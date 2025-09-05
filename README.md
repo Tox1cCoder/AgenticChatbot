@@ -10,19 +10,14 @@
 └─────────────────┘    └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
-## Prerequisites
-
-- Python 3.10 or higher
-- PostgreSQL 12 or higher
-- Git (for cloning the repository)
-
 ## Installation
 
 1. **Clone the repository**
 
    ```bash
-   git clone <repository-url>
-   cd sample-chatbot
+   git clone https://tk-itteam.backlog.com/git/AI202508/ai_training.git
+   cd ai-training
+   git checkout Thai-Postgre-FastAPI
    ```
 
 2. **Create a virtual environment**
