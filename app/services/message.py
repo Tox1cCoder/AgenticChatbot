@@ -1,0 +1,148 @@
+from typing import List
+from fastapi import HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.repositories.message import MessageRepository
+from app.repositories.conversation import ConversationRepository
+from app.repositories.user import UserRepository
+from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
+
+
+class MessageService:
+    """Service layer for Message operations"""
+    
+    def __init__(self, db: Session):
+        self.repository = MessageRepository(db)
+        self.conversation_repository = ConversationRepository(db)
+        self.user_repository = UserRepository(db)
+    
+    def create_message(self, message_data: MessageCreate) -> MessageRead:
+        """Create a new message with validation"""
+        # Validate user exists
+        if not self.user_repository.exists(message_data.user_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Validate conversation exists and user has access
+        if not self.conversation_repository.user_owns_conversation(message_data.user_id, message_data.conversation_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this conversation"
+            )
+        
+        # Create the message
+        message = self.repository.create(message_data)
+        
+        # If this is a user message, generate a simple bot response
+        if message_data.role == "user":
+            bot_response_data = MessageCreate(
+                conversation_id=message_data.conversation_id,
+                user_id=message_data.user_id,
+                content=self._generate_bot_response(message_data.content),
+                role="assistant"
+            )
+            self.repository.create(bot_response_data)
+        
+        return MessageRead.model_validate(message)
+    
+    def get_message_by_id(self, message_id: int) -> MessageRead:
+        """Get message by ID"""
+        message = self.repository.get_by_id(message_id)
+        if not message:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Message not found"
+            )
+        return MessageRead.model_validate(message)
+    
+    def get_conversation_messages(self, conversation_id: int, user_id: int, skip: int = 0, limit: int = 100) -> List[MessageRead]:
+        """Get messages for a conversation with access validation"""
+        # Validate user has access to conversation
+        if not self.conversation_repository.user_owns_conversation(user_id, conversation_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this conversation"
+            )
+        
+        messages = self.repository.get_by_conversation_id(conversation_id, skip=skip, limit=limit)
+        return [MessageRead.model_validate(msg) for msg in messages]
+    
+    def get_conversation_history(self, conversation_id: int, user_id: int, limit: int = 50) -> List[MessageRead]:
+        """Get recent conversation history"""
+        # Validate user has access to conversation
+        if not self.conversation_repository.user_owns_conversation(user_id, conversation_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this conversation"
+            )
+        
+        messages = self.repository.get_conversation_history(conversation_id, limit=limit)
+        return [MessageRead.model_validate(msg) for msg in messages]
+    
+    def get_user_messages(self, user_id: int, skip: int = 0, limit: int = 100) -> List[MessageRead]:
+        """Get messages by user"""
+        # Validate user exists
+        if not self.user_repository.exists(user_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        messages = self.repository.get_messages_by_user(user_id, skip=skip, limit=limit)
+        return [MessageRead.model_validate(msg) for msg in messages]
+    
+    def update_message(self, message_id: int, user_id: int, message_data: MessageUpdate) -> MessageRead:
+        """Update message with ownership validation"""
+        message = self.repository.get_by_id(message_id)
+        if not message:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Message not found"
+            )
+        
+        # Validate user owns the message
+        if message.user_id != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this message"
+            )
+        
+        updated_message = self.repository.update(message, message_data)
+        return MessageRead.model_validate(updated_message)
+    
+    def delete_message(self, message_id: int, user_id: int) -> bool:
+        """Delete message with ownership validation"""
+        message = self.repository.get_by_id(message_id)
+        if not message:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Message not found"
+            )
+        
+        # Validate user owns the message
+        if message.user_id != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this message"
+            )
+        
+        return self.repository.delete(message_id)
+    
+    def _generate_bot_response(self, user_message: str) -> str:
+        """Generate a simple bot response"""
+        user_message = user_message.lower()
+        
+        if "hello" in user_message or "hi" in user_message:
+            return "Hello! How can I help you today?"
+        elif "how are you" in user_message:
+            return "I'm doing great, thank you for asking! How are you?"
+        elif "bye" in user_message or "goodbye" in user_message:
+            return "Goodbye! Have a great day!"
+        elif "help" in user_message:
+            return "I'm here to help! You can ask me questions and I'll do my best to assist you."
+        elif "?" in user_message:
+            return "That's an interesting question! I'm still learning, but I'd be happy to chat about it."
+        else:
+            return f"I received your message: '{user_message}'. Thanks for chatting with me!"
