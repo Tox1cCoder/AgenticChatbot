@@ -4,7 +4,7 @@
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
 │   API Layer     │    │  Service Layer  │    │ Repository Layer│    │  Database Layer │
 │                 │    │                 │    │                 │    │                 │
-│ FastAPI Routes  │───▶│ Business Logic  │───▶│  Data Access    │───▶│   PostgreSQL    │
+│ FastAPI Routes  │───▶│ Business Logic  │───▶│  Data Access   │───▶│   PostgreSQL   │
 │ Request/Response│    │ Validation      │    │  CRUD Operations│    │   SQLAlchemy    │
 │ Pydantic Schemas│    │ Domain Rules    │    │  Query Building │    │   Alembic       │
 └─────────────────┘    └─────────────────┘    └─────────────────┘    └─────────────────┘

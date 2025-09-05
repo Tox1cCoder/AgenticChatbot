@@ -26,7 +26,7 @@ class Settings(BaseSettings):
 
     # Security
     secret_key: str = Field(
-        default="your-secret-key-change-in-production",
+        default="secret-key",
         description="Secret key for security",
     )
 
