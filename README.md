@@ -66,7 +66,6 @@
 
    ```sql
    CREATE DATABASE chatbot;
-   \c chatbot;
    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
    ```
 
