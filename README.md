@@ -1,20 +1,5 @@
 # Sample Chatbot - FastAPI & PostgreSQL
 
-A modern, production-ready chatbot application built with FastAPI and PostgreSQL, featuring threaded conversations, user authentication with password hashing, and a comprehensive feedback system.
-
-## 🚀 Features
-
-- **User Authentication**: Secure password hashing with bcrypt
-- **UUID Primary Keys**: All entities use UUID for better scalability and security
-- **Threaded Conversations**: Support for message threading with parent-child relationships
-- **Feedback System**: Users can rate and comment on messages (1-5 star ratings)
-- **Message Roles**: Structured message types (user, assistant, system)
-- **RESTful API**: Complete CRUD operations with FastAPI
-- **Database Migrations**: Alembic for schema version control
-- **Clean Architecture**: Layered design with separation of concerns
-- **Type Safety**: Full type hints with Pydantic validation
-- **Auto Documentation**: Interactive API docs with Swagger UI
-
 ## Architecture
 
 ```
@@ -41,10 +26,7 @@ A modern, production-ready chatbot application built with FastAPI and PostgreSQL
 
    ```bash
    python -m venv venv
-   # On Windows
    venv\Scripts\activate
-   # On macOS/Linux
-   source venv/bin/activate
    ```
 
 3. **Install dependencies**
