@@ -16,9 +16,6 @@ class User(BaseModel):
     conversations = relationship(
         "Conversation", back_populates="user", cascade="all, delete-orphan"
     )
-    messages = relationship(
-        "Message", back_populates="user", cascade="all, delete-orphan"
-    )
     feedback = relationship(
         "Feedback", back_populates="user", cascade="all, delete-orphan"
     )
