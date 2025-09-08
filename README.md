@@ -89,11 +89,7 @@
    - Alternative Docs: http://localhost:8000/redoc
    - Health Check: http://localhost:8000/health
 
-## Streamlit Demo
-
-For easy testing, we've included a Streamlit web interface that provides a user-friendly way to interact with the API.
-
-### Running the Demo
+## Running the Demo
 
 1. **Install demo dependencies**
 
@@ -116,25 +112,6 @@ For easy testing, we've included a Streamlit web interface that provides a user-
 3. **Access the demo**
    - Demo Interface: http://localhost:8501
    - Make sure your FastAPI server is running on http://localhost:8000
-
-### Demo Features
-
-- 👤 **User Management**: Create and select users
-- 💬 **Chat Interface**: Create conversations and send messages
-- 🤖 **Auto Bot Responses**: Automatically generated when you send user messages
-- ⭐ **Feedback System**: Rate assistant messages (1-5 stars)
-- 📊 **Statistics**: View message rating statistics
-- 🔧 **API Testing Tools**: Test custom endpoints with raw requests
-- 🏥 **Health Monitoring**: Check API and database health
-
-### Demo Screenshots
-
-The demo provides:
-
-- **Sidebar**: User creation and selection
-- **Main Area**: Chat interface with message history
-- **Right Panel**: API tools and quick stats
-- **Feedback**: Rate bot responses directly in the interface
 
 ## API Endpoints
 
@@ -174,7 +151,7 @@ The demo provides:
 
 ### Feedback Management
 
-- `POST /feedback/` - Create feedback for a message (rating 1-5)
+- `POST /feedback/user/{user_id}` - Create feedback for a message (rating 1-5) or update existing feedback
 - `GET /feedback/{feedback_id}` - Get feedback by UUID
 - `GET /feedback/message/{message_id}` - Get all feedback for a message
 - `GET /feedback/user/{user_id}` - Get user's feedback history
@@ -272,6 +249,8 @@ Content-Type: application/json
     "comment": "Very helpful response!"
 }
 ```
+
+**Note**: If the user has already rated this message, the existing rating will be updated with the new values.
 
 ### 7. Get Message Rating Statistics
 

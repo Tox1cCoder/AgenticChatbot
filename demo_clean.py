@@ -51,7 +51,7 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
 
 
 # Header
-st.title("Chatbot API Demo")
+st.title("🤖 Chatbot API Demo")
 
 # Sidebar
 with st.sidebar:
@@ -124,13 +124,11 @@ with st.sidebar:
     with col1:
         if st.button("API", key="health_api"):
             health = make_api_request("GET", "/health/")
-            st.json(health)
             if health:
                 st.success("✅ API OK")
     with col2:
         if st.button("DB", key="health_db"):
             health = make_api_request("GET", "/health/db")
-            st.json(health)
             if health:
                 st.success("✅ DB OK")
 

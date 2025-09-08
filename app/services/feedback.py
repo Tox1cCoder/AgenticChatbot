@@ -37,13 +37,18 @@ class FeedbackService:
         existing_feedback = self.repository.get_by_message_and_user(
             feedback_data.message_id, user_id
         )
-        if existing_feedback:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Feedback already exists for this message",
-            )
 
-        # Create feedback data with user_id
+        if existing_feedback:
+            # Update existing feedback
+            from app.schemas.feedback import FeedbackUpdate
+
+            update_data = FeedbackUpdate(
+                rating=feedback_data.rating, comment=feedback_data.comment
+            )
+            updated_feedback = self.repository.update(existing_feedback, update_data)
+            return FeedbackRead.model_validate(updated_feedback)
+
+        # Create new feedback
         feedback_dict = feedback_data.model_dump()
         feedback_dict["user_id"] = user_id
 
@@ -137,7 +142,7 @@ class FeedbackService:
 
         return {
             "message_id": message_id,
-            "average_rating": avg_rating,
+            "rating": avg_rating,
             "feedback_count": feedback_count,
         }
 

@@ -23,7 +23,7 @@ async def create_feedback(
     feedback_data: FeedbackCreate,
     feedback_service: FeedbackService = Depends(get_feedback_service),
 ) -> FeedbackRead:
-    """Create new feedback for a message"""
+    """Create new feedback for a message or update existing feedback"""
     return feedback_service.create_feedback(feedback_data, user_id)
 
 
