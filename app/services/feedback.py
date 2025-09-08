@@ -47,16 +47,24 @@ class FeedbackService:
         feedback_dict = feedback_data.model_dump()
         feedback_dict["user_id"] = user_id
 
-        # Create a temporary schema-like object for the repository
-        class FeedbackCreateDB:
-            def __init__(self, **kwargs):
-                for key, value in kwargs.items():
-                    setattr(self, key, value)
+        # Create a proper schema class with user_id for repository
+        from pydantic import BaseModel
+
+        class FeedbackCreateWithUserId(BaseModel):
+            message_id: UUID
+            user_id: UUID
+            rating: int
+            comment: Optional[str] = None
 
             def model_dump(self):
-                return {key: value for key, value in self.__dict__.items()}
+                return {
+                    "message_id": self.message_id,
+                    "user_id": self.user_id,
+                    "rating": self.rating,
+                    "comment": self.comment,
+                }
 
-        feedback_create_db = FeedbackCreateDB(**feedback_dict)
+        feedback_create_db = FeedbackCreateWithUserId(**feedback_dict)
         feedback = self.repository.create(feedback_create_db)
         return FeedbackRead.model_validate(feedback)
 

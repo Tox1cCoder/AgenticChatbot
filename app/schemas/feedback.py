@@ -12,7 +12,6 @@ class FeedbackBase(BaseModel):
 
 class FeedbackCreate(FeedbackBase):
     message_id: UUID = Field(..., description="Message ID this feedback is for")
-    user_id: UUID = Field(..., description="User ID who provides this feedback")
 
 
 class FeedbackUpdate(BaseModel):

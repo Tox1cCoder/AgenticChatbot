@@ -89,6 +89,53 @@
    - Alternative Docs: http://localhost:8000/redoc
    - Health Check: http://localhost:8000/health
 
+## Streamlit Demo
+
+For easy testing, we've included a Streamlit web interface that provides a user-friendly way to interact with the API.
+
+### Running the Demo
+
+1. **Install demo dependencies**
+
+   ```bash
+   pip install -r demo_requirements.txt
+   ```
+
+2. **Start the demo**
+
+   ```bash
+   streamlit run demo.py
+   ```
+
+   Or use the provided batch script:
+
+   ```bash
+   run_demo.bat
+   ```
+
+3. **Access the demo**
+   - Demo Interface: http://localhost:8501
+   - Make sure your FastAPI server is running on http://localhost:8000
+
+### Demo Features
+
+- 👤 **User Management**: Create and select users
+- 💬 **Chat Interface**: Create conversations and send messages
+- 🤖 **Auto Bot Responses**: Automatically generated when you send user messages
+- ⭐ **Feedback System**: Rate assistant messages (1-5 stars)
+- 📊 **Statistics**: View message rating statistics
+- 🔧 **API Testing Tools**: Test custom endpoints with raw requests
+- 🏥 **Health Monitoring**: Check API and database health
+
+### Demo Screenshots
+
+The demo provides:
+
+- **Sidebar**: User creation and selection
+- **Main Area**: Chat interface with message history
+- **Right Panel**: API tools and quick stats
+- **Feedback**: Rate bot responses directly in the interface
+
 ## API Endpoints
 
 ### Health Endpoints
@@ -216,7 +263,7 @@ GET http://localhost:8000/messages/conversation/9775b267-2641-4fb1-974a-b04835f8
 ### 6. Rate a Message
 
 ```http
-POST http://localhost:8000/feedback/
+POST http://localhost:8000/feedback/user/{user_id}
 Content-Type: application/json
 
 {
