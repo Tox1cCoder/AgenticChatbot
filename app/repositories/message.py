@@ -67,3 +67,12 @@ class MessageRepository(BaseRepository[Message, MessageCreate, MessageUpdate]):
             .limit(1)
         )
         return self.db.execute(stmt).scalar_one_or_none()
+
+    def get_conversation_thread(self, conversation_id: UUID) -> List[Message]:
+        """Get all messages in a conversation thread ordered by creation time"""
+        stmt = (
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.asc())
+        )
+        return list(self.db.execute(stmt).scalars().all())

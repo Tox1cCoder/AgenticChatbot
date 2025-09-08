@@ -33,17 +33,18 @@ class ConversationService:
         conversation_dict = conversation_data.model_dump()
         conversation_dict["user_id"] = user_id
 
-        # Create a temporary schema-like object for the repository
-        class ConversationCreateDB:
-            def __init__(self, **kwargs):
-                for key, value in kwargs.items():
-                    setattr(self, key, value)
+        # Create a new schema class with user_id for repository
+        from pydantic import BaseModel
+
+        class ConversationCreateWithUserId(BaseModel):
+            title: str
+            user_id: UUID
 
             def model_dump(self):
-                return {key: value for key, value in self.__dict__.items()}
+                return {"title": self.title, "user_id": self.user_id}
 
-        conversation_create_db = ConversationCreateDB(**conversation_dict)
-        conversation = self.repository.create(conversation_create_db)
+        conversation_create_obj = ConversationCreateWithUserId(**conversation_dict)
+        conversation = self.repository.create(conversation_create_obj)
         return ConversationRead.model_validate(conversation)
 
     def get_conversation_by_id(self, conversation_id: UUID) -> ConversationRead:

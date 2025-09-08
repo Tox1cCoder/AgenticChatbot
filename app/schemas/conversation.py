@@ -12,7 +12,7 @@ class ConversationBase(BaseModel):
 
 
 class ConversationCreate(ConversationBase):
-    user_id: UUID = Field(..., description="User ID who owns this conversation")
+    pass
 
 
 class ConversationUpdate(BaseModel):

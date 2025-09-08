@@ -44,11 +44,11 @@ class MessageService:
         message = self.repository.create(message_data)
 
         # If this is a user message, generate a simple bot response
-        if message_data.role == MessageRole.USER:
+        if message_data.role == MessageRole.user:
             bot_response_data = MessageCreate(
                 conversation_id=message_data.conversation_id,
                 content=self._generate_bot_response(message_data.content),
-                role=MessageRole.ASSISTANT,
+                role=MessageRole.assistant,
                 parent_message_id=message.id,  # Reply to the user message
             )
             self.repository.create(bot_response_data)

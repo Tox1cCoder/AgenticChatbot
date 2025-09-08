@@ -210,7 +210,7 @@ Content-Type: application/json
 ### 5. Get Conversation Thread
 
 ```http
-GET http://localhost:8000/messages/conversation/550e8400-e29b-41d4-a716-446655440000/thread?user_id=770e8400-e29b-41d4-a716-446655440002
+GET http://localhost:8000/messages/conversation/9775b267-2641-4fb1-974a-b04835f803c8/thread?user_id=d264183a-eb1a-4ade-93a3-3438548d632a
 ```
 
 ### 6. Rate a Message
@@ -313,17 +313,6 @@ app/
 └── main.py               # FastAPI application
 ```
 
-### Key Features Implemented
-
-1. **UUID Primary Keys**: Better for distributed systems and security
-2. **Password Hashing**: Secure bcrypt hashing for user passwords
-3. **Message Threading**: Parent-child relationships for reply chains
-4. **Feedback System**: 1-5 star ratings with optional comments
-5. **Message Roles**: Enum-based role system (user/assistant/system)
-6. **Clean Architecture**: Separation of concerns across layers
-7. **Type Safety**: Full type hints throughout the codebase
-8. **Validation**: Pydantic schemas for request/response validation
-
 ### Database Migrations
 
 Generate a new migration:
@@ -349,30 +338,3 @@ Rollback to previous migration:
 ```bash
 alembic downgrade -1
 ```
-
-### Security Features
-
-- **Password Hashing**: Uses bcrypt with salt for secure password storage
-- **UUID Keys**: Prevents enumeration attacks on entity IDs
-- **Input Validation**: Pydantic schemas validate all input data
-- **SQL Injection Protection**: SQLAlchemy ORM prevents SQL injection
-- **Access Control**: User ownership validation for conversations and messages
-
-### Performance Considerations
-
-- **Database Indexes**: Proper indexing on foreign keys and search fields
-- **Pagination**: All list endpoints support skip/limit pagination
-- **Lazy Loading**: Relationships loaded only when needed
-- **Connection Pooling**: SQLAlchemy manages database connections efficiently
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
