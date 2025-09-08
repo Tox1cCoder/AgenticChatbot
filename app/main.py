@@ -2,19 +2,25 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.api import health_router, users_router, conversations_router, messages_router
+from app.api import (
+    health_router,
+    users_router,
+    conversations_router,
+    messages_router,
+    feedback_router,
+)
 
 
 def create_app() -> FastAPI:
     """Create and configure FastAPI application"""
-    
+
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,
         description=settings.app_description,
         debug=settings.api_debug,
     )
-    
+
     # Add CORS middleware
     app.add_middleware(
         CORSMiddleware,
@@ -23,13 +29,14 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
+
     # Include routers
     app.include_router(health_router)
     app.include_router(users_router)
     app.include_router(conversations_router)
     app.include_router(messages_router)
-    
+    app.include_router(feedback_router)
+
     return app
 
 
@@ -44,5 +51,5 @@ async def root():
         "message": "Welcome to the Sample Chatbot API",
         "version": settings.app_version,
         "docs_url": "/docs",
-        "health_check": "/health"
+        "health_check": "/health",
     }
