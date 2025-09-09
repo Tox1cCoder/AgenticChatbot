@@ -89,13 +89,3 @@ async def update_feedback(
 ) -> FeedbackRead:
     """Update feedback (requires user ownership)"""
     return feedback_service.update_feedback(feedback_id, user_id, feedback_data)
-
-
-@router.delete("/{feedback_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_feedback(
-    feedback_id: UUID,
-    user_id: UUID,
-    feedback_service: FeedbackService = Depends(get_feedback_service),
-) -> None:
-    """Delete feedback (requires user ownership)"""
-    feedback_service.delete_feedback(feedback_id, user_id)

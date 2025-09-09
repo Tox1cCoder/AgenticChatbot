@@ -53,8 +53,6 @@ class FeedbackService:
         feedback_dict["user_id"] = user_id
 
         # Create a proper schema class with user_id for repository
-        from pydantic import BaseModel
-
         class FeedbackCreateWithUserId(BaseModel):
             message_id: UUID
             user_id: UUID

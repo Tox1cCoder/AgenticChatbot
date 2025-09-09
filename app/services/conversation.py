@@ -107,13 +107,3 @@ class ConversationService:
 
         updated_conversation = self.repository.update(conversation, conversation_data)
         return ConversationRead.model_validate(updated_conversation)
-
-    def delete_conversation(self, conversation_id: UUID, user_id: UUID) -> bool:
-        """Delete conversation with ownership validation"""
-        if not self.repository.user_owns_conversation(user_id, conversation_id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this conversation",
-            )
-
-        return self.repository.delete(conversation_id)

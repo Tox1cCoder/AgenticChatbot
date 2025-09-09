@@ -115,6 +115,7 @@ with st.sidebar:
                 }
                 result = make_api_request("POST", "/users/", user_data)
                 if result:
+                    st.cache_data.clear()
                     st.session_state.current_user_id = result.get("id")
                     st.session_state.users_list = []  # Force reload
                     st.success("✅ User created and selected!")
@@ -256,7 +257,7 @@ if st.session_state.current_conversation_id:
                     )
                 with col2:
                     comment = st.text_input(
-                        "Comment:", value="", key=f"comment_{msg['id']}"
+                        "Comment:", value=None, key=f"comment_{msg['id']}"
                     )
                     if st.button("👍", key=f"rate_{msg['id']}"):
                         feedback_data = {
@@ -271,17 +272,23 @@ if st.session_state.current_conversation_id:
                         )
                         if result:
                             st.cache_data.clear()
-                            st.success(f"Rated {rating}⭐ with comment!")
+                            if comment:
+                                st.success(f"Rated {rating}⭐ with comment!")
+                            else:
+                                st.success(f"Rated {rating}⭐!")
                 with col3:
                     if st.button("📊", key=f"stats_{msg['id']}"):
                         stats = get_feedback_stats(msg["id"])
                         if stats:
                             st.json(stats)
-                # Show feedback history (if available)
+
                 feedbacks = get_feedbacks(msg["id"])
                 if feedbacks:
                     for fb in feedbacks:
-                        st.caption(f"Rated {fb['rating']}⭐: {fb.get('comment', '')}")
+                        if fb.get("comment"):
+                            st.caption(f"Rated {fb['rating']}⭐: {fb.get('comment', '')}")
+                        else:
+                            st.caption(f"Rated {fb['rating']}⭐")
 
     # Send Message
     with st.form("send_message", clear_on_submit=True):

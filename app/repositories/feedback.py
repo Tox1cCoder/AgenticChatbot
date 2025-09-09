@@ -58,3 +58,9 @@ class FeedbackRepository(BaseRepository[Feedback, FeedbackCreate, FeedbackUpdate
         )
         result = self.db.execute(stmt).scalar()
         return float(result) if result is not None else None
+
+    def get_comment_for_message(self, message_id: UUID) -> Optional[str]:
+        """Get comment for a message (assuming one comment per message for simplicity)"""
+        stmt = select(Feedback.comment).where(Feedback.message_id == message_id)
+        result = self.db.execute(stmt).scalar()
+        return result if result is not None else None

@@ -65,21 +65,3 @@ async def get_user_by_username(
             status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
         )
     return user
-
-
-@router.put("/{user_id}", response_model=UserRead)
-async def update_user(
-    user_id: UUID,
-    user_data: UserUpdate,
-    user_service: UserService = Depends(get_user_service),
-) -> UserRead:
-    """Update user"""
-    return user_service.update_user(user_id, user_data)
-
-
-@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_user(
-    user_id: UUID, user_service: UserService = Depends(get_user_service)
-) -> None:
-    """Delete user"""
-    user_service.delete_user(user_id)

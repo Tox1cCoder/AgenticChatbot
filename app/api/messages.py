@@ -54,34 +54,3 @@ async def get_conversation_thread(
 ) -> List[MessageRead]:
     """Get conversation thread ordered by timestamp (requires user ownership)"""
     return message_service.get_conversation_thread(conversation_id, user_id)
-
-
-@router.get("/{parent_message_id}/replies", response_model=List[MessageRead])
-async def get_message_replies(
-    parent_message_id: UUID,
-    user_id: UUID,
-    message_service: MessageService = Depends(get_message_service),
-) -> List[MessageRead]:
-    """Get all replies to a specific message (requires user ownership)"""
-    return message_service.get_message_replies(parent_message_id, user_id)
-
-
-@router.put("/{message_id}", response_model=MessageRead)
-async def update_message(
-    message_id: UUID,
-    user_id: UUID,
-    message_data: MessageUpdate,
-    message_service: MessageService = Depends(get_message_service),
-) -> MessageRead:
-    """Update message (requires user ownership)"""
-    return message_service.update_message(message_id, user_id, message_data)
-
-
-@router.delete("/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_message(
-    message_id: UUID,
-    user_id: UUID,
-    message_service: MessageService = Depends(get_message_service),
-) -> None:
-    """Delete message (requires user ownership)"""
-    message_service.delete_message(message_id, user_id)

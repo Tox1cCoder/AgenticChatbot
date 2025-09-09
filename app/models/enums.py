@@ -5,7 +5,7 @@ from sqlalchemy import Enum
 class MessageRole(enum.Enum):
     user = "user"
     assistant = "assistant"
-    system = "system"
+    # system = "system"
 
 
 # SQLAlchemy enum type
