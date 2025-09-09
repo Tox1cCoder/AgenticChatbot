@@ -171,9 +171,5 @@ class MessageService:
             return "I'm doing great, thank you for asking! How are you?"
         elif "bye" in user_message or "goodbye" in user_message:
             return "Goodbye! Have a great day!"
-        elif "help" in user_message:
-            return "I'm here to help! You can ask me questions and I'll do my best to assist you."
-        elif "?" in user_message:
-            return "That's an interesting question! I'm still learning, but I'd be happy to chat about it."
         else:
             return f"I received your message: '{user_message}'. Thanks for chatting with me!"
