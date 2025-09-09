@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import json
-from typing import Dict, Optional
+from typing import Dict, Optional, Any, List
 
 # API Configuration
 API_BASE_URL = "http://localhost:8000"
@@ -50,6 +50,47 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
         return {}
 
 
+# --- Cached API GET functions ---
+@st.cache_data(show_spinner=False)
+def get_users() -> List[Dict[str, Any]]:
+    return make_api_request("GET", "/users/") or []
+
+
+@st.cache_data(show_spinner=False)
+def get_conversations(user_id: str) -> List[Dict[str, Any]]:
+    return make_api_request("GET", f"/conversations/user/{user_id}") or []
+
+
+@st.cache_data(show_spinner=False)
+def get_health_api() -> Dict:
+    return make_api_request("GET", "/health/")
+
+
+@st.cache_data(show_spinner=False)
+def get_health_db() -> Dict:
+    return make_api_request("GET", "/health/db")
+
+
+@st.cache_data(show_spinner=False)
+def get_messages(conversation_id: str, user_id: str) -> List[Dict[str, Any]]:
+    return (
+        make_api_request(
+            "GET", f"/messages/conversation/{conversation_id}/thread?user_id={user_id}"
+        )
+        or []
+    )
+
+
+@st.cache_data(show_spinner=False)
+def get_feedbacks(message_id: str) -> List[Dict[str, Any]]:
+    return make_api_request("GET", f"/feedback/message/{message_id}") or []
+
+
+@st.cache_data(show_spinner=False)
+def get_feedback_stats(message_id: str) -> Dict:
+    return make_api_request("GET", f"/feedback/message/{message_id}/stats") or {}
+
+
 # Header
 st.title("Chatbot API Demo")
 
@@ -80,8 +121,8 @@ with st.sidebar:
                     st.rerun()
 
     # Select User
-    if st.button("🔄 Load Users") or not st.session_state.users_list:
-        users = make_api_request("GET", "/users/")
+    if not st.session_state.users_list:
+        users = get_users()
         if users:
             st.session_state.users_list = users
 
@@ -123,13 +164,13 @@ with st.sidebar:
     col1, col2 = st.columns(2)
     with col1:
         if st.button("API", key="health_api"):
-            health = make_api_request("GET", "/health/")
+            health = get_health_api()
             st.json(health)
             if health:
                 st.success("✅ API OK")
     with col2:
         if st.button("DB", key="health_db"):
-            health = make_api_request("GET", "/health/db")
+            health = get_health_db()
             st.json(health)
             if health:
                 st.success("✅ DB OK")
@@ -161,12 +202,10 @@ with col1:
 
 with col2:
     # Load and Select Conversation
-    # if st.button("🔄 Load Conversations") or not st.session_state.conversations_list:
-    #     conversations = make_api_request(
-    #         "GET", f"/conversations/user/{st.session_state.current_user_id}"
-    #     )
-    #     if conversations:
-    #         st.session_state.conversations_list = conversations
+    if not st.session_state.conversations_list:
+        conversations = get_conversations(st.session_state.current_user_id)
+        if conversations:
+            st.session_state.conversations_list = conversations
 
     if st.session_state.conversations_list:
         conv_options = {
@@ -183,9 +222,9 @@ with col2:
         ):
             st.session_state.current_conversation_id = conv_options[selected_conv_title]
             # Load messages
-            messages = make_api_request(
-                "GET",
-                f"/messages/conversation/{st.session_state.current_conversation_id}/thread?user_id={st.session_state.current_user_id}",
+            messages = get_messages(
+                st.session_state.current_conversation_id,
+                st.session_state.current_user_id,
             )
             st.session_state.messages = messages or []
             st.rerun()
@@ -231,16 +270,15 @@ if st.session_state.current_conversation_id:
                             feedback_data,
                         )
                         if result:
+                            st.cache_data.clear()
                             st.success(f"Rated {rating}⭐ with comment!")
                 with col3:
                     if st.button("📊", key=f"stats_{msg['id']}"):
-                        stats = make_api_request(
-                            "GET", f"/feedback/message/{msg['id']}/stats"
-                        )
+                        stats = get_feedback_stats(msg["id"])
                         if stats:
                             st.json(stats)
                 # Show feedback history (if available)
-                feedbacks = make_api_request("GET", f"/feedback/message/{msg['id']}")
+                feedbacks = get_feedbacks(msg["id"])
                 if feedbacks:
                     for fb in feedbacks:
                         st.caption(f"Rated {fb['rating']}⭐: {fb.get('comment', '')}")
@@ -257,10 +295,11 @@ if st.session_state.current_conversation_id:
                 }
                 result = make_api_request("POST", "/messages/", message_data)
                 if result:
+                    st.cache_data.clear()
                     # Reload messages
-                    messages = make_api_request(
-                        "GET",
-                        f"/messages/conversation/{st.session_state.current_conversation_id}/thread?user_id={st.session_state.current_user_id}",
+                    messages = get_messages(
+                        st.session_state.current_conversation_id,
+                        st.session_state.current_user_id,
                     )
                     st.session_state.messages = messages or []
                     st.rerun()
