@@ -7,6 +7,7 @@ from app.repositories.message import MessageRepository
 from app.repositories.conversation import ConversationRepository
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
 from app.models.enums import MessageRole
+from app.factories.message_factory import MessageFactory
 
 
 class MessageService:
@@ -16,53 +17,60 @@ class MessageService:
         self.repository = MessageRepository(db)
         self.conversation_repository = ConversationRepository(db)
 
-    def create_message(self, message_data: MessageCreate) -> MessageRead:
+    def create_message(self, message_create_data: MessageCreate) -> MessageRead:
         """Create a new message with validation"""
         # Validate conversation exists
-        if not self.conversation_repository.exists(message_data.conversation_id):
+        if not self.conversation_repository.exists(message_create_data.conversation_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
 
         # Validate parent message exists if provided
-        if message_data.parent_message_id:
-            parent_message = self.repository.get_by_id(message_data.parent_message_id)
-            if not parent_message:
+        if message_create_data.parent_message_id:
+            parent_message_entity = self.repository.get_by_id(
+                message_create_data.parent_message_id
+            )
+            if not parent_message_entity:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Parent message not found",
                 )
 
             # Ensure parent message is in the same conversation
-            if parent_message.conversation_id != message_data.conversation_id:
+            if (
+                parent_message_entity.conversation_id
+                != message_create_data.conversation_id
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Parent message must be in the same conversation",
                 )
 
-        # Create the message
-        message = self.repository.create(message_data)
+        # Create message entity using factory
+        message_entity = MessageFactory.create_from_schema(message_create_data)
+
+        # Save to repository
+        created_message = self.repository.create(message_entity)
 
         # If this is a user message, generate a simple bot response
-        if message_data.role == MessageRole.user:
-            bot_response_data = MessageCreate(
-                conversation_id=message_data.conversation_id,
-                content=self._generate_bot_response(message_data.content),
-                role=MessageRole.assistant,
-                parent_message_id=message.id,  # Reply to the user message
+        if message_create_data.role == MessageRole.USER:
+            bot_response_entity = MessageFactory.create_bot_response(
+                conversation_id=message_create_data.conversation_id,
+                content=self._generate_bot_response(message_create_data.content),
+                parent_message_id=created_message.id,  # Reply to the user message
             )
-            self.repository.create(bot_response_data)
+            self.repository.create(bot_response_entity)
 
-        return MessageRead.model_validate(message)
+        return MessageRead.model_validate(created_message)
 
     def get_message_by_id(self, message_id: UUID) -> MessageRead:
         """Get message by ID"""
-        message = self.repository.get_by_id(message_id)
-        if not message:
+        message_entity = self.repository.get_by_id(message_id)
+        if not message_entity:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
             )
-        return MessageRead.model_validate(message)
+        return MessageRead.model_validate(message_entity)
 
     def get_conversation_messages(
         self, conversation_id: UUID, user_id: UUID, skip: int = 0, limit: int = 100
@@ -77,10 +85,10 @@ class MessageService:
                 detail="Access denied to this conversation",
             )
 
-        messages = self.repository.get_by_conversation_id(
+        message_entities = self.repository.get_by_conversation_id(
             conversation_id, skip=skip, limit=limit
         )
-        return [MessageRead.model_validate(msg) for msg in messages]
+        return [MessageRead.model_validate(msg) for msg in message_entities]
 
     def get_conversation_thread(
         self, conversation_id: UUID, user_id: UUID
@@ -95,64 +103,64 @@ class MessageService:
                 detail="Access denied to this conversation",
             )
 
-        messages = self.repository.get_conversation_thread(conversation_id)
-        return [MessageRead.model_validate(msg) for msg in messages]
+        message_entities = self.repository.get_conversation_thread(conversation_id)
+        return [MessageRead.model_validate(msg) for msg in message_entities]
 
     def get_message_replies(
         self, parent_message_id: UUID, user_id: UUID
     ) -> List[MessageRead]:
         """Get all replies to a specific message"""
         # Validate parent message exists and user has access
-        parent_message = self.repository.get_by_id(parent_message_id)
-        if not parent_message:
+        parent_message_entity = self.repository.get_by_id(parent_message_id)
+        if not parent_message_entity:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Parent message not found"
             )
 
         if not self.conversation_repository.user_owns_conversation(
-            user_id, parent_message.conversation_id
+            user_id, parent_message_entity.conversation_id
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this conversation",
             )
 
-        replies = self.repository.get_message_replies(parent_message_id)
-        return [MessageRead.model_validate(message) for message in replies]
+        reply_entities = self.repository.get_message_replies(parent_message_id)
+        return [MessageRead.model_validate(message) for message in reply_entities]
 
     def update_message(
-        self, message_id: UUID, user_id: UUID, message_data: MessageUpdate
+        self, message_id: UUID, user_id: UUID, message_update_data: MessageUpdate
     ) -> MessageRead:
         """Update message with ownership validation"""
-        message = self.repository.get_by_id(message_id)
-        if not message:
+        message_entity = self.repository.get_by_id(message_id)
+        if not message_entity:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
             )
 
         # Validate user has access to the conversation
         if not self.conversation_repository.user_owns_conversation(
-            user_id, message.conversation_id
+            user_id, message_entity.conversation_id
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this conversation",
             )
 
-        updated_message = self.repository.update(message, message_data)
+        updated_message = self.repository.update(message_entity, message_update_data)
         return MessageRead.model_validate(updated_message)
 
     def delete_message(self, message_id: UUID, user_id: UUID) -> bool:
         """Delete message with ownership validation"""
-        message = self.repository.get_by_id(message_id)
-        if not message:
+        message_entity = self.repository.get_by_id(message_id)
+        if not message_entity:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
             )
 
         # Validate user has access to the conversation
         if not self.conversation_repository.user_owns_conversation(
-            user_id, message.conversation_id
+            user_id, message_entity.conversation_id
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

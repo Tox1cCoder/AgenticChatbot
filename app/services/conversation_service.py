@@ -10,6 +10,7 @@ from app.schemas.conversation import (
     ConversationUpdate,
     ConversationRead,
 )
+from app.factories.conversation_factory import ConversationFactory
 
 
 class ConversationService:
@@ -20,41 +21,32 @@ class ConversationService:
         self.user_repository = UserRepository(db)
 
     def create_conversation(
-        self, conversation_data: ConversationCreate, user_id: UUID
+        self, conversation_create_data: ConversationCreate, owner_id: UUID
     ) -> ConversationRead:
         """Create a new conversation with validation"""
         # Validate user exists
-        if not self.user_repository.exists(user_id):
+        if not self.user_repository.exists(owner_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
             )
 
-        # Create conversation data with user_id
-        conversation_dict = conversation_data.model_dump()
-        conversation_dict["user_id"] = user_id
+        # Create conversation entity using factory
+        conversation_entity = ConversationFactory.create_from_schema(
+            conversation_create_data, owner_id
+        )
 
-        # Create a new schema class with user_id for repository
-        from pydantic import BaseModel
-
-        class ConversationCreateWithUserId(BaseModel):
-            title: str
-            user_id: UUID
-
-            def model_dump(self):
-                return {"title": self.title, "user_id": self.user_id}
-
-        conversation_create_obj = ConversationCreateWithUserId(**conversation_dict)
-        conversation = self.repository.create(conversation_create_obj)
-        return ConversationRead.model_validate(conversation)
+        # Save to repository
+        created_conversation = self.repository.create(conversation_entity)
+        return ConversationRead.model_validate(created_conversation)
 
     def get_conversation_by_id(self, conversation_id: UUID) -> ConversationRead:
         """Get conversation by ID"""
-        conversation = self.repository.get_by_id(conversation_id)
-        if not conversation:
+        conversation_entity = self.repository.get_by_id(conversation_id)
+        if not conversation_entity:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
-        return ConversationRead.model_validate(conversation)
+        return ConversationRead.model_validate(conversation_entity)
 
     def get_user_conversations(
         self, user_id: UUID, skip: int = 0, limit: int = 100
@@ -66,8 +58,13 @@ class ConversationService:
                 status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
             )
 
-        conversations = self.repository.get_by_user_id(user_id, skip=skip, limit=limit)
-        return [ConversationRead.model_validate(conv) for conv in conversations]
+        conversation_entities = self.repository.get_by_user_id(
+            user_id, skip=skip, limit=limit
+        )
+        return [
+            ConversationRead.model_validate(conversation_entity)
+            for conversation_entity in conversation_entities
+        ]
 
     def get_conversation_with_messages(
         self, conversation_id: UUID, user_id: UUID
@@ -79,18 +76,18 @@ class ConversationService:
                 detail="Access denied to this conversation",
             )
 
-        conversation = self.repository.get_with_messages(conversation_id)
-        if not conversation:
+        conversation_entity = self.repository.get_with_messages(conversation_id)
+        if not conversation_entity:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
-        return ConversationRead.model_validate(conversation)
+        return ConversationRead.model_validate(conversation_entity)
 
     def update_conversation(
         self,
         conversation_id: UUID,
         user_id: UUID,
-        conversation_data: ConversationUpdate,
+        conversation_update_data: ConversationUpdate,
     ) -> ConversationRead:
         """Update conversation with ownership validation"""
         if not self.repository.user_owns_conversation(user_id, conversation_id):
@@ -99,11 +96,23 @@ class ConversationService:
                 detail="Access denied to this conversation",
             )
 
-        conversation = self.repository.get_by_id(conversation_id)
-        if not conversation:
+        conversation_entity = self.repository.get_by_id(conversation_id)
+        if not conversation_entity:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
 
-        updated_conversation = self.repository.update(conversation, conversation_data)
+        updated_conversation = self.repository.update(
+            conversation_entity, conversation_update_data
+        )
         return ConversationRead.model_validate(updated_conversation)
+
+    def delete_conversation(self, conversation_id: UUID, user_id: UUID) -> bool:
+        """Delete conversation with ownership validation"""
+        if not self.repository.user_owns_conversation(user_id, conversation_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this conversation",
+            )
+
+        return self.repository.delete(conversation_id)
