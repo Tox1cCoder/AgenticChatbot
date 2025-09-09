@@ -58,11 +58,3 @@ class FeedbackRepository(BaseRepository[Feedback, FeedbackCreate, FeedbackUpdate
         )
         result = self.db.execute(stmt).scalar()
         return float(result) if result is not None else None
-
-    def get_feedback_count_for_message(self, message_id: UUID) -> int:
-        """Get count of feedback for a message"""
-        from sqlalchemy import func
-
-        stmt = select(func.count(Feedback.id)).where(Feedback.message_id == message_id)
-        result = self.db.execute(stmt).scalar()
-        return int(result) if result is not None else 0

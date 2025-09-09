@@ -138,12 +138,11 @@ class FeedbackService:
             )
 
         avg_rating = self.repository.get_average_rating_for_message(message_id)
-        feedback_count = self.repository.get_feedback_count_for_message(message_id)
 
         return {
             "message_id": message_id,
             "rating": avg_rating,
-            "feedback_count": feedback_count,
+            "comment": self.repository.get_comment_for_message(message_id),
         }
 
     def update_feedback(

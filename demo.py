@@ -161,12 +161,12 @@ with col1:
 
 with col2:
     # Load and Select Conversation
-    if st.button("🔄 Load Conversations") or not st.session_state.conversations_list:
-        conversations = make_api_request(
-            "GET", f"/conversations/user/{st.session_state.current_user_id}"
-        )
-        if conversations:
-            st.session_state.conversations_list = conversations
+    # if st.button("🔄 Load Conversations") or not st.session_state.conversations_list:
+    #     conversations = make_api_request(
+    #         "GET", f"/conversations/user/{st.session_state.current_user_id}"
+    #     )
+    #     if conversations:
+    #         st.session_state.conversations_list = conversations
 
     if st.session_state.conversations_list:
         conv_options = {
@@ -208,7 +208,7 @@ if st.session_state.current_conversation_id:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
 
-            # Rating for assistant messages
+            # Rating and comment for assistant messages
             if msg["role"] == "assistant":
                 col1, col2, col3 = st.columns([1, 1, 2])
                 with col1:
@@ -216,11 +216,14 @@ if st.session_state.current_conversation_id:
                         "Rate:", [1, 2, 3, 4, 5], key=f"rating_{msg['id']}"
                     )
                 with col2:
+                    comment = st.text_input(
+                        "Comment:", value="", key=f"comment_{msg['id']}"
+                    )
                     if st.button("👍", key=f"rate_{msg['id']}"):
                         feedback_data = {
                             "message_id": msg["id"],
                             "rating": rating,
-                            "comment": f"{rating} stars",
+                            "comment": comment,
                         }
                         result = make_api_request(
                             "POST",
@@ -228,7 +231,7 @@ if st.session_state.current_conversation_id:
                             feedback_data,
                         )
                         if result:
-                            st.success(f"Rated {rating}⭐")
+                            st.success(f"Rated {rating}⭐ with comment!")
                 with col3:
                     if st.button("📊", key=f"stats_{msg['id']}"):
                         stats = make_api_request(
@@ -236,6 +239,11 @@ if st.session_state.current_conversation_id:
                         )
                         if stats:
                             st.json(stats)
+                # Show feedback history (if available)
+                feedbacks = make_api_request("GET", f"/feedback/message/{msg['id']}")
+                if feedbacks:
+                    for fb in feedbacks:
+                        st.caption(f"Rated {fb['rating']}⭐: {fb.get('comment', '')}")
 
     # Send Message
     with st.form("send_message", clear_on_submit=True):
