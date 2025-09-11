@@ -1,7 +1,4 @@
 # Sample Chatbot
-
----
-
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
 │   API Layer     │    │  Service Layer  │    │ Repository Layer│    │  Database Layer │
 │                 │    │                 │    │                 │    │                 │
