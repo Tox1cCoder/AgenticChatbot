@@ -1,8 +1,7 @@
-# Sample Chatbot - FastAPI & PostgreSQL
+# Sample Chatbot
 
-## Architecture
+---
 
-```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
 │   API Layer     │    │  Service Layer  │    │ Repository Layer│    │  Database Layer │
 │                 │    │                 │    │                 │    │                 │
@@ -10,356 +9,221 @@
 │ Request/Response│    │ Validation      │    │  CRUD Operations│    │   SQLAlchemy    │
 │ Pydantic Schemas│    │ Domain Rules    │    │  Query Building │    │   Alembic       │
 └─────────────────┘    └─────────────────┘    └─────────────────┘    └─────────────────┘
-```
 
-## Installation
+## Quickstart
 
-1. **Clone the repository**
-
-   ```bash
-   git clone https://tk-itteam.backlog.com/git/AI202508/ai_training.git
-   cd ai-training
-   git checkout Thai-Postgre-FastAPI
-   ```
-
-2. **Create a virtual environment**
-
-   ```bash
-   python -m venv venv
-   venv\Scripts\activate
-   ```
-
-3. **Install dependencies**
-
-   ```bash
-   pip install -e .
-   ```
-
-   Required packages:
-
-   - FastAPI
-   - SQLAlchemy 2.0+
-   - PostgreSQL driver (psycopg2-binary)
-   - Alembic
-   - Pydantic v2
-   - bcrypt
-   - uvicorn
-
-4. **Set up environment variables**
-
-   ```bash
-   copy .env.example .env
-   ```
-
-   Edit `.env` file with your database configuration:
-
-   ```
-   DATABASE_URL=postgresql://username:password@localhost:5432/chatbot
-   API_HOST=0.0.0.0
-   API_PORT=8000
-   API_DEBUG=true
-   ```
-
-5. **Set up the database**
-
-   Create a PostgreSQL database and enable UUID extension:
-
-   ```sql
-   CREATE DATABASE chatbot;
-   CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-   ```
-
-   Run database migrations:
-
-   ```bash
-   alembic upgrade head
-   ```
-
-## Running the Application
-
-1. **Start the development server**
-
-   ```bash
-   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-   ```
-
-2. **Access the API**
-   - API Documentation: http://localhost:8000/docs
-   - Alternative Docs: http://localhost:8000/redoc
-   - Health Check: http://localhost:8000/health
-
-## Running the Demo
-
-1. **Install demo dependencies**
-
-   ```bash
-   pip install -r demo_requirements.txt
-   ```
-
-2. **Start the demo**
-
-   ```bash
-   streamlit run demo.py
-   ```
-
-   Or use the provided batch script:
-
-   ```bash
-   run_demo.bat
-   ```
-
-3. **Access the demo**
-   - Demo Interface: http://localhost:8501
-   - Make sure your FastAPI server is running on http://localhost:8000
-
-## API Endpoints
-
-### Health Endpoints
-
-- `GET /health/` - Basic health check
-- `GET /health/db` - Database health check
-
-### User Management
-
-- `POST /users/` - Create a new user (with password hashing)
-- `GET /users/{user_id}` - Get user by UUID
-- `GET /users/` - List all users (paginated)
-- `GET /users/email/{email}` - Get user by email
-- `GET /users/username/{username}` - Get user by username
-- `PUT /users/{user_id}` - Update user
-- `DELETE /users/{user_id}` - Delete user
-
-### Conversation Management
-
-- `POST /conversations/` - Create a new conversation
-- `GET /conversations/{conversation_id}` - Get conversation by UUID
-- `GET /conversations/user/{user_id}` - Get user's conversations
-- `GET /conversations/{conversation_id}/messages` - Get conversation with messages
-- `PUT /conversations/{conversation_id}` - Update conversation
-- `DELETE /conversations/{conversation_id}` - Delete conversation
-
-### Message Management
-
-- `POST /messages/` - Create a new message (auto-generates bot response)
-- `GET /messages/{message_id}` - Get message by UUID
-- `GET /messages/conversation/{conversation_id}` - Get conversation messages
-- `GET /messages/conversation/{conversation_id}/thread` - Get threaded conversation
-- `GET /messages/{parent_message_id}/replies` - Get message replies
-- `PUT /messages/{message_id}` - Update message
-- `DELETE /messages/{message_id}` - Delete message
-
-### Feedback Management
-
-- `POST /feedback/user/{user_id}` - Create feedback for a message (rating 1-5) or update existing feedback
-- `GET /feedback/{feedback_id}` - Get feedback by UUID
-- `GET /feedback/message/{message_id}` - Get all feedback for a message
-- `GET /feedback/user/{user_id}` - Get user's feedback history
-- `GET /feedback/message/{message_id}/user/{user_id}` - Get user's feedback for specific message
-- `GET /feedback/message/{message_id}/stats` - Get message rating statistics
-- `PUT /feedback/{feedback_id}` - Update feedback
-- `DELETE /feedback/{feedback_id}` - Delete feedback
-- `GET /conversations/{conversation_id}` - Get conversation by ID
-- `GET /conversations/user/{user_id}` - Get user's conversations
-- `PUT /conversations/{conversation_id}` - Update conversation
-- `DELETE /conversations/{conversation_id}` - Delete conversation
-
-### Message Management
-
-- `POST /messages/` - Create a new message (auto-generates bot response)
-- `GET /messages/{message_id}` - Get message by ID
-- `GET /messages/conversation/{conversation_id}` - Get conversation messages
-- `GET /messages/conversation/{conversation_id}/history` - Get conversation history
-- `GET /messages/user/{user_id}` - Get user's messages
-- `PUT /messages/{message_id}` - Update message
-- `DELETE /messages/{message_id}` - Delete message
-
-## Testing with Postman
-
-### 1. Create a User
-
-```http
-POST http://localhost:8000/users/
-Content-Type: application/json
-
-{
-    "username": "testuser",
-    "email": "test@example.com",
-    "password": "secure123",
-    "full_name": "Test User",
-    "avatar_url": "https://example.com/avatar.jpg"
-}
-```
-
-### 2. Create a Conversation
-
-```http
-POST http://localhost:8000/conversations/
-Content-Type: application/json
-
-{
-    "title": "My First Chat"
-}
-```
-
-Note: You'll need to pass the user_id as a query parameter or include it in the request context.
-
-### 3. Send a Message (Triggers Bot Response)
-
-```http
-POST http://localhost:8000/messages/
-Content-Type: application/json
-
-{
-    "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
-    "content": "Hello, how are you?",
-    "role": "user"
-}
-```
-
-### 4. Send a Threaded Reply
-
-```http
-POST http://localhost:8000/messages/
-Content-Type: application/json
-
-{
-    "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
-    "content": "This is a reply to the previous message",
-    "role": "user",
-    "parent_message_id": "660e8400-e29b-41d4-a716-446655440001"
-}
-```
-
-### 5. Get Conversation Thread
-
-```http
-GET http://localhost:8000/messages/conversation/9775b267-2641-4fb1-974a-b04835f803c8/thread?user_id=d264183a-eb1a-4ade-93a3-3438548d632a
-```
-
-### 6. Rate a Message
-
-```http
-POST http://localhost:8000/feedback/user/{user_id}
-Content-Type: application/json
-
-{
-    "message_id": "660e8400-e29b-41d4-a716-446655440001",
-    "rating": 5,
-    "comment": "Very helpful response!"
-}
-```
-
-**Note**: If the user has already rated this message, the existing rating will be updated with the new values.
-
-### 7. Get Message Rating Statistics
-
-```http
-GET http://localhost:8000/feedback/message/660e8400-e29b-41d4-a716-446655440001/stats
-```
-
-## Database Schema
-
-### Users Table
-
-- `id` (UUID, Primary Key)
-- `username` (VARCHAR, Unique)
-- `email` (VARCHAR, Unique)
-- `password_hash` (TEXT)
-- `full_name` (VARCHAR, Optional)
-- `avatar_url` (VARCHAR, Optional)
-- `created_at` (TIMESTAMPTZ)
-- `updated_at` (TIMESTAMPTZ)
-
-### Conversations Table
-
-- `id` (UUID, Primary Key)
-- `user_id` (UUID, Foreign Key → Users)
-- `title` (VARCHAR, Required)
-- `created_at` (TIMESTAMPTZ)
-- `updated_at` (TIMESTAMPTZ)
-
-### Messages Table
-
-- `id` (UUID, Primary Key)
-- `conversation_id` (UUID, Foreign Key → Conversations)
-- `parent_message_id` (UUID, Foreign Key → Messages, Optional)
-- `content` (TEXT)
-- `role` (ENUM: user/assistant/system)
-- `created_at` (TIMESTAMPTZ)
-
-### Feedback Table
-
-- `id` (UUID, Primary Key)
-- `message_id` (UUID, Foreign Key → Messages)
-- `user_id` (UUID, Foreign Key → Users)
-- `rating` (SMALLINT, 1-5)
-- `comment` (TEXT, Optional)
-- `created_at` (TIMESTAMPTZ)
-- `updated_at` (TIMESTAMPTZ)
-- **Unique Constraint**: (message_id, user_id)
-
-## Development
-
-### Project Structure
-
-```
-app/
-├── api/                    # FastAPI route handlers
-│   ├── users.py           # User management endpoints
-│   ├── conversations.py   # Conversation endpoints
-│   ├── messages.py        # Message endpoints
-│   └── feedback.py        # Feedback endpoints
-├── core/                  # Core utilities
-│   ├── database.py        # Database connection
-│   └── security.py        # Password hashing
-├── models/                # SQLAlchemy models
-│   ├── base.py           # Base model with UUID and timestamps
-│   ├── user.py           # User model
-│   ├── conversation.py   # Conversation model
-│   ├── message.py        # Message model with threading
-│   ├── feedback.py       # Feedback model
-│   └── enums.py          # Message role enum
-├── repositories/          # Data access layer
-│   ├── base.py           # Base repository
-│   ├── user.py           # User repository
-│   ├── conversation.py   # Conversation repository
-│   ├── message.py        # Message repository
-│   └── feedback.py       # Feedback repository
-├── schemas/               # Pydantic schemas
-│   ├── user.py           # User validation schemas
-│   ├── conversation.py   # Conversation schemas
-│   ├── message.py        # Message schemas
-│   └── feedback.py       # Feedback schemas
-├── services/              # Business logic layer
-│   ├── user.py           # User service
-│   ├── conversation.py   # Conversation service
-│   ├── message.py        # Message service
-│   └── feedback.py       # Feedback service
-└── main.py               # FastAPI application
-```
-
-### Database Migrations
-
-Generate a new migration:
+### 1. Clone & Setup
 
 ```bash
-alembic revision --autogenerate -m "Description of changes"
+git clone https://tk-itteam.backlog.com/git/AI202508/ai_training.git
+git checkout Thai-Postgre-FastAPI
+cd <repo-folder>
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e .
 ```
 
-Apply migrations:
+### 2. Environment Variables
+
+Copy `.env.example` to `.env` and edit:
+
+```env
+DATABASE_URL=postgresql://username:password@localhost:5432/chatbot
+API_HOST=0.0.0.0
+API_PORT=8000
+API_DEBUG=true
+```
+
+### 3. Database Setup
+
+Create DB and enable UUID extension:
+
+```sql
+CREATE DATABASE chatbot;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+```
+
+### 4. Migrations
 
 ```bash
 alembic upgrade head
 ```
 
-View migration history:
+### 5. Run API
 
 ```bash
-alembic history
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Rollback to previous migration:
+API Docs: [http://localhost:8000/docs](http://localhost:8000/docs)
+Redoc: [http://localhost:8000/redoc](http://localhost:8000/redoc)
+Health: [http://localhost:8000/health](http://localhost:8000/health)
+
+---
+
+## Demo UI
 
 ```bash
-alembic downgrade -1
+pip install -r demo_requirements.txt
+streamlit run demo.py
 ```
+
+Demo: [http://localhost:8501](http://localhost:8501)
+
+---
+
+## API Endpoints
+
+### Health
+
+- `GET /health/` — Health check
+- `GET /health/db` — Database health check
+
+### Users
+
+- `POST /users/` — Create user
+- `GET /users/{user_id}` — Get user by ID
+- `GET /users/` — List users (paginated)
+
+### Conversations
+
+- `POST /conversations/user/{user_id}` — Create conversation for user
+- `GET /conversations/{conversation_id}` — Get conversation by ID
+- `GET /conversations/user/{user_id}` — List user's conversations (paginated)
+- `PUT /conversations/{conversation_id}` — Update conversation (requires user_id)
+
+### Messages
+
+- `POST /messages/` — Create message (auto bot reply if role is 'user')
+- `GET /messages/{message_id}` — Get message by ID
+- `GET /messages/conversation/{conversation_id}` — Get messages for a conversation (requires user_id, paginated)
+- `GET /messages/conversation/{conversation_id}/thread` — Get conversation thread (requires user_id)
+
+### Feedback
+
+- `POST /feedback/user/{user_id}` — Create/update feedback for a message
+- `GET /feedback/{feedback_id}` — Get feedback by ID
+- `GET /feedback/message/{message_id}` — Get all feedback for a message (paginated)
+- `GET /feedback/user/{user_id}` — Get all feedback by a user (paginated)
+- `GET /feedback/message/{message_id}/user/{user_id}` — Get user's feedback for a message
+- `GET /feedback/message/{message_id}/stats` — Get rating stats for a message
+- `PUT /feedback/{feedback_id}` — Update feedback (requires user_id)
+
+---
+
+## Example API Usage
+
+### Create User
+
+```http
+POST /users/
+{
+   "username": "testuser",
+   "email": "test@example.com",
+   "password": "secure123",
+   "full_name": "Test User",
+   "avatar_url": "https://example.com/avatar.jpg"
+}
+```
+
+### Create Conversation
+
+```http
+POST /conversations/
+{
+   "title": "My First Chat"
+}
+```
+
+### Send Message
+
+```http
+POST /messages/
+{
+   "conversation_id": "<uuid>",
+   "content": "Hello, how are you?",
+   "role": "user"
+}
+```
+
+### Threaded Reply
+
+```http
+POST /messages/
+{
+   "conversation_id": "<uuid>",
+   "content": "Reply to previous",
+   "role": "user",
+   "parent_message_id": "<uuid>"
+}
+```
+
+### Rate Message
+
+```http
+POST /feedback/user/{user_id}
+{
+   "message_id": "<uuid>",
+   "rating": 5,
+   "comment": "Great!"
+}
+```
+
+---
+
+## Database Schema
+
+**User**
+
+- id: UUID (PK)
+- username: VARCHAR(50), unique, required
+- email: VARCHAR(255), unique, required
+- password_hash: TEXT, required
+- avatar_url: VARCHAR(2048), optional
+
+**Conversation**
+
+- id: UUID (PK)
+- user_id: UUID (FK to user.id), required
+- title: VARCHAR(255), required
+
+**Message**
+
+- id: UUID (PK)
+- conversation_id: UUID (FK to conversation.id), required
+- sender: ENUM (user/assistant/system), required
+- content: TEXT, required
+- Index: (conversation_id, created_at)
+
+**Feedback**
+
+- id: UUID (PK)
+- message_id: UUID (FK to message.id), required, unique, indexed
+- user_id: UUID (FK to user.id), required, indexed
+- rating: SMALLINT (1-5), required
+- comment: TEXT, optional
+- Index: (message_id, user_id)
+
+---
+
+## Project Structure
+
+```
+app/
+├── api/           # FastAPI routes
+├── core/          # Config, security
+├── db/            # DB session, base
+├── factories/     # Test/data factories
+├── models/        # SQLAlchemy models
+├── repositories/  # Data access
+├── schemas/       # Pydantic schemas
+├── services/      # Business logic
+└── main.py        # FastAPI app entrypoint
+```
+
+## Migrations
+
+- Create migration: `alembic revision --autogenerate -m "desc"`
+- Apply: `alembic upgrade head`
+- History: `alembic history`
+- Rollback: `alembic downgrade -1`
