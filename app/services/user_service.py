@@ -1,20 +1,36 @@
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 from uuid import UUID
 from fastapi import HTTPException, status
-from sqlalchemy.orm import Session
 
 from app.repositories.user import UserRepository
 from app.schemas.user import UserCreate, UserUpdate, UserRead
 from app.factories.user_factory import UserFactory
 from app.services.validation_service import UserValidationService
 
+if TYPE_CHECKING:
+    from app.core.container import DIContainer
+
 
 class UserService:
-    """Service layer for User operations"""
+    """Service layer for User operations with proper dependency injection"""
 
-    def __init__(self, db: Session):
-        self.repository = UserRepository(db)
-        self.validation_service = UserValidationService(db)
+    def __init__(
+        self,
+        container: "DIContainer",
+        user_repository: UserRepository,
+        user_validation_service: UserValidationService,
+    ):
+        """
+        Initialize UserService with injected dependencies.
+
+        Args:
+            container: DI container for additional dependency resolution
+            user_repository: Injected user repository
+            user_validation_service: Injected validation service
+        """
+        self.container = container
+        self.repository = user_repository
+        self.validation_service = user_validation_service
 
     def create_user(self, user_create_data: UserCreate) -> UserRead:
         """Create a new user with validation"""

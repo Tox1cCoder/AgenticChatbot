@@ -1,7 +1,6 @@
-from typing import List
+from typing import List, TYPE_CHECKING
 from uuid import UUID
 from fastapi import HTTPException, status
-from sqlalchemy.orm import Session
 
 from app.repositories.conversation import ConversationRepository
 from app.repositories.user import UserRepository
@@ -12,13 +11,30 @@ from app.schemas.conversation import (
 )
 from app.factories.conversation_factory import ConversationFactory
 
+if TYPE_CHECKING:
+    from app.core.container import DIContainer
+
 
 class ConversationService:
-    """Service layer for Conversation operations"""
+    """Service layer for Conversation operations with proper dependency injection"""
 
-    def __init__(self, db: Session):
-        self.repository = ConversationRepository(db)
-        self.user_repository = UserRepository(db)
+    def __init__(
+        self,
+        container: "DIContainer",
+        conversation_repository: ConversationRepository,
+        user_repository: UserRepository,
+    ):
+        """
+        Initialize ConversationService with injected dependencies.
+
+        Args:
+            container: DI container for additional dependency resolution
+            conversation_repository: Injected conversation repository
+            user_repository: Injected user repository
+        """
+        self.container = container
+        self.repository = conversation_repository
+        self.user_repository = user_repository
 
     def create_conversation(
         self, conversation_create_data: ConversationCreate, owner_id: UUID

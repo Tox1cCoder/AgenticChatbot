@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.core.container import get_container, DIContainer
 from app.services.feedback_service import FeedbackService
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
 
@@ -11,8 +12,10 @@ router = APIRouter(prefix="/feedback", tags=["feedback"])
 
 
 def get_feedback_service(db: Session = Depends(get_db)) -> FeedbackService:
-    """Dependency to get FeedbackService instance"""
-    return FeedbackService(db)
+    """Dependency to get FeedbackService instance with proper DI"""
+    container = get_container()
+    container.set_session(db)
+    return container.get("feedback_service")
 
 
 @router.post(

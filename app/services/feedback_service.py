@@ -1,7 +1,6 @@
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 from uuid import UUID
 from fastapi import HTTPException, status
-from sqlalchemy.orm import Session
 
 from app.repositories.feedback import FeedbackRepository
 from app.repositories.message import MessageRepository
@@ -9,14 +8,33 @@ from app.repositories.user import UserRepository
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
 from app.factories.feedback_factory import FeedbackFactory
 
+if TYPE_CHECKING:
+    from app.core.container import DIContainer
+
 
 class FeedbackService:
-    """Service layer for Feedback operations"""
+    """Service layer for Feedback operations with proper dependency injection"""
 
-    def __init__(self, db: Session):
-        self.repository = FeedbackRepository(db)
-        self.message_repository = MessageRepository(db)
-        self.user_repository = UserRepository(db)
+    def __init__(
+        self,
+        container: "DIContainer",
+        feedback_repository: FeedbackRepository,
+        message_repository: MessageRepository,
+        user_repository: UserRepository,
+    ):
+        """
+        Initialize FeedbackService with injected dependencies.
+
+        Args:
+            container: DI container for additional dependency resolution
+            feedback_repository: Injected feedback repository
+            message_repository: Injected message repository
+            user_repository: Injected user repository
+        """
+        self.container = container
+        self.repository = feedback_repository
+        self.message_repository = message_repository
+        self.user_repository = user_repository
 
     def create_feedback(
         self, feedback_create_data: FeedbackCreate, user_id: UUID

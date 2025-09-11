@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.core.container import get_container, DIContainer
 from app.services.user_service import UserService
 from app.schemas.user import UserCreate, UserUpdate, UserRead
 
@@ -11,8 +12,10 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 
 def get_user_service(db: Session = Depends(get_db)) -> UserService:
-    """Dependency to get UserService instance"""
-    return UserService(db)
+    """Dependency to get UserService instance with proper DI"""
+    container = get_container()
+    container.set_session(db)
+    return container.get("user_service")
 
 
 @router.post("/", response_model=UserRead, status_code=status.HTTP_201_CREATED)

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.core.container import get_container, DIContainer
 from app.services.conversation_service import ConversationService
 from app.schemas.conversation import (
     ConversationCreate,
@@ -15,8 +16,10 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
 def get_conversation_service(db: Session = Depends(get_db)) -> ConversationService:
-    """Dependency to get ConversationService instance"""
-    return ConversationService(db)
+    """Dependency to get ConversationService instance with proper DI"""
+    container = get_container()
+    container.set_session(db)
+    return container.get("conversation_service")
 
 
 @router.post(

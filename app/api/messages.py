@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.core.container import get_container, DIContainer
 from app.services.message_service import MessageService
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
 
@@ -11,8 +12,10 @@ router = APIRouter(prefix="/messages", tags=["messages"])
 
 
 def get_message_service(db: Session = Depends(get_db)) -> MessageService:
-    """Dependency to get MessageService instance"""
-    return MessageService(db)
+    """Dependency to get MessageService instance with proper DI"""
+    container = get_container()
+    container.set_session(db)
+    return container.get("message_service")
 
 
 @router.post("/", response_model=MessageRead, status_code=status.HTTP_201_CREATED)

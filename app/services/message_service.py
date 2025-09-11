@@ -1,21 +1,41 @@
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 from uuid import UUID
 from fastapi import HTTPException, status
-from sqlalchemy.orm import Session
 
 from app.repositories.message import MessageRepository
 from app.repositories.conversation import ConversationRepository
+from app.repositories.user import UserRepository
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
 from app.models.enums import MessageRole
 from app.factories.message_factory import MessageFactory
 
+if TYPE_CHECKING:
+    from app.core.container import DIContainer
+
 
 class MessageService:
-    """Service layer for Message operations"""
+    """Service layer for Message operations with proper dependency injection"""
 
-    def __init__(self, db: Session):
-        self.repository = MessageRepository(db)
-        self.conversation_repository = ConversationRepository(db)
+    def __init__(
+        self,
+        container: "DIContainer",
+        message_repository: MessageRepository,
+        conversation_repository: ConversationRepository,
+        user_repository: UserRepository,
+    ):
+        """
+        Initialize MessageService with injected dependencies.
+
+        Args:
+            container: DI container for additional dependency resolution
+            message_repository: Injected message repository
+            conversation_repository: Injected conversation repository
+            user_repository: Injected user repository
+        """
+        self.container = container
+        self.repository = message_repository
+        self.conversation_repository = conversation_repository
+        self.user_repository = user_repository
 
     def create_message(self, message_create_data: MessageCreate) -> MessageRead:
         """Create a new message with validation"""
