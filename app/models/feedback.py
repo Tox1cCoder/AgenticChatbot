@@ -6,7 +6,7 @@ from app.models.base import BaseModel
 
 
 class Feedback(BaseModel):
-    __tablename__ = "feedbacks"
+    __tablename__ = "feedback"
 
     message_id = Column(
         UUID(as_uuid=True),
@@ -16,7 +16,7 @@ class Feedback(BaseModel):
         index=True,
     )
     user_id = Column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+        UUID(as_uuid=True), ForeignKey("user.id"), nullable=False, index=True
     )
     rating = Column(SmallInteger, nullable=False)  # Rating from 1 to 5
     comment = Column(Text, nullable=True)

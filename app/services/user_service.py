@@ -106,12 +106,3 @@ class UserService:
 
         updated_user = self.repository.update(user_entity, user_update_data)
         return UserRead.model_validate(updated_user)
-
-    def delete_user(self, user_id: UUID) -> bool:
-        """Delete user"""
-        if not self.validation_service.validate_user_exists(user_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-            )
-
-        return self.repository.delete(user_id)

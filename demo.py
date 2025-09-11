@@ -94,37 +94,12 @@ def get_feedback_stats(message_id: str) -> Dict:
 # Header
 st.title("Chatbot API Demo")
 
-# # Sidebar
-# with st.sidebar:
-#     st.header("👤 User Management")
-
-#     # Create User
-#     with st.expander("Sign Up New User"):
-#         with st.form("Sign Up"):
-#             username = st.text_input("Username")
-#             email = st.text_input("Email")
-#             password = st.text_input("Password", type="password")
-#             # full_name = st.text_input("Full Name")
-
-#             if st.form_submit_button("Sign Up"):
-#                 user_data = {
-#                     "username": username,
-#                     "email": email,
-#                     "password": password,
-#                 }
-#                 result = make_api_request("POST", "/users/", user_data)
-#                 if result:
-#                     st.cache_data.clear()
-#                     st.session_state.current_user_id = result.get("id")
-#                     st.session_state.users_list = []  # Force reload
-#                     st.success("✅ User signed up and selected!")
-#                     st.rerun()
-
+# Sudebar - User Management
 with st.sidebar:
     st.header("👤 User Management")
 
     # Create User
-    with st.expander("Sign Up New User"):
+    with st.expander("Sign Up"):
         with st.form("Sign Up"):
             username = st.text_input("Username")
             email = st.text_input("Email")
@@ -150,7 +125,7 @@ with st.sidebar:
                         st.cache_data.clear()
                         st.session_state.current_user_id = result.get("id")
                         st.session_state.users_list = []  # Force reload
-                        st.success("✅ User signed up and selected!")
+                        st.success("✅ User signed up!")
                         st.rerun()
 
     # Select User
@@ -277,11 +252,11 @@ if st.session_state.current_conversation_id:
 
     # Messages
     for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
+        with st.chat_message(msg["sender"]):
             st.write(msg["content"])
 
             # Rating and comment for assistant messages
-            if msg["role"] == "assistant":
+            if msg["sender"] == "assistant":
                 col1, col2, col3 = st.columns([1, 1, 2])
                 with col1:
                     rating = st.selectbox(
@@ -332,7 +307,7 @@ if st.session_state.current_conversation_id:
                 message_data = {
                     "conversation_id": st.session_state.current_conversation_id,
                     "content": message_content,
-                    "role": "user",
+                    "sender": "user",
                 }
                 result = make_api_request("POST", "/messages/", message_data)
                 if result:

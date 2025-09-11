@@ -35,7 +35,6 @@ class ServiceDefinition:
 class DIContainer:
     """
     Dependency Injection Container that manages service instantiation and dependency resolution.
-    Eliminates manual dependency creation in service constructors.
     """
 
     def __init__(self):

@@ -46,27 +46,6 @@ class MessageService:
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
 
-        # Validate parent message exists if provided
-        if message_create_data.parent_message_id:
-            parent_message_entity = self.repository.get_by_id(
-                message_create_data.parent_message_id
-            )
-            if not parent_message_entity:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Parent message not found",
-                )
-
-            # Ensure parent message is in the same conversation
-            if (
-                parent_message_entity.conversation_id
-                != message_create_data.conversation_id
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Parent message must be in the same conversation",
-                )
-
         # Create message entity using factory
         message_entity = MessageFactory.create_from_schema(message_create_data)
 
@@ -74,11 +53,10 @@ class MessageService:
         created_message = self.repository.create(message_entity)
 
         # If this is a user message, generate a simple bot response
-        if message_create_data.role == MessageRole.user:
+        if message_create_data.sender == MessageRole.user:
             bot_response_entity = MessageFactory.create_bot_response(
                 conversation_id=message_create_data.conversation_id,
                 content=self._generate_bot_response(message_create_data.content),
-                parent_message_id=created_message.id,  # Reply to the user message
             )
             self.repository.create(bot_response_entity)
 
@@ -126,28 +104,6 @@ class MessageService:
 
         message_entities = self.repository.get_conversation_thread(conversation_id)
         return [MessageRead.model_validate(msg) for msg in message_entities]
-
-    def get_message_replies(
-        self, parent_message_id: UUID, user_id: UUID
-    ) -> List[MessageRead]:
-        """Get all replies to a specific message"""
-        # Validate parent message exists and user has access
-        parent_message_entity = self.repository.get_by_id(parent_message_id)
-        if not parent_message_entity:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Parent message not found"
-            )
-
-        if not self.conversation_repository.user_owns_conversation(
-            user_id, parent_message_entity.conversation_id
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this conversation",
-            )
-
-        reply_entities = self.repository.get_message_replies(parent_message_id)
-        return [MessageRead.model_validate(message) for message in reply_entities]
 
     def update_message(
         self, message_id: UUID, user_id: UUID, message_update_data: MessageUpdate

@@ -55,7 +55,7 @@ class ConversationCRUDStrategy(
 class ConversationRepository(
     Repository[Conversation, ConversationCreate, ConversationUpdate]
 ):
-    """Repository for Conversation model using strategy pattern"""
+    """Repository for Conversation model"""
 
     def __init__(self, db: Session):
         strategy = ConversationCRUDStrategy(Conversation)

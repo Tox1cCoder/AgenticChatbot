@@ -67,7 +67,7 @@ class MessageCRUDStrategy(DefaultCRUDStrategy[Message, MessageCreate, MessageUpd
 
 
 class MessageRepository(Repository[Message, MessageCreate, MessageUpdate]):
-    """Repository for Message model using strategy pattern"""
+    """Repository for Message model"""
 
     def __init__(self, db: Session):
         strategy = MessageCRUDStrategy(Message)

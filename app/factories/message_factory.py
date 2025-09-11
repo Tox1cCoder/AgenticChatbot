@@ -20,8 +20,7 @@ class MessageFactory:
         return {
             "id": uuid4(),
             "conversation_id": message_data.conversation_id,
-            "parent_message_id": message_data.parent_message_id,
-            "role": message_data.role,
+            "sender": message_data.sender,
             "content": message_data.content,
             "created_at": datetime.now(timezone.utc),
         }
@@ -34,22 +33,18 @@ class MessageFactory:
         return {
             "id": message_data.get("id", uuid4()),
             "conversation_id": message_data["conversation_id"],
-            "parent_message_id": message_data.get("parent_message_id"),
-            "role": message_data["role"],
+            "sender": message_data["sender"],
             "content": message_data["content"],
             "created_at": message_data.get("created_at", now),
         }
 
     @staticmethod
-    def create_bot_response(
-        conversation_id: UUID, content: str, parent_message_id: Optional[UUID] = None
-    ) -> Dict[str, Any]:
+    def create_bot_response(conversation_id: UUID, content: str) -> Dict[str, Any]:
         """Create bot response message data dictionary"""
         return {
             "id": uuid4(),
             "conversation_id": conversation_id,
-            "parent_message_id": parent_message_id,
-            "role": MessageRole.assistant,
+            "sender": MessageRole.assistant,
             "content": content,
             "created_at": datetime.now(timezone.utc),
         }

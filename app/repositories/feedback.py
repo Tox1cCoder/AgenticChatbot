@@ -68,7 +68,7 @@ class FeedbackCRUDStrategy(
 
 
 class FeedbackRepository(Repository[Feedback, FeedbackCreate, FeedbackUpdate]):
-    """Repository for Feedback model using strategy pattern"""
+    """Repository for Feedback model"""
 
     def __init__(self, db: Session):
         strategy = FeedbackCRUDStrategy(Feedback)

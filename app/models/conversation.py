@@ -9,7 +9,7 @@ class Conversation(BaseModel):
     __tablename__ = "conversation"
 
     user_id = Column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+        UUID(as_uuid=True), ForeignKey("user.id"), nullable=False, index=True
     )
     title = Column(String(255), nullable=False)
 
