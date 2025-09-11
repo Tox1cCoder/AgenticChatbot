@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.db.session import get_db
+from app.database.session import get_db
 from app.core.container import get_container, DIContainer
 from app.services.message_service import MessageService
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
