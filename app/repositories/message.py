@@ -4,18 +4,15 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from app.models.message import Message
-from app.repositories.base import BaseRepository
+from app.repositories.strategy import Repository, DefaultCRUDStrategy
 from app.schemas.message import MessageCreate, MessageUpdate
 
 
-class MessageRepository(BaseRepository[Message, MessageCreate, MessageUpdate]):
-    """Repository for Message model with custom methods"""
-
-    def __init__(self, db: Session):
-        super().__init__(Message, db)
+class MessageCRUDStrategy(DefaultCRUDStrategy[Message, MessageCreate, MessageUpdate]):
+    """Custom CRUD strategy for Message operations"""
 
     def get_by_conversation_id(
-        self, conversation_id: UUID, skip: int = 0, limit: int = 100
+        self, db: Session, conversation_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[Message]:
         """Get messages by conversation ID ordered by creation time"""
         stmt = (
@@ -25,10 +22,10 @@ class MessageRepository(BaseRepository[Message, MessageCreate, MessageUpdate]):
             .offset(skip)
             .limit(limit)
         )
-        return list(self.db.execute(stmt).scalars().all())
+        return list(db.execute(stmt).scalars().all())
 
     def get_conversation_history(
-        self, conversation_id: UUID, limit: int = 50
+        self, db: Session, conversation_id: UUID, limit: int = 50
     ) -> List[Message]:
         """Get recent conversation history"""
         stmt = (
@@ -37,28 +34,17 @@ class MessageRepository(BaseRepository[Message, MessageCreate, MessageUpdate]):
             .order_by(Message.created_at.desc())
             .limit(limit)
         )
-        messages = list(self.db.execute(stmt).scalars().all())
+        messages = list(db.execute(stmt).scalars().all())
         return list(reversed(messages))  # Return in chronological order
 
-    def get_by_parent_message_id(
-        self, parent_message_id: UUID, skip: int = 0, limit: int = 100
-    ) -> List[Message]:
-        """Get child messages by parent message ID"""
-        stmt = (
-            select(Message)
-            .where(Message.parent_message_id == parent_message_id)
-            .order_by(Message.created_at.asc())
-            .offset(skip)
-            .limit(limit)
-        )
-        return list(self.db.execute(stmt).scalars().all())
-
-    def get_conversation_message_count(self, conversation_id: UUID) -> int:
+    def get_conversation_message_count(self, db: Session, conversation_id: UUID) -> int:
         """Get count of messages in a conversation"""
         stmt = select(Message.id).where(Message.conversation_id == conversation_id)
-        return len(list(self.db.execute(stmt).scalars().all()))
+        return len(list(db.execute(stmt).scalars().all()))
 
-    def get_latest_message(self, conversation_id: UUID) -> Optional[Message]:
+    def get_latest_message(
+        self, db: Session, conversation_id: UUID
+    ) -> Optional[Message]:
         """Get the latest message in a conversation"""
         stmt = (
             select(Message)
@@ -66,13 +52,53 @@ class MessageRepository(BaseRepository[Message, MessageCreate, MessageUpdate]):
             .order_by(Message.created_at.desc())
             .limit(1)
         )
-        return self.db.execute(stmt).scalar_one_or_none()
+        return db.execute(stmt).scalar_one_or_none()
 
-    def get_conversation_thread(self, conversation_id: UUID) -> List[Message]:
+    def get_conversation_thread(
+        self, db: Session, conversation_id: UUID
+    ) -> List[Message]:
         """Get all messages in a conversation thread ordered by creation time"""
         stmt = (
             select(Message)
             .where(Message.conversation_id == conversation_id)
             .order_by(Message.created_at.asc())
         )
-        return list(self.db.execute(stmt).scalars().all())
+        return list(db.execute(stmt).scalars().all())
+
+
+class MessageRepository(Repository[Message, MessageCreate, MessageUpdate]):
+    """Repository for Message model using strategy pattern"""
+
+    def __init__(self, db: Session):
+        strategy = MessageCRUDStrategy(Message)
+        super().__init__(db, strategy)
+
+    def get_by_conversation_id(
+        self, conversation_id: UUID, skip: int = 0, limit: int = 100
+    ) -> List[Message]:
+        """Get messages by conversation ID ordered by creation time"""
+        return self._crud_strategy.get_by_conversation_id(
+            self.db, conversation_id, skip, limit
+        )
+
+    def get_conversation_history(
+        self, conversation_id: UUID, limit: int = 50
+    ) -> List[Message]:
+        """Get recent conversation history"""
+        return self._crud_strategy.get_conversation_history(
+            self.db, conversation_id, limit
+        )
+
+    def get_conversation_message_count(self, conversation_id: UUID) -> int:
+        """Get count of messages in a conversation"""
+        return self._crud_strategy.get_conversation_message_count(
+            self.db, conversation_id
+        )
+
+    def get_latest_message(self, conversation_id: UUID) -> Optional[Message]:
+        """Get the latest message in a conversation"""
+        return self._crud_strategy.get_latest_message(self.db, conversation_id)
+
+    def get_conversation_thread(self, conversation_id: UUID) -> List[Message]:
+        """Get all messages in a conversation thread ordered by creation time"""
+        return self._crud_strategy.get_conversation_thread(self.db, conversation_id)

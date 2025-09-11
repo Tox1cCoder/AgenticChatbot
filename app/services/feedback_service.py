@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import List, Optional, TYPE_CHECKING
 from uuid import UUID
 from fastapi import HTTPException, status
@@ -17,7 +18,7 @@ class FeedbackService:
 
     def __init__(
         self,
-        container: "DIContainer",
+        container: DIContainer,
         feedback_repository: FeedbackRepository,
         message_repository: MessageRepository,
         user_repository: UserRepository,

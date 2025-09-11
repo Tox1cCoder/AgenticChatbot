@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import List, TYPE_CHECKING
 from uuid import UUID
 from fastapi import HTTPException, status
@@ -20,7 +21,7 @@ class ConversationService:
 
     def __init__(
         self,
-        container: "DIContainer",
+        container: DIContainer,
         conversation_repository: ConversationRepository,
         user_repository: UserRepository,
     ):
