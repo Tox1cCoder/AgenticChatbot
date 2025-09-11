@@ -6,7 +6,7 @@ from app.models.base import BaseModel
 
 
 class Conversation(BaseModel):
-    __tablename__ = "conversations"
+    __tablename__ = "conversation"
 
     user_id = Column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True

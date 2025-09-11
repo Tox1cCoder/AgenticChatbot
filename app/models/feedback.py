@@ -6,10 +6,14 @@ from app.models.base import BaseModel
 
 
 class Feedback(BaseModel):
-    __tablename__ = "feedback"
+    __tablename__ = "feedbacks"
 
     message_id = Column(
-        UUID(as_uuid=True), ForeignKey("messages.id"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("message.id"),
+        nullable=False,
+        unique=True,
+        index=True,
     )
     user_id = Column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
@@ -21,11 +25,8 @@ class Feedback(BaseModel):
     message = relationship("Message", back_populates="feedback")
     user = relationship("User", back_populates="feedback")
 
-    # Unique constraint to ensure one feedback per user per message
-    __table_args__ = (
-        UniqueConstraint("message_id", "user_id", name="uq_feedback_message_user"),
-        Index("idx_feedback_message_user", "message_id", "user_id"),
-    )
+    # Index for efficient querying
+    __table_args__ = (Index("idx_feedbacks_message_user", "message_id", "user_id"),)
 
     def __repr__(self) -> str:
         return f"<Feedback(id={self.id}, message_id={self.message_id}, user_id={self.user_id}, rating={self.rating})>"

@@ -6,10 +6,14 @@ from typing import Dict, Type, TypeVar, Callable, Any
 from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
-from app.repositories.user import UserRepository
-from app.repositories.conversation import ConversationRepository
-from app.repositories.message import MessageRepository
-from app.repositories.feedback import FeedbackRepository
+from app.repositories.user import UserRepository, UserCRUDStrategy
+from app.repositories.conversation import (
+    ConversationRepository,
+    ConversationCRUDStrategy,
+)
+from app.repositories.message import MessageRepository, MessageCRUDStrategy
+from app.repositories.feedback import FeedbackRepository, FeedbackCRUDStrategy
+from app.repositories.strategy import Repository
 from app.services.user_service import UserService
 from app.services.conversation_service import ConversationService
 from app.services.message_service import MessageService
@@ -45,7 +49,7 @@ class DIContainer:
     def _register_services(self):
         """Register all services with their dependency requirements"""
 
-        # Repository registrations - depend only on db session
+        # Repository registrations with strategy pattern - depend only on db session
         self._services["user_repository"] = ServiceDefinition(
             service_class=UserRepository, dependencies=["db"], singleton=False
         )

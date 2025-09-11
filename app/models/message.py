@@ -7,30 +7,24 @@ from app.models.enums import MessageRoleType
 
 
 class Message(BaseModel):
-    __tablename__ = "messages"
+    __tablename__ = "message"
 
     conversation_id = Column(
-        UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False, index=True
+        UUID(as_uuid=True), ForeignKey("conversation.id"), nullable=False, index=True
     )
-    parent_message_id = Column(
-        UUID(as_uuid=True), ForeignKey("messages.id"), nullable=True, index=True
-    )
-    role = Column(MessageRoleType, nullable=False)
+    sender = Column(MessageRoleType, nullable=False)
     content = Column(Text, nullable=False)
 
     # Relationships
     conversation = relationship("Conversation", back_populates="messages")
-    parent_message = relationship(
-        "Message", remote_side="Message.id", backref="child_messages"
-    )
     feedback = relationship(
         "Feedback", back_populates="message", cascade="all, delete-orphan"
     )
 
     # Index for efficient querying by conversation and timestamp
     __table_args__ = (
-        Index("idx_messages_conversation_created", "conversation_id", "created_at"),
+        Index("idx_message_conversation_created", "conversation_id", "created_at"),
     )
 
     def __repr__(self) -> str:
-        return f"<Message(id={self.id}, conversation_id={self.conversation_id}, role='{self.role.value}')>"
+        return f"<Message(id={self.id}, conversation_id={self.conversation_id}, sender='{self.sender.value}')>"
