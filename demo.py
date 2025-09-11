@@ -94,7 +94,32 @@ def get_feedback_stats(message_id: str) -> Dict:
 # Header
 st.title("Chatbot API Demo")
 
-# Sidebar
+# # Sidebar
+# with st.sidebar:
+#     st.header("👤 User Management")
+
+#     # Create User
+#     with st.expander("Sign Up New User"):
+#         with st.form("Sign Up"):
+#             username = st.text_input("Username")
+#             email = st.text_input("Email")
+#             password = st.text_input("Password", type="password")
+#             # full_name = st.text_input("Full Name")
+
+#             if st.form_submit_button("Sign Up"):
+#                 user_data = {
+#                     "username": username,
+#                     "email": email,
+#                     "password": password,
+#                 }
+#                 result = make_api_request("POST", "/users/", user_data)
+#                 if result:
+#                     st.cache_data.clear()
+#                     st.session_state.current_user_id = result.get("id")
+#                     st.session_state.users_list = []  # Force reload
+#                     st.success("✅ User signed up and selected!")
+#                     st.rerun()
+
 with st.sidebar:
     st.header("👤 User Management")
 
@@ -104,22 +129,29 @@ with st.sidebar:
             username = st.text_input("Username")
             email = st.text_input("Email")
             password = st.text_input("Password", type="password")
-            # full_name = st.text_input("Full Name")
+            confirm_password = st.text_input(
+                "Re-enter Password", type="password"
+            )  # ✅ confirmation
 
-            if st.form_submit_button("Sign Up"):
-                user_data = {
-                    "username": username,
-                    "email": email,
-                    "password": password,
-                    # "full_name": full_name,
-                }
-                result = make_api_request("POST", "/users/", user_data)
-                if result:
-                    st.cache_data.clear()
-                    st.session_state.current_user_id = result.get("id")
-                    st.session_state.users_list = []  # Force reload
-                    st.success("✅ User signed up and selected!")
-                    st.rerun()
+            submit = st.form_submit_button("Sign Up")
+            if submit:
+                if password != confirm_password:
+                    st.error("❌ Passwords do not match. Please try again.")
+                elif not username or not email or not password:
+                    st.warning("⚠️ Please fill out all fields.")
+                else:
+                    user_data = {
+                        "username": username,
+                        "email": email,
+                        "password": password,
+                    }
+                    result = make_api_request("POST", "/users/", user_data)
+                    if result:
+                        st.cache_data.clear()
+                        st.session_state.current_user_id = result.get("id")
+                        st.session_state.users_list = []  # Force reload
+                        st.success("✅ User signed up and selected!")
+                        st.rerun()
 
     # Select User
     if not st.session_state.users_list:
