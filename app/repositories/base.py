@@ -19,17 +19,17 @@ class BaseRepository(Generic[ModelType, CreateSchemaType, UpdateSchemaType], ABC
         self.model = model
         self.db = db
 
-    def create(self, obj_in: CreateSchemaType) -> ModelType:
+    def create(self, input_schema: CreateSchemaType) -> ModelType:
         """Create a new record"""
-        if isinstance(obj_in, dict):
-            obj_in_data = obj_in
+        if isinstance(input_schema, dict):
+            input_schema_data = input_schema
         else:
-            obj_in_data = (
-                obj_in.model_dump()
-                if hasattr(obj_in, "model_dump")
-                else obj_in.__dict__
+            input_schema_data = (
+                input_schema.model_dump()
+                if hasattr(input_schema, "model_dump")
+                else input_schema.__dict__
             )
-        db_obj = self.model(**obj_in_data)
+        db_obj = self.model(**input_schema_data)
         self.db.add(db_obj)
         self.db.commit()
         self.db.refresh(db_obj)
@@ -45,12 +45,12 @@ class BaseRepository(Generic[ModelType, CreateSchemaType, UpdateSchemaType], ABC
         stmt = select(self.model).offset(skip).limit(limit)
         return list(self.db.execute(stmt).scalars().all())
 
-    def update(self, db_obj: ModelType, obj_in: UpdateSchemaType) -> ModelType:
+    def update(self, db_obj: ModelType, input_schema: UpdateSchemaType) -> ModelType:
         """Update an existing record"""
         obj_data = (
-            obj_in.model_dump(exclude_unset=True)
-            if hasattr(obj_in, "model_dump")
-            else obj_in.__dict__
+            input_schema.model_dump(exclude_unset=True)
+            if hasattr(input_schema, "model_dump")
+            else input_schema.__dict__
         )
         for field, value in obj_data.items():
             setattr(db_obj, field, value)
