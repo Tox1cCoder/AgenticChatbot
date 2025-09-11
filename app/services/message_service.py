@@ -3,6 +3,11 @@ from typing import List, Optional, TYPE_CHECKING
 from uuid import UUID
 from fastapi import HTTPException, status
 
+from pathlib import Path
+import os
+import google.genai
+from dotenv import load_dotenv
+
 from app.repositories.message import MessageRepository
 from app.repositories.conversation import ConversationRepository
 from app.repositories.user import UserRepository
@@ -147,14 +152,27 @@ class MessageService:
         return self.repository.delete(message_id)
 
     def _generate_bot_response(self, user_message: str) -> str:
-        """Generate a simple bot response"""
-        user_message = user_message.lower()
+        """Generate a bot response"""
 
-        if "hello" in user_message or "hi" in user_message:
-            return "Hello! How can I help you today?"
-        elif "how are you" in user_message:
-            return "I'm doing great, thank you for asking! How are you?"
-        elif "bye" in user_message or "goodbye" in user_message:
-            return "Goodbye! Have a great day!"
-        else:
-            return f"I received your message: '{user_message}'. Thanks for chatting with me!"
+        BASE_DIR = Path(__file__).resolve().parent.parent  # app/
+        ENV_PATH = BASE_DIR / "core" / ".env"
+
+        load_dotenv(dotenv_path=ENV_PATH)
+
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            return "[Error: Gemini API key not configured]"
+
+        system_prompt = (
+            "You are a helpful chatbot. Please answer in a short, concise sentence."
+        )
+        prompt = f"{system_prompt}\nUser: {user_message}"
+
+        try:
+            client = google.genai.Client(api_key=api_key)
+            response = client.models.generate_content(
+                model="gemini-2.5-flash", contents=prompt
+            )
+            return response.text if hasattr(response, "text") else str(response)
+        except Exception as e:
+            return f"[Gemini API error: {str(e)}]"
