@@ -1,6 +1,5 @@
 """
 Dependency Injection Container for managing application dependencies.
-Implements proper DI pattern where services don't manually instantiate dependencies.
 """
 
 from typing import Dict, Type, TypeVar, Callable, Any

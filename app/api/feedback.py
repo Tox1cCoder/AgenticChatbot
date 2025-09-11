@@ -12,7 +12,7 @@ router = APIRouter(prefix="/feedback", tags=["feedback"])
 
 
 def get_feedback_service(db: Session = Depends(get_db)) -> FeedbackService:
-    """Dependency to get FeedbackService instance with proper DI"""
+    """Dependency to get FeedbackService instance"""
     container = get_container()
     container.set_session(db)
     return container.get("feedback_service")

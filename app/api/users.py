@@ -12,7 +12,7 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 
 def get_user_service(db: Session = Depends(get_db)) -> UserService:
-    """Dependency to get UserService instance with proper DI"""
+    """Dependency to get UserService instance"""
     container = get_container()
     container.set_session(db)
     return container.get("user_service")

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 class UserService:
-    """Service layer for User operations with proper dependency injection"""
+    """Service layer for User operations"""
 
     def __init__(
         self,

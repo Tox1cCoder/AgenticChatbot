@@ -16,7 +16,7 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
 def get_conversation_service(db: Session = Depends(get_db)) -> ConversationService:
-    """Dependency to get ConversationService instance with proper DI"""
+    """Dependency to get ConversationService instance"""
     container = get_container()
     container.set_session(db)
     return container.get("conversation_service")

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 class MessageService:
-    """Service layer for Message operations with proper dependency injection"""
+    """Service layer for Message operations"""
 
     def __init__(
         self,

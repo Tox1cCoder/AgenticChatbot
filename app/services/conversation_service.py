@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class ConversationService:
-    """Service layer for Conversation operations with proper dependency injection"""
+    """Service layer for Conversation operations"""
 
     def __init__(
         self,

@@ -12,7 +12,7 @@ router = APIRouter(prefix="/messages", tags=["messages"])
 
 
 def get_message_service(db: Session = Depends(get_db)) -> MessageService:
-    """Dependency to get MessageService instance with proper DI"""
+    """Dependency to get MessageService instance"""
     container = get_container()
     container.set_session(db)
     return container.get("message_service")

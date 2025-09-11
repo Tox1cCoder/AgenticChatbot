@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class FeedbackService:
-    """Service layer for Feedback operations with proper dependency injection"""
+    """Service layer for Feedback operations"""
 
     def __init__(
         self,
