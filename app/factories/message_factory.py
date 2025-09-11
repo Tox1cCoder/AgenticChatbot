@@ -49,7 +49,7 @@ class MessageFactory:
             "id": uuid4(),
             "conversation_id": conversation_id,
             "parent_message_id": parent_message_id,
-            "role": MessageRole.ASSISTANT,
+            "role": MessageRole.assistant,
             "content": content,
             "created_at": datetime.now(timezone.utc),
         }

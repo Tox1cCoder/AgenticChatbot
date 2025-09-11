@@ -53,7 +53,7 @@ class MessageService:
         created_message = self.repository.create(message_entity)
 
         # If this is a user message, generate a simple bot response
-        if message_create_data.role == MessageRole.USER:
+        if message_create_data.role == MessageRole.user:
             bot_response_entity = MessageFactory.create_bot_response(
                 conversation_id=message_create_data.conversation_id,
                 content=self._generate_bot_response(message_create_data.content),
