@@ -15,41 +15,41 @@ class MessageFactory:
     """Factory for creating Message entities"""
 
     @staticmethod
-    def create_from_schema(message_data: MessageCreate) -> Message:
-        """Create Message entity from MessageCreate schema"""
-        return Message(
-            id=uuid4(),
-            conversation_id=message_data.conversation_id,
-            parent_message_id=message_data.parent_message_id,
-            role=message_data.role,
-            content=message_data.content,
-            created_at=datetime.now(timezone.utc),
-        )
+    def create_from_schema(message_data: MessageCreate) -> Dict[str, Any]:
+        """Create Message data dictionary from MessageCreate schema"""
+        return {
+            "id": uuid4(),
+            "conversation_id": message_data.conversation_id,
+            "parent_message_id": message_data.parent_message_id,
+            "role": message_data.role,
+            "content": message_data.content,
+            "created_at": datetime.now(timezone.utc),
+        }
 
     @staticmethod
-    def create_from_dict(message_data: Dict[str, Any]) -> Message:
-        """Create Message entity from dictionary"""
+    def create_from_dict(message_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create Message data dictionary from dictionary"""
         now = datetime.now(timezone.utc)
 
-        return Message(
-            id=message_data.get("id", uuid4()),
-            conversation_id=message_data["conversation_id"],
-            parent_message_id=message_data.get("parent_message_id"),
-            role=message_data["role"],
-            content=message_data["content"],
-            created_at=message_data.get("created_at", now),
-        )
+        return {
+            "id": message_data.get("id", uuid4()),
+            "conversation_id": message_data["conversation_id"],
+            "parent_message_id": message_data.get("parent_message_id"),
+            "role": message_data["role"],
+            "content": message_data["content"],
+            "created_at": message_data.get("created_at", now),
+        }
 
     @staticmethod
     def create_bot_response(
         conversation_id: UUID, content: str, parent_message_id: Optional[UUID] = None
-    ) -> Message:
-        """Create a bot response message"""
-        return Message(
-            id=uuid4(),
-            conversation_id=conversation_id,
-            parent_message_id=parent_message_id,
-            role=MessageRole.ASSISTANT,
-            content=content,
-            created_at=datetime.now(timezone.utc),
-        )
+    ) -> Dict[str, Any]:
+        """Create bot response message data dictionary"""
+        return {
+            "id": uuid4(),
+            "conversation_id": conversation_id,
+            "parent_message_id": parent_message_id,
+            "role": MessageRole.ASSISTANT,
+            "content": content,
+            "created_at": datetime.now(timezone.utc),
+        }

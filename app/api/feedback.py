@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.services.feedback import FeedbackService
+from app.services.feedback_service import FeedbackService
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
 
 router = APIRouter(prefix="/feedback", tags=["feedback"])

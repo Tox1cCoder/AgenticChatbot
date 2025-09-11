@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.services.conversation import ConversationService
+from app.services.conversation_service import ConversationService
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationUpdate,

@@ -21,9 +21,14 @@ class BaseRepository(Generic[ModelType, CreateSchemaType, UpdateSchemaType], ABC
 
     def create(self, obj_in: CreateSchemaType) -> ModelType:
         """Create a new record"""
-        obj_in_data = (
-            obj_in.model_dump() if hasattr(obj_in, "model_dump") else obj_in.__dict__
-        )
+        if isinstance(obj_in, dict):
+            obj_in_data = obj_in
+        else:
+            obj_in_data = (
+                obj_in.model_dump()
+                if hasattr(obj_in, "model_dump")
+                else obj_in.__dict__
+            )
         db_obj = self.model(**obj_in_data)
         self.db.add(db_obj)
         self.db.commit()
