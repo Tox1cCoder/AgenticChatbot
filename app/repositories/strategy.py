@@ -116,8 +116,7 @@ class DefaultCRUDStrategy(CRUDStrategy[ModelType, CreateSchemaType, UpdateSchema
 
 class Repository(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
     """
-    Repository using strategy pattern instead of inheritance.
-    Composes CRUD strategy for flexible behavior.
+    Repository using strategy pattern.
     """
 
     def __init__(
@@ -129,27 +128,27 @@ class Repository(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         self._crud_strategy = crud_strategy
 
     def create(self, input_schema: CreateSchemaType) -> ModelType:
-        """Create a new record using strategy"""
+        """Create a new record"""
         return self._crud_strategy.create(self.db, input_schema)
 
     def get_by_id(self, id: Union[int, UUID]) -> Optional[ModelType]:
-        """Get a record by ID using strategy"""
+        """Get a record by ID"""
         return self._crud_strategy.get_by_id(self.db, id)
 
     def get_all(self, skip: int = 0, limit: int = 100) -> List[ModelType]:
-        """Get all records with pagination using strategy"""
+        """Get all records with pagination"""
         return self._crud_strategy.get_all(self.db, skip, limit)
 
     def update(self, db_obj: ModelType, input_schema: UpdateSchemaType) -> ModelType:
-        """Update an existing record using strategy"""
+        """Update an existing record"""
         return self._crud_strategy.update(self.db, db_obj, input_schema)
 
     def delete(self, id: Union[int, UUID]) -> bool:
-        """Delete a record by ID using strategy"""
+        """Delete a record by ID"""
         return self._crud_strategy.delete(self.db, id)
 
     def exists(self, id: Union[int, UUID]) -> bool:
-        """Check if a record exists by ID using strategy"""
+        """Check if a record exists by ID"""
         return self._crud_strategy.exists(self.db, id)
 
     def set_strategy(
