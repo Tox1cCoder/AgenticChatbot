@@ -5,9 +5,10 @@ Strategy pattern interfaces for repository operations.
 from abc import ABC, abstractmethod
 from typing import Generic, TypeVar, Optional, List, Any, Dict, Union
 from uuid import UUID
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, update, delete, func
 
 from app.models.base import BaseModel
 
@@ -75,13 +76,20 @@ class DefaultCRUDStrategy(CRUDStrategy[ModelType, CreateSchemaType, UpdateSchema
         return db_obj
 
     def get_by_id(self, db: Session, id: Union[int, UUID]) -> Optional[ModelType]:
-        """Get a record by ID"""
-        stmt = select(self.model).where(self.model.id == id)
+        """Get a record by ID (excluding soft deleted)"""
+        stmt = select(self.model).where(
+            self.model.id == id, self.model.deleted_at.is_(None)
+        )
         return db.execute(stmt).scalar_one_or_none()
 
     def get_all(self, db: Session, skip: int = 0, limit: int = 100) -> List[ModelType]:
-        """Get all records with pagination"""
-        stmt = select(self.model).offset(skip).limit(limit)
+        """Get all records with pagination (excluding soft deleted)"""
+        stmt = (
+            select(self.model)
+            .where(self.model.deleted_at.is_(None))
+            .offset(skip)
+            .limit(limit)
+        )
         return list(db.execute(stmt).scalars().all())
 
     def update(
@@ -100,17 +108,19 @@ class DefaultCRUDStrategy(CRUDStrategy[ModelType, CreateSchemaType, UpdateSchema
         return db_obj
 
     def delete(self, db: Session, id: Union[int, UUID]) -> bool:
-        """Delete a record by ID"""
+        """Soft delete a record by ID"""
         db_obj = self.get_by_id(db, id)
         if db_obj:
-            db.delete(db_obj)
+            db_obj.deleted_at = datetime.now(timezone.utc)
             db.commit()
             return True
         return False
 
     def exists(self, db: Session, id: Union[int, UUID]) -> bool:
-        """Check if a record exists by ID"""
-        stmt = select(self.model.id).where(self.model.id == id)
+        """Check if a record exists by ID (excluding soft deleted)"""
+        stmt = select(self.model.id).where(
+            self.model.id == id, self.model.deleted_at.is_(None)
+        )
         return db.execute(stmt).scalar() is not None
 
 

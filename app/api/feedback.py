@@ -18,9 +18,7 @@ def get_feedback_service(db: Session = Depends(get_db)) -> FeedbackService:
     return container.get("feedback_service")
 
 
-@router.post(
-    "/user/{user_id}", response_model=FeedbackRead, status_code=status.HTTP_201_CREATED
-)
+@router.post("/", response_model=FeedbackRead, status_code=status.HTTP_201_CREATED)
 async def create_feedback(
     user_id: UUID,
     feedback_data: FeedbackCreate,

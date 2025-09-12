@@ -66,17 +66,17 @@ class ConversationService:
         return ConversationRead.model_validate(conversation_entity)
 
     def get_user_conversations(
-        self, user_id: UUID, skip: int = 0, limit: int = 100
+        self, owner_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[ConversationRead]:
         """Get all conversations for a user"""
         # Validate user exists
-        if not self.user_repository.exists(user_id):
+        if not self.user_repository.exists(owner_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
             )
 
-        conversation_entities = self.repository.get_by_user_id(
-            user_id, skip=skip, limit=limit
+        conversation_entities = self.repository.get_by_owner_id(
+            owner_id, skip=skip, limit=limit
         )
         return [
             ConversationRead.model_validate(conversation_entity)
@@ -84,10 +84,10 @@ class ConversationService:
         ]
 
     def get_conversation_with_messages(
-        self, conversation_id: UUID, user_id: UUID
+        self, conversation_id: UUID, owner_id: UUID
     ) -> ConversationRead:
         """Get conversation with messages, ensuring user owns it"""
-        if not self.repository.user_owns_conversation(user_id, conversation_id):
+        if not self.repository.user_owns_conversation(owner_id, conversation_id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this conversation",
@@ -103,11 +103,11 @@ class ConversationService:
     def update_conversation(
         self,
         conversation_id: UUID,
-        user_id: UUID,
+        owner_id: UUID,
         conversation_update_data: ConversationUpdate,
     ) -> ConversationRead:
         """Update conversation with ownership validation"""
-        if not self.repository.user_owns_conversation(user_id, conversation_id):
+        if not self.repository.user_owns_conversation(owner_id, conversation_id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this conversation",
@@ -124,9 +124,9 @@ class ConversationService:
         )
         return ConversationRead.model_validate(updated_conversation)
 
-    def delete_conversation(self, conversation_id: UUID, user_id: UUID) -> bool:
+    def delete_conversation(self, conversation_id: UUID, owner_id: UUID) -> bool:
         """Delete conversation with ownership validation"""
-        if not self.repository.user_owns_conversation(user_id, conversation_id):
+        if not self.repository.user_owns_conversation(owner_id, conversation_id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this conversation",

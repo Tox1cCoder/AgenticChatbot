@@ -25,10 +25,6 @@ venv.bak/
 Thumbs.db
 Desktop.ini
 
-# Alembic
-alembic/versions/*.py
-!alembic/versions/__init__.py
-
 # Database
 *.db
 *.sqlite

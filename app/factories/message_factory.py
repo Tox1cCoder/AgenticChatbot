@@ -44,7 +44,7 @@ class MessageFactory:
         return {
             "id": uuid4(),
             "conversation_id": conversation_id,
-            "sender": MessageRole.assistant,
+            "sender": MessageRole.assistant.value,
             "content": content,
             "created_at": datetime.now(timezone.utc),
         }

@@ -1,12 +1,12 @@
 import enum
-from sqlalchemy import Enum
+from sqlalchemy import Integer
 
 
-class MessageRole(enum.Enum):
-    user = "user"
-    assistant = "assistant"
-    # system = "system"
+class MessageRole(enum.IntEnum):
+    user = 1
+    assistant = 2
+    # system = 3
 
 
-# SQLAlchemy enum type
-MessageRoleType = Enum(MessageRole, name="message_role")
+# SQLAlchemy type (no longer enum-based)
+MessageRoleType = Integer

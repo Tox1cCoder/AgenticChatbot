@@ -20,7 +20,7 @@ class ConversationFactory:
         """Create Conversation data dictionary from ConversationCreate schema"""
         return {
             "id": uuid4(),
-            "user_id": owner_id,
+            "owner_id": owner_id,
             "title": conversation_data.title,
             "created_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
@@ -33,7 +33,7 @@ class ConversationFactory:
 
         return {
             "id": conversation_data.get("id", uuid4()),
-            "user_id": conversation_data["user_id"],
+            "owner_id": conversation_data["owner_id"],
             "title": conversation_data["title"],
             "created_at": conversation_data.get("created_at", now),
             "updated_at": conversation_data.get("updated_at", now),

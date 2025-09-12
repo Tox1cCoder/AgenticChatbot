@@ -23,7 +23,7 @@ def get_conversation_service(db: Session = Depends(get_db)) -> ConversationServi
 
 
 @router.post(
-    "/user/{user_id}",
+    "/",
     response_model=ConversationRead,
     status_code=status.HTTP_201_CREATED,
 )
@@ -45,8 +45,8 @@ async def get_conversation(
     return conversation_service.get_conversation_by_id(conversation_id)
 
 
-@router.get("/user/{user_id}", response_model=List[ConversationRead])
-async def get_user_conversations(
+@router.get("/", response_model=List[ConversationRead])
+async def get_conversations(
     user_id: UUID,
     skip: int = 0,
     limit: int = 100,
@@ -67,3 +67,19 @@ async def update_conversation(
     return conversation_service.update_conversation(
         conversation_id, user_id, conversation_data
     )
+
+
+@router.delete("/{conversation_id}")
+async def delete_conversation(
+    conversation_id: UUID,
+    user_id: UUID,
+    conversation_service: ConversationService = Depends(get_conversation_service),
+) -> dict:
+    """Delete conversation (requires user ownership)"""
+    success = conversation_service.delete_conversation(conversation_id, user_id)
+    if success:
+        return {"message": "Conversation deleted successfully"}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
+        )

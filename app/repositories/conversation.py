@@ -13,13 +13,13 @@ class ConversationCRUDStrategy(
 ):
     """Custom CRUD strategy for Conversation operations"""
 
-    def get_by_user_id(
-        self, db: Session, user_id: UUID, skip: int = 0, limit: int = 100
+    def get_by_owner_id(
+        self, db: Session, owner_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[Conversation]:
-        """Get conversations by user ID"""
+        """Get conversations by owner ID"""
         stmt = (
             select(Conversation)
-            .where(Conversation.user_id == user_id)
+            .where(Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None))
             .order_by(Conversation.updated_at.desc())
             .offset(skip)
             .limit(limit)
@@ -33,21 +33,27 @@ class ConversationCRUDStrategy(
         stmt = (
             select(Conversation)
             .options(joinedload(Conversation.messages))
-            .where(Conversation.id == conversation_id)
+            .where(
+                Conversation.id == conversation_id, Conversation.deleted_at.is_(None)
+            )
         )
         return db.execute(stmt).scalar_one_or_none()
 
-    def get_user_conversation_count(self, db: Session, user_id: UUID) -> int:
+    def get_user_conversation_count(self, db: Session, owner_id: UUID) -> int:
         """Get count of conversations for a user"""
-        stmt = select(Conversation.id).where(Conversation.user_id == user_id)
+        stmt = select(Conversation.id).where(
+            Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
+        )
         return len(list(db.execute(stmt).scalars().all()))
 
     def user_owns_conversation(
-        self, db: Session, user_id: UUID, conversation_id: UUID
+        self, db: Session, owner_id: UUID, conversation_id: UUID
     ) -> bool:
         """Check if user owns the conversation"""
         stmt = select(Conversation.id).where(
-            Conversation.id == conversation_id, Conversation.user_id == user_id
+            Conversation.id == conversation_id,
+            Conversation.owner_id == owner_id,
+            Conversation.deleted_at.is_(None),
         )
         return db.execute(stmt).scalar() is not None
 
@@ -61,22 +67,22 @@ class ConversationRepository(
         strategy = ConversationCRUDStrategy(Conversation)
         super().__init__(db, strategy)
 
-    def get_by_user_id(
-        self, user_id: UUID, skip: int = 0, limit: int = 100
+    def get_by_owner_id(
+        self, owner_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[Conversation]:
-        """Get conversations by user ID"""
-        return self._crud_strategy.get_by_user_id(self.db, user_id, skip, limit)
+        """Get conversations by owner ID"""
+        return self._crud_strategy.get_by_owner_id(self.db, owner_id, skip, limit)
 
     def get_with_messages(self, conversation_id: UUID) -> Optional[Conversation]:
         """Get conversation with its messages"""
         return self._crud_strategy.get_with_messages(self.db, conversation_id)
 
-    def get_user_conversation_count(self, user_id: UUID) -> int:
+    def get_user_conversation_count(self, owner_id: UUID) -> int:
         """Get count of conversations for a user"""
-        return self._crud_strategy.get_user_conversation_count(self.db, user_id)
+        return self._crud_strategy.get_user_conversation_count(self.db, owner_id)
 
-    def user_owns_conversation(self, user_id: UUID, conversation_id: UUID) -> bool:
+    def user_owns_conversation(self, owner_id: UUID, conversation_id: UUID) -> bool:
         """Check if user owns the conversation"""
         return self._crud_strategy.user_owns_conversation(
-            self.db, user_id, conversation_id
+            self.db, owner_id, conversation_id
         )

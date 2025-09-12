@@ -25,7 +25,7 @@ class ConversationRead(ConversationBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    user_id: UUID
+    owner_id: UUID
     created_at: datetime
     updated_at: datetime
 

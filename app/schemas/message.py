@@ -4,13 +4,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, ConfigDict
 
-from app.models.enums import MessageRole
-
 
 class MessageBase(BaseModel):
     content: str = Field(..., min_length=1, description="Message content")
-    sender: MessageRole = Field(
-        ..., description="Message sender: user, assistant, or system"
+    sender: int = Field(
+        ..., description="Message sender: 1=user, 2=assistant, 3=system"
     )
 
 

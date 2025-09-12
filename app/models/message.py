@@ -7,19 +7,17 @@ from app.models.enums import MessageRoleType
 
 
 class Message(BaseModel):
-    __tablename__ = "message"
+    __tablename__ = "messages"
 
     conversation_id = Column(
-        UUID(as_uuid=True), ForeignKey("conversation.id"), nullable=False, index=True
+        UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False, index=True
     )
     sender = Column(MessageRoleType, nullable=False)
     content = Column(Text, nullable=False)
 
     # Relationships
     conversation = relationship("Conversation", back_populates="messages")
-    feedback = relationship(
-        "Feedback", back_populates="message", cascade="all, delete-orphan"
-    )
+    feedback = relationship("Feedback", back_populates="message")
 
     # Index for efficient querying by conversation and timestamp
     __table_args__ = (
@@ -27,4 +25,4 @@ class Message(BaseModel):
     )
 
     def __repr__(self) -> str:
-        return f"<Message(id={self.id}, conversation_id={self.conversation_id}, sender='{self.sender.value}')>"
+        return f"<Message(id={self.id}, conversation_id={self.conversation_id}, sender={self.sender})>"

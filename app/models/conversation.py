@@ -6,18 +6,16 @@ from app.models.base import BaseModel
 
 
 class Conversation(BaseModel):
-    __tablename__ = "conversation"
+    __tablename__ = "conversations"
 
-    user_id = Column(
-        UUID(as_uuid=True), ForeignKey("user.id"), nullable=False, index=True
+    owner_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
     )
     title = Column(String(255), nullable=False)
 
     # Relationships
     user = relationship("User", back_populates="conversations")
-    messages = relationship(
-        "Message", back_populates="conversation", cascade="all, delete-orphan"
-    )
+    messages = relationship("Message", back_populates="conversation")
 
     def __repr__(self) -> str:
-        return f"<Conversation(id={self.id}, user_id={self.user_id}, title='{self.title}')>"
+        return f"<Conversation(id={self.id}, owner_id={self.owner_id}, title='{self.title}')>"

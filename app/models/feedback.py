@@ -10,13 +10,13 @@ class Feedback(BaseModel):
 
     message_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("message.id"),
+        ForeignKey("messages.id"),
         nullable=False,
         unique=True,
         index=True,
     )
     user_id = Column(
-        UUID(as_uuid=True), ForeignKey("user.id"), nullable=False, index=True
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
     )
     rating = Column(SmallInteger, nullable=False)  # Rating from 1 to 5
     comment = Column(Text, nullable=True)
