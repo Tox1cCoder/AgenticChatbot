@@ -6,7 +6,6 @@ from sqlalchemy import Column, String, Text, DateTime, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
-# Use shared declarative base for relationship resolution
 from app.models.base import Base
 
 

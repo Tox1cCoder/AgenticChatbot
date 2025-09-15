@@ -193,7 +193,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Initialize session state
+# Initialize session state with session persistence
 if "current_user_id" not in st.session_state:
     st.session_state.current_user_id = None
 if "current_conversation_id" not in st.session_state:
@@ -205,15 +205,14 @@ if "users_list" not in st.session_state:
 if "conversations_list" not in st.session_state:
     st.session_state.conversations_list = []
 if "show_login" not in st.session_state:
-    st.session_state.show_login = True
+    # Only show login if no auth token exists - prevents F5 logout
+    st.session_state.show_login = (
+        "auth_token" not in st.session_state or not st.session_state.get("auth_token")
+    )
 if "show_signup" not in st.session_state:
     st.session_state.show_signup = False
-if "show_feedback_modal" not in st.session_state:
-    st.session_state.show_feedback_modal = False
 if "show_conversation_manager" not in st.session_state:
     st.session_state.show_conversation_manager = False
-if "selected_message_for_feedback" not in st.session_state:
-    st.session_state.selected_message_for_feedback = None
 if "auth_token" not in st.session_state:
     st.session_state.auth_token = None
 
@@ -238,7 +237,17 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
             response = requests.delete(url, headers=headers)
 
         if response.status_code >= 400:
-            st.error(f"API Error {response.status_code}: {response.text}")
+            # Enhanced error handling for authentication issues
+            if response.status_code == 403:
+                st.error(
+                    f"🔒 Authentication required. Please log in with proper credentials. (Error {response.status_code})"
+                )
+                # Clear invalid session state on auth failure
+                st.session_state.auth_token = None
+                st.session_state.current_user_id = None
+                st.session_state.show_login = True
+            else:
+                st.error(f"API Error {response.status_code}: {response.text}")
             return {}
 
         return response.json()
@@ -301,29 +310,32 @@ def render_login_page():
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.markdown('<div class="login-container">', unsafe_allow_html=True)
-        st.markdown("# 🤖 ChatBot")
+        st.markdown("# ChatBot")
         st.markdown("### Welcome back!")
 
         tab1, tab2 = st.tabs(["Sign In", "Sign Up"])
 
         with tab1:
-            # Add user selection window for demo
-            with st.expander("🔍 Demo User Selector", expanded=False):
+            with st.expander("Demo User Selector", expanded=False):
                 st.markdown("**Quick login for demo testing**")
                 users = get_users()
                 if users:
-                    for user in users[:5]:  # Show first 5 users
+                    for user in users[:5]:
                         if st.button(
                             f"Login as: {user.get('email', user.get('username', 'Unknown'))}",
                             key=f"quick_login_{user['id']}",
                             use_container_width=True,
                         ):
-                            st.session_state.current_user_id = user["id"]
-                            st.session_state.show_login = False
-                            st.success(
-                                f"✅ Signed in as {user.get('email', user.get('username', 'User'))}"
+                            st.warning(
+                                "⚠️ Demo login temporarily disabled. Please use regular login with email and password."
                             )
-                            st.rerun()
+                            # Note: Actual password would be needed for JWT authentication
+                            # st.session_state.current_user_id = user["id"]
+                            # st.session_state.show_login = False
+                            # st.success(
+                            #     f"✅ Signed in as {user.get('email', user.get('username', 'User'))}"
+                            # )
+                            # st.rerun()
                 else:
                     st.info("No users found in database")
 
@@ -350,7 +362,7 @@ def render_login_page():
 
         with tab2:
             with st.form("signup_form"):
-                st.markdown("#### Create new account")
+                st.markdown("#### Create a new account")
                 username = st.text_input("Username", placeholder="Choose a username")
                 email = st.text_input("Email", placeholder="Enter your email")
                 password = st.text_input(
@@ -373,13 +385,30 @@ def render_login_page():
                             "email": email,
                             "password": password,
                         }
-                        result = make_api_request("POST", "/users/", user_data)
+                        result = make_api_request("POST", "/auth/signup", user_data)
                         if result:
                             st.cache_data.clear()
-                            st.session_state.current_user_id = result.get("id")
-                            st.session_state.show_login = False
-                            st.success("✅ Account created successfully!")
-                            st.rerun()
+                            # After successful signup, authenticate the user
+                            login_data = {"email": email, "password": password}
+                            auth_response = make_api_request(
+                                "POST", "/auth/login", login_data
+                            )
+
+                            if auth_response and "access_token" in auth_response:
+                                st.session_state.auth_token = auth_response[
+                                    "access_token"
+                                ]
+                                st.session_state.current_user_id = auth_response.get(
+                                    "user_id"
+                                )
+                                st.session_state.show_login = False
+                                st.success(
+                                    "✅ Account created and signed in successfully!"
+                                )
+                                st.rerun()
+                            else:
+                                st.success("✅ Account created! Please sign in.")
+                                st.rerun()
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -389,19 +418,14 @@ def render_conversation_sidebar():
     with st.sidebar:
         st.markdown("### Conversations")
 
-        # New conversation button
+        # New conversation button - will create conversation on first message
         if st.button("New Chat", use_container_width=True):
-            conv_data = {"title": f"New Chat {datetime.now().strftime('%H:%M')}"}
-            result = make_api_request(
-                "POST",
-                f"/conversations/",
-                conv_data,
+            # Don't create conversation immediately, just clear current state
+            st.session_state.current_conversation_id = (
+                "pending_new"  # Special state for new conversation
             )
-            if result:
-                st.session_state.current_conversation_id = result.get("id")
-                st.session_state.conversations_list = []  # Force reload
-                st.session_state.messages = []
-                st.rerun()
+            st.session_state.messages = []
+            st.rerun()
 
         # Conversation manager button
         if st.button("Manage Conversations", use_container_width=True):
@@ -410,8 +434,12 @@ def render_conversation_sidebar():
 
         st.divider()
 
-        # Load conversations
-        if not st.session_state.conversations_list and st.session_state.current_user_id:
+        # Load conversations - only if user is authenticated
+        if (
+            not st.session_state.conversations_list
+            and st.session_state.current_user_id
+            and st.session_state.auth_token
+        ):
             conversations = get_conversations(st.session_state.current_user_id)
             if conversations:
                 st.session_state.conversations_list = conversations
@@ -454,97 +482,9 @@ def render_conversation_sidebar():
                     st.session_state.current_conversation_id = None
                     st.session_state.messages = []
                     st.session_state.conversations_list = []
+                    st.session_state.auth_token = None  # Clear auth token on logout
                     st.session_state.show_login = True
                     st.rerun()
-
-
-def render_feedback_modal(message_id: str):
-    """Render modern feedback modal window as popup overlay"""
-    if (
-        st.session_state.show_feedback_modal
-        and st.session_state.selected_message_for_feedback == message_id
-    ):
-        # Create overlay modal using columns for centering
-        with st.container():
-            # Add overlay background
-            st.markdown(
-                """
-                <style>
-                .feedback-overlay {
-                    position: fixed;
-                    top: 0;
-                    left: 0;
-                    width: 100%;
-                    height: 100%;
-                    background: rgba(0,0,0,0.5);
-                    z-index: 1000;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                }
-                .feedback-popup {
-                    background: white;
-                    padding: 30px;
-                    border-radius: 12px;
-                    box-shadow: 0 15px 40px rgba(0,0,0,0.3);
-                    border: 1px solid #dee2e6;
-                    max-width: 500px;
-                    width: 90%;
-                    position: relative;
-                }
-                </style>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            # Create centered modal content
-            col1, col2, col3 = st.columns([1, 3, 1])
-            with col2:
-                st.markdown('<div class="feedback-popup">', unsafe_allow_html=True)
-                st.markdown("### Provide Feedback")
-
-                with st.form(f"feedback_form_{message_id}"):
-                    rating = st.select_slider(
-                        "Rate this response:",
-                        options=[1, 2, 3, 4, 5],
-                        value=3,
-                        format_func=lambda x: "⭐" * x,
-                    )
-
-                    comment = st.text_area(
-                        "Additional comments (optional):",
-                        placeholder="Share your thoughts about this response...",
-                    )
-
-                    col_submit, col_cancel = st.columns(2)
-                    with col_submit:
-                        if st.form_submit_button(
-                            "Submit Feedback", use_container_width=True
-                        ):
-                            feedback_data = {
-                                "message_id": message_id,
-                                "rating": rating,
-                                "comment": comment,
-                            }
-                            result = make_api_request(
-                                "POST",
-                                f"/messages/{message_id}/feedback?user_id={st.session_state.current_user_id}",
-                                feedback_data,
-                            )
-                            if result:
-                                st.cache_data.clear()
-                                st.session_state.show_feedback_modal = False
-                                st.session_state.selected_message_for_feedback = None
-                                st.success("✅ Feedback submitted!")
-                                st.rerun()
-
-                    with col_cancel:
-                        if st.form_submit_button("Cancel", use_container_width=True):
-                            st.session_state.show_feedback_modal = False
-                            st.session_state.selected_message_for_feedback = None
-                            st.rerun()
-
-                st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_conversation_manager():
@@ -652,7 +592,17 @@ def render_conversation_manager():
 
 def render_chat_interface():
     """Render modern chat interface"""
-    if st.session_state.current_conversation_id:
+    # Handle conversation title display
+    if (
+        st.session_state.current_conversation_id
+        and st.session_state.current_conversation_id != "pending_new"
+    ):
+        # Ensure conversations list is loaded
+        if not st.session_state.conversations_list and st.session_state.current_user_id:
+            conversations = get_conversations(st.session_state.current_user_id)
+            if conversations:
+                st.session_state.conversations_list = conversations
+
         current_conv = next(
             (
                 c
@@ -664,99 +614,11 @@ def render_chat_interface():
 
         if current_conv:
             st.markdown(f"# {current_conv['title']}")
+        else:
+            st.markdown("# Conversation")
 
-        # Chat container with modern styling
-        st.markdown('<div class="chat-container">', unsafe_allow_html=True)
-
-        # Display all messages with proper alignment
-        for msg in st.session_state.messages:
-            if msg["sender"] == "user":
-                # User message (right aligned with avatar)
-                st.markdown(
-                    f"""
-                    <div style="display: flex; justify-content: flex-end; margin: 10px 0; align-items: flex-start; gap: 10px;">
-                        <div class="user-message">
-                            {msg["content"]}
-                            <div class="message-timestamp">You • {msg.get("created_at", "now")}</div>
-                        </div>
-                        <div style="background: #007bff; color: white; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">👤</div>
-                    </div>
-                """,
-                    unsafe_allow_html=True,
-                )
-            else:
-                # Bot message (left aligned with avatar and small feedback button)
-                st.markdown(
-                    f"""
-                    <div style="display: flex; justify-content: flex-start; margin: 10px 0; align-items: flex-start; gap: 10px;">
-                        <div style="background: #6c757d; color: white; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">🤖</div>
-                        <div style="display: flex; flex-direction: column; gap: 5px; max-width: 70%;">
-                            <div class="bot-message">
-                                {msg["content"]}
-                                <div class="message-timestamp">Assistant • {msg.get("created_at", "now")}</div>
-                            </div>
-                        </div>
-                    </div>
-                """,
-                    unsafe_allow_html=True,
-                )
-                # Small feedback button positioned right next to bot message
-                if st.button(
-                    "💭", key=f"feedback_btn_{msg['id']}", help="Give feedback"
-                ):
-                    st.session_state.show_feedback_modal = True
-                    st.session_state.selected_message_for_feedback = msg["id"]
-                    st.rerun()
-
-                # Show existing feedback
-                feedbacks = get_feedbacks(msg["id"])
-                if feedbacks:
-                    avg_rating = sum(fb.get("rating", 0) for fb in feedbacks) / len(
-                        feedbacks
-                    )
-                    st.markdown(f"⭐ {avg_rating:.1f} ({len(feedbacks)} reviews)")
-
-                    # Show individual feedback comments
-                    with st.expander("View Feedback", expanded=False):
-                        for fb in feedbacks:
-                            if fb.get("comment"):
-                                st.markdown(f"**{fb['rating']}⭐** - {fb['comment']}")
-                            else:
-                                st.markdown(f"**{fb['rating']}⭐**")
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        # Message input with modern styling
-        with st.form("message_form", clear_on_submit=True):
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                message_content = st.text_area(
-                    "Message",
-                    placeholder="Type your message here...",
-                    height=100,
-                    label_visibility="collapsed",
-                )
-            with col2:
-                st.markdown("<br>", unsafe_allow_html=True)  # Add spacing
-                send_button = st.form_submit_button("📤 Send", use_container_width=True)
-
-            if send_button and message_content.strip():
-                # Send user message
-                message_data = {
-                    "conversation_id": st.session_state.current_conversation_id,
-                    "content": message_content,
-                    "sender": "user",
-                }
-                result = make_api_request("POST", "/messages/", message_data)
-                if result:
-                    st.cache_data.clear()
-                    # Reload all messages for the conversation
-                    messages = get_messages(
-                        st.session_state.current_conversation_id,
-                        st.session_state.current_user_id,
-                    )
-                    st.session_state.messages = messages or []
-                    st.rerun()
+    elif st.session_state.current_conversation_id == "pending_new":
+        st.markdown("# New Chat - Start typing to begin!")
     else:
         # Welcome screen
         col1, col2, col3 = st.columns([1, 2, 1])
@@ -772,12 +634,151 @@ def render_chat_interface():
                 Select or create a conversation to begin.
             """
             )
+        return
+
+    # Chat container with modern styling
+    st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+
+    # Display all messages with proper alignment
+    for msg in st.session_state.messages:
+        if msg["sender"] == 1:  # User messages (MessageRole.user = 1)
+            # User message (right aligned with avatar)
+            st.markdown(
+                f"""
+                <div style="display: flex; justify-content: flex-end; margin: 10px 0; align-items: flex-start; gap: 10px;">
+                    <div class="user-message">
+                        {msg["content"]}
+                        <div class="message-timestamp">You • {msg.get("created_at", "now")}</div>
+                    </div>
+                    <div style="background: #007bff; color: white; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">👤</div>
+                </div>
+            """,
+                unsafe_allow_html=True,
+            )
+        else:
+            # Bot message (left aligned with avatar and small feedback button)
+            st.markdown(
+                f"""
+                <div style="display: flex; justify-content: flex-start; margin: 10px 0; align-items: flex-start; gap: 10px;">
+                    <div style="background: #6c757d; color: white; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">🤖</div>
+                    <div style="display: flex; flex-direction: column; gap: 5px; max-width: 70%;">
+                        <div class="bot-message">
+                            {msg["content"]}
+                            <div class="message-timestamp">Assistant • {msg.get("created_at", "now")}</div>
+                        </div>
+                    </div>
+                </div>
+            """,
+                unsafe_allow_html=True,
+            )
+            # Feedback button using st.popover for better UX
+            with st.popover("💭", help="Give feedback"):
+                st.markdown("### Provide Feedback")
+
+                with st.form(f"feedback_form_{msg['id']}"):
+                    rating = st.selectbox("Rating", [1, 2, 3, 4, 5], index=4)
+                    comment = st.text_area("Comment (optional)", height=100)
+
+                    if st.form_submit_button(
+                        "Submit Feedback", use_container_width=True
+                    ):
+                        feedback_data = {
+                            "message_id": msg[
+                                "id"
+                            ],  # Include message_id in request body
+                            "rating": rating,
+                            "comment": comment,
+                        }
+                        result = make_api_request(
+                            "POST",
+                            f"/messages/{msg['id']}/feedback",
+                            feedback_data,
+                        )
+                        if result:
+                            st.success("✅ Feedback submitted!")
+                            st.rerun()
+
+            # Show existing feedback
+            feedbacks = get_feedbacks(msg["id"])
+            if feedbacks:
+                avg_rating = sum(fb.get("rating", 0) for fb in feedbacks) / len(
+                    feedbacks
+                )
+                st.markdown(f"⭐ {avg_rating:.1f} ({len(feedbacks)} reviews)")
+
+                # Show individual feedback comments
+                with st.expander("View Feedback", expanded=False):
+                    for fb in feedbacks:
+                        if fb.get("comment"):
+                            st.markdown(f"**{fb['rating']}⭐** - {fb['comment']}")
+                        else:
+                            st.markdown(f"**{fb['rating']}⭐**")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Message input form - only show if we have a conversation
+    if st.session_state.current_conversation_id:
+        with st.form("message_form", clear_on_submit=True):
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                message_content = st.text_area(
+                    "Message",
+                    placeholder="Type your message here...",
+                    height=100,
+                    label_visibility="collapsed",
+                )
+            with col2:
+                st.markdown("<br>", unsafe_allow_html=True)  # Add spacing
+                send_button = st.form_submit_button("📤 Send", use_container_width=True)
+
+            if send_button and message_content.strip():
+                # Check if we need to create a new conversation first
+                if st.session_state.current_conversation_id == "pending_new":
+                    # Create new conversation on first message
+                    conv_data = {
+                        "title": f"New Chat {datetime.now().strftime('%H:%M')}"
+                    }
+                    conv_result = make_api_request(
+                        "POST",
+                        f"/conversations/",
+                        conv_data,
+                    )
+                    if conv_result:
+                        st.session_state.current_conversation_id = conv_result.get("id")
+                        st.session_state.conversations_list = []  # Force reload
+                    else:
+                        st.error("Failed to create conversation")
+                        return
+
+                # Send user message
+                message_data = {
+                    "conversation_id": st.session_state.current_conversation_id,
+                    "content": message_content,
+                    "role": 1,  # MessageRole.user = 1 (use numeric value for API)
+                }
+                result = make_api_request("POST", "/messages/", message_data)
+                if result:
+                    # Clear cache and force reload of conversations list to reflect new conversation
+                    st.cache_data.clear()
+                    # Reload all messages from backend to get both user message and bot response
+                    messages = get_messages(
+                        st.session_state.current_conversation_id,
+                        st.session_state.current_user_id,
+                    )
+                    st.session_state.messages = messages or []
+                    # Force refresh conversations list to include new conversation
+                    st.session_state.conversations_list = []
+                    st.rerun()
 
 
 # Main application logic
 def main():
-    # Show login page if not authenticated
-    if st.session_state.show_login and not st.session_state.current_user_id:
+    # Show login page if not authenticated - require BOTH user_id AND auth_token
+    if (
+        st.session_state.show_login
+        or not st.session_state.current_user_id
+        or not st.session_state.auth_token
+    ):
         render_login_page()
         return
 
@@ -789,11 +790,7 @@ def main():
         render_conversation_manager()
         return
 
-    # Show feedback modal if requested
-    if st.session_state.show_feedback_modal:
-        render_feedback_modal(st.session_state.selected_message_for_feedback)
-
-    # Main chat interface
+    # Main chat interface (feedback modal functionality is now integrated via popovers)
     render_chat_interface()
 
 

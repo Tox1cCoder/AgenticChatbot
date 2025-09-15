@@ -32,6 +32,7 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int = ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    user_id: str  # Include user_id in token response
 
 
 class RefreshTokenResponse(BaseModel):
@@ -60,27 +61,42 @@ async def login(
     login_data: LoginRequest, user_service: UserService = Depends(get_user_service)
 ) -> TokenResponse:
     """Authenticate user and return JWT tokens"""
-    # Get user by email
-    user = user_service.get_user_by_email(login_data.email)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
+    try:
+        # Get user by email with password hash for authentication
+        user = user_service.get_user_by_email_with_password(login_data.email)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password",
+            )
+
+        # Verify password
+        if not verify_password(login_data.password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password",
+            )
+
+        # Create tokens
+        token_data = {"sub": str(user.id)}
+        access_token = create_access_token(token_data)
+        refresh_token = create_refresh_token(token_data)
+
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            user_id=str(user.id),  # Include user_id in response
         )
 
-    # Verify password
-    if not verify_password(login_data.password, user.password_hash):
+    except HTTPException:
+        # Re-raise HTTP exceptions (authentication failures)
+        raise
+    except Exception as e:
+        # Log unexpected errors and return generic authentication failure
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
+            detail="Authentication failed",
         )
-
-    # Create tokens
-    token_data = {"sub": str(user.id)}
-    access_token = create_access_token(token_data)
-    refresh_token = create_refresh_token(token_data)
-
-    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
 
 
 @router.post("/refresh", response_model=RefreshTokenResponse)
@@ -107,5 +123,5 @@ async def refresh_token(
 @router.post("/logout")
 async def logout():
     """Logout endpoint (client should discard tokens)"""
-    # Blacklist the token placeholder
+    # Placeholder: Blacklist the token 
     return {"message": "Successfully logged out. Please discard your tokens."}

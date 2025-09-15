@@ -16,7 +16,7 @@ class MessageFactory:
 
     @staticmethod
     def create_from_schema(message_data: MessageCreate) -> Dict[str, Any]:
-        """Create Message data dictionary from MessageCreate schema (deprecated - use create_from_schema_with_role)"""
+        """Create Message data dictionary from MessageCreate schema"""
         return {
             "id": uuid4(),
             "conversation_id": message_data.conversation_id,

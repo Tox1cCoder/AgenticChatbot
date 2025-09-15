@@ -5,7 +5,7 @@ from fastapi import HTTPException, status
 
 from pathlib import Path
 import os
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 
 from app.repositories.message import MessageRepository
@@ -51,7 +51,7 @@ class MessageService:
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
 
-        # Create message entity using factory with provided role
+        # Create message entity using factory with role from schema (not hardcoded)
         message_entity = MessageFactory.create_from_schema_with_role(
             message_create_data, message_create_data.role
         )
@@ -59,7 +59,7 @@ class MessageService:
         # Save to repository
         created_message = self.repository.create(message_entity)
 
-        # Auto-generate bot response
+        # Auto-generate bot response only for user messages
         if message_create_data.role == MessageRole.user:
             bot_response_entity = MessageFactory.create_bot_response(
                 conversation_id=message_create_data.conversation_id,
@@ -171,7 +171,7 @@ class MessageService:
         prompt = f"{system_prompt}\nUser: {user_message}"
 
         try:
-            client = google.genai.Client(api_key=api_key)
+            client = genai.Client(api_key=api_key)
             response = client.models.generate_content(
                 model="gemini-2.5-flash", contents=prompt
             )

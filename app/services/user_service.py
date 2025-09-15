@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import HTTPException, status
 
 from app.repositories.user import UserRepository
-from app.schemas.user import UserCreate, UserUpdate, UserRead
+from app.schemas.user import UserCreate, UserUpdate, UserRead, UserInDB
 from app.factories.user_factory import UserFactory
 from app.services.validation_service import UserValidationService
 
@@ -68,6 +68,11 @@ class UserService:
         """Get user by email"""
         user_entity = self.repository.get_by_email(email)
         return UserRead.model_validate(user_entity) if user_entity else None
+
+    def get_user_by_email_with_password(self, email: str) -> Optional[UserInDB]:
+        """Get user by email with password hash for authentication"""
+        user_entity = self.repository.get_by_email(email)
+        return UserInDB.model_validate(user_entity) if user_entity else None
 
     def get_user_by_username(self, username: str) -> Optional[UserRead]:
         """Get user by username"""

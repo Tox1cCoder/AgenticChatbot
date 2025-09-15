@@ -8,7 +8,6 @@ from sqlalchemy.orm import relationship
 
 from app.models.enums import MessageRoleType
 
-# Use shared declarative base for relationship resolution
 from app.models.base import Base
 
 
