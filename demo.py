@@ -205,7 +205,7 @@ if "users_list" not in st.session_state:
 if "conversations_list" not in st.session_state:
     st.session_state.conversations_list = []
 if "show_login" not in st.session_state:
-    # Only show login if no auth token exists - prevents F5 logout
+    # Only show login if no auth token exists
     st.session_state.show_login = (
         "auth_token" not in st.session_state or not st.session_state.get("auth_token")
     )
@@ -237,7 +237,7 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
             response = requests.delete(url, headers=headers)
 
         if response.status_code >= 400:
-            # Enhanced error handling for authentication issues
+            # Error handling for authentication issues
             if response.status_code == 403:
                 st.error(
                     f"🔒 Authentication required. Please log in with proper credentials. (Error {response.status_code})"
@@ -269,7 +269,6 @@ def get_users() -> List[Dict[str, Any]]:
 
 @st.cache_data(show_spinner=False)
 def get_conversations(user_id: str) -> List[Dict[str, Any]]:
-    # Use the correct endpoint without query parameter
     return make_api_request("GET", f"/conversations/") or []
 
 
@@ -316,26 +315,16 @@ def render_login_page():
         tab1, tab2 = st.tabs(["Sign In", "Sign Up"])
 
         with tab1:
-            with st.expander("Demo User Selector", expanded=False):
-                st.markdown("**Quick login for demo testing**")
+            with st.expander("Demo User List", expanded=False):
                 users = get_users()
                 if users:
                     for user in users[:5]:
                         if st.button(
-                            f"Login as: {user.get('email', user.get('username', 'Unknown'))}",
+                            f"{user.get('email', user.get('username', 'Unknown'))}",
                             key=f"quick_login_{user['id']}",
                             use_container_width=True,
                         ):
-                            st.warning(
-                                "⚠️ Demo login temporarily disabled. Please use regular login with email and password."
-                            )
-                            # Note: Actual password would be needed for JWT authentication
-                            # st.session_state.current_user_id = user["id"]
-                            # st.session_state.show_login = False
-                            # st.success(
-                            #     f"✅ Signed in as {user.get('email', user.get('username', 'User'))}"
-                            # )
-                            # st.rerun()
+                            st.warning("Placholder")
                 else:
                     st.info("No users found in database")
 
@@ -420,7 +409,6 @@ def render_conversation_sidebar():
 
         # New conversation button - will create conversation on first message
         if st.button("New Chat", use_container_width=True):
-            # Don't create conversation immediately, just clear current state
             st.session_state.current_conversation_id = (
                 "pending_new"  # Special state for new conversation
             )
@@ -671,7 +659,6 @@ def render_chat_interface():
             """,
                 unsafe_allow_html=True,
             )
-            # Feedback button using st.popover for better UX
             with st.popover("💭", help="Give feedback"):
                 st.markdown("### Provide Feedback")
 
@@ -689,15 +676,14 @@ def render_chat_interface():
                             "rating": rating,
                             "comment": comment,
                         }
-                        result = make_api_request(
+                        make_api_request(
                             "POST",
                             f"/messages/{msg['id']}/feedback",
                             feedback_data,
                         )
-                        if result:
-                            st.success("✅ Feedback submitted!")
-                            st.rerun()
-
+                        st.success("✅ Feedback submitted!")
+                        st.cache_data.clear()  # Clear cache to refresh feedback data
+                        st.rerun()
             # Show existing feedback
             feedbacks = get_feedbacks(msg["id"])
             if feedbacks:
@@ -729,10 +715,9 @@ def render_chat_interface():
                 )
             with col2:
                 st.markdown("<br>", unsafe_allow_html=True)  # Add spacing
-                send_button = st.form_submit_button("📤 Send", use_container_width=True)
+                send_button = st.form_submit_button("Send", use_container_width=True)
 
             if send_button and message_content.strip():
-                # Check if we need to create a new conversation first
                 if st.session_state.current_conversation_id == "pending_new":
                     # Create new conversation on first message
                     conv_data = {
@@ -754,7 +739,7 @@ def render_chat_interface():
                 message_data = {
                     "conversation_id": st.session_state.current_conversation_id,
                     "content": message_content,
-                    "role": 1,  # MessageRole.user = 1 (use numeric value for API)
+                    "role": 1,  # MessageRole.user = 1
                 }
                 result = make_api_request("POST", "/messages/", message_data)
                 if result:
@@ -790,7 +775,7 @@ def main():
         render_conversation_manager()
         return
 
-    # Main chat interface (feedback modal functionality is now integrated via popovers)
+    # Main chat interface
     render_chat_interface()
 
 

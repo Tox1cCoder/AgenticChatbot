@@ -51,7 +51,7 @@ class MessageService:
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
 
-        # Create message entity using factory with role from schema (not hardcoded)
+        # Create message entity using factory with role from schema
         message_entity = MessageFactory.create_from_schema_with_role(
             message_create_data, message_create_data.role
         )

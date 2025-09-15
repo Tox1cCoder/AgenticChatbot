@@ -40,7 +40,7 @@ class ConversationService:
     def create_conversation(
         self, conversation_create_data: ConversationCreate, owner_id: UUID
     ) -> ConversationRead:
-        """Create a new conversation (authentication handled at API layer)"""
+        """Create a new conversation"""
         # Create conversation entity using factory
         conversation_entity = ConversationFactory.create_from_schema(
             conversation_create_data, owner_id
@@ -62,7 +62,7 @@ class ConversationService:
     def get_user_conversations(
         self, owner_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[ConversationRead]:
-        """Get all conversations for a user (authentication handled at API layer)"""
+        """Get all conversations for a user"""
         conversation_entities = self.repository.get_by_owner_id(
             owner_id, skip=skip, limit=limit
         )

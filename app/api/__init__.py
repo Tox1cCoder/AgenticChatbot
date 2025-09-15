@@ -1,4 +1,3 @@
-# Import all routers for easy access
 from app.api.health import router as health_router
 from app.api.users import router as users_router
 from app.api.conversations import router as conversations_router
