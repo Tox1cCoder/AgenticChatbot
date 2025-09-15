@@ -13,14 +13,16 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship, DeclarativeBase
+from sqlalchemy.orm import relationship, declarative_base
 
-from app.models.base import Base
+# Create independent base for this model
+Base = declarative_base()
 
 
 class Feedback(Base):
     __tablename__ = "feedback"
 
+    # Independent attribute declarations - no inheritance
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     updated_at = Column(

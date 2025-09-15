@@ -107,6 +107,5 @@ async def refresh_token(
 @router.post("/logout")
 async def logout():
     """Logout endpoint (client should discard tokens)"""
-    # In a production app, you might want to blacklist the token
-    # For now, we'll just return a success message
+    # Blacklist the token placeholder
     return {"message": "Successfully logged out. Please discard your tokens."}

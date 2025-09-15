@@ -8,5 +8,5 @@ class MessageRole(enum.IntEnum):
     # system = 3
 
 
-# SQLAlchemy type (no longer enum-based)
+# SQLAlchemy type
 MessageRoleType = Integer

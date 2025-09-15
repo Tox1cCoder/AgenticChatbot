@@ -51,7 +51,7 @@ class MessageService:
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
 
-        # Auto-assign user role to all incoming messages (service determines role automatically)
+        # Auto-assign user role to all incoming messages
         # Create message entity using factory with auto-assigned user role
         message_entity = MessageFactory.create_from_schema_with_role(
             message_create_data, MessageRole.user

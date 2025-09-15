@@ -43,29 +43,3 @@ async def get_users(
     """Get all users"""
     skip = (page - 1) * limit
     return user_service.get_all_users(skip=skip, limit=limit)
-
-
-# @router.get("/email/{email}", response_model=UserRead)
-# async def get_user_by_email(
-#     email: str, user_service: UserService = Depends(get_user_service)
-# ) -> UserRead:
-#     """Get user by email"""
-#     user = user_service.get_user_by_email(email)
-#     if not user:
-#         raise HTTPException(
-#             status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-#         )
-#     return user
-
-
-# @router.get("/username/{username}", response_model=UserRead)
-# async def get_user_by_username(
-#     username: str, user_service: UserService = Depends(get_user_service)
-# ) -> UserRead:
-#     """Get user by username"""
-#     user = user_service.get_user_by_username(username)
-#     if not user:
-#         raise HTTPException(
-#             status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-#         )
-#     return user
