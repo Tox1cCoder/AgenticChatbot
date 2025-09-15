@@ -41,11 +41,12 @@ async def get_message(
 async def get_conversation_messages(
     conversation_id: UUID,
     user_id: UUID,
-    skip: int = 0,
+    page: int = 1,
     limit: int = 100,
     message_service: MessageService = Depends(get_message_service),
 ) -> List[MessageRead]:
     """Get messages for a conversation (requires user ownership)"""
+    skip = (page - 1) * limit
     return message_service.get_conversation_messages(
         conversation_id, user_id, skip=skip, limit=limit
     )

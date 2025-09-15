@@ -10,7 +10,6 @@ API_BASE_URL = "http://localhost:8000"
 # Page Configuration
 st.set_page_config(
     page_title="ChatBot",
-    page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -253,7 +252,7 @@ def get_users() -> List[Dict[str, Any]]:
 
 @st.cache_data(show_spinner=False)
 def get_conversations(user_id: str) -> List[Dict[str, Any]]:
-    return make_api_request("GET", f"/conversations/user/{user_id}") or []
+    return make_api_request("GET", f"/conversations/?user_id={user_id}") or []
 
 
 @st.cache_data(show_spinner=False)
@@ -384,7 +383,7 @@ def render_conversation_sidebar():
             conv_data = {"title": f"New Chat {datetime.now().strftime('%H:%M')}"}
             result = make_api_request(
                 "POST",
-                f"/conversations/user/{st.session_state.current_user_id}",
+                f"/conversations/?user_id={st.session_state.current_user_id}",
                 conv_data,
             )
             if result:

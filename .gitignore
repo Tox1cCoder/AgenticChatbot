@@ -54,3 +54,4 @@ Pipfile.lock
 poetry.lock
 tasksync
 log.md
+.traycery/

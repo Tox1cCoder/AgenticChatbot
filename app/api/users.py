@@ -36,11 +36,12 @@ async def get_user(
 
 @router.get("/", response_model=List[UserRead])
 async def get_users(
-    skip: int = 0,
+    page: int = 1,
     limit: int = 100,
     user_service: UserService = Depends(get_user_service),
 ) -> List[UserRead]:
     """Get all users"""
+    skip = (page - 1) * limit
     return user_service.get_all_users(skip=skip, limit=limit)
 
 

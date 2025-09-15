@@ -16,11 +16,24 @@ class MessageFactory:
 
     @staticmethod
     def create_from_schema(message_data: MessageCreate) -> Dict[str, Any]:
-        """Create Message data dictionary from MessageCreate schema"""
+        """Create Message data dictionary from MessageCreate schema (deprecated - use create_from_schema_with_role)"""
         return {
             "id": uuid4(),
             "conversation_id": message_data.conversation_id,
-            "sender": message_data.sender,
+            "sender": MessageRole.user.value,  # Default role assignment
+            "content": message_data.content,
+            "created_at": datetime.now(timezone.utc),
+        }
+
+    @staticmethod
+    def create_from_schema_with_role(
+        message_data: MessageCreate, role: MessageRole
+    ) -> Dict[str, Any]:
+        """Create Message data dictionary from MessageCreate schema with specified role"""
+        return {
+            "id": uuid4(),
+            "conversation_id": message_data.conversation_id,
+            "sender": role.value,
             "content": message_data.content,
             "created_at": datetime.now(timezone.utc),
         }

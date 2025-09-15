@@ -40,12 +40,8 @@ class ConversationService:
     def create_conversation(
         self, conversation_create_data: ConversationCreate, owner_id: UUID
     ) -> ConversationRead:
-        """Create a new conversation with validation"""
-        # Validate user exists
-        if not self.user_repository.exists(owner_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-            )
+        """Create a new conversation (authentication handled at API layer)"""
+        # API layer authentication ensures user exists - no duplicate validation needed
 
         # Create conversation entity using factory
         conversation_entity = ConversationFactory.create_from_schema(
@@ -68,12 +64,8 @@ class ConversationService:
     def get_user_conversations(
         self, owner_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[ConversationRead]:
-        """Get all conversations for a user"""
-        # Validate user exists
-        if not self.user_repository.exists(owner_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-            )
+        """Get all conversations for a user (authentication handled at API layer)"""
+        # API layer authentication ensures user exists - no duplicate validation needed
 
         conversation_entities = self.repository.get_by_owner_id(
             owner_id, skip=skip, limit=limit

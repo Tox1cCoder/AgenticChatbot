@@ -44,26 +44,28 @@ class MessageService:
         self.user_repository = user_repository
 
     def create_message(self, message_create_data: MessageCreate) -> MessageRead:
-        """Create a new message with validation"""
+        """Create a new message with automatic role assignment"""
         # Validate conversation exists
         if not self.conversation_repository.exists(message_create_data.conversation_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
 
-        # Create message entity using factory
-        message_entity = MessageFactory.create_from_schema(message_create_data)
+        # Auto-assign user role to all incoming messages (service determines role automatically)
+        # Create message entity using factory with auto-assigned user role
+        message_entity = MessageFactory.create_from_schema_with_role(
+            message_create_data, MessageRole.user
+        )
 
         # Save to repository
         created_message = self.repository.create(message_entity)
 
-        # If this is a user message, generate a simple bot response
-        if message_create_data.sender == MessageRole.user.value:
-            bot_response_entity = MessageFactory.create_bot_response(
-                conversation_id=message_create_data.conversation_id,
-                content=self._generate_bot_response(message_create_data.content),
-            )
-            self.repository.create(bot_response_entity)
+        # Auto-generate bot response for user messages
+        bot_response_entity = MessageFactory.create_bot_response(
+            conversation_id=message_create_data.conversation_id,
+            content=self._generate_bot_response(message_create_data.content),
+        )
+        self.repository.create(bot_response_entity)
 
         return MessageRead.model_validate(created_message)
 

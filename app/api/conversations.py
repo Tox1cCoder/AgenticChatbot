@@ -48,11 +48,12 @@ async def get_conversation(
 @router.get("/", response_model=List[ConversationRead])
 async def get_conversations(
     user_id: UUID,
-    skip: int = 0,
+    page: int = 1,
     limit: int = 100,
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> List[ConversationRead]:
     """Get all conversations for a user"""
+    skip = (page - 1) * limit
     return conversation_service.get_user_conversations(user_id, skip=skip, limit=limit)
 
 

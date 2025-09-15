@@ -9,6 +9,7 @@ from app.api import (
     messages_router,
     feedback_router,
 )
+from app.api.auth import router as auth_router
 
 
 def create_app() -> FastAPI:
@@ -31,6 +32,7 @@ def create_app() -> FastAPI:
     )
 
     # Include routers
+    app.include_router(auth_router)
     app.include_router(health_router)
     app.include_router(users_router)
     app.include_router(conversations_router)

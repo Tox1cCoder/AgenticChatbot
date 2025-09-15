@@ -10,9 +10,7 @@ class MessageCreate(BaseModel):
         ..., description="Conversation ID this message belongs to"
     )
     content: str = Field(..., min_length=1, description="Message content")
-    sender: int = Field(
-        ..., description="Message sender: 1=user, 2=assistant, 3=system"
-    )
+    # sender field removed - auto-assigned by service layer
 
 
 class MessageUpdate(BaseModel):
