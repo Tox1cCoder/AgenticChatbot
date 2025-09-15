@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database.session import get_db
 from app.core.container import get_container, DIContainer
+from app.core.auth import get_current_user_id
 from app.services.feedback_service import FeedbackService
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
 
@@ -25,8 +26,8 @@ def get_feedback_service(db: Session = Depends(get_db)) -> FeedbackService:
 )
 async def create_feedback(
     message_id: UUID,
-    user_id: UUID,
     feedback_data: FeedbackCreate,
+    user_id: UUID = Depends(get_current_user_id),
     feedback_service: FeedbackService = Depends(get_feedback_service),
 ) -> FeedbackRead:
     """Create new feedback for a message or update existing feedback"""
@@ -59,11 +60,18 @@ async def get_message_feedback(
 @router.get("/user/{user_id}", response_model=List[FeedbackRead])
 async def get_user_feedback(
     user_id: UUID,
+    authenticated_user_id: UUID = Depends(get_current_user_id),
     skip: int = 0,
     limit: int = 100,
     feedback_service: FeedbackService = Depends(get_feedback_service),
 ) -> List[FeedbackRead]:
-    """Get all feedback by a user"""
+    """Get all feedback by authenticated user (user_id must match authenticated user)"""
+    # Validate user can only access their own feedback
+    if user_id != authenticated_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: can only access your own feedback",
+        )
     return feedback_service.get_feedback_by_user(user_id, skip=skip, limit=limit)
 
 
@@ -71,9 +79,16 @@ async def get_user_feedback(
 async def get_user_feedback_for_message(
     message_id: UUID,
     user_id: UUID,
+    authenticated_user_id: UUID = Depends(get_current_user_id),
     feedback_service: FeedbackService = Depends(get_feedback_service),
 ) -> FeedbackRead:
-    """Get specific user's feedback for a message"""
+    """Get authenticated user's feedback for a message (user_id must match authenticated user)"""
+    # Validate user can only access their own feedback
+    if user_id != authenticated_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: can only access your own feedback",
+        )
     feedback = feedback_service.get_user_feedback_for_message(message_id, user_id)
     if not feedback:
         raise HTTPException(
@@ -94,8 +109,8 @@ async def get_message_rating_stats(
 async def update_feedback(
     message_id: UUID,
     feedback_id: UUID,
-    user_id: UUID,
     feedback_data: FeedbackUpdate,
+    user_id: UUID = Depends(get_current_user_id),
     feedback_service: FeedbackService = Depends(get_feedback_service),
 ) -> FeedbackRead:
     """Update feedback (requires user ownership)"""

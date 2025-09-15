@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database.session import get_db
 from app.core.container import get_container, DIContainer
+from app.core.auth import get_current_user_id
 from app.services.message_service import MessageService
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
 
@@ -40,7 +41,7 @@ async def get_message(
 )
 async def get_conversation_messages(
     conversation_id: UUID,
-    user_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
     page: int = 1,
     limit: int = 100,
     message_service: MessageService = Depends(get_message_service),
@@ -57,7 +58,7 @@ async def get_conversation_messages(
 )
 async def get_conversation_thread(
     conversation_id: UUID,
-    user_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
     message_service: MessageService = Depends(get_message_service),
 ) -> List[MessageRead]:
     """Get conversation thread ordered by timestamp (requires user ownership)"""

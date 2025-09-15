@@ -10,9 +10,8 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import select, update, delete, func
 
-from app.models.base import BaseModel
-
-ModelType = TypeVar("ModelType", bound=BaseModel)
+# Use Any for model type instead of BaseModel since inheritance removed
+ModelType = TypeVar("ModelType")
 CreateSchemaType = TypeVar("CreateSchemaType")
 UpdateSchemaType = TypeVar("UpdateSchemaType")
 

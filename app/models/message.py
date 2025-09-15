@@ -4,18 +4,17 @@ import uuid
 
 from sqlalchemy import Column, ForeignKey, Text, Index, DateTime, func
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship, declarative_base
+from sqlalchemy.orm import relationship
 
 from app.models.enums import MessageRoleType
 
-# Create independent base for this model
-Base = declarative_base()
+# Use shared declarative base for relationship resolution
+from app.models.base import Base
 
 
 class Message(Base):
     __tablename__ = "messages"
 
-    # Independent attribute declarations - no inheritance
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     updated_at = Column(

@@ -5,7 +5,7 @@ from fastapi import HTTPException, status
 
 from pathlib import Path
 import os
-import google.genai
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 from app.repositories.message import MessageRepository
@@ -44,28 +44,28 @@ class MessageService:
         self.user_repository = user_repository
 
     def create_message(self, message_create_data: MessageCreate) -> MessageRead:
-        """Create a new message with automatic role assignment"""
+        """Create a new message with role from request data"""
         # Validate conversation exists
         if not self.conversation_repository.exists(message_create_data.conversation_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
             )
 
-        # Auto-assign user role to all incoming messages
-        # Create message entity using factory with auto-assigned user role
+        # Create message entity using factory with provided role
         message_entity = MessageFactory.create_from_schema_with_role(
-            message_create_data, MessageRole.user
+            message_create_data, message_create_data.role
         )
 
         # Save to repository
         created_message = self.repository.create(message_entity)
 
-        # Auto-generate bot response for user messages
-        bot_response_entity = MessageFactory.create_bot_response(
-            conversation_id=message_create_data.conversation_id,
-            content=self._generate_bot_response(message_create_data.content),
-        )
-        self.repository.create(bot_response_entity)
+        # Auto-generate bot response
+        if message_create_data.role == MessageRole.user:
+            bot_response_entity = MessageFactory.create_bot_response(
+                conversation_id=message_create_data.conversation_id,
+                content=self._generate_bot_response(message_create_data.content),
+            )
+            self.repository.create(bot_response_entity)
 
         return MessageRead.model_validate(created_message)
 
@@ -156,7 +156,7 @@ class MessageService:
     def _generate_bot_response(self, user_message: str) -> str:
         """Generate a bot response"""
 
-        BASE_DIR = Path(__file__).resolve().parent.parent  # app/
+        BASE_DIR = Path(__file__).resolve().parent.parent
         ENV_PATH = BASE_DIR / "core" / ".env"
 
         load_dotenv(dotenv_path=ENV_PATH)

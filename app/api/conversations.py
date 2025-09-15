@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database.session import get_db
 from app.core.container import get_container, DIContainer
+from app.core.auth import get_current_user_id
 from app.services.conversation_service import ConversationService
 from app.schemas.conversation import (
     ConversationCreate,
@@ -29,10 +30,10 @@ def get_conversation_service(db: Session = Depends(get_db)) -> ConversationServi
 )
 async def create_conversation(
     conversation_data: ConversationCreate,
-    user_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> ConversationRead:
-    """Create a new conversation for a user"""
+    """Create a new conversation for authenticated user"""
     return conversation_service.create_conversation(conversation_data, user_id)
 
 
@@ -47,12 +48,12 @@ async def get_conversation(
 
 @router.get("/", response_model=List[ConversationRead])
 async def get_conversations(
-    user_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
     page: int = 1,
     limit: int = 100,
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> List[ConversationRead]:
-    """Get all conversations for a user"""
+    """Get all conversations for authenticated user"""
     skip = (page - 1) * limit
     return conversation_service.get_user_conversations(user_id, skip=skip, limit=limit)
 
@@ -60,8 +61,8 @@ async def get_conversations(
 @router.put("/{conversation_id}", response_model=ConversationRead)
 async def update_conversation(
     conversation_id: UUID,
-    user_id: UUID,
     conversation_data: ConversationUpdate,
+    user_id: UUID = Depends(get_current_user_id),
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> ConversationRead:
     """Update conversation (requires user ownership)"""
@@ -73,7 +74,7 @@ async def update_conversation(
 @router.delete("/{conversation_id}")
 async def delete_conversation(
     conversation_id: UUID,
-    user_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> dict:
     """Delete conversation (requires user ownership)"""

@@ -3,6 +3,7 @@ from typing import Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field, ConfigDict
+from app.models.enums import MessageRole
 
 
 class MessageCreate(BaseModel):
@@ -10,7 +11,9 @@ class MessageCreate(BaseModel):
         ..., description="Conversation ID this message belongs to"
     )
     content: str = Field(..., min_length=1, description="Message content")
-    # sender field removed - auto-assigned by service layer
+    role: MessageRole = Field(
+        default=MessageRole.user, description="Message role: user=1, assistant=2"
+    )
 
 
 class MessageUpdate(BaseModel):

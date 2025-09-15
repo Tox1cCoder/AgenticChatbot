@@ -214,20 +214,28 @@ if "show_conversation_manager" not in st.session_state:
     st.session_state.show_conversation_manager = False
 if "selected_message_for_feedback" not in st.session_state:
     st.session_state.selected_message_for_feedback = None
+if "auth_token" not in st.session_state:
+    st.session_state.auth_token = None
 
 
 def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
     """Make API request and handle errors"""
     url = f"{API_BASE_URL}{endpoint}"
+
+    # Add JWT authorization header for authentication
+    headers = {}
+    if "auth_token" in st.session_state and st.session_state.auth_token:
+        headers["Authorization"] = f"Bearer {st.session_state.auth_token}"
+
     try:
         if method == "GET":
-            response = requests.get(url)
+            response = requests.get(url, headers=headers)
         elif method == "POST":
-            response = requests.post(url, json=data)
+            response = requests.post(url, json=data, headers=headers)
         elif method == "PUT":
-            response = requests.put(url, json=data)
+            response = requests.put(url, json=data, headers=headers)
         elif method == "DELETE":
-            response = requests.delete(url)
+            response = requests.delete(url, headers=headers)
 
         if response.status_code >= 400:
             st.error(f"API Error {response.status_code}: {response.text}")
@@ -252,7 +260,8 @@ def get_users() -> List[Dict[str, Any]]:
 
 @st.cache_data(show_spinner=False)
 def get_conversations(user_id: str) -> List[Dict[str, Any]]:
-    return make_api_request("GET", f"/conversations/?user_id={user_id}") or []
+    # Use the correct endpoint without query parameter
+    return make_api_request("GET", f"/conversations/") or []
 
 
 @st.cache_data(show_spinner=False)
@@ -270,7 +279,7 @@ def get_messages(conversation_id: str, user_id: str) -> List[Dict[str, Any]]:
     return (
         make_api_request(
             "GET",
-            f"/messages/conversations/{conversation_id}/messages/thread?user_id={user_id}",
+            f"/messages/conversations/{conversation_id}/messages/thread",
         )
         or []
     )
@@ -326,16 +335,18 @@ def render_login_page():
                 )
 
                 if st.form_submit_button("Sign In", use_container_width=True):
-                    # For demo purposes, we'll just find user by email
-                    users = get_users()
-                    user = next((u for u in users if u.get("email") == email), None)
-                    if user:
-                        st.session_state.current_user_id = user["id"]
+                    # Use auth API for login
+                    login_data = {"email": email, "password": password}
+                    auth_response = make_api_request("POST", "/auth/login", login_data)
+
+                    if auth_response and "access_token" in auth_response:
+                        st.session_state.auth_token = auth_response["access_token"]
+                        st.session_state.current_user_id = auth_response.get("user_id")
                         st.session_state.show_login = False
                         st.success("✅ Signed in successfully!")
                         st.rerun()
                     else:
-                        st.error("❌ User not found")
+                        st.error("❌ Invalid credentials")
 
         with tab2:
             with st.form("signup_form"):
@@ -376,14 +387,14 @@ def render_login_page():
 def render_conversation_sidebar():
     """Render modern conversation sidebar"""
     with st.sidebar:
-        st.markdown("### 💬 Conversations")
+        st.markdown("### Conversations")
 
         # New conversation button
-        if st.button("➕ New Chat", use_container_width=True):
+        if st.button("New Chat", use_container_width=True):
             conv_data = {"title": f"New Chat {datetime.now().strftime('%H:%M')}"}
             result = make_api_request(
                 "POST",
-                f"/conversations/?user_id={st.session_state.current_user_id}",
+                f"/conversations/",
                 conv_data,
             )
             if result:
@@ -393,7 +404,7 @@ def render_conversation_sidebar():
                 st.rerun()
 
         # Conversation manager button
-        if st.button("📁 Manage Conversations", use_container_width=True):
+        if st.button("Manage Conversations", use_container_width=True):
             st.session_state.show_conversation_manager = True
             st.rerun()
 
@@ -490,7 +501,7 @@ def render_feedback_modal(message_id: str):
             col1, col2, col3 = st.columns([1, 3, 1])
             with col2:
                 st.markdown('<div class="feedback-popup">', unsafe_allow_html=True)
-                st.markdown("### 📝 Provide Feedback")
+                st.markdown("### Provide Feedback")
 
                 with st.form(f"feedback_form_{message_id}"):
                     rating = st.select_slider(
@@ -543,7 +554,7 @@ def render_conversation_manager():
 
         col1, col2, col3 = st.columns([1, 3, 1])
         with col2:
-            st.markdown("### 📁 Conversation Manager")
+            st.markdown("### Conversation Manager")
 
             # Search functionality
             st.markdown('<div class="search-container">', unsafe_allow_html=True)
@@ -610,7 +621,7 @@ def render_conversation_manager():
                                     # Implement conversation deletion
                                     result = make_api_request(
                                         "DELETE",
-                                        f"/conversations/{conv['id']}?user_id={st.session_state.current_user_id}",
+                                        f"/conversations/{conv['id']}",
                                     )
                                     if result:
                                         st.session_state.conversations_list = (
@@ -652,7 +663,7 @@ def render_chat_interface():
         )
 
         if current_conv:
-            st.markdown(f"# 💬 {current_conv['title']}")
+            st.markdown(f"# {current_conv['title']}")
 
         # Chat container with modern styling
         st.markdown('<div class="chat-container">', unsafe_allow_html=True)
