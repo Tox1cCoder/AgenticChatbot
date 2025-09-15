@@ -48,17 +48,17 @@ class FeedbackCRUDStrategy(
         )
         return db.execute(stmt).scalar_one_or_none()
 
-    def get_average_rating_for_message(
+    def get_rating_for_message(
         self, db: Session, message_id: UUID
     ) -> Optional[float]:
-        """Get average rating for a message"""
+        """Get rating for a message"""
         from sqlalchemy import func
 
-        stmt = select(func.avg(Feedback.rating)).where(
+        stmt = select(Feedback.rating).where(
             Feedback.message_id == message_id
         )
         result = db.execute(stmt).scalar()
-        return float(result) if result is not None else None
+        return result if result is not None else None
 
     def get_comment_for_message(self, db: Session, message_id: UUID) -> Optional[str]:
         """Get comment for a message (unique per ERD constraint)"""
@@ -92,9 +92,9 @@ class FeedbackRepository(Repository[Feedback, FeedbackCreate, FeedbackUpdate]):
         """Get feedback by message and user (should be unique per ERD)"""
         return self._crud_strategy.get_by_message_and_user(self.db, message_id, user_id)
 
-    def get_average_rating_for_message(self, message_id: UUID) -> Optional[float]:
-        """Get average rating for a message"""
-        return self._crud_strategy.get_average_rating_for_message(self.db, message_id)
+    def get_rating_for_message(self, message_id: UUID) -> Optional[float]:
+        """Get rating for a message"""
+        return self._crud_strategy.get_rating_for_message(self.db, message_id)
 
     def get_comment_for_message(self, message_id: UUID) -> Optional[str]:
         """Get comment for a message (unique per ERD constraint)"""

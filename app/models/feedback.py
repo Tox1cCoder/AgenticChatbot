@@ -2,7 +2,16 @@ from datetime import datetime
 from typing import Optional
 import uuid
 
-from sqlalchemy import Column, ForeignKey, Text, SmallInteger, Index, UniqueConstraint, DateTime, func
+from sqlalchemy import (
+    Column,
+    ForeignKey,
+    Text,
+    SmallInteger,
+    Index,
+    UniqueConstraint,
+    DateTime,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship, DeclarativeBase
 
@@ -18,7 +27,7 @@ class Feedback(Base):
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
     )
     deleted_at = Column(DateTime(timezone=True), nullable=True)
-    
+
     message_id = Column(
         UUID(as_uuid=True),
         ForeignKey("messages.id"),

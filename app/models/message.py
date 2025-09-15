@@ -19,7 +19,7 @@ class Message(Base):
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
     )
     deleted_at = Column(DateTime(timezone=True), nullable=True)
-    
+
     conversation_id = Column(
         UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False, index=True
     )

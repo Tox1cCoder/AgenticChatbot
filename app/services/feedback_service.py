@@ -143,7 +143,7 @@ class FeedbackService:
                 status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
             )
 
-        avg_rating = self.repository.get_average_rating_for_message(message_id)
+        avg_rating = self.repository.get_rating_for_message(message_id)
 
         return {
             "message_id": message_id,

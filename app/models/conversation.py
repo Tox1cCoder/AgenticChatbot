@@ -18,7 +18,7 @@ class Conversation(Base):
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
     )
     deleted_at = Column(DateTime(timezone=True), nullable=True)
-    
+
     owner_id = Column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
     )

@@ -18,7 +18,7 @@ class User(Base):
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
     )
     deleted_at = Column(DateTime(timezone=True), nullable=True)
-    
+
     username = Column(String(50), unique=True, index=True, nullable=False)
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(Text, nullable=False)
