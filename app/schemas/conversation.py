@@ -5,14 +5,10 @@ from uuid import UUID
 from pydantic import BaseModel, Field, ConfigDict
 
 
-class ConversationBase(BaseModel):
+class ConversationCreate(BaseModel):
     title: str = Field(
         ..., min_length=1, max_length=255, description="Conversation title"
     )
-
-
-class ConversationCreate(ConversationBase):
-    pass
 
 
 class ConversationUpdate(BaseModel):
@@ -21,14 +17,27 @@ class ConversationUpdate(BaseModel):
     )
 
 
-class ConversationRead(ConversationBase):
+class ConversationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    owner_id: UUID
     created_at: datetime
     updated_at: datetime
+    deleted_at: Optional[datetime]
+    owner_id: UUID
+    title: str = Field(
+        ..., min_length=1, max_length=255, description="Conversation title"
+    )
 
 
-class ConversationInDB(ConversationRead):
-    pass
+class ConversationInDB(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: Optional[datetime]
+    owner_id: UUID
+    title: str = Field(
+        ..., min_length=1, max_length=255, description="Conversation title"
+    )

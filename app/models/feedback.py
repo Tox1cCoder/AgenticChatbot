@@ -1,13 +1,24 @@
-from sqlalchemy import Column, ForeignKey, Text, SmallInteger, Index, UniqueConstraint
+from datetime import datetime
+from typing import Optional
+import uuid
+
+from sqlalchemy import Column, ForeignKey, Text, SmallInteger, Index, UniqueConstraint, DateTime, func
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, DeclarativeBase
 
-from app.models.base import BaseModel
+from app.models.base import Base
 
 
-class Feedback(BaseModel):
+class Feedback(Base):
     __tablename__ = "feedback"
 
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
+    )
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    
     message_id = Column(
         UUID(as_uuid=True),
         ForeignKey("messages.id"),

@@ -8,7 +8,7 @@ from app.core.container import get_container, DIContainer
 from app.services.feedback_service import FeedbackService
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
 
-router = APIRouter(prefix="/feedback", tags=["feedback"])
+router = APIRouter(prefix="/messages", tags=["feedback"])
 
 
 def get_feedback_service(db: Session = Depends(get_db)) -> FeedbackService:
@@ -18,25 +18,34 @@ def get_feedback_service(db: Session = Depends(get_db)) -> FeedbackService:
     return container.get("feedback_service")
 
 
-@router.post("/", response_model=FeedbackRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/{message_id}/feedback",
+    response_model=FeedbackRead,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_feedback(
+    message_id: UUID,
     user_id: UUID,
     feedback_data: FeedbackCreate,
     feedback_service: FeedbackService = Depends(get_feedback_service),
 ) -> FeedbackRead:
     """Create new feedback for a message or update existing feedback"""
+    # Set the message_id from the URL path
+    feedback_data.message_id = message_id
     return feedback_service.create_feedback(feedback_data, user_id)
 
 
-@router.get("/{feedback_id}", response_model=FeedbackRead)
+@router.get("/{message_id}/feedback/{feedback_id}", response_model=FeedbackRead)
 async def get_feedback(
-    feedback_id: UUID, feedback_service: FeedbackService = Depends(get_feedback_service)
+    message_id: UUID,
+    feedback_id: UUID,
+    feedback_service: FeedbackService = Depends(get_feedback_service),
 ) -> FeedbackRead:
-    """Get feedback by ID"""
+    """Get specific feedback for a message"""
     return feedback_service.get_feedback_by_id(feedback_id)
 
 
-@router.get("/message/{message_id}", response_model=List[FeedbackRead])
+@router.get("/{message_id}/feedback", response_model=List[FeedbackRead])
 async def get_message_feedback(
     message_id: UUID,
     skip: int = 0,
@@ -58,7 +67,7 @@ async def get_user_feedback(
     return feedback_service.get_feedback_by_user(user_id, skip=skip, limit=limit)
 
 
-@router.get("/message/{message_id}/user/{user_id}", response_model=FeedbackRead)
+@router.get("/{message_id}/feedback/user/{user_id}", response_model=FeedbackRead)
 async def get_user_feedback_for_message(
     message_id: UUID,
     user_id: UUID,
@@ -73,7 +82,7 @@ async def get_user_feedback_for_message(
     return feedback
 
 
-@router.get("/message/{message_id}/stats")
+@router.get("/{message_id}/feedback/stats")
 async def get_message_rating_stats(
     message_id: UUID, feedback_service: FeedbackService = Depends(get_feedback_service)
 ) -> dict:
@@ -81,8 +90,9 @@ async def get_message_rating_stats(
     return feedback_service.get_message_rating_stats(message_id)
 
 
-@router.put("/{feedback_id}", response_model=FeedbackRead)
+@router.put("/{message_id}/feedback/{feedback_id}", response_model=FeedbackRead)
 async def update_feedback(
+    message_id: UUID,
     feedback_id: UUID,
     user_id: UUID,
     feedback_data: FeedbackUpdate,

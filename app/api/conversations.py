@@ -28,8 +28,8 @@ def get_conversation_service(db: Session = Depends(get_db)) -> ConversationServi
     status_code=status.HTTP_201_CREATED,
 )
 async def create_conversation(
-    user_id: UUID,
     conversation_data: ConversationCreate,
+    user_id: UUID,
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> ConversationRead:
     """Create a new conversation for a user"""

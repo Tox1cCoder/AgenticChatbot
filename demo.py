@@ -270,7 +270,8 @@ def get_health_db() -> Dict:
 def get_messages(conversation_id: str, user_id: str) -> List[Dict[str, Any]]:
     return (
         make_api_request(
-            "GET", f"/messages/conversation/{conversation_id}/thread?user_id={user_id}"
+            "GET",
+            f"/messages/conversations/{conversation_id}/messages/thread?user_id={user_id}",
         )
         or []
     )
@@ -278,12 +279,12 @@ def get_messages(conversation_id: str, user_id: str) -> List[Dict[str, Any]]:
 
 @st.cache_data(show_spinner=False)
 def get_feedbacks(message_id: str) -> List[Dict[str, Any]]:
-    return make_api_request("GET", f"/feedback/message/{message_id}") or []
+    return make_api_request("GET", f"/messages/{message_id}/feedback") or []
 
 
 @st.cache_data(show_spinner=False)
 def get_feedback_stats(message_id: str) -> Dict:
-    return make_api_request("GET", f"/feedback/message/{message_id}/stats") or {}
+    return make_api_request("GET", f"/messages/{message_id}/feedback/stats") or {}
 
 
 def render_login_page():
@@ -517,7 +518,7 @@ def render_feedback_modal(message_id: str):
                             }
                             result = make_api_request(
                                 "POST",
-                                f"/feedback/user/{st.session_state.current_user_id}",
+                                f"/messages/{message_id}/feedback?user_id={st.session_state.current_user_id}",
                                 feedback_data,
                             )
                             if result:

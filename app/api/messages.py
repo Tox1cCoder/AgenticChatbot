@@ -35,7 +35,9 @@ async def get_message(
     return message_service.get_message_by_id(message_id)
 
 
-@router.get("/conversation/{conversation_id}", response_model=List[MessageRead])
+@router.get(
+    "/conversations/{conversation_id}/messages", response_model=List[MessageRead]
+)
 async def get_conversation_messages(
     conversation_id: UUID,
     user_id: UUID,
@@ -49,7 +51,9 @@ async def get_conversation_messages(
     )
 
 
-@router.get("/conversation/{conversation_id}/thread", response_model=List[MessageRead])
+@router.get(
+    "/conversations/{conversation_id}/messages/thread", response_model=List[MessageRead]
+)
 async def get_conversation_thread(
     conversation_id: UUID,
     user_id: UUID,

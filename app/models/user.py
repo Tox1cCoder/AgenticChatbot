@@ -1,12 +1,24 @@
-from sqlalchemy import Column, String, Text
-from sqlalchemy.orm import relationship
+from datetime import datetime
+from typing import Optional
+import uuid
 
-from app.models.base import BaseModel
+from sqlalchemy import Column, String, Text, DateTime, func
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship, DeclarativeBase
+
+from app.models.base import Base
 
 
-class User(BaseModel):
+class User(Base):
     __tablename__ = "users"
 
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
+    )
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    
     username = Column(String(50), unique=True, index=True, nullable=False)
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(Text, nullable=False)
