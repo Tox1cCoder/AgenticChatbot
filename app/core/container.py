@@ -48,7 +48,7 @@ class DIContainer:
     def _register_services(self):
         """Register all services with their dependency requirements"""
 
-        # Repository registrations with strategy pattern - depend only on db session
+        # Repository registrations - depend only on db session
         self._services["user_repository"] = ServiceDefinition(
             service_class=UserRepository, dependencies=["db"], singleton=False
         )
