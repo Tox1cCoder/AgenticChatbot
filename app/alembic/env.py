@@ -31,7 +31,7 @@ target_metadata = Base.metadata
 
 def get_url():
     """Get database URL from settings"""
-    return "postgresql://postgres:1@localhost:5432/chatbot"
+    return settings.database_url
 
 
 def run_migrations_offline() -> None:

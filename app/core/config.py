@@ -2,24 +2,20 @@ from functools import lru_cache
 from typing import List
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
-    )
-
     # Database settings
     database_url: str = Field(
-        default="postgresql://test:123456@localhost:5432/chatbot",
+        default="postgresql://test:123123123@localhost:5432/chatbot",
         description="Database URL for PostgreSQL connection",
     )
 
     # API settings
     api_host: str = Field(default="0.0.0.0", description="API host")
     api_port: int = Field(default=8000, description="API port")
-    api_debug: bool = Field(default=False, description="Debug mode")
+    api_debug: bool = Field(default=True, description="Debug mode")
 
     # Environment
     environment: str = Field(default="development", description="Environment")
@@ -29,12 +25,22 @@ class Settings(BaseSettings):
         default="secret-key",
         description="Secret key for security",
     )
+    jwt_algorithm: str = Field(default="HS256", description="JWT signing algorithm")
+    access_token_expire_minutes: int = Field(
+        default=30, description="Access token expiration in minutes"
+    )
+    refresh_token_expire_days: int = Field(
+        default=7, description="Refresh token expiration in days"
+    )
 
     # CORS settings
     cors_origins: List[str] = Field(
         default=["http://localhost:3000", "http://localhost:8080"],
         description="CORS allowed origins",
     )
+
+    # LLM API Keys
+    gemini_api_key: str = Field(default="GEMINI_API_KEY", description="Gemini API Key")
 
     # Application metadata
     app_name: str = Field(default="Sample Chatbot", description="Application name")

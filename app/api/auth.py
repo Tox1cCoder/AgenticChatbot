@@ -9,11 +9,11 @@ from uuid import UUID
 from app.database.session import get_db
 from app.core.container import get_container
 from app.services.user_service import UserService
+from app.core.config import settings
 from app.core.security import (
     verify_password,
     create_access_token,
     create_refresh_token,
-    ACCESS_TOKEN_EXPIRE_MINUTES,
 )
 from app.core.auth import get_refresh_token_user_id, security
 from app.schemas.user import UserCreate, UserRead
@@ -31,14 +31,14 @@ class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
-    expires_in: int = ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    expires_in: int = settings.access_token_expire_minutes * 60
     user_id: str  # Include user_id in token response
 
 
 class RefreshTokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    expires_in: int = ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    expires_in: int = settings.access_token_expire_minutes * 60
 
 
 def get_user_service(db: Session = Depends(get_db)) -> UserService:
@@ -123,5 +123,5 @@ async def refresh_token(
 @router.post("/logout")
 async def logout():
     """Logout endpoint (client should discard tokens)"""
-    # Placeholder: Blacklist the token 
+    # Placeholder: Blacklist the token
     return {"message": "Successfully logged out. Please discard your tokens."}

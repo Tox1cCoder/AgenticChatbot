@@ -3,11 +3,9 @@ from typing import List, Optional, TYPE_CHECKING
 from uuid import UUID
 from fastapi import HTTPException, status
 
-from pathlib import Path
-import os
 from google import genai
-from dotenv import load_dotenv
 
+from app.core.config import settings
 from app.repositories.message import MessageRepository
 from app.repositories.conversation import ConversationRepository
 from app.repositories.user import UserRepository
@@ -79,7 +77,11 @@ class MessageService:
         return MessageRead.model_validate(message_entity)
 
     def get_conversation_messages(
-        self, conversation_id: UUID, user_id: UUID, skip: int = 0, limit: int = 100
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        skip: int = 0,
+        limit: int = 100,
     ) -> List[MessageRead]:
         """Get messages for a conversation with access validation"""
         # Validate user has access to conversation
@@ -97,7 +99,9 @@ class MessageService:
         return [MessageRead.model_validate(msg) for msg in message_entities]
 
     def get_conversation_thread(
-        self, conversation_id: UUID, user_id: UUID
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
     ) -> List[MessageRead]:
         """Get conversation thread ordered by timestamp"""
         # Validate user has access to conversation
@@ -113,7 +117,10 @@ class MessageService:
         return [MessageRead.model_validate(msg) for msg in message_entities]
 
     def update_message(
-        self, message_id: UUID, user_id: UUID, message_update_data: MessageUpdate
+        self,
+        message_id: UUID,
+        user_id: UUID,
+        message_update_data: MessageUpdate,
     ) -> MessageRead:
         """Update message with ownership validation"""
         message_entity = self.repository.get_by_id(message_id)
@@ -156,13 +163,8 @@ class MessageService:
     def _generate_bot_response(self, user_message: str) -> str:
         """Generate a bot response"""
 
-        BASE_DIR = Path(__file__).resolve().parent.parent
-        ENV_PATH = BASE_DIR / "core" / ".env"
-
-        load_dotenv(dotenv_path=ENV_PATH)
-
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
+        api_key = settings.gemini_api_key
+        if not api_key or api_key == "GEMINI_API_KEY":
             return "[Error: Gemini API key not configured]"
 
         system_prompt = (

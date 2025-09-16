@@ -702,7 +702,7 @@ def render_chat_interface():
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Message input form - only show if we have a conversation
+    # Message input form
     if st.session_state.current_conversation_id:
         with st.form("message_form", clear_on_submit=True):
             col1, col2 = st.columns([4, 1])

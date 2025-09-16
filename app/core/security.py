@@ -2,15 +2,11 @@
 
 import bcrypt
 import jwt
-import os
 from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import HTTPException, status
 
-# Security configuration
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-here-change-in-production")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+from app.core.config import settings
 
 
 def hash_password(password: str) -> str:
@@ -34,17 +30,17 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = datetime.utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
 
     to_encode.update({"exp": expire, "iat": datetime.utcnow()})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.jwt_algorithm)
     return encoded_jwt
 
 
 def verify_token(token: str) -> dict:
     """Verify and decode JWT token using PyJWT (FastAPI recommended)"""
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(
@@ -77,10 +73,10 @@ def create_refresh_token(data: dict) -> str:
     """Create refresh token with longer expiration"""
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(
-        days=7
-    )  # 7 day expiration for refresh tokens
+        days=settings.refresh_token_expire_days
+    )
     to_encode.update({"exp": expire, "iat": datetime.utcnow(), "type": "refresh"})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode(to_encode, settings.secret_key, algorithm=settings.jwt_algorithm)
 
 
 def verify_refresh_token(token: str) -> dict:
