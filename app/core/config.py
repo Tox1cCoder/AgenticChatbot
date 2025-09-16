@@ -1,8 +1,15 @@
 from functools import lru_cache
 from typing import List
-
 from pydantic import Field
 from pydantic_settings import BaseSettings
+
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+dotenv_path = Path(__file__).parent / ".env"
+if dotenv_path.exists():
+    load_dotenv(dotenv_path)
 
 
 class Settings(BaseSettings):
@@ -15,7 +22,7 @@ class Settings(BaseSettings):
     # API settings
     api_host: str = Field(default="0.0.0.0", description="API host")
     api_port: int = Field(default=8000, description="API port")
-    api_debug: bool = Field(default=True, description="Debug mode")
+    api_debug: bool = Field(default=False, description="Debug mode")
 
     # Environment
     environment: str = Field(default="development", description="Environment")
@@ -40,7 +47,11 @@ class Settings(BaseSettings):
     )
 
     # LLM API Keys
-    gemini_api_key: str = Field(default="GEMINI_API_KEY", description="Gemini API Key")
+    gemini_api_key: str = Field(
+        default="",
+        description="Gemini API Key",
+        env=["GEMINI_API_KEY", "gemini_api_key"],
+    )
 
     # Application metadata
     app_name: str = Field(default="Sample Chatbot", description="Application name")

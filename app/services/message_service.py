@@ -161,11 +161,15 @@ class MessageService:
         return self.repository.delete(message_id)
 
     def _generate_bot_response(self, user_message: str) -> str:
-        """Generate a bot response"""
-
+        """Generate a bot response using Gemini API"""
         api_key = settings.gemini_api_key
-        if not api_key or api_key == "GEMINI_API_KEY":
+        # Accept key from env or .env, strip prefix if present
+        if not api_key:
             return "[Error: Gemini API key not configured]"
+        if api_key.startswith("GEMINI_API_KEY="):
+            api_key = api_key.split("=", 1)[-1].strip()
+        if not api_key or api_key.startswith("AIza") is False:
+            return "[Error: Gemini API key not valid]"
 
         system_prompt = (
             "You are a helpful chatbot. Please answer in a short, concise sentence."
