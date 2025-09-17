@@ -75,7 +75,7 @@
                 "exec": [
                   "if (pm.response.code === 201) {",
                   "    const response = pm.response.json();",
-                  "    pm.collectionVariables.set('user_id', response.data.id);",
+                  "    pm.environment.set('user_id', response.data.id);",
                   "}"
                 ]
               }
@@ -110,8 +110,8 @@
                 "exec": [
                   "if (pm.response.code === 200) {",
                   "    const response = pm.response.json();",
-                  "    pm.collectionVariables.set('access_token', response.accessToken);",
-                  "    pm.collectionVariables.set('user_id', response.userId);",
+                  "    pm.environment.set('access_token', response.accessToken);",
+                  "    pm.environment.set('user_id', response.userId);",
                   "}"
                 ]
               }
@@ -192,7 +192,7 @@
                 "exec": [
                   "if (pm.response.code === 201) {",
                   "    const response = pm.response.json();",
-                  "    pm.collectionVariables.set('conversation_id', response.data.id);",
+                  "    pm.environment.set('conversation_id', response.data.id);",
                   "}"
                 ]
               }
@@ -272,7 +272,7 @@
                 "exec": [
                   "if (pm.response.code === 201) {",
                   "    const response = pm.response.json();",
-                  "    pm.collectionVariables.set('message_id', response.data.id);",
+                  "    pm.environment.set('message_id', response.data.id);",
                   "}"
                 ]
               }
@@ -351,6 +351,21 @@
       "item": [
         {
           "name": "Submit Feedback",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    const response = pm.response.json();",
+                  "    if (response.data && response.data.id) {",
+                  "        pm.environment.set('feedback_id', response.data.id);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [

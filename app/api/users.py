@@ -2,11 +2,12 @@ import logging
 from typing import List
 from uuid import UUID
 from typing import Annotated
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 
 from dependency_injector.wiring import Provide, inject
 
 from app.core.container import Container
+from app.core.exceptions import ResourceNotFoundException
 from app.interfaces.user_service_interface import IUserService
 from app.schemas.user import UserCreate, UserUpdate, UserRead
 from app.schemas.responses import ApiResponse

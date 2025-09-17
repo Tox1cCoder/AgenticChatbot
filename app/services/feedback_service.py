@@ -1,17 +1,19 @@
 from __future__ import annotations
 from typing import List, Optional
 from uuid import UUID
-from fastapi import HTTPException, status
 
+from app.core.exceptions import (
+    ValidationException,
+    ResourceNotFoundException,
+    AuthorizationException,
+)
 from app.repositories.feedback import FeedbackRepository
 from app.repositories.message import MessageRepository
 from app.repositories.user import UserRepository
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
 from app.factories.feedback_factory import FeedbackFactory
-from app.services.validation_service import (
-    UserValidationService,
-    MessageValidationService,
-)
+from app.utils.user_validation import UserValidationUtils
+from app.utils.message_validation import MessageValidationUtils
 from app.interfaces.feedback_service_interface import IFeedbackService
 
 
@@ -23,8 +25,8 @@ class FeedbackService(IFeedbackService):
         feedback_repository: FeedbackRepository,
         message_repository: MessageRepository,
         user_repository: UserRepository,
-        user_validation_service: UserValidationService,
-        message_validation_service: MessageValidationService,
+        user_validation_utils: UserValidationUtils,
+        message_validation_utils: MessageValidationUtils,
     ):
         """
         Initialize FeedbackService with injected dependencies.
@@ -33,29 +35,29 @@ class FeedbackService(IFeedbackService):
             feedback_repository: Injected feedback repository
             message_repository: Injected message repository
             user_repository: Injected user repository
-            user_validation_service: Injected user validation service
-            message_validation_service: Injected message validation service
+            user_validation_utils: Injected user validation utils
+            message_validation_utils: Injected message validation utils
         """
         self.repository = feedback_repository
         self.message_repository = message_repository
         self.user_repository = user_repository
-        self.user_validation_service = user_validation_service
-        self.message_validation_service = message_validation_service
+        self.user_validation_utils = user_validation_utils
+        self.message_validation_utils = message_validation_utils
 
     def create_feedback(
         self, feedback_create_data: FeedbackCreate, user_id: UUID
     ) -> FeedbackRead:
         """Create new feedback with validation"""
-        if not self.user_validation_service.validate_user_exists(user_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        if not self.user_validation_utils.validate_user_exists(user_id):
+            raise ResourceNotFoundException(
+                detail="User not found", error_code="USER_NOT_FOUND"
             )
 
-        if not self.message_validation_service.validate_message_exists(
+        if not self.message_validation_utils.validate_message_exists(
             feedback_create_data.message_id
         ):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
+            raise ResourceNotFoundException(
+                detail="Message not found", error_code="MESSAGE_NOT_FOUND"
             )
 
         existing_feedback_entity = self.repository.get_by_message_and_user(
@@ -83,8 +85,8 @@ class FeedbackService(IFeedbackService):
         """Get feedback by ID"""
         feedback_entity = self.repository.get_by_id(feedback_id)
         if not feedback_entity:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Feedback not found"
+            raise ResourceNotFoundException(
+                detail="Feedback not found", error_code="FEEDBACK_NOT_FOUND"
             )
         return FeedbackRead.model_validate(feedback_entity)
 
@@ -93,9 +95,9 @@ class FeedbackService(IFeedbackService):
     ) -> List[FeedbackRead]:
         """Get all feedback for a message"""
         # Validate message exists
-        if not self.message_validation_service.validate_message_exists(message_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
+        if not self.message_validation_utils.validate_message_exists(message_id):
+            raise ResourceNotFoundException(
+                detail="Message not found", error_code="MESSAGE_NOT_FOUND"
             )
 
         feedback_entities = self.repository.get_by_message_id(
@@ -108,9 +110,9 @@ class FeedbackService(IFeedbackService):
     ) -> List[FeedbackRead]:
         """Get all feedback by a user"""
         # Validate user exists
-        if not self.user_validation_service.validate_user_exists(user_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        if not self.user_validation_utils.validate_user_exists(user_id):
+            raise ResourceNotFoundException(
+                detail="User not found", error_code="USER_NOT_FOUND"
             )
 
         feedback_entities = self.repository.get_by_user_id(
@@ -123,15 +125,15 @@ class FeedbackService(IFeedbackService):
     ) -> Optional[FeedbackRead]:
         """Get specific user's feedback for a message"""
         # Validate message exists
-        if not self.message_validation_service.validate_message_exists(message_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
+        if not self.message_validation_utils.validate_message_exists(message_id):
+            raise ResourceNotFoundException(
+                detail="Message not found", error_code="MESSAGE_NOT_FOUND"
             )
 
         # Validate user exists
-        if not self.user_validation_service.validate_user_exists(user_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        if not self.user_validation_utils.validate_user_exists(user_id):
+            raise ResourceNotFoundException(
+                detail="User not found", error_code="USER_NOT_FOUND"
             )
 
         feedback_entity = self.repository.get_by_message_and_user(message_id, user_id)
@@ -140,9 +142,9 @@ class FeedbackService(IFeedbackService):
     def get_message_rating_stats(self, message_id: UUID) -> dict:
         """Get rating statistics for a message"""
         # Validate message exists
-        if not self.message_validation_service.validate_message_exists(message_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
+        if not self.message_validation_utils.validate_message_exists(message_id):
+            raise ResourceNotFoundException(
+                detail="Message not found", error_code="MESSAGE_NOT_FOUND"
             )
 
         avg_rating = self.repository.get_rating_for_message(message_id)
@@ -159,15 +161,15 @@ class FeedbackService(IFeedbackService):
         """Update feedback with ownership validation"""
         feedback_entity = self.repository.get_by_id(feedback_id)
         if not feedback_entity:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Feedback not found"
+            raise ResourceNotFoundException(
+                detail="Feedback not found", error_code="FEEDBACK_NOT_FOUND"
             )
 
         # Validate user owns the feedback
         if feedback_entity.user_id != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+            raise AuthorizationException(
                 detail="Access denied to this feedback",
+                error_code="FEEDBACK_ACCESS_DENIED",
             )
 
         updated_feedback = self.repository.update(
@@ -179,15 +181,15 @@ class FeedbackService(IFeedbackService):
         """Delete feedback with ownership validation"""
         feedback_entity = self.repository.get_by_id(feedback_id)
         if not feedback_entity:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Feedback not found"
+            raise ResourceNotFoundException(
+                detail="Feedback not found", error_code="FEEDBACK_NOT_FOUND"
             )
 
         # Validate user owns the feedback
         if feedback_entity.user_id != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+            raise AuthorizationException(
                 detail="Access denied to this feedback",
+                error_code="FEEDBACK_ACCESS_DENIED",
             )
 
         return self.repository.delete(feedback_id)

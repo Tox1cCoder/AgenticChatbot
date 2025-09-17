@@ -3,13 +3,14 @@
 import logging
 from datetime import timedelta
 from typing import Annotated
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from fastapi.security import HTTPAuthorizationCredentials
 from uuid import UUID
 
 from dependency_injector.wiring import Provide, inject
 
 from app.core.container import Container
+from app.core.exceptions import AuthenticationException, ResourceNotFoundException
 from app.interfaces.user_service_interface import IUserService
 from app.services.auth_service import AuthService
 from app.core.config import settings
@@ -88,10 +89,8 @@ async def refresh_token(
     # Verify user still exists
     user = user_service.get_by_id(user_id)
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-            headers={"WWW-Authenticate": "Bearer"},
+        raise AuthenticationException(
+            detail="User not found", error_code="USER_NOT_FOUND"
         )
     # Create new access token
     token_data = {"sub": str(user.id)}

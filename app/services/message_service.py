@@ -1,8 +1,12 @@
 from __future__ import annotations
 from typing import List, Optional
 from uuid import UUID
-from fastapi import HTTPException, status
 
+from app.core.exceptions import (
+    ValidationException,
+    ResourceNotFoundException,
+    AuthorizationException,
+)
 from google import genai
 
 from app.core.config import settings
@@ -12,10 +16,8 @@ from app.repositories.user import UserRepository
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
 from app.models.enums import MessageRole
 from app.factories.message_factory import MessageFactory
-from app.services.validation_service import (
-    ConversationValidationService,
-    MessageValidationService,
-)
+from app.utils.conversation_validation import ConversationValidationUtils
+from app.utils.message_validation import MessageValidationUtils
 from app.interfaces.message_service_interface import IMessageService
 
 
@@ -27,8 +29,8 @@ class MessageService(IMessageService):
         message_repository: MessageRepository,
         conversation_repository: ConversationRepository,
         user_repository: UserRepository,
-        conversation_validation_service: ConversationValidationService,
-        message_validation_service: MessageValidationService,
+        conversation_validation_utils: ConversationValidationUtils,
+        message_validation_utils: MessageValidationUtils,
     ):
         """
         Initialize MessageService with injected dependencies.
@@ -37,23 +39,23 @@ class MessageService(IMessageService):
             message_repository: Injected message repository
             conversation_repository: Injected conversation repository
             user_repository: Injected user repository
-            conversation_validation_service: Injected conversation validation service
-            message_validation_service: Injected message validation service
+            conversation_validation_utils: Injected conversation validation utils
+            message_validation_utils: Injected message validation utils
         """
         self.repository = message_repository
         self.conversation_repository = conversation_repository
         self.user_repository = user_repository
-        self.conversation_validation_service = conversation_validation_service
-        self.message_validation_service = message_validation_service
+        self.conversation_validation_utils = conversation_validation_utils
+        self.message_validation_utils = message_validation_utils
 
     def create_message(self, message_create_data: MessageCreate) -> MessageRead:
         """Create a new message with role from request data"""
         # Validate conversation exists
-        if not self.conversation_validation_service.validate_conversation_exists(
+        if not self.conversation_validation_utils.validate_conversation_exists(
             message_create_data.conversation_id
         ):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
+            raise ResourceNotFoundException(
+                detail="Conversation not found", error_code="CONVERSATION_NOT_FOUND"
             )
 
         # Create message entity using factory with role from schema
@@ -76,9 +78,9 @@ class MessageService(IMessageService):
 
     def get_by_id(self, message_id: UUID, user_id: UUID) -> MessageRead:
         """Get message by ID"""
-        if not self.message_validation_service.validate_message_exists(message_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
+        if not self.message_validation_utils.validate_message_exists(message_id):
+            raise ResourceNotFoundException(
+                detail="Message not found", error_code="MESSAGE_NOT_FOUND"
             )
 
         message_entity = self.repository.get_by_id(message_id)
@@ -94,21 +96,20 @@ class MessageService(IMessageService):
         """Get messages for a conversation with access validation"""
         # Validate user has access to conversation
         is_valid, validation_errors = (
-            self.conversation_validation_service.validate_conversation_access(
+            self.conversation_validation_utils.validate_conversation_access(
                 user_id, conversation_id
             )
         )
 
         if not is_valid:
             if "Conversation not found" in validation_errors:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Conversation not found",
+                raise ResourceNotFoundException(
+                    detail="Conversation not found", error_code="CONVERSATION_NOT_FOUND"
                 )
             else:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
+                raise AuthorizationException(
                     detail="Access denied to this conversation",
+                    error_code="CONVERSATION_ACCESS_DENIED",
                 )
 
         message_entities = self.repository.get_by_conversation_id(
@@ -133,21 +134,20 @@ class MessageService(IMessageService):
         """Get conversation thread ordered by timestamp"""
         # Validate user has access to conversation
         is_valid, validation_errors = (
-            self.conversation_validation_service.validate_conversation_access(
+            self.conversation_validation_utils.validate_conversation_access(
                 user_id, conversation_id
             )
         )
 
         if not is_valid:
             if "Conversation not found" in validation_errors:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Conversation not found",
+                raise ResourceNotFoundException(
+                    detail="Conversation not found", error_code="CONVERSATION_NOT_FOUND"
                 )
             else:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
+                raise AuthorizationException(
                     detail="Access denied to this conversation",
+                    error_code="CONVERSATION_ACCESS_DENIED",
                 )
 
         message_entities = self.repository.get_conversation_thread(conversation_id)
@@ -162,18 +162,18 @@ class MessageService(IMessageService):
         """Update message with ownership validation"""
         # Validate message access
         is_valid, validation_errors = (
-            self.message_validation_service.validate_message_access(user_id, message_id)
+            self.message_validation_utils.validate_message_access(user_id, message_id)
         )
 
         if not is_valid:
             if "Message not found" in validation_errors:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
+                raise ResourceNotFoundException(
+                    detail="Message not found", error_code="MESSAGE_NOT_FOUND"
                 )
             else:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
+                raise AuthorizationException(
                     detail="Access denied to this conversation",
+                    error_code="CONVERSATION_ACCESS_DENIED",
                 )
 
         message_entity = self.repository.get_by_id(message_id)
@@ -184,18 +184,18 @@ class MessageService(IMessageService):
         """Delete message with ownership validation"""
         # Validate message access
         is_valid, validation_errors = (
-            self.message_validation_service.validate_message_access(user_id, message_id)
+            self.message_validation_utils.validate_message_access(user_id, message_id)
         )
 
         if not is_valid:
             if "Message not found" in validation_errors:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
+                raise ResourceNotFoundException(
+                    detail="Message not found", error_code="MESSAGE_NOT_FOUND"
                 )
             else:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
+                raise AuthorizationException(
                     detail="Access denied to this conversation",
+                    error_code="CONVERSATION_ACCESS_DENIED",
                 )
 
         return self.repository.delete(message_id)

@@ -1,12 +1,11 @@
 from __future__ import annotations
 from typing import List, Optional, TYPE_CHECKING
 from uuid import UUID
-from fastapi import HTTPException, status
 
+from app.core.exceptions import ValidationException, ResourceNotFoundException
 from app.repositories.user import UserRepository
 from app.schemas.user import UserCreate, UserUpdate, UserRead, UserInDB
 from app.factories.user_factory import UserFactory
-from app.services.validation_service import UserValidationService
 from app.utils.user_validation import UserValidationUtils
 from app.interfaces.user_service_interface import IUserService
 
@@ -17,30 +16,29 @@ class UserService(IUserService):
     def __init__(
         self,
         user_repository: UserRepository,
-        user_validation_service: UserValidationService,
+        user_validation_utils: UserValidationUtils,
     ):
         """
         Initialize UserService with injected dependencies.
 
         Args:
             user_repository: Injected user repository
-            user_validation_service: Injected validation service
+            user_validation_utils: Injected validation utilities
         """
         self.repository = user_repository
-        self.validation_service = user_validation_service
+        self.validation_utils = user_validation_utils
 
     def create_user(self, user_create_data: UserCreate) -> UserRead:
         """Create a new user with validation"""
         is_valid, validation_errors = (
-            self.validation_service.validate_email_and_username_availability(
+            self.validation_utils.validate_email_and_username_availability(
                 user_create_data.email, user_create_data.username
             )
         )
 
         if not is_valid:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=", ".join(validation_errors),
+            raise ValidationException(
+                detail=", ".join(validation_errors), error_code="USER_VALIDATION_FAILED"
             )
 
         user_entity = UserFactory.create_from_schema(user_create_data)
@@ -51,8 +49,8 @@ class UserService(IUserService):
         """Get user by ID"""
         user_entity = self.repository.get_by_id(user_id)
         if not user_entity:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+            raise ResourceNotFoundException(
+                detail="User not found", error_code="USER_NOT_FOUND"
             )
         return UserRead.model_validate(user_entity)
 
@@ -80,8 +78,8 @@ class UserService(IUserService):
         """Update user with validation"""
         user_entity = self.repository.get_by_id(user_id)
         if not user_entity:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+            raise ResourceNotFoundException(
+                detail="User not found", error_code="USER_NOT_FOUND"
             )
 
         if user_update_data.email or user_update_data.username:
@@ -89,15 +87,15 @@ class UserService(IUserService):
             username_to_check = user_update_data.username or user_entity.username
 
             is_valid, validation_errors = (
-                self.validation_service.validate_email_and_username_availability(
+                self.validation_utils.validate_email_and_username_availability(
                     email_to_check, username_to_check, exclude_user_id=user_id
                 )
             )
 
             if not is_valid:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
+                raise ValidationException(
                     detail=", ".join(validation_errors),
+                    error_code="USER_VALIDATION_FAILED",
                 )
 
         updated_user = self.repository.update(user_entity.id, user_update_data)

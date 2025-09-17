@@ -2,12 +2,13 @@ import logging
 from typing import List
 from uuid import UUID
 from typing import Annotated
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 
 from dependency_injector.wiring import Provide, inject
 
 from app.core.container import Container
 from app.core.auth import get_current_user_id
+from app.core.exceptions import ResourceNotFoundException
 from app.interfaces.conversation_service_interface import IConversationService
 from app.schemas.conversation import (
     ConversationCreate,
@@ -82,6 +83,6 @@ async def delete_conversation(
     if success:
         return SuccessResponse(message="Conversation deleted successfully")
     else:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
+        raise ResourceNotFoundException(
+            detail="Conversation not found", error_code="CONVERSATION_NOT_FOUND"
         )
