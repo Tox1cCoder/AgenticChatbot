@@ -15,17 +15,20 @@ from app.services.validation_service import (
     UserValidationService,
     ConversationValidationService,
 )
+from app.utils.user_validation import UserValidationUtils
+from app.utils.conversation_validation import ConversationValidationUtils
+from app.interfaces.conversation_service_interface import IConversationService
 
 
-class ConversationService:
+class ConversationService(IConversationService):
     """Service layer for Conversation operations"""
 
     def __init__(
         self,
         conversation_repository: ConversationRepository,
         user_repository: UserRepository,
-        user_validation_service: UserValidationService,
-        conversation_validation_service: ConversationValidationService,
+        user_validation_utils: UserValidationUtils,
+        conversation_validation_utils: ConversationValidationUtils,
     ):
         """
         Initialize ConversationService with injected dependencies.
@@ -33,20 +36,20 @@ class ConversationService:
         Args:
             conversation_repository: Injected conversation repository
             user_repository: Injected user repository
-            user_validation_service: Injected user validation service
-            conversation_validation_service: Injected conversation validation service
+            user_validation_utils: Injected user validation utils
+            conversation_validation_utils: Injected conversation validation utils
         """
         self.repository = conversation_repository
         self.user_repository = user_repository
-        self.user_validation_service = user_validation_service
-        self.conversation_validation_service = conversation_validation_service
+        self.user_validation_utils = user_validation_utils
+        self.conversation_validation_utils = conversation_validation_utils
 
     def create_conversation(
         self, conversation_create_data: ConversationCreate, owner_id: UUID
     ) -> ConversationRead:
         """Create a new conversation with validation"""
         # Validate user exists
-        if not self.user_validation_service.validate_user_exists(owner_id):
+        if not self.user_validation_utils.validate_user_exists(owner_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
             )
@@ -58,11 +61,11 @@ class ConversationService:
 
         # Save to repository
         created_conversation = self.repository.create(conversation_entity)
-        return ConversationRead.model_validate(created_conversation)
+        return ConversationRead.dto(created_conversation)
 
-    def get_conversation_by_id(self, conversation_id: UUID) -> ConversationRead:
+    def get_by_id(self, conversation_id: UUID) -> ConversationRead:
         """Get conversation by ID"""
-        if not self.conversation_validation_service.validate_conversation_exists(
+        if not self.conversation_validation_utils.validate_conversation_exists(
             conversation_id
         ):
             raise HTTPException(
@@ -70,14 +73,14 @@ class ConversationService:
             )
 
         conversation_entity = self.repository.get_by_id(conversation_id)
-        return ConversationRead.model_validate(conversation_entity)
+        return ConversationRead.dto(conversation_entity)
 
     def get_user_conversations(
         self, owner_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[ConversationRead]:
         """Get all conversations for a user with validation"""
         # Validate user exists
-        if not self.user_validation_service.validate_user_exists(owner_id):
+        if not self.user_validation_utils.validate_user_exists(owner_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
             )
@@ -86,7 +89,7 @@ class ConversationService:
             owner_id, skip=skip, limit=limit
         )
         return [
-            ConversationRead.model_validate(conversation_entity)
+            ConversationRead.dto(conversation_entity)
             for conversation_entity in conversation_entities
         ]
 
@@ -96,7 +99,7 @@ class ConversationService:
         """Get conversation with messages, ensuring user owns it"""
         # Validate conversation access
         is_valid, validation_errors = (
-            self.conversation_validation_service.validate_conversation_access(
+            self.conversation_validation_utils.validate_conversation_access(
                 owner_id, conversation_id
             )
         )
@@ -114,7 +117,7 @@ class ConversationService:
                 )
 
         conversation_entity = self.repository.get_with_messages(conversation_id)
-        return ConversationRead.model_validate(conversation_entity)
+        return ConversationRead.dto(conversation_entity)
 
     def update_conversation(
         self,
@@ -125,7 +128,7 @@ class ConversationService:
         """Update conversation with ownership validation"""
         # Validate conversation access
         is_valid, validation_errors = (
-            self.conversation_validation_service.validate_conversation_access(
+            self.conversation_validation_utils.validate_conversation_access(
                 owner_id, conversation_id
             )
         )
@@ -146,13 +149,13 @@ class ConversationService:
         updated_conversation = self.repository.update(
             conversation_entity, conversation_update_data
         )
-        return ConversationRead.model_validate(updated_conversation)
+        return ConversationRead.dto(updated_conversation)
 
     def delete_conversation(self, conversation_id: UUID, owner_id: UUID) -> bool:
         """Delete conversation with ownership validation"""
         # Validate conversation access
         is_valid, validation_errors = (
-            self.conversation_validation_service.validate_conversation_access(
+            self.conversation_validation_utils.validate_conversation_access(
                 owner_id, conversation_id
             )
         )

@@ -7,7 +7,7 @@ from dependency_injector.wiring import Provide, inject
 
 from app.core.container import Container
 from app.core.auth import get_current_user_id
-from app.services.conversation_service import ConversationService
+from app.interfaces.conversation_service_interface import IConversationService
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationUpdate,
@@ -27,7 +27,7 @@ async def create_conversation(
     conversation_data: ConversationCreate,
     user_id: UUID = Depends(get_current_user_id),
     conversation_service: Annotated[
-        ConversationService, Depends(Provide[Container.conversation_service])
+        IConversationService, Depends(Provide[Container.conversation_service])
     ] = None,
 ) -> ConversationRead:
     """Create a new conversation for authenticated user"""
@@ -39,18 +39,18 @@ async def create_conversation(
 async def get_conversation(
     conversation_id: UUID,
     conversation_service: Annotated[
-        ConversationService, Depends(Provide[Container.conversation_service])
+        IConversationService, Depends(Provide[Container.conversation_service])
     ],
 ) -> ConversationRead:
     """Get conversation by ID"""
-    return conversation_service.get_conversation_by_id(conversation_id)
+    return conversation_service.get_by_id(conversation_id)
 
 
 @router.get("/", response_model=List[ConversationRead])
 @inject
 async def get_conversations(
     conversation_service: Annotated[
-        ConversationService, Depends(Provide[Container.conversation_service])
+        IConversationService, Depends(Provide[Container.conversation_service])
     ],
     user_id: UUID = Depends(get_current_user_id),
     page: int = 1,
@@ -61,20 +61,20 @@ async def get_conversations(
     return conversation_service.get_user_conversations(user_id, skip=skip, limit=limit)
 
 
-@router.put("/{conversation_id}", response_model=ConversationRead)
-@inject
-async def update_conversation(
-    conversation_id: UUID,
-    conversation_data: ConversationUpdate,
-    conversation_service: Annotated[
-        ConversationService, Depends(Provide[Container.conversation_service])
-    ],
-    user_id: UUID = Depends(get_current_user_id),
-) -> ConversationRead:
-    """Update conversation (requires user ownership)"""
-    return conversation_service.update_conversation(
-        conversation_id, user_id, conversation_data
-    )
+# @router.put("/{conversation_id}", response_model=ConversationRead)
+# @inject
+# async def update_conversation(
+#     conversation_id: UUID,
+#     conversation_data: ConversationUpdate,
+#     conversation_service: Annotated[
+#         ConversationService, Depends(Provide[Container.conversation_service])
+#     ],
+#     user_id: UUID = Depends(get_current_user_id),
+# ) -> ConversationRead:
+#     """Update conversation (requires user ownership)"""
+#     return conversation_service.update_conversation(
+#         conversation_id, user_id, conversation_data
+#     )
 
 
 @router.delete("/{conversation_id}")
@@ -82,7 +82,7 @@ async def update_conversation(
 async def delete_conversation(
     conversation_id: UUID,
     conversation_service: Annotated[
-        ConversationService, Depends(Provide[Container.conversation_service])
+        IConversationService, Depends(Provide[Container.conversation_service])
     ],
     user_id: UUID = Depends(get_current_user_id),
 ) -> dict:

@@ -9,7 +9,7 @@ from uuid import UUID
 from dependency_injector.wiring import Provide, inject
 
 from app.core.container import Container
-from app.services.user_service import UserService
+from app.interfaces.user_service_interface import IUserService
 from app.core.config import settings
 from app.core.security import (
     verify_password,
@@ -18,7 +18,7 @@ from app.core.security import (
 )
 from app.core.auth import get_refresh_token_user_id, security
 from app.schemas.user import UserCreate, UserRead
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -29,24 +29,34 @@ class LoginRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
-    expires_in: int = settings.access_token_expire_minutes * 60
-    user_id: str  # Include user_id in token response
+    accessToken: str = Field(alias="access_token")
+    refreshToken: str = Field(alias="refresh_token")
+    tokenType: str = Field(default="bearer", alias="token_type")
+    expiresIn: int = Field(
+        default=settings.access_token_expire_minutes * 60, alias="expires_in"
+    )
+    userId: str = Field(alias="user_id")  # Include user_id in token response
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class RefreshTokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    expires_in: int = settings.access_token_expire_minutes * 60
+    accessToken: str = Field(alias="access_token")
+    tokenType: str = Field(default="bearer", alias="token_type")
+    expiresIn: int = Field(
+        default=settings.access_token_expire_minutes * 60, alias="expires_in"
+    )
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 @router.post("/signup", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 @inject
 async def signup(
     user_data: UserCreate,
-    user_service: Annotated[UserService, Depends(Provide[Container.user_service])],
+    user_service: Annotated[IUserService, Depends(Provide[Container.user_service])],
 ) -> UserRead:
     """Register a new user"""
     return user_service.create_user(user_data)
@@ -56,12 +66,12 @@ async def signup(
 @inject
 async def login(
     login_data: LoginRequest,
-    user_service: Annotated[UserService, Depends(Provide[Container.user_service])],
+    user_service: Annotated[IUserService, Depends(Provide[Container.user_service])],
 ) -> TokenResponse:
     """Authenticate user and return JWT tokens"""
     try:
         # Get user by email with password hash for authentication
-        user = user_service.get_user_by_email_with_password(login_data.email)
+        user = user_service.get_by_email_with_password(login_data.email)
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -100,12 +110,12 @@ async def login(
 @router.post("/refresh", response_model=RefreshTokenResponse)
 @inject
 async def refresh_token(
-    user_service: Annotated[UserService, Depends(Provide[Container.user_service])],
+    user_service: Annotated[IUserService, Depends(Provide[Container.user_service])],
     user_id: UUID = Depends(get_refresh_token_user_id),
 ) -> RefreshTokenResponse:
     """Get new access token using refresh token"""
     # Verify user still exists
-    user = user_service.get_user_by_id(user_id)
+    user = user_service.get_by_id(user_id)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -12,9 +12,10 @@ from app.services.validation_service import (
     UserValidationService,
     MessageValidationService,
 )
+from app.interfaces.feedback_service_interface import IFeedbackService
 
 
-class FeedbackService:
+class FeedbackService(IFeedbackService):
     """Service layer for Feedback operations"""
 
     def __init__(
@@ -74,14 +75,14 @@ class FeedbackService:
             updated_feedback = self.repository.update(
                 existing_feedback_entity, update_data
             )
-            return FeedbackRead.model_validate(updated_feedback)
+            return FeedbackRead.dto(updated_feedback)
 
         # Create new feedback entity using factory
         feedback_entity = FeedbackFactory.create_from_schema(
             feedback_create_data, user_id
         )
         created_feedback = self.repository.create(feedback_entity)
-        return FeedbackRead.model_validate(created_feedback)
+        return FeedbackRead.dto(created_feedback)
 
     def get_feedback_by_id(self, feedback_id: UUID) -> FeedbackRead:
         """Get feedback by ID"""
@@ -90,9 +91,9 @@ class FeedbackService:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Feedback not found"
             )
-        return FeedbackRead.model_validate(feedback_entity)
+        return FeedbackRead.dto(feedback_entity)
 
-    def get_feedback_by_message(
+    def get_by_message(
         self, message_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[FeedbackRead]:
         """Get all feedback for a message"""
@@ -105,9 +106,9 @@ class FeedbackService:
         feedback_entities = self.repository.get_by_message_id(
             message_id, skip=skip, limit=limit
         )
-        return [FeedbackRead.model_validate(feedback) for feedback in feedback_entities]
+        return [FeedbackRead.dto(feedback) for feedback in feedback_entities]
 
-    def get_feedback_by_user(
+    def get_by_user(
         self, user_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[FeedbackRead]:
         """Get all feedback by a user"""
@@ -120,7 +121,7 @@ class FeedbackService:
         feedback_entities = self.repository.get_by_user_id(
             user_id, skip=skip, limit=limit
         )
-        return [FeedbackRead.model_validate(feedback) for feedback in feedback_entities]
+        return [FeedbackRead.dto(feedback) for feedback in feedback_entities]
 
     def get_user_feedback_for_message(
         self, message_id: UUID, user_id: UUID
@@ -139,7 +140,7 @@ class FeedbackService:
             )
 
         feedback_entity = self.repository.get_by_message_and_user(message_id, user_id)
-        return FeedbackRead.model_validate(feedback_entity) if feedback_entity else None
+        return FeedbackRead.dto(feedback_entity) if feedback_entity else None
 
     def get_message_rating_stats(self, message_id: UUID) -> dict:
         """Get rating statistics for a message"""
@@ -175,7 +176,7 @@ class FeedbackService:
             )
 
         updated_feedback = self.repository.update(feedback_entity, feedback_update_data)
-        return FeedbackRead.model_validate(updated_feedback)
+        return FeedbackRead.dto(updated_feedback)
 
     def delete_feedback(self, feedback_id: UUID, user_id: UUID) -> bool:
         """Delete feedback with ownership validation"""
