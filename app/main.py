@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
+from app.core.container import Container
 from app.api import (
     health_router,
     users_router,
@@ -15,12 +16,27 @@ from app.api.auth import router as auth_router
 def create_app() -> FastAPI:
     """Create and configure FastAPI application"""
 
+    # Initialize the dependency injection container
+    container = Container()
+    container.wire(
+        modules=[
+            "app.api.auth",
+            "app.api.users",
+            "app.api.conversations",
+            "app.api.messages",
+            "app.api.feedback",
+        ]
+    )
+
     app = FastAPI(
         title=settings.app_name,
         version=settings.app_version,
         description=settings.app_description,
         debug=settings.api_debug,
     )
+
+    # Attach container to app for dependency injection
+    app.container = container
 
     # Add CORS middleware
     app.add_middleware(

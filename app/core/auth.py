@@ -32,24 +32,23 @@ async def get_current_user_id(
         )
 
 
-async def get_optional_user_id(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(
-        HTTPBearer(auto_error=False)
-    ),
-) -> Optional[UUID]:
-    """
-    Optional authentication dependency for endpoints that can work with or without auth
-    Compatible with PyJWT error handling
-    """
-    if not credentials:
-        return None
+# async def get_optional_user_id(
+#     credentials: Optional[HTTPAuthorizationCredentials] = Depends(
+#         HTTPBearer(auto_error=False)
+#     ),
+# ) -> Optional[UUID]:
+#     """
+#     Optional authentication dependency for endpoints that can work with or without auth
+#     """
+#     if not credentials:
+#         return None
 
-    try:
-        token = credentials.credentials
-        user_id_str = get_user_id_from_token(token)
-        return UUID(user_id_str)
-    except (HTTPException, ValueError):
-        return None
+#     try:
+#         token = credentials.credentials
+#         user_id_str = get_user_id_from_token(token)
+#         return UUID(user_id_str)
+#     except (HTTPException, ValueError):
+#         return None
 
 
 async def get_refresh_token_user_id(

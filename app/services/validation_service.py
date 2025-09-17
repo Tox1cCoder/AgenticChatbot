@@ -4,6 +4,7 @@ Validation utilities for service layer
 
 from typing import Optional
 from uuid import UUID
+from contextlib import AbstractContextManager
 from sqlalchemy.orm import Session
 
 from app.repositories.user import UserRepository
@@ -12,8 +13,10 @@ from app.repositories.user import UserRepository
 class UserValidationService:
     """Service for user-related validations"""
 
-    def __init__(self, db: Session):
-        self.user_repository = UserRepository(db)
+    def __init__(self, session_factory: callable):
+        """Initialize validation service with session factory for dependency injection."""
+        self.session_factory = session_factory
+        self.user_repository = UserRepository(session_factory)
 
     def is_email_available(
         self, email: str, exclude_user_id: Optional[UUID] = None

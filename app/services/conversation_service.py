@@ -12,16 +12,12 @@ from app.schemas.conversation import (
 )
 from app.factories.conversation_factory import ConversationFactory
 
-if TYPE_CHECKING:
-    from app.core.container import DIContainer
-
 
 class ConversationService:
     """Service layer for Conversation operations"""
 
     def __init__(
         self,
-        container: DIContainer,
         conversation_repository: ConversationRepository,
         user_repository: UserRepository,
     ):
@@ -29,11 +25,9 @@ class ConversationService:
         Initialize ConversationService with injected dependencies.
 
         Args:
-            container: DI container for additional dependency resolution
             conversation_repository: Injected conversation repository
             user_repository: Injected user repository
         """
-        self.container = container
         self.repository = conversation_repository
         self.user_repository = user_repository
 

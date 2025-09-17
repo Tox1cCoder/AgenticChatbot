@@ -1,5 +1,6 @@
 from typing import List, Optional
 from uuid import UUID
+from contextlib import AbstractContextManager
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
@@ -58,47 +59,79 @@ class MessageCRUDStrategy(DefaultCRUDStrategy[Message, MessageCreate, MessageUpd
         self, db: Session, conversation_id: UUID
     ) -> List[Message]:
         """Get all messages in a conversation thread ordered by creation time"""
-        stmt = (
-            select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.asc())
-        )
+        stmt = select(Message).where(Message.conversation_id == conversation_id)
         return list(db.execute(stmt).scalars().all())
 
 
-class MessageRepository(Repository[Message, MessageCreate, MessageUpdate]):
-    """Repository for Message model"""
+class MessageRepository:
+    """Repository for Message model using session factory pattern"""
 
-    def __init__(self, db: Session):
-        strategy = MessageCRUDStrategy(Message)
-        super().__init__(db, strategy)
+    def __init__(self, session_factory: callable):
+        """Initialize repository with session factory for dependency injection."""
+        self.session_factory = session_factory
+        self._crud_strategy = MessageCRUDStrategy(Message)
 
     def get_by_conversation_id(
         self, conversation_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[Message]:
         """Get messages by conversation ID ordered by creation time"""
-        return self._crud_strategy.get_by_conversation_id(
-            self.db, conversation_id, skip, limit
-        )
+        with self.session_factory() as session:
+            return self._crud_strategy.get_by_conversation_id(
+                session, conversation_id, skip, limit
+            )
 
     def get_conversation_history(
         self, conversation_id: UUID, limit: int = 50
     ) -> List[Message]:
         """Get recent conversation history"""
-        return self._crud_strategy.get_conversation_history(
-            self.db, conversation_id, limit
-        )
+        with self.session_factory() as session:
+            return self._crud_strategy.get_conversation_history(
+                session, conversation_id, limit
+            )
 
     def get_conversation_message_count(self, conversation_id: UUID) -> int:
         """Get count of messages in a conversation"""
-        return self._crud_strategy.get_conversation_message_count(
-            self.db, conversation_id
-        )
+        with self.session_factory() as session:
+            return self._crud_strategy.get_conversation_message_count(
+                session, conversation_id
+            )
 
     def get_latest_message(self, conversation_id: UUID) -> Optional[Message]:
         """Get the latest message in a conversation"""
-        return self._crud_strategy.get_latest_message(self.db, conversation_id)
+        with self.session_factory() as session:
+            return self._crud_strategy.get_latest_message(session, conversation_id)
 
     def get_conversation_thread(self, conversation_id: UUID) -> List[Message]:
         """Get all messages in a conversation thread ordered by creation time"""
-        return self._crud_strategy.get_conversation_thread(self.db, conversation_id)
+        with self.session_factory() as session:
+            return self._crud_strategy.get_conversation_thread(session, conversation_id)
+
+    def create(self, input_schema: MessageCreate) -> Message:
+        """Create a new message"""
+        with self.session_factory() as session:
+            return self._crud_strategy.create(session, input_schema)
+
+    def get_by_id(self, id: UUID) -> Optional[Message]:
+        """Get message by ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.get_by_id(session, id)
+
+    def get_all(self, skip: int = 0, limit: int = 100) -> list[Message]:
+        """Get all messages with pagination"""
+        with self.session_factory() as session:
+            return self._crud_strategy.get_all(session, skip, limit)
+
+    def update(self, id: UUID, input_schema: MessageUpdate) -> Optional[Message]:
+        """Update message by ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.update(session, id, input_schema)
+
+    def delete(self, id: UUID) -> bool:
+        """Delete message by ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.delete(session, id)
+
+    def exists(self, id: UUID) -> bool:
+        """Check if message exists"""
+        with self.session_factory() as session:
+            return self._crud_strategy.exists(session, id)

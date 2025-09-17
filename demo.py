@@ -630,7 +630,7 @@ def render_chat_interface():
     # Display all messages with proper alignment
     for msg in st.session_state.messages:
         if msg["sender"] == 1:  # User messages (MessageRole.user = 1)
-            # User message (right aligned with avatar)
+            # User message
             st.markdown(
                 f"""
                 <div style="display: flex; justify-content: flex-end; margin: 10px 0; align-items: flex-start; gap: 10px;">
@@ -644,7 +644,7 @@ def render_chat_interface():
                 unsafe_allow_html=True,
             )
         else:
-            # Bot message (left aligned with avatar and small feedback button)
+            # Bot message
             st.markdown(
                 f"""
                 <div style="display: flex; justify-content: flex-start; margin: 10px 0; align-items: flex-start; gap: 10px;">

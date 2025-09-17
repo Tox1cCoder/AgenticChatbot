@@ -1,5 +1,6 @@
 from typing import List, Optional
 from uuid import UUID
+from contextlib import AbstractContextManager
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select
 
@@ -58,31 +59,66 @@ class ConversationCRUDStrategy(
         return db.execute(stmt).scalar() is not None
 
 
-class ConversationRepository(
-    Repository[Conversation, ConversationCreate, ConversationUpdate]
-):
-    """Repository for Conversation model"""
+class ConversationRepository:
+    """Repository for Conversation model using session factory pattern"""
 
-    def __init__(self, db: Session):
-        strategy = ConversationCRUDStrategy(Conversation)
-        super().__init__(db, strategy)
+    def __init__(self, session_factory: callable):
+        """Initialize repository with session factory for dependency injection."""
+        self.session_factory = session_factory
+        self._crud_strategy = ConversationCRUDStrategy(Conversation)
 
     def get_by_owner_id(
         self, owner_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[Conversation]:
         """Get conversations by owner ID"""
-        return self._crud_strategy.get_by_owner_id(self.db, owner_id, skip, limit)
+        with self.session_factory() as session:
+            return self._crud_strategy.get_by_owner_id(session, owner_id, skip, limit)
 
     def get_with_messages(self, conversation_id: UUID) -> Optional[Conversation]:
         """Get conversation with its messages"""
-        return self._crud_strategy.get_with_messages(self.db, conversation_id)
+        with self.session_factory() as session:
+            return self._crud_strategy.get_with_messages(session, conversation_id)
 
     def get_user_conversation_count(self, owner_id: UUID) -> int:
         """Get count of conversations for a user"""
-        return self._crud_strategy.get_user_conversation_count(self.db, owner_id)
+        with self.session_factory() as session:
+            return self._crud_strategy.get_user_conversation_count(session, owner_id)
 
     def user_owns_conversation(self, owner_id: UUID, conversation_id: UUID) -> bool:
         """Check if user owns the conversation"""
-        return self._crud_strategy.user_owns_conversation(
-            self.db, owner_id, conversation_id
-        )
+        with self.session_factory() as session:
+            return self._crud_strategy.user_owns_conversation(
+                session, owner_id, conversation_id
+            )
+
+    def create(self, input_schema: ConversationCreate) -> Conversation:
+        """Create a new conversation"""
+        with self.session_factory() as session:
+            return self._crud_strategy.create(session, input_schema)
+
+    def get_by_id(self, id: UUID) -> Optional[Conversation]:
+        """Get conversation by ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.get_by_id(session, id)
+
+    def get_all(self, skip: int = 0, limit: int = 100) -> list[Conversation]:
+        """Get all conversations with pagination"""
+        with self.session_factory() as session:
+            return self._crud_strategy.get_all(session, skip, limit)
+
+    def update(
+        self, id: UUID, input_schema: ConversationUpdate
+    ) -> Optional[Conversation]:
+        """Update conversation by ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.update(session, id, input_schema)
+
+    def delete(self, id: UUID) -> bool:
+        """Delete conversation by ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.delete(session, id)
+
+    def exists(self, id: UUID) -> bool:
+        """Check if conversation exists"""
+        with self.session_factory() as session:
+            return self._crud_strategy.exists(session, id)

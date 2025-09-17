@@ -1,13 +1,14 @@
 """Authentication API endpoints for user login, signup, and token management"""
 
 from datetime import timedelta
+from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
-from sqlalchemy.orm import Session
 from uuid import UUID
 
-from app.database.session import get_db
-from app.core.container import get_container
+from dependency_injector.wiring import Provide, inject
+
+from app.core.container import Container
 from app.services.user_service import UserService
 from app.core.config import settings
 from app.core.security import (
@@ -41,24 +42,21 @@ class RefreshTokenResponse(BaseModel):
     expires_in: int = settings.access_token_expire_minutes * 60
 
 
-def get_user_service(db: Session = Depends(get_db)) -> UserService:
-    """Dependency to get UserService instance"""
-    container = get_container()
-    container.set_session(db)
-    return container.get("user_service")
-
-
 @router.post("/signup", response_model=UserRead, status_code=status.HTTP_201_CREATED)
+@inject
 async def signup(
-    user_data: UserCreate, user_service: UserService = Depends(get_user_service)
+    user_data: UserCreate,
+    user_service: Annotated[UserService, Depends(Provide[Container.user_service])],
 ) -> UserRead:
     """Register a new user"""
     return user_service.create_user(user_data)
 
 
 @router.post("/login", response_model=TokenResponse)
+@inject
 async def login(
-    login_data: LoginRequest, user_service: UserService = Depends(get_user_service)
+    login_data: LoginRequest,
+    user_service: Annotated[UserService, Depends(Provide[Container.user_service])],
 ) -> TokenResponse:
     """Authenticate user and return JWT tokens"""
     try:
@@ -100,9 +98,10 @@ async def login(
 
 
 @router.post("/refresh", response_model=RefreshTokenResponse)
+@inject
 async def refresh_token(
+    user_service: Annotated[UserService, Depends(Provide[Container.user_service])],
     user_id: UUID = Depends(get_refresh_token_user_id),
-    user_service: UserService = Depends(get_user_service),
 ) -> RefreshTokenResponse:
     """Get new access token using refresh token"""
     # Verify user still exists

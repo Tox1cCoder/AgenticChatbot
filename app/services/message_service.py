@@ -1,9 +1,9 @@
 from __future__ import annotations
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional
 from uuid import UUID
 from fastapi import HTTPException, status
 
-from google import genai
+import google.generativeai as genai
 
 from app.core.config import settings
 from app.repositories.message import MessageRepository
@@ -13,16 +13,12 @@ from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
 from app.models.enums import MessageRole
 from app.factories.message_factory import MessageFactory
 
-if TYPE_CHECKING:
-    from app.core.container import DIContainer
-
 
 class MessageService:
     """Service layer for Message operations"""
 
     def __init__(
         self,
-        container: DIContainer,
         message_repository: MessageRepository,
         conversation_repository: ConversationRepository,
         user_repository: UserRepository,
@@ -31,12 +27,10 @@ class MessageService:
         Initialize MessageService with injected dependencies.
 
         Args:
-            container: DI container for additional dependency resolution
             message_repository: Injected message repository
             conversation_repository: Injected conversation repository
             user_repository: Injected user repository
         """
-        self.container = container
         self.repository = message_repository
         self.conversation_repository = conversation_repository
         self.user_repository = user_repository

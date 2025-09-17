@@ -25,7 +25,7 @@ def verify_password(password: str, hashed_password: str) -> bool:
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Create JWT access token using PyJWT (FastAPI recommended)"""
+    """Create JWT access token using PyJWT"""
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -38,7 +38,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 
 def verify_token(token: str) -> dict:
-    """Verify and decode JWT token using PyJWT (FastAPI recommended)"""
+    """Verify and decode JWT token using PyJWT"""
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
         return payload

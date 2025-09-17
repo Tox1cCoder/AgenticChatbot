@@ -1,5 +1,6 @@
 from typing import Optional
 from uuid import UUID
+from contextlib import AbstractContextManager
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
@@ -43,22 +44,57 @@ class UserCRUDStrategy(DefaultCRUDStrategy[User, UserCreate, UserUpdate]):
 class UserRepository(Repository[User, UserCreate, UserUpdate]):
     """Repository for User model using strategy pattern"""
 
-    def __init__(self, db: Session):
-        strategy = UserCRUDStrategy(User)
-        super().__init__(db, strategy)
+    def __init__(self, session_factory: callable):
+        """Initialize repository with session factory for dependency injection."""
+        self.session_factory = session_factory
+        self._crud_strategy = UserCRUDStrategy(User)
 
     def get_by_email(self, email: str) -> Optional[User]:
         """Get user by email address"""
-        return self._crud_strategy.get_by_email(self.db, email)
+        with self.session_factory() as session:
+            return self._crud_strategy.get_by_email(session, email)
 
     def get_by_username(self, username: str) -> Optional[User]:
         """Get user by username"""
-        return self._crud_strategy.get_by_username(self.db, username)
+        with self.session_factory() as session:
+            return self._crud_strategy.get_by_username(session, username)
 
     def email_exists(self, email: str, exclude_id: Optional[UUID] = None) -> bool:
         """Check if email already exists"""
-        return self._crud_strategy.email_exists(self.db, email, exclude_id)
+        with self.session_factory() as session:
+            return self._crud_strategy.email_exists(session, email, exclude_id)
 
     def username_exists(self, username: str, exclude_id: Optional[UUID] = None) -> bool:
         """Check if username already exists"""
-        return self._crud_strategy.username_exists(self.db, username, exclude_id)
+        with self.session_factory() as session:
+            return self._crud_strategy.username_exists(session, username, exclude_id)
+
+    def create(self, input_schema: UserCreate) -> User:
+        """Create a new user"""
+        with self.session_factory() as session:
+            return self._crud_strategy.create(session, input_schema)
+
+    def get_by_id(self, id: UUID) -> Optional[User]:
+        """Get user by ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.get_by_id(session, id)
+
+    def get_all(self, skip: int = 0, limit: int = 100) -> list[User]:
+        """Get all users with pagination"""
+        with self.session_factory() as session:
+            return self._crud_strategy.get_all(session, skip, limit)
+
+    def update(self, id: UUID, input_schema: UserUpdate) -> Optional[User]:
+        """Update user by ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.update(session, id, input_schema)
+
+    def delete(self, id: UUID) -> bool:
+        """Delete user by ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.delete(session, id)
+
+    def exists(self, id: UUID) -> bool:
+        """Check if user exists"""
+        with self.session_factory() as session:
+            return self._crud_strategy.exists(session, id)

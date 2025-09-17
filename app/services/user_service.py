@@ -8,16 +8,12 @@ from app.schemas.user import UserCreate, UserUpdate, UserRead, UserInDB
 from app.factories.user_factory import UserFactory
 from app.services.validation_service import UserValidationService
 
-if TYPE_CHECKING:
-    from app.core.container import DIContainer
-
 
 class UserService:
     """Service layer for User operations"""
 
     def __init__(
         self,
-        container: DIContainer,
         user_repository: UserRepository,
         user_validation_service: UserValidationService,
     ):
@@ -25,11 +21,9 @@ class UserService:
         Initialize UserService with injected dependencies.
 
         Args:
-            container: DI container for additional dependency resolution
             user_repository: Injected user repository
             user_validation_service: Injected validation service
         """
-        self.container = container
         self.repository = user_repository
         self.validation_service = user_validation_service
 

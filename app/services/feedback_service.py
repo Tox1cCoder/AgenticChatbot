@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional
 from uuid import UUID
 from fastapi import HTTPException, status
 
@@ -9,16 +9,12 @@ from app.repositories.user import UserRepository
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
 from app.factories.feedback_factory import FeedbackFactory
 
-if TYPE_CHECKING:
-    from app.core.container import DIContainer
-
 
 class FeedbackService:
     """Service layer for Feedback operations"""
 
     def __init__(
         self,
-        container: DIContainer,
         feedback_repository: FeedbackRepository,
         message_repository: MessageRepository,
         user_repository: UserRepository,
@@ -27,12 +23,13 @@ class FeedbackService:
         Initialize FeedbackService with injected dependencies.
 
         Args:
-            container: DI container for additional dependency resolution
             feedback_repository: Injected feedback repository
             message_repository: Injected message repository
             user_repository: Injected user repository
         """
-        self.container = container
+        self.repository = feedback_repository
+        self.message_repository = message_repository
+        self.user_repository = user_repository
         self.repository = feedback_repository
         self.message_repository = message_repository
         self.user_repository = user_repository

@@ -15,7 +15,7 @@ if dotenv_path.exists():
 class Settings(BaseSettings):
     # Database settings
     database_url: str = Field(
-        default="postgresql://test:123123123@localhost:5432/chatbot",
+        default="postgresql://postgres:123123123@localhost:5432/chatbot",
         description="Database URL for PostgreSQL connection",
     )
 
