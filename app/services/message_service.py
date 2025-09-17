@@ -3,7 +3,7 @@ from typing import List, Optional
 from uuid import UUID
 from fastapi import HTTPException, status
 
-import google.generativeai as genai
+from google import genai
 
 from app.core.config import settings
 from app.repositories.message import MessageRepository
