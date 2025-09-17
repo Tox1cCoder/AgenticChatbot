@@ -1,3 +1,4 @@
+import logging
 from typing import List, Optional
 from uuid import UUID
 from typing import Annotated
@@ -7,15 +8,16 @@ from dependency_injector.wiring import Provide, inject
 
 from app.core.container import Container
 from app.core.auth import get_current_user_id
-from app.services.feedback_service import FeedbackService
+from app.interfaces.feedback_service_interface import IFeedbackService
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
+from app.schemas.responses import ApiResponse
 
 router = APIRouter(prefix="/messages", tags=["feedback"])
 
 
 @router.post(
     "/{message_id}/feedback",
-    response_model=FeedbackRead,
+    response_model=ApiResponse[FeedbackRead],
     status_code=status.HTTP_201_CREATED,
 )
 @inject
@@ -23,54 +25,58 @@ async def create_feedback(
     message_id: UUID,
     feedback_data: FeedbackCreate,
     feedback_service: Annotated[
-        FeedbackService, Depends(Provide[Container.feedback_service])
+        IFeedbackService, Depends(Provide[Container.feedback_service])
     ],
     user_id: UUID = Depends(get_current_user_id),
-) -> FeedbackRead:
+) -> ApiResponse[FeedbackRead]:
     """Create new feedback for a message or update existing feedback"""
-    # Set the message_id from the URL path
     feedback_data.message_id = message_id
-    return feedback_service.create_feedback(feedback_data, user_id)
+    result = feedback_service.create_feedback(feedback_data, user_id)
+    return ApiResponse(data=result, message="Feedback created successfully")
 
 
-@router.get("/{message_id}/feedback/{feedback_id}", response_model=FeedbackRead)
+@router.get(
+    "/{message_id}/feedback/{feedback_id}", response_model=ApiResponse[FeedbackRead]
+)
 @inject
 async def get_feedback(
     message_id: UUID,
     feedback_id: UUID,
     feedback_service: Annotated[
-        FeedbackService, Depends(Provide[Container.feedback_service])
+        IFeedbackService, Depends(Provide[Container.feedback_service])
     ],
-) -> FeedbackRead:
+) -> ApiResponse[FeedbackRead]:
     """Get specific feedback for a message"""
-    return feedback_service.get_feedback_by_id(feedback_id)
+    result = feedback_service.get_by_id(feedback_id)
+    return ApiResponse(data=result, message="Feedback retrieved successfully")
 
 
-@router.get("/{message_id}/feedback", response_model=List[FeedbackRead])
+@router.get("/{message_id}/feedback", response_model=ApiResponse[List[FeedbackRead]])
 @inject
 async def get_message_feedback(
     message_id: UUID,
     feedback_service: Annotated[
-        FeedbackService, Depends(Provide[Container.feedback_service])
+        IFeedbackService, Depends(Provide[Container.feedback_service])
     ],
     skip: int = 0,
     limit: int = 100,
-) -> List[FeedbackRead]:
+) -> ApiResponse[List[FeedbackRead]]:
     """Get all feedback for a message"""
-    return feedback_service.get_feedback_by_message(message_id, skip=skip, limit=limit)
+    result = feedback_service.get_by_message(message_id, skip=skip, limit=limit)
+    return ApiResponse(data=result, message="Message feedback retrieved successfully")
 
 
-@router.get("/user/{user_id}", response_model=List[FeedbackRead])
+@router.get("/user/{user_id}", response_model=ApiResponse[List[FeedbackRead]])
 @inject
 async def get_user_feedback(
     user_id: UUID,
     feedback_service: Annotated[
-        FeedbackService, Depends(Provide[Container.feedback_service])
+        IFeedbackService, Depends(Provide[Container.feedback_service])
     ],
     authenticated_user_id: UUID = Depends(get_current_user_id),
     skip: int = 0,
     limit: int = 100,
-) -> List[FeedbackRead]:
+) -> ApiResponse[List[FeedbackRead]]:
     """Get all feedback by authenticated user (user_id must match authenticated user)"""
     # Validate user can only access their own feedback
     if user_id != authenticated_user_id:
@@ -78,7 +84,8 @@ async def get_user_feedback(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied: can only access your own feedback",
         )
-    return feedback_service.get_feedback_by_user(user_id, skip=skip, limit=limit)
+    result = feedback_service.get_feedback_by_user(user_id, skip=skip, limit=limit)
+    return ApiResponse(data=result, message="User feedback retrieved successfully")
 
 
 @router.get("/{message_id}/feedback/user/{user_id}", response_model=FeedbackRead)
@@ -87,7 +94,7 @@ async def get_user_feedback_for_message(
     message_id: UUID,
     user_id: UUID,
     feedback_service: Annotated[
-        FeedbackService, Depends(Provide[Container.feedback_service])
+        IFeedbackService, Depends(Provide[Container.feedback_service])
     ],
     authenticated_user_id: UUID = Depends(get_current_user_id),
 ) -> FeedbackRead:
@@ -111,7 +118,7 @@ async def get_user_feedback_for_message(
 async def get_message_rating_stats(
     message_id: UUID,
     feedback_service: Annotated[
-        FeedbackService, Depends(Provide[Container.feedback_service])
+        IFeedbackService, Depends(Provide[Container.feedback_service])
     ],
 ) -> dict:
     """Get rating statistics for a message"""
@@ -125,7 +132,7 @@ async def update_feedback(
     feedback_id: UUID,
     feedback_data: FeedbackUpdate,
     feedback_service: Annotated[
-        FeedbackService, Depends(Provide[Container.feedback_service])
+        IFeedbackService, Depends(Provide[Container.feedback_service])
     ],
     user_id: UUID = Depends(get_current_user_id),
 ) -> FeedbackRead:

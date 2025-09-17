@@ -142,7 +142,6 @@ POST /users/
    "email": "test@example.com",
    "password": "secure123",
    "full_name": "Test User",
-   "avatar_url": "https://example.com/avatar.jpg"
 }
 ```
 

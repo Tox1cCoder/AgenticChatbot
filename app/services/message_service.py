@@ -72,7 +72,7 @@ class MessageService(IMessageService):
             )
             self.repository.create(bot_response_entity)
 
-        return MessageRead.dto(created_message)
+        return MessageRead.model_validate(created_message)
 
     def get_by_id(self, message_id: UUID, user_id: UUID) -> MessageRead:
         """Get message by ID"""
@@ -82,7 +82,7 @@ class MessageService(IMessageService):
             )
 
         message_entity = self.repository.get_by_id(message_id)
-        return MessageRead.dto(message_entity)
+        return MessageRead.model_validate(message_entity)
 
     def get_conversation_messages(
         self,
@@ -114,7 +114,16 @@ class MessageService(IMessageService):
         message_entities = self.repository.get_by_conversation_id(
             conversation_id, skip=skip, limit=limit
         )
-        return [MessageRead.dto(msg) for msg in message_entities]
+        return [MessageRead.model_validate(msg) for msg in message_entities]
+
+    def get_user_messages(
+        self, user_id: UUID, skip: int = 0, limit: int = 100
+    ) -> List[MessageRead]:
+        """Get all messages by a user"""
+        message_entities = self.repository.get_by_user_id(
+            user_id, skip=skip, limit=limit
+        )
+        return [MessageRead.model_validate(msg) for msg in message_entities]
 
     def get_conversation_thread(
         self,
@@ -142,7 +151,7 @@ class MessageService(IMessageService):
                 )
 
         message_entities = self.repository.get_conversation_thread(conversation_id)
-        return [MessageRead.dto(msg) for msg in message_entities]
+        return [MessageRead.model_validate(msg) for msg in message_entities]
 
     def update_message(
         self,
@@ -168,8 +177,8 @@ class MessageService(IMessageService):
                 )
 
         message_entity = self.repository.get_by_id(message_id)
-        updated_message = self.repository.update(message_entity, message_update_data)
-        return MessageRead.dto(updated_message)
+        updated_message = self.repository.update(message_entity.id, message_update_data)
+        return MessageRead.model_validate(updated_message)
 
     def delete_message(self, message_id: UUID, user_id: UUID) -> bool:
         """Delete message with ownership validation"""

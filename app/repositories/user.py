@@ -5,12 +5,19 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from app.models.user import User
-from app.repositories.strategy import Repository, DefaultCRUDStrategy
+from app.repositories.command_strategy import DefaultCommandStrategy
+from app.repositories.query_strategy import DefaultQueryStrategy
 from app.schemas.user import UserCreate, UserUpdate
 
 
-class UserCRUDStrategy(DefaultCRUDStrategy[User, UserCreate, UserUpdate]):
+class UserCRUDStrategy(
+    DefaultCommandStrategy[User, UserCreate, UserUpdate], DefaultQueryStrategy[User]
+):
     """Custom CRUD strategy for User operations"""
+
+    def __init__(self, model: type[User]):
+        DefaultCommandStrategy.__init__(self, model)
+        DefaultQueryStrategy.__init__(self, model)
 
     def get_by_email(self, db: Session, email: str) -> Optional[User]:
         """Get user by email address"""
@@ -41,7 +48,7 @@ class UserCRUDStrategy(DefaultCRUDStrategy[User, UserCreate, UserUpdate]):
         return db.execute(stmt).scalar() is not None
 
 
-class UserRepository(Repository[User, UserCreate, UserUpdate]):
+class UserRepository:
     """Repository for User model using strategy pattern"""
 
     def __init__(self, session_factory: callable):

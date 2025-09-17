@@ -87,19 +87,33 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    # Validation services
+    user_validation_service = providers.Factory(
+        UserValidationService,
+        session_factory=db.provided.session,
+    )
+    conversation_validation_service = providers.Factory(
+        ConversationValidationService,
+        session_factory=db.provided.session,
+    )
+    message_validation_service = providers.Factory(
+        MessageValidationService,
+        session_factory=db.provided.session,
+    )
+
     # Business services
     user_service = providers.Factory(
         UserService,
         user_repository=user_repository,
-        user_validation_utils=user_validation_utils,
+        user_validation_service=user_validation_service,
     )
 
     conversation_service = providers.Factory(
         ConversationService,
         conversation_repository=conversation_repository,
         user_repository=user_repository,
-        user_validation_utils=user_validation_utils,
-        conversation_validation_utils=conversation_validation_utils,
+        user_validation_service=user_validation_service,
+        conversation_validation_service=conversation_validation_service,
     )
 
     message_service = providers.Factory(
@@ -107,8 +121,8 @@ class Container(containers.DeclarativeContainer):
         message_repository=message_repository,
         conversation_repository=conversation_repository,
         user_repository=user_repository,
-        conversation_validation_utils=conversation_validation_utils,
-        message_validation_utils=message_validation_utils,
+        conversation_validation_service=conversation_validation_service,
+        message_validation_service=message_validation_service,
     )
 
     feedback_service = providers.Factory(
@@ -116,8 +130,8 @@ class Container(containers.DeclarativeContainer):
         feedback_repository=feedback_repository,
         message_repository=message_repository,
         user_repository=user_repository,
-        user_validation_utils=user_validation_utils,
-        message_validation_utils=message_validation_utils,
+        user_validation_service=user_validation_service,
+        message_validation_service=message_validation_service,
     )
 
 

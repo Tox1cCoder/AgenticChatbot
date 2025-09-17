@@ -11,6 +11,7 @@ from app.api import (
     feedback_router,
 )
 from app.api.auth import router as auth_router
+from app.utils.exception_handler import register_exception_handlers
 
 
 def create_app() -> FastAPI:
@@ -46,6 +47,9 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Register centralized exception handlers
+    register_exception_handlers(app)
 
     # Include routers
     app.include_router(auth_router)

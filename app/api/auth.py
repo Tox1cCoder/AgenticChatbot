@@ -1,5 +1,6 @@
 """Authentication API endpoints for user login, signup, and token management"""
 
+import logging
 from datetime import timedelta
 from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -10,6 +11,7 @@ from dependency_injector.wiring import Provide, inject
 
 from app.core.container import Container
 from app.interfaces.user_service_interface import IUserService
+from app.services.auth_service import AuthService
 from app.core.config import settings
 from app.core.security import (
     verify_password,
@@ -35,10 +37,10 @@ class TokenResponse(BaseModel):
     expiresIn: int = Field(
         default=settings.access_token_expire_minutes * 60, alias="expires_in"
     )
-    userId: str = Field(alias="user_id")  # Include user_id in token response
+    userId: str = Field(alias="user_id")
 
     class Config:
-        allow_population_by_field_name = True
+        validate_by_name = True
 
 
 class RefreshTokenResponse(BaseModel):
@@ -49,7 +51,7 @@ class RefreshTokenResponse(BaseModel):
     )
 
     class Config:
-        allow_population_by_field_name = True
+        validate_by_name = True
 
 
 @router.post("/signup", response_model=UserRead, status_code=status.HTTP_201_CREATED)
@@ -69,42 +71,11 @@ async def login(
     user_service: Annotated[IUserService, Depends(Provide[Container.user_service])],
 ) -> TokenResponse:
     """Authenticate user and return JWT tokens"""
-    try:
-        # Get user by email with password hash for authentication
-        user = user_service.get_by_email_with_password(login_data.email)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or password",
-            )
-
-        # Verify password
-        if not verify_password(login_data.password, user.password_hash):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or password",
-            )
-
-        # Create tokens
-        token_data = {"sub": str(user.id)}
-        access_token = create_access_token(token_data)
-        refresh_token = create_refresh_token(token_data)
-
-        return TokenResponse(
-            access_token=access_token,
-            refresh_token=refresh_token,
-            user_id=str(user.id),  # Include user_id in response
-        )
-
-    except HTTPException:
-        # Re-raise HTTP exceptions (authentication failures)
-        raise
-    except Exception as e:
-        # Log unexpected errors and return generic authentication failure
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication failed",
-        )
+    # Create auth service instance with user service
+    auth_service = AuthService(user_service)
+    # Authenticate user using auth service
+    auth_response = auth_service.authenticate_user(login_data)
+    return TokenResponse(**auth_response)
 
 
 @router.post("/refresh", response_model=RefreshTokenResponse)
@@ -120,12 +91,11 @@ async def refresh_token(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-
     # Create new access token
     token_data = {"sub": str(user.id)}
     access_token = create_access_token(token_data)
-
     return RefreshTokenResponse(access_token=access_token)
 
 

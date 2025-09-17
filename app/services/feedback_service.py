@@ -46,13 +46,11 @@ class FeedbackService(IFeedbackService):
         self, feedback_create_data: FeedbackCreate, user_id: UUID
     ) -> FeedbackRead:
         """Create new feedback with validation"""
-        # Validate user exists
         if not self.user_validation_service.validate_user_exists(user_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
             )
 
-        # Validate message exists
         if not self.message_validation_service.validate_message_exists(
             feedback_create_data.message_id
         ):
@@ -60,38 +58,35 @@ class FeedbackService(IFeedbackService):
                 status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
             )
 
-        # Check if user already provided feedback for this message
         existing_feedback_entity = self.repository.get_by_message_and_user(
             feedback_create_data.message_id, user_id
         )
 
         if existing_feedback_entity:
-            # Update existing feedback
             from app.schemas.feedback import FeedbackUpdate
 
             update_data = FeedbackUpdate(
                 rating=feedback_create_data.rating, comment=feedback_create_data.comment
             )
             updated_feedback = self.repository.update(
-                existing_feedback_entity, update_data
+                existing_feedback_entity.id, update_data
             )
-            return FeedbackRead.dto(updated_feedback)
+            return FeedbackRead.model_validate(updated_feedback)
 
-        # Create new feedback entity using factory
         feedback_entity = FeedbackFactory.create_from_schema(
             feedback_create_data, user_id
         )
         created_feedback = self.repository.create(feedback_entity)
-        return FeedbackRead.dto(created_feedback)
+        return FeedbackRead.model_validate(created_feedback)
 
-    def get_feedback_by_id(self, feedback_id: UUID) -> FeedbackRead:
+    def get_by_id(self, feedback_id: UUID) -> FeedbackRead:
         """Get feedback by ID"""
         feedback_entity = self.repository.get_by_id(feedback_id)
         if not feedback_entity:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Feedback not found"
             )
-        return FeedbackRead.dto(feedback_entity)
+        return FeedbackRead.model_validate(feedback_entity)
 
     def get_by_message(
         self, message_id: UUID, skip: int = 0, limit: int = 100
@@ -106,7 +101,7 @@ class FeedbackService(IFeedbackService):
         feedback_entities = self.repository.get_by_message_id(
             message_id, skip=skip, limit=limit
         )
-        return [FeedbackRead.dto(feedback) for feedback in feedback_entities]
+        return [FeedbackRead.model_validate(feedback) for feedback in feedback_entities]
 
     def get_by_user(
         self, user_id: UUID, skip: int = 0, limit: int = 100
@@ -121,7 +116,7 @@ class FeedbackService(IFeedbackService):
         feedback_entities = self.repository.get_by_user_id(
             user_id, skip=skip, limit=limit
         )
-        return [FeedbackRead.dto(feedback) for feedback in feedback_entities]
+        return [FeedbackRead.model_validate(feedback) for feedback in feedback_entities]
 
     def get_user_feedback_for_message(
         self, message_id: UUID, user_id: UUID
@@ -140,7 +135,7 @@ class FeedbackService(IFeedbackService):
             )
 
         feedback_entity = self.repository.get_by_message_and_user(message_id, user_id)
-        return FeedbackRead.dto(feedback_entity) if feedback_entity else None
+        return FeedbackRead.model_validate(feedback_entity) if feedback_entity else None
 
     def get_message_rating_stats(self, message_id: UUID) -> dict:
         """Get rating statistics for a message"""
@@ -175,8 +170,10 @@ class FeedbackService(IFeedbackService):
                 detail="Access denied to this feedback",
             )
 
-        updated_feedback = self.repository.update(feedback_entity, feedback_update_data)
-        return FeedbackRead.dto(updated_feedback)
+        updated_feedback = self.repository.update(
+            feedback_entity.id, feedback_update_data
+        )
+        return FeedbackRead.model_validate(updated_feedback)
 
     def delete_feedback(self, feedback_id: UUID, user_id: UUID) -> bool:
         """Delete feedback with ownership validation"""

@@ -5,14 +5,20 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from app.models.feedback import Feedback
-from app.repositories.strategy import Repository, DefaultCRUDStrategy
+from app.repositories.command_strategy import DefaultCommandStrategy
+from app.repositories.query_strategy import DefaultQueryStrategy
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate
 
 
 class FeedbackCRUDStrategy(
-    DefaultCRUDStrategy[Feedback, FeedbackCreate, FeedbackUpdate]
+    DefaultCommandStrategy[Feedback, FeedbackCreate, FeedbackUpdate],
+    DefaultQueryStrategy[Feedback],
 ):
     """Custom CRUD strategy for Feedback operations"""
+
+    def __init__(self, model: type[Feedback]):
+        DefaultCommandStrategy.__init__(self, model)
+        DefaultQueryStrategy.__init__(self, model)
 
     def get_by_message_id(
         self, db: Session, message_id: UUID, skip: int = 0, limit: int = 100

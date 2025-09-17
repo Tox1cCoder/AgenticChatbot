@@ -27,8 +27,8 @@ class ConversationService(IConversationService):
         self,
         conversation_repository: ConversationRepository,
         user_repository: UserRepository,
-        user_validation_utils: UserValidationUtils,
-        conversation_validation_utils: ConversationValidationUtils,
+        user_validation_service: UserValidationService,
+        conversation_validation_service: ConversationValidationService,
     ):
         """
         Initialize ConversationService with injected dependencies.
@@ -36,36 +36,32 @@ class ConversationService(IConversationService):
         Args:
             conversation_repository: Injected conversation repository
             user_repository: Injected user repository
-            user_validation_utils: Injected user validation utils
-            conversation_validation_utils: Injected conversation validation utils
+            user_validation_service: Injected user validation service
+            conversation_validation_service: Injected conversation validation service
         """
         self.repository = conversation_repository
         self.user_repository = user_repository
-        self.user_validation_utils = user_validation_utils
-        self.conversation_validation_utils = conversation_validation_utils
+        self.user_validation_service = user_validation_service
+        self.conversation_validation_service = conversation_validation_service
 
     def create_conversation(
         self, conversation_create_data: ConversationCreate, owner_id: UUID
     ) -> ConversationRead:
         """Create a new conversation with validation"""
-        # Validate user exists
-        if not self.user_validation_utils.validate_user_exists(owner_id):
+        if not self.user_validation_service.validate_user_exists(owner_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
             )
 
-        # Create conversation entity using factory
         conversation_entity = ConversationFactory.create_from_schema(
             conversation_create_data, owner_id
         )
-
-        # Save to repository
         created_conversation = self.repository.create(conversation_entity)
-        return ConversationRead.dto(created_conversation)
+        return ConversationRead.model_validate(created_conversation)
 
     def get_by_id(self, conversation_id: UUID) -> ConversationRead:
         """Get conversation by ID"""
-        if not self.conversation_validation_utils.validate_conversation_exists(
+        if not self.conversation_validation_service.validate_conversation_exists(
             conversation_id
         ):
             raise HTTPException(
@@ -73,14 +69,13 @@ class ConversationService(IConversationService):
             )
 
         conversation_entity = self.repository.get_by_id(conversation_id)
-        return ConversationRead.dto(conversation_entity)
+        return ConversationRead.model_validate(conversation_entity)
 
     def get_user_conversations(
         self, owner_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[ConversationRead]:
         """Get all conversations for a user with validation"""
-        # Validate user exists
-        if not self.user_validation_utils.validate_user_exists(owner_id):
+        if not self.user_validation_service.validate_user_exists(owner_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
             )
@@ -89,7 +84,7 @@ class ConversationService(IConversationService):
             owner_id, skip=skip, limit=limit
         )
         return [
-            ConversationRead.dto(conversation_entity)
+            ConversationRead.model_validate(conversation_entity)
             for conversation_entity in conversation_entities
         ]
 
@@ -97,9 +92,8 @@ class ConversationService(IConversationService):
         self, conversation_id: UUID, owner_id: UUID
     ) -> ConversationRead:
         """Get conversation with messages, ensuring user owns it"""
-        # Validate conversation access
         is_valid, validation_errors = (
-            self.conversation_validation_utils.validate_conversation_access(
+            self.conversation_validation_service.validate_conversation_access(
                 owner_id, conversation_id
             )
         )
@@ -117,7 +111,7 @@ class ConversationService(IConversationService):
                 )
 
         conversation_entity = self.repository.get_with_messages(conversation_id)
-        return ConversationRead.dto(conversation_entity)
+        return ConversationRead.model_validate(conversation_entity)
 
     def update_conversation(
         self,
@@ -126,9 +120,8 @@ class ConversationService(IConversationService):
         conversation_update_data: ConversationUpdate,
     ) -> ConversationRead:
         """Update conversation with ownership validation"""
-        # Validate conversation access
         is_valid, validation_errors = (
-            self.conversation_validation_utils.validate_conversation_access(
+            self.conversation_validation_service.validate_conversation_access(
                 owner_id, conversation_id
             )
         )
@@ -147,15 +140,14 @@ class ConversationService(IConversationService):
 
         conversation_entity = self.repository.get_by_id(conversation_id)
         updated_conversation = self.repository.update(
-            conversation_entity, conversation_update_data
+            conversation_entity.id, conversation_update_data
         )
-        return ConversationRead.dto(updated_conversation)
+        return ConversationRead.model_validate(updated_conversation)
 
     def delete_conversation(self, conversation_id: UUID, owner_id: UUID) -> bool:
         """Delete conversation with ownership validation"""
-        # Validate conversation access
         is_valid, validation_errors = (
-            self.conversation_validation_utils.validate_conversation_access(
+            self.conversation_validation_service.validate_conversation_access(
                 owner_id, conversation_id
             )
         )

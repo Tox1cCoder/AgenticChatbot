@@ -5,14 +5,20 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select
 
 from app.models.conversation import Conversation
-from app.repositories.strategy import Repository, DefaultCRUDStrategy
+from app.repositories.command_strategy import DefaultCommandStrategy
+from app.repositories.query_strategy import DefaultQueryStrategy
 from app.schemas.conversation import ConversationCreate, ConversationUpdate
 
 
 class ConversationCRUDStrategy(
-    DefaultCRUDStrategy[Conversation, ConversationCreate, ConversationUpdate]
+    DefaultCommandStrategy[Conversation, ConversationCreate, ConversationUpdate],
+    DefaultQueryStrategy[Conversation],
 ):
     """Custom CRUD strategy for Conversation operations"""
+
+    def __init__(self, model: type[Conversation]):
+        DefaultCommandStrategy.__init__(self, model)
+        DefaultQueryStrategy.__init__(self, model)
 
     def get_by_owner_id(
         self, db: Session, owner_id: UUID, skip: int = 0, limit: int = 100
@@ -39,13 +45,6 @@ class ConversationCRUDStrategy(
             )
         )
         return db.execute(stmt).scalar_one_or_none()
-
-    def get_user_conversation_count(self, db: Session, owner_id: UUID) -> int:
-        """Get count of conversations for a user"""
-        stmt = select(Conversation.id).where(
-            Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
-        )
-        return len(list(db.execute(stmt).scalars().all()))
 
     def user_owns_conversation(
         self, db: Session, owner_id: UUID, conversation_id: UUID
@@ -78,11 +77,6 @@ class ConversationRepository:
         """Get conversation with its messages"""
         with self.session_factory() as session:
             return self._crud_strategy.get_with_messages(session, conversation_id)
-
-    def get_user_conversation_count(self, owner_id: UUID) -> int:
-        """Get count of conversations for a user"""
-        with self.session_factory() as session:
-            return self._crud_strategy.get_user_conversation_count(session, owner_id)
 
     def user_owns_conversation(self, owner_id: UUID, conversation_id: UUID) -> bool:
         """Check if user owns the conversation"""

@@ -264,12 +264,18 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
 # --- Cached API GET functions ---
 @st.cache_data(show_spinner=False)
 def get_users() -> List[Dict[str, Any]]:
-    return make_api_request("GET", "/users/") or []
+    response = make_api_request("GET", "/users/")
+    if response and "data" in response:
+        return response["data"]
+    return []
 
 
 @st.cache_data(show_spinner=False)
 def get_conversations(user_id: str) -> List[Dict[str, Any]]:
-    return make_api_request("GET", f"/conversations/") or []
+    response = make_api_request("GET", f"/conversations/")
+    if response and "data" in response:
+        return response["data"]
+    return []
 
 
 @st.cache_data(show_spinner=False)
@@ -284,18 +290,21 @@ def get_health_db() -> Dict:
 
 @st.cache_data(show_spinner=False)
 def get_messages(conversation_id: str, user_id: str) -> List[Dict[str, Any]]:
-    return (
-        make_api_request(
-            "GET",
-            f"/messages/conversations/{conversation_id}/messages/thread",
-        )
-        or []
+    response = make_api_request(
+        "GET",
+        f"/messages/conversations/{conversation_id}/messages/thread",
     )
+    if response and "data" in response:
+        return response["data"]
+    return []
 
 
 @st.cache_data(show_spinner=False)
 def get_feedbacks(message_id: str) -> List[Dict[str, Any]]:
-    return make_api_request("GET", f"/messages/{message_id}/feedback") or []
+    response = make_api_request("GET", f"/messages/{message_id}/feedback")
+    if response and "data" in response:
+        return response["data"]
+    return []
 
 
 @st.cache_data(show_spinner=False)
@@ -728,8 +737,10 @@ def render_chat_interface():
                         f"/conversations/",
                         conv_data,
                     )
-                    if conv_result:
-                        st.session_state.current_conversation_id = conv_result.get("id")
+                    if conv_result and "data" in conv_result:
+                        st.session_state.current_conversation_id = conv_result["data"][
+                            "id"
+                        ]
                         st.session_state.conversations_list = []  # Force reload
                     else:
                         st.error("Failed to create conversation")
@@ -739,7 +750,6 @@ def render_chat_interface():
                 message_data = {
                     "conversation_id": st.session_state.current_conversation_id,
                     "content": message_content,
-                    "role": 1,  # MessageRole.user = 1
                 }
                 result = make_api_request("POST", "/messages/", message_data)
                 if result:
