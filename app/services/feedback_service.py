@@ -8,6 +8,10 @@ from app.repositories.message import MessageRepository
 from app.repositories.user import UserRepository
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
 from app.factories.feedback_factory import FeedbackFactory
+from app.services.validation_service import (
+    UserValidationService,
+    MessageValidationService,
+)
 
 
 class FeedbackService:
@@ -18,6 +22,8 @@ class FeedbackService:
         feedback_repository: FeedbackRepository,
         message_repository: MessageRepository,
         user_repository: UserRepository,
+        user_validation_service: UserValidationService,
+        message_validation_service: MessageValidationService,
     ):
         """
         Initialize FeedbackService with injected dependencies.
@@ -26,26 +32,29 @@ class FeedbackService:
             feedback_repository: Injected feedback repository
             message_repository: Injected message repository
             user_repository: Injected user repository
+            user_validation_service: Injected user validation service
+            message_validation_service: Injected message validation service
         """
         self.repository = feedback_repository
         self.message_repository = message_repository
         self.user_repository = user_repository
-        self.repository = feedback_repository
-        self.message_repository = message_repository
-        self.user_repository = user_repository
+        self.user_validation_service = user_validation_service
+        self.message_validation_service = message_validation_service
 
     def create_feedback(
         self, feedback_create_data: FeedbackCreate, user_id: UUID
     ) -> FeedbackRead:
         """Create new feedback with validation"""
         # Validate user exists
-        if not self.user_repository.exists(user_id):
+        if not self.user_validation_service.validate_user_exists(user_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
             )
 
         # Validate message exists
-        if not self.message_repository.exists(feedback_create_data.message_id):
+        if not self.message_validation_service.validate_message_exists(
+            feedback_create_data.message_id
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
             )
@@ -88,7 +97,7 @@ class FeedbackService:
     ) -> List[FeedbackRead]:
         """Get all feedback for a message"""
         # Validate message exists
-        if not self.message_repository.exists(message_id):
+        if not self.message_validation_service.validate_message_exists(message_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
             )
@@ -103,7 +112,7 @@ class FeedbackService:
     ) -> List[FeedbackRead]:
         """Get all feedback by a user"""
         # Validate user exists
-        if not self.user_repository.exists(user_id):
+        if not self.user_validation_service.validate_user_exists(user_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
             )
@@ -118,13 +127,13 @@ class FeedbackService:
     ) -> Optional[FeedbackRead]:
         """Get specific user's feedback for a message"""
         # Validate message exists
-        if not self.message_repository.exists(message_id):
+        if not self.message_validation_service.validate_message_exists(message_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
             )
 
         # Validate user exists
-        if not self.user_repository.exists(user_id):
+        if not self.user_validation_service.validate_user_exists(user_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
             )
@@ -135,7 +144,7 @@ class FeedbackService:
     def get_message_rating_stats(self, message_id: UUID) -> dict:
         """Get rating statistics for a message"""
         # Validate message exists
-        if not self.message_repository.exists(message_id):
+        if not self.message_validation_service.validate_message_exists(message_id):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Message not found"
             )

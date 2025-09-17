@@ -315,18 +315,18 @@ def render_login_page():
         tab1, tab2 = st.tabs(["Sign In", "Sign Up"])
 
         with tab1:
-            with st.expander("Demo User List", expanded=False):
-                users = get_users()
-                if users:
-                    for user in users[:5]:
-                        if st.button(
-                            f"{user.get('email', user.get('username', 'Unknown'))}",
-                            key=f"quick_login_{user['id']}",
-                            use_container_width=True,
-                        ):
-                            st.warning("Placholder")
-                else:
-                    st.info("No users found in database")
+            # with st.expander("Demo User List", expanded=False):
+            #     users = get_users()
+            #     if users:
+            #         for user in users[:5]:
+            #             if st.button(
+            #                 f"{user.get('email', user.get('username', 'Unknown'))}",
+            #                 key=f"quick_login_{user['id']}",
+            #                 use_container_width=True,
+            #             ):
+            #                 st.warning("Placholder")
+            #     else:
+            #         st.info("No users found in database")
 
             with st.form("login_form"):
                 st.markdown("#### Sign in to your account")

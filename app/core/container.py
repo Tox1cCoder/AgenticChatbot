@@ -14,7 +14,11 @@ from app.services.user_service import UserService
 from app.services.conversation_service import ConversationService
 from app.services.message_service import MessageService
 from app.services.feedback_service import FeedbackService
-from app.services.validation_service import UserValidationService
+from app.services.validation_service import (
+    UserValidationService,
+    ConversationValidationService,
+    MessageValidationService,
+)
 
 
 class Container(containers.DeclarativeContainer):
@@ -65,6 +69,14 @@ class Container(containers.DeclarativeContainer):
         UserValidationService,
         session_factory=db.provided.session,
     )
+    conversation_validation_service = providers.Factory(
+        ConversationValidationService,
+        session_factory=db.provided.session,
+    )
+    message_validation_service = providers.Factory(
+        MessageValidationService,
+        session_factory=db.provided.session,
+    )
 
     # Business services
     user_service = providers.Factory(
@@ -77,6 +89,8 @@ class Container(containers.DeclarativeContainer):
         ConversationService,
         conversation_repository=conversation_repository,
         user_repository=user_repository,
+        user_validation_service=user_validation_service,
+        conversation_validation_service=conversation_validation_service,
     )
 
     message_service = providers.Factory(
@@ -84,6 +98,8 @@ class Container(containers.DeclarativeContainer):
         message_repository=message_repository,
         conversation_repository=conversation_repository,
         user_repository=user_repository,
+        conversation_validation_service=conversation_validation_service,
+        message_validation_service=message_validation_service,
     )
 
     feedback_service = providers.Factory(
@@ -91,6 +107,8 @@ class Container(containers.DeclarativeContainer):
         feedback_repository=feedback_repository,
         message_repository=message_repository,
         user_repository=user_repository,
+        user_validation_service=user_validation_service,
+        message_validation_service=message_validation_service,
     )
 
 
