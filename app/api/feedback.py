@@ -36,6 +36,18 @@ async def create_feedback(
     return ApiResponse(data=result, message="Feedback created successfully")
 
 
+@router.get("/{message_id}/feedback/stats")
+@inject
+async def get_message_rating_stats(
+    message_id: UUID,
+    feedback_service: Annotated[
+        IFeedbackService, Depends(Provide[Container.feedback_service])
+    ],
+) -> dict:
+    """Get rating statistics for a message"""
+    return feedback_service.get_message_rating_stats(message_id)
+
+
 @router.get(
     "/{message_id}/feedback/{feedback_id}", response_model=ApiResponse[FeedbackRead]
 )
@@ -114,18 +126,6 @@ async def get_user_feedback_for_message(
             detail="Feedback not found", error_code="FEEDBACK_NOT_FOUND"
         )
     return ApiResponse(data=feedback, message="User feedback retrieved successfully")
-
-
-@router.get("/{message_id}/feedback/stats")
-@inject
-async def get_message_rating_stats(
-    message_id: UUID,
-    feedback_service: Annotated[
-        IFeedbackService, Depends(Provide[Container.feedback_service])
-    ],
-) -> dict:
-    """Get rating statistics for a message"""
-    return feedback_service.get_message_rating_stats(message_id)
 
 
 @router.put(

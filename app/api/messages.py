@@ -38,9 +38,10 @@ async def get_message(
     message_service: Annotated[
         IMessageService, Depends(Provide[Container.message_service])
     ],
+    user_id: UUID = Depends(get_current_user_id),
 ) -> ApiResponse[MessageRead]:
     """Get message by ID"""
-    result = message_service.get_by_id(message_id)
+    result = message_service.get_by_id(message_id, user_id)
     return ApiResponse(data=result, message="Message retrieved successfully")
 
 
