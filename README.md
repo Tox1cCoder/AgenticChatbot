@@ -1,5 +1,20 @@
 # Sample Chatbot
 
+## Project Structure
+
+```
+app/
+├── api/           # FastAPI routes
+├── core/          # Config, security, DI
+├── database/      # DB session, base, connection
+├── factories/     # Test/data factories
+├── models/        # SQLAlchemy models
+├── repositories/  # Data access layer
+├── schemas/       # Pydantic schemas
+├── services/      # Business logic
+├── main.py        # FastAPI app entrypoint
+```
+
 ## Quickstart
 
 ### 1. Clone & Setup
@@ -10,19 +25,31 @@ git checkout Thai-Postgre-FastAPI
 cd <repo-folder>
 python -m venv .venv
 .venv\Scripts\activate
-pip install -e .
+pip install -e .  # Installs dependencies from pyproject.toml
+```
+
+For the demo UI:
+
+```bash
+pip install -r demo_requirements.txt
+streamlit run demo.py
 ```
 
 ### 2. Environment Variables
 
-Copy `.env.example` to `.env` and edit:
+Create a `.env` file in `app/core/` (or edit the existing one) and set:
 
 ```env
 DATABASE_URL=postgresql://username:password@localhost:5432/chatbot
 API_HOST=0.0.0.0
 API_PORT=8000
 API_DEBUG=true
+GEMINI_API_KEY=your_gemini_api_key_here
 ```
+
+Other optional variables (see `app/core/config.py`):
+
+- SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS, CORS_ORIGINS, ENVIRONMENT
 
 ### 3. Database Setup
 
@@ -53,6 +80,8 @@ Health: [http://localhost:8000/health](http://localhost:8000/health)
 
 ## Demo UI
 
+The demo UI uses Streamlit. To run it:
+
 ```bash
 pip install -r demo_requirements.txt
 streamlit run demo.py
@@ -73,14 +102,15 @@ Demo: [http://localhost:8501](http://localhost:8501)
 
 - `POST /users/` — Create user
 - `GET /users/{user_id}` — Get user by ID
-- `GET /users/` — List users (paginated)
+- `GET /users/` — List users (paginated, requires authentication)
 
-### Conversations
+### Conversations (all require authentication)
 
-- `POST /conversations/user/{user_id}` — Create conversation for user
+- `POST /conversations/` — Create conversation for current user
 - `GET /conversations/{conversation_id}` — Get conversation by ID
-- `GET /conversations/user/{user_id}` — List user's conversations (paginated)
-- `PUT /conversations/{conversation_id}` — Update conversation (requires user_id)
+- `GET /conversations/` — List current user's conversations (paginated: `page`, `limit`)
+- `PUT /conversations/{conversation_id}` — Update conversation (user must own conversation)
+- `DELETE /conversations/{conversation_id}` — Delete conversation (user must own conversation)
 
 ### Messages
 
@@ -193,27 +223,3 @@ POST /feedback/user/{user_id}
 - rating: SMALLINT (1-5), required
 - comment: TEXT, optional
 - Index: (message_id, user_id)
-
----
-
-## Project Structure
-
-```
-app/
-├── api/           # FastAPI routes
-├── core/          # Config, security
-├── db/            # DB session, base
-├── factories/     # Test/data factories
-├── models/        # SQLAlchemy models
-├── repositories/  # Data access
-├── schemas/       # Pydantic schemas
-├── services/      # Business logic
-└── main.py        # FastAPI app entrypoint
-```
-
-## Migrations
-
-- Create migration: `alembic revision --autogenerate -m "desc"`
-- Apply: `alembic upgrade head`
-- History: `alembic history`
-- Rollback: `alembic downgrade -1`
