@@ -1,5 +1,4 @@
-import logging
-from typing import List, Optional
+from typing import List
 from uuid import UUID
 from typing import Annotated
 from fastapi import APIRouter, Depends, status
@@ -8,7 +7,6 @@ from dependency_injector.wiring import Provide, inject
 
 from app.core.container import Container
 from app.core.auth import get_current_user_id
-from app.core.exceptions import AuthorizationException, ResourceNotFoundException
 from app.interfaces.feedback_service_interface import IFeedbackService
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
 from app.schemas.responses import ApiResponse
@@ -76,7 +74,9 @@ async def get_message_feedback(
 ) -> ApiResponse[List[FeedbackRead]]:
     """Get all feedback for a message"""
     result = feedback_service.get_by_message(message_id, skip=skip, limit=limit)
-    return ApiResponse(data=result, message="Message feedback retrieved successfully")
+    return ApiResponse(
+        data=result, message="Message feedback retrieved successfully"
+    )
 
 
 @router.get("/user/{user_id}", response_model=ApiResponse[List[FeedbackRead]])
@@ -91,12 +91,6 @@ async def get_user_feedback(
     limit: int = 100,
 ) -> ApiResponse[List[FeedbackRead]]:
     """Get all feedback by authenticated user (user_id must match authenticated user)"""
-    # Validate user can only access their own feedback
-    if user_id != authenticated_user_id:
-        raise AuthorizationException(
-            detail="Access denied: can only access your own feedback",
-            error_code="FEEDBACK_ACCESS_DENIED",
-        )
     result = feedback_service.get_feedback_by_user(user_id, skip=skip, limit=limit)
     return ApiResponse(data=result, message="User feedback retrieved successfully")
 
@@ -114,18 +108,10 @@ async def get_user_feedback_for_message(
     authenticated_user_id: UUID = Depends(get_current_user_id),
 ) -> ApiResponse[FeedbackRead]:
     """Get authenticated user's feedback for a message (user_id must match authenticated user)"""
-    # Validate user can only access their own feedback
-    if user_id != authenticated_user_id:
-        raise AuthorizationException(
-            detail="Access denied: can only access your own feedback",
-            error_code="FEEDBACK_ACCESS_DENIED",
-        )
     feedback = feedback_service.get_user_feedback_for_message(message_id, user_id)
-    if not feedback:
-        raise ResourceNotFoundException(
-            detail="Feedback not found", error_code="FEEDBACK_NOT_FOUND"
-        )
-    return ApiResponse(data=feedback, message="User feedback retrieved successfully")
+    return ApiResponse(
+        data=feedback, message="User feedback retrieved successfully"
+    )
 
 
 @router.put(

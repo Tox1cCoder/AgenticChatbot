@@ -280,12 +280,18 @@ def get_conversations(user_id: str) -> List[Dict[str, Any]]:
 
 @st.cache_data(show_spinner=False)
 def get_health_api() -> Dict:
-    return make_api_request("GET", "/health/")
+    response = make_api_request("GET", "/health/")
+    if response and "data" in response:
+        return response["data"]
+    return {}
 
 
 @st.cache_data(show_spinner=False)
 def get_health_db() -> Dict:
-    return make_api_request("GET", "/health/db")
+    response = make_api_request("GET", "/health/db")
+    if response and "data" in response:
+        return response["data"]
+    return {}
 
 
 @st.cache_data(show_spinner=False)
@@ -309,7 +315,10 @@ def get_feedbacks(message_id: str) -> List[Dict[str, Any]]:
 
 @st.cache_data(show_spinner=False)
 def get_feedback_stats(message_id: str) -> Dict:
-    return make_api_request("GET", f"/messages/{message_id}/feedback/stats") or {}
+    response = make_api_request("GET", f"/messages/{message_id}/feedback/stats")
+    if response and "data" in response:
+        return response["data"]
+    return {}
 
 
 def render_login_page():
@@ -349,9 +358,13 @@ def render_login_page():
                     login_data = {"email": email, "password": password}
                     auth_response = make_api_request("POST", "/auth/login", login_data)
 
-                    if auth_response and "access_token" in auth_response:
-                        st.session_state.auth_token = auth_response["access_token"]
-                        st.session_state.current_user_id = auth_response.get("user_id")
+                    if auth_response and "data" in auth_response:
+                        st.session_state.auth_token = auth_response["data"][
+                            "accessToken"
+                        ]
+                        st.session_state.current_user_id = auth_response["data"].get(
+                            "userId"
+                        )
                         st.session_state.show_login = False
                         st.success("✅ Signed in successfully!")
                         st.rerun()
@@ -392,13 +405,13 @@ def render_login_page():
                                 "POST", "/auth/login", login_data
                             )
 
-                            if auth_response and "access_token" in auth_response:
-                                st.session_state.auth_token = auth_response[
-                                    "access_token"
+                            if auth_response and "data" in auth_response:
+                                st.session_state.auth_token = auth_response["data"][
+                                    "accessToken"
                                 ]
-                                st.session_state.current_user_id = auth_response.get(
-                                    "user_id"
-                                )
+                                st.session_state.current_user_id = auth_response[
+                                    "data"
+                                ].get("userId")
                                 st.session_state.show_login = False
                                 st.success(
                                     "✅ Account created and signed in successfully!"
@@ -752,7 +765,7 @@ def render_chat_interface():
                     "content": message_content,
                 }
                 result = make_api_request("POST", "/messages/", message_data)
-                if result:
+                if result and "data" in result:
                     # Clear cache and force reload of conversations list to reflect new conversation
                     st.cache_data.clear()
                     # Reload all messages from backend to get both user message and bot response

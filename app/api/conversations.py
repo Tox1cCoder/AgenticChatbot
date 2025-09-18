@@ -1,4 +1,3 @@
-import logging
 from typing import List
 from uuid import UUID
 from typing import Annotated
@@ -8,11 +7,9 @@ from dependency_injector.wiring import Provide, inject
 
 from app.core.container import Container
 from app.core.auth import get_current_user_id
-from app.core.exceptions import ResourceNotFoundException
 from app.interfaces.conversation_service_interface import IConversationService
 from app.schemas.conversation import (
     ConversationCreate,
-    ConversationUpdate,
     ConversationRead,
 )
 from app.schemas.responses import ApiResponse, SuccessResponse
@@ -79,10 +76,5 @@ async def delete_conversation(
     user_id: UUID = Depends(get_current_user_id),
 ) -> SuccessResponse:
     """Delete conversation (requires user ownership)"""
-    success = conversation_service.delete_conversation(conversation_id, user_id)
-    if success:
-        return SuccessResponse(message="Conversation deleted successfully")
-    else:
-        raise ResourceNotFoundException(
-            detail="Conversation not found", error_code="CONVERSATION_NOT_FOUND"
-        )
+    conversation_service.delete_conversation(conversation_id, user_id)
+    return SuccessResponse(message="Conversation deleted successfully")

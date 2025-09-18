@@ -60,3 +60,12 @@ class ResourceNotFoundException(CustomHTTPException):
         super().__init__(
             status_code=status.HTTP_404_NOT_FOUND, detail=detail, error_code=error_code
         )
+
+
+class TokenExpiredException(AuthenticationException):
+    """Token expired exception"""
+
+    def __init__(
+        self, detail: str = "Token has expired", error_code: str = "TOKEN_EXPIRED"
+    ):
+        super().__init__(detail=detail, error_code=error_code)

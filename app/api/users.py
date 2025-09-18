@@ -1,4 +1,3 @@
-import logging
 from typing import List
 from uuid import UUID
 from typing import Annotated
@@ -7,25 +6,11 @@ from fastapi import APIRouter, Depends, status
 from dependency_injector.wiring import Provide, inject
 
 from app.core.container import Container
-from app.core.exceptions import ResourceNotFoundException
 from app.interfaces.user_service_interface import IUserService
-from app.schemas.user import UserCreate, UserUpdate, UserRead
+from app.schemas.user import UserRead
 from app.schemas.responses import ApiResponse
 
 router = APIRouter(prefix="/users", tags=["users"])
-
-
-@router.post(
-    "/", response_model=ApiResponse[UserRead], status_code=status.HTTP_201_CREATED
-)
-@inject
-async def create_user(
-    user_data: UserCreate,
-    user_service: Annotated[IUserService, Depends(Provide[Container.user_service])],
-) -> ApiResponse[UserRead]:
-    """Create a new user"""
-    result = user_service.create_user(user_data)
-    return ApiResponse(data=result, message="User created successfully")
 
 
 @router.get("/{user_id}", response_model=ApiResponse[UserRead])

@@ -1,4 +1,3 @@
-import logging
 from typing import List
 from uuid import UUID
 from typing import Annotated
@@ -8,9 +7,8 @@ from dependency_injector.wiring import Provide, inject
 
 from app.core.container import Container
 from app.core.auth import get_current_user_id
-from app.core.exceptions import ResourceNotFoundException
 from app.interfaces.message_service_interface import IMessageService
-from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
+from app.schemas.message import MessageCreate, MessageRead
 from app.schemas.responses import ApiResponse
 
 router = APIRouter(prefix="/messages", tags=["messages"])

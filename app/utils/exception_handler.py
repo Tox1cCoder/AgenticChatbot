@@ -9,10 +9,6 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from app.core.exceptions import (
     CustomHTTPException,
-    AuthenticationException,
-    AuthorizationException,
-    ValidationException,
-    ResourceNotFoundException,
 )
 
 
@@ -26,53 +22,6 @@ def register_exception_handlers(app: FastAPI):
                 "detail": exc.detail,
             },
             headers=getattr(exc, "headers", None),
-        )
-
-    @app.exception_handler(AuthenticationException)
-    async def authentication_exception_handler(
-        request: Request, exc: AuthenticationException
-    ):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={
-                "error": exc.error_code,
-                "detail": exc.detail,
-            },
-            headers=getattr(exc, "headers", None),
-        )
-
-    @app.exception_handler(AuthorizationException)
-    async def authorization_exception_handler(
-        request: Request, exc: AuthorizationException
-    ):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={
-                "error": exc.error_code,
-                "detail": exc.detail,
-            },
-        )
-
-    @app.exception_handler(ValidationException)
-    async def validation_exception_handler(request: Request, exc: ValidationException):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={
-                "error": exc.error_code,
-                "detail": exc.detail,
-            },
-        )
-
-    @app.exception_handler(ResourceNotFoundException)
-    async def resource_not_found_exception_handler(
-        request: Request, exc: ResourceNotFoundException
-    ):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={
-                "error": exc.error_code,
-                "detail": exc.detail,
-            },
         )
 
     @app.exception_handler(FastAPIHTTPException)

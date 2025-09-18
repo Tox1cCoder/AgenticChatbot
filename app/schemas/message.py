@@ -40,7 +40,7 @@ class MessageRead(BaseModel):
     deleted_at: Optional[datetime]
     conversation_id: UUID
     sender: int = Field(
-        ..., description="Message sender: 1=user, 2=assistant, 3=system"
+        ..., description="Message sender: 1=user, 2=assistant"
     )
     content: str = Field(..., min_length=1, description="Message content")
 

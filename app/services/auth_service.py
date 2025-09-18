@@ -8,10 +8,13 @@ from app.core.security import verify_password, create_access_token, create_refre
 from app.schemas.responses.token_response import LoginRequest
 
 
-class AuthService:
+from app.interfaces.auth_service_interface import IAuthService
+from app.interfaces.user_service_interface import IUserService
+
+class AuthService(IAuthService):
     """Service for authentication operations"""
 
-    def __init__(self, user_service):
+    def __init__(self, user_service: IUserService) -> None:
         self.user_service = user_service
 
     def authenticate_user(self, login_data: LoginRequest) -> dict:

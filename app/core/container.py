@@ -1,5 +1,5 @@
 """
-Dependency Injection Container using python-dependency-injector.
+Dependency Injection Container.
 """
 
 from dependency_injector import containers, providers
@@ -22,7 +22,9 @@ from app.interfaces import (
     IConversationService,
     IMessageService,
     IFeedbackService,
+    IAuthService,
 )
+from app.services.auth_service import AuthService
 
 
 class Container(containers.DeclarativeContainer):
@@ -81,15 +83,19 @@ class Container(containers.DeclarativeContainer):
         MessageValidationUtils,
         session_factory=db.provided.session,
     )
+    feedback_validation_utils = providers.Factory(
+        FeedbackValidationUtils,
+        session_factory=db.provided.session,
+    )
 
     # Business services
-    user_service = providers.Factory(
+    user_service: providers.Provider[IUserService] = providers.Factory(
         UserService,
         user_repository=user_repository,
         user_validation_utils=user_validation_utils,
     )
 
-    conversation_service = providers.Factory(
+    conversation_service: providers.Provider[IConversationService] = providers.Factory(
         ConversationService,
         conversation_repository=conversation_repository,
         user_repository=user_repository,
@@ -97,7 +103,7 @@ class Container(containers.DeclarativeContainer):
         conversation_validation_utils=conversation_validation_utils,
     )
 
-    message_service = providers.Factory(
+    message_service: providers.Provider[IMessageService] = providers.Factory(
         MessageService,
         message_repository=message_repository,
         conversation_repository=conversation_repository,
@@ -106,13 +112,18 @@ class Container(containers.DeclarativeContainer):
         message_validation_utils=message_validation_utils,
     )
 
-    feedback_service = providers.Factory(
+    feedback_service: providers.Provider[IFeedbackService] = providers.Factory(
         FeedbackService,
         feedback_repository=feedback_repository,
         message_repository=message_repository,
         user_repository=user_repository,
         user_validation_utils=user_validation_utils,
         message_validation_utils=message_validation_utils,
+    )
+
+    auth_service: providers.Provider[IAuthService] = providers.Factory(
+        AuthService,
+        user_service=user_service,
     )
 
 
