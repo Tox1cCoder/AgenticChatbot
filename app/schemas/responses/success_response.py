@@ -1,5 +1,5 @@
 """
-Simple success response
+Success Response Schema
 """
 
 from pydantic import BaseModel, Field, ConfigDict
@@ -11,7 +11,7 @@ def to_camel(string: str) -> str:
 
 
 class SuccessResponse(BaseModel):
-    """Simple success response"""
+    """Success Response Schema"""
 
     success: bool = Field(True, description="Indicates the request was successful")
     message: str = Field(

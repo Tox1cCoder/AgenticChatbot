@@ -5,7 +5,7 @@ Authentication service for handling login operations
 from fastapi import HTTPException, status
 
 from app.core.security import verify_password, create_access_token, create_refresh_token
-from app.schemas.auth import LoginRequest
+from app.schemas.responses.token_response import LoginRequest
 
 
 class AuthService:

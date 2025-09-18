@@ -21,38 +21,15 @@ from app.core.security import (
 )
 from app.core.auth import get_refresh_token_user_id, security
 from app.schemas.user import UserCreate, UserRead
+from app.schemas.responses.api_response import ApiResponse
+from app.schemas.responses.token_response import (
+    TokenResponse,
+    LoginRequest,
+    RefreshTokenResponse,
+)
 from pydantic import BaseModel, EmailStr, Field
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
-
-
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-
-class TokenResponse(BaseModel):
-    accessToken: str = Field(alias="access_token")
-    refreshToken: str = Field(alias="refresh_token")
-    tokenType: str = Field(default="bearer", alias="token_type")
-    expiresIn: int = Field(
-        default=settings.access_token_expire_minutes * 60, alias="expires_in"
-    )
-    userId: str = Field(alias="user_id")
-
-    class Config:
-        validate_by_name = True
-
-
-class RefreshTokenResponse(BaseModel):
-    accessToken: str = Field(alias="access_token")
-    tokenType: str = Field(default="bearer", alias="token_type")
-    expiresIn: int = Field(
-        default=settings.access_token_expire_minutes * 60, alias="expires_in"
-    )
-
-    class Config:
-        validate_by_name = True
 
 
 @router.post("/signup", response_model=UserRead, status_code=status.HTTP_201_CREATED)
@@ -65,18 +42,19 @@ async def signup(
     return user_service.create_user(user_data)
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=ApiResponse[TokenResponse])
 @inject
 async def login(
     login_data: LoginRequest,
     user_service: Annotated[IUserService, Depends(Provide[Container.user_service])],
-) -> TokenResponse:
+) -> ApiResponse[TokenResponse]:
     """Authenticate user and return JWT tokens"""
     # Create auth service instance with user service
     auth_service = AuthService(user_service)
     # Authenticate user using auth service
     auth_response = auth_service.authenticate_user(login_data)
-    return TokenResponse(**auth_response)
+    token_response = TokenResponse(**auth_response)
+    return ApiResponse(data=token_response, message="Login successful")
 
 
 @router.post("/refresh", response_model=RefreshTokenResponse)

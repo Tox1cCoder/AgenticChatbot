@@ -1,5 +1,5 @@
 """
-Error response format
+Error Response Schema
 """
 
 from typing import Optional, Dict, Any
@@ -12,7 +12,7 @@ def to_camel(string: str) -> str:
 
 
 class ErrorResponse(BaseModel):
-    """Error response format"""
+    """Error Response Schema"""
 
     success: bool = Field(False, description="Indicates the request failed")
     message: str = Field(..., description="Error message")
