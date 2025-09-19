@@ -28,7 +28,6 @@ async def create_message(
     result = message_service.create_message(message_data)
     return ApiResponse(data=result, message="Message created successfully")
 
-
 @router.get("/{message_id}", response_model=ApiResponse[MessageRead])
 @inject
 async def get_message(

@@ -2,7 +2,8 @@ import streamlit as st
 import requests
 import json
 from typing import Dict, Optional, Any, List
-from datetime import datetime
+from datetime import datetime, timedelta
+from dateutil import parser
 
 # API Configuration
 API_BASE_URL = "http://localhost:8000"
@@ -646,8 +647,25 @@ def render_chat_interface():
             )
         return
 
-    # Chat container with modern styling
     st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+
+    def format_time(iso_string: str) -> str:
+        try:
+            dt = parser.isoparse(iso_string)
+            now = datetime.now(dt.tzinfo)
+
+            # If same day → just show time
+            if dt.date() == now.date():
+                return dt.strftime("%H:%M")
+
+            # If within this week → show weekday + time
+            if now - timedelta(days=7) < dt <= now:
+                return dt.strftime("%a %H:%M")
+
+            # Else → full date + time
+            return dt.strftime("%b %d, %Y %H:%M")
+        except Exception:
+            return iso_string
 
     # Display all messages with proper alignment
     for msg in st.session_state.messages:
@@ -656,13 +674,19 @@ def render_chat_interface():
             st.markdown(
                 f"""
                 <div style="display: flex; justify-content: flex-end; margin: 10px 0; align-items: flex-start; gap: 10px;">
-                    <div class="user-message">
+                    <div class="user-message" style="background: #f1f1f1; padding: 10px; border-radius: 10px; max-width: 70%;">
                         {msg["content"]}
-                        <div class="message-timestamp">You • {msg.get("data/createdAt", "nowcc")}</div>
+                        <div class="message-timestamp" style="font-size: 12px; color: gray; margin-top: 5px;">
+                            You • {format_time(msg.get("createdAt", "now"))}
+                        </div>
                     </div>
-                    <div style="background: #007bff; color: white; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">👤</div>
+                    <div style="border: 2px solid #007bff; color: #007bff; border-radius: 50%; 
+                                width: 35px; height: 35px; display: flex; align-items: center; 
+                                justify-content: center; font-weight: bold; font-size: 14px;">
+                        👤
+                    </div>
                 </div>
-            """,
+                """,
                 unsafe_allow_html=True,
             )
         else:
@@ -670,15 +694,21 @@ def render_chat_interface():
             st.markdown(
                 f"""
                 <div style="display: flex; justify-content: flex-start; margin: 10px 0; align-items: flex-start; gap: 10px;">
-                    <div style="background: #6c757d; color: white; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">🤖</div>
+                    <div style="border: 2px solid #6c757d; color: #6c757d; border-radius: 50%; 
+                                width: 35px; height: 35px; display: flex; align-items: center; 
+                                justify-content: center; font-weight: bold; font-size: 14px;">
+                        🤖
+                    </div>
                     <div style="display: flex; flex-direction: column; gap: 5px; max-width: 70%;">
-                        <div class="bot-message">
+                        <div class="bot-message" style="background: #e9ecef; padding: 10px; border-radius: 10px;">
                             {msg["content"]}
-                            <div class="message-timestamp">Assistant • {msg.get("created_at", "now")}</div>
+                            <div class="message-timestamp" style="font-size: 12px; color: gray; margin-top: 5px;">
+                                Assistant • {format_time(msg.get("createdAt", "now"))}
+                            </div>
                         </div>
                     </div>
                 </div>
-            """,
+                """,
                 unsafe_allow_html=True,
             )
             with st.popover("💭", help="Give feedback"):
@@ -708,11 +738,9 @@ def render_chat_interface():
                         st.rerun()
             # Show existing feedback
             feedbacks = get_feedbacks(msg["id"])
-            if feedbacks:
-                avg_rating = sum(fb.get("rating", 0) for fb in feedbacks) / len(
-                    feedbacks
-                )
-                st.markdown(f"⭐ {avg_rating:.1f} ({len(feedbacks)} reviews)")
+            for fb in feedbacks:
+                rating = fb.get("rating", 0)
+                st.markdown(f"⭐ {rating:.1f}")
 
                 # Show individual feedback comments
                 with st.expander("View Feedback", expanded=False):

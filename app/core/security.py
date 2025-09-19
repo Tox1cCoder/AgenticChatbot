@@ -32,20 +32,20 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 
 def verify_token(token: str) -> dict:
-    """Verify and decode JWT token using JwtService"""
+    """Verify and decode JWT token"""
     return jwt_service.decode_token(token)
 
 
 def get_user_id_from_token(token: str) -> str:
-    """Extract user ID from JWT token using JwtService"""
+    """Extract user ID from JWT token"""
     return jwt_service.get_user_id_from_token(token)
 
 
 def create_refresh_token(data: dict) -> str:
-    """Create refresh token using JwtService"""
+    """Create refresh token"""
     return jwt_service.create_refresh_token(data)
 
 
 def verify_refresh_token(token: str) -> dict:
-    """Verify refresh token using JwtService"""
+    """Verify refresh token"""
     return jwt_service.verify_refresh_token(token)

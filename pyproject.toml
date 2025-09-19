@@ -9,15 +9,19 @@ description = "A sample chatbot application with FastAPI and PostgreSQL"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "fastapi>=0.104.1",
-    "uvicorn[standard]>=0.24.0",
-    "sqlalchemy>=2.0.23",
-    "psycopg2-binary>=2.9.9",
     "alembic>=1.12.1",
+    "bcrypt",
+    "dependency-injector",
+    "email-validator>=2.1.0",
+    "fastapi>=0.104.1",
+    "google-generativeai",
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
+    "psycopg2-binary>=2.9.9",
+    "PyJWT",
     "python-multipart>=0.0.6",
-    "email-validator>=2.1.0",
+    "sqlalchemy>=2.0.23",
+    "uvicorn[standard]>=0.24.0",
 ]
 
 [project.optional-dependencies]
