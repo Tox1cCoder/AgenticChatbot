@@ -4,9 +4,9 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import jwt
-from fastapi import HTTPException, status
 
 from app.core.config import settings
+from app.core.exceptions import TokenExpiredException, AuthenticationException
 
 
 class JwtService:
@@ -46,26 +46,19 @@ class JwtService:
             payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
             return payload
         except jwt.ExpiredSignatureError:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token has expired",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+            raise TokenExpiredException()
         except jwt.InvalidTokenError:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
+            raise AuthenticationException(
                 detail="Invalid authentication credentials",
-                headers={"WWW-Authenticate": "Bearer"},
+                error_code="INVALID_CREDENTIALS",
             )
 
     def verify_refresh_token(self, token: str) -> dict:
         """Verify refresh token and ensure correct type"""
         payload = self.decode_token(token)
         if payload.get("type") != "refresh":
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token type",
-                headers={"WWW-Authenticate": "Bearer"},
+            raise AuthenticationException(
+                detail="Invalid token type", error_code="INVALID_TOKEN_TYPE"
             )
         return payload
 
@@ -74,9 +67,8 @@ class JwtService:
         payload = self.decode_token(token)
         user_id: str = payload.get("sub")
         if user_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
+            raise AuthenticationException(
                 detail="Invalid authentication credentials",
-                headers={"WWW-Authenticate": "Bearer"},
+                error_code="INVALID_CREDENTIALS",
             )
         return user_id

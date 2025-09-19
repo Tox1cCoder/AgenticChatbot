@@ -1,9 +1,16 @@
 # Step 0: Define tools and model
-
+import os
+from dotenv import load_dotenv
 from langchain_core.tools import tool
 from langchain.chat_models import init_chat_model
 
-llm = init_chat_model("anthropic:claude-3-7-sonnet-latest", temperature=0)
+load_dotenv(os.path.join(os.path.dirname(__file__), "../core/.env"))
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+llm = init_chat_model(
+    "google_genai:gemini-2.5-flash", temperature=0, api_key=GEMINI_API_KEY
+)
 
 
 # Define tools

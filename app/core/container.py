@@ -10,13 +10,18 @@ from app.repositories.user import UserRepository
 from app.repositories.conversation import ConversationRepository
 from app.repositories.message import MessageRepository
 from app.repositories.feedback import FeedbackRepository
+
+from app.services.auth_service import AuthService
 from app.services.user_service import UserService
 from app.services.conversation_service import ConversationService
 from app.services.message_service import MessageService
 from app.services.feedback_service import FeedbackService
-from app.utils.user_validation import UserValidationUtils
-from app.utils.conversation_validation import ConversationValidationUtils
-from app.utils.message_validation import MessageValidationUtils
+
+from app.utils.validation.user_validation import UserValidationUtils
+from app.utils.validation.conversation_validation import ConversationValidationUtils
+from app.utils.validation.feedback_validation import FeedbackValidationUtils
+from app.utils.validation.message_validation import MessageValidationUtils
+
 from app.interfaces import (
     IUserService,
     IConversationService,
@@ -24,7 +29,6 @@ from app.interfaces import (
     IFeedbackService,
     IAuthService,
 )
-from app.services.auth_service import AuthService
 
 
 class Container(containers.DeclarativeContainer):
@@ -98,7 +102,6 @@ class Container(containers.DeclarativeContainer):
     conversation_service: providers.Provider[IConversationService] = providers.Factory(
         ConversationService,
         conversation_repository=conversation_repository,
-        user_repository=user_repository,
         user_validation_utils=user_validation_utils,
         conversation_validation_utils=conversation_validation_utils,
     )
@@ -106,8 +109,6 @@ class Container(containers.DeclarativeContainer):
     message_service: providers.Provider[IMessageService] = providers.Factory(
         MessageService,
         message_repository=message_repository,
-        conversation_repository=conversation_repository,
-        user_repository=user_repository,
         conversation_validation_utils=conversation_validation_utils,
         message_validation_utils=message_validation_utils,
     )
@@ -119,6 +120,7 @@ class Container(containers.DeclarativeContainer):
         user_repository=user_repository,
         user_validation_utils=user_validation_utils,
         message_validation_utils=message_validation_utils,
+        feedback_validation_utils=feedback_validation_utils,
     )
 
     auth_service: providers.Provider[IAuthService] = providers.Factory(

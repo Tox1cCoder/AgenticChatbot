@@ -658,7 +658,7 @@ def render_chat_interface():
                 <div style="display: flex; justify-content: flex-end; margin: 10px 0; align-items: flex-start; gap: 10px;">
                     <div class="user-message">
                         {msg["content"]}
-                        <div class="message-timestamp">You • {msg.get("created_at", "now")}</div>
+                        <div class="message-timestamp">You • {msg.get("data/createdAt", "nowcc")}</div>
                     </div>
                     <div style="background: #007bff; color: white; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">👤</div>
                 </div>

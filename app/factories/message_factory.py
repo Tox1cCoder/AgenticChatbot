@@ -4,11 +4,11 @@ Message factory for creating Message entities
 
 from typing import Dict, Any, Optional
 from uuid import uuid4, UUID
-from datetime import datetime, timezone
 
 from app.models.message import Message
 from app.schemas.message import MessageCreate
 from app.models.enums import MessageRole
+from app.utils.timestamp_utils import TimestampUtils
 
 
 class MessageFactory:
@@ -22,7 +22,7 @@ class MessageFactory:
             "conversation_id": message_data.conversation_id,
             "sender": MessageRole.user.value,  # Default role assignment
             "content": message_data.content,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": TimestampUtils.now(),
         }
 
     @staticmethod
@@ -35,20 +35,18 @@ class MessageFactory:
             "conversation_id": message_data.conversation_id,
             "sender": role.value,
             "content": message_data.content,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": TimestampUtils.now(),
         }
 
     @staticmethod
     def create_from_dict(message_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create Message data dictionary from dictionary"""
-        now = datetime.now(timezone.utc)
-
         return {
             "id": message_data.get("id", uuid4()),
             "conversation_id": message_data["conversation_id"],
             "sender": message_data["sender"],
             "content": message_data["content"],
-            "created_at": message_data.get("created_at", now),
+            "created_at": message_data.get("created_at", TimestampUtils.now()),
         }
 
     @staticmethod
@@ -59,5 +57,5 @@ class MessageFactory:
             "conversation_id": conversation_id,
             "sender": MessageRole.assistant.value,
             "content": content,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": TimestampUtils.now(),
         }

@@ -3,7 +3,7 @@
 from fastapi import Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from uuid import UUID
-from jose import ExpiredSignatureError
+import jwt
 
 from app.core.security import get_user_id_from_token, verify_refresh_token
 from app.core.exceptions import TokenExpiredException, AuthenticationException, AuthorizationException
@@ -21,7 +21,7 @@ async def get_current_user_id(
     try:
         user_id_str = get_user_id_from_token(token)
         return UUID(user_id_str)
-    except ExpiredSignatureError:
+    except jwt.ExpiredSignatureError:
         raise TokenExpiredException()
     except ValueError:
         raise AuthenticationException(
@@ -48,7 +48,7 @@ async def get_refresh_token_user_id(
             )
 
         return UUID(user_id_str)
-    except ExpiredSignatureError:
+    except jwt.ExpiredSignatureError:
         raise TokenExpiredException()
     except ValueError:
         raise AuthenticationException(

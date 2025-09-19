@@ -1,23 +1,16 @@
 from __future__ import annotations
-from typing import List, Optional
+from typing import List
 from uuid import UUID
 
-from app.core.exceptions import (
-    ValidationException,
-    ResourceNotFoundException,
-    AuthorizationException,
-)
 from google import genai
 
 from app.core.config import settings
 from app.repositories.message import MessageRepository
-from app.repositories.conversation import ConversationRepository
-from app.repositories.user import UserRepository
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
 from app.models.enums import MessageRole
 from app.factories.message_factory import MessageFactory
-from app.utils.conversation_validation import ConversationValidationUtils
-from app.utils.message_validation import MessageValidationUtils
+from app.utils.validation.conversation_validation import ConversationValidationUtils
+from app.utils.validation.message_validation import MessageValidationUtils
 from app.interfaces.message_service_interface import IMessageService
 
 
@@ -27,46 +20,24 @@ class MessageService(IMessageService):
     def __init__(
         self,
         message_repository: MessageRepository,
-        conversation_repository: ConversationRepository,
-        user_repository: UserRepository,
         conversation_validation_utils: ConversationValidationUtils,
         message_validation_utils: MessageValidationUtils,
     ):
-        """
-        Initialize MessageService with injected dependencies.
-
-        Args:
-            message_repository: Injected message repository
-            conversation_repository: Injected conversation repository
-            user_repository: Injected user repository
-            conversation_validation_utils: Injected conversation validation utils
-            message_validation_utils: Injected message validation utils
-        """
         self.repository = message_repository
-        self.conversation_repository = conversation_repository
-        self.user_repository = user_repository
         self.conversation_validation_utils = conversation_validation_utils
         self.message_validation_utils = message_validation_utils
 
     def create_message(self, message_create_data: MessageCreate) -> MessageRead:
-        """Create a new message with role from request data"""
-        # Validate conversation exists
-        if not self.conversation_validation_utils.validate_conversation_exists(
+        self.conversation_validation_utils.validate_conversation_exists(
             message_create_data.conversation_id
-        ):
-            raise ResourceNotFoundException(
-                detail="Conversation not found", error_code="CONVERSATION_NOT_FOUND"
-            )
+        )
 
-        # Create message entity using factory with role from schema
         message_entity = MessageFactory.create_from_schema_with_role(
             message_create_data, message_create_data.role
         )
 
-        # Save to repository
         created_message = self.repository.create(message_entity)
 
-        # Auto-generate bot response only for user messages
         if message_create_data.role == MessageRole.user:
             bot_response_entity = MessageFactory.create_bot_response(
                 conversation_id=message_create_data.conversation_id,
@@ -77,12 +48,7 @@ class MessageService(IMessageService):
         return MessageRead.model_validate(created_message)
 
     def get_by_id(self, message_id: UUID, user_id: UUID) -> MessageRead:
-        """Get message by ID"""
-        if not self.message_validation_utils.validate_message_exists(message_id):
-            raise ResourceNotFoundException(
-                detail="Message not found", error_code="MESSAGE_NOT_FOUND"
-            )
-
+        self.message_validation_utils.validate_message_access(user_id, message_id)
         message_entity = self.repository.get_by_id(message_id)
         return MessageRead.model_validate(message_entity)
 
@@ -93,25 +59,9 @@ class MessageService(IMessageService):
         skip: int = 0,
         limit: int = 100,
     ) -> List[MessageRead]:
-        """Get messages for a conversation with access validation"""
-        # Validate user has access to conversation
-        is_valid, validation_errors = (
-            self.conversation_validation_utils.validate_conversation_access(
-                user_id, conversation_id
-            )
+        self.conversation_validation_utils.validate_conversation_access(
+            user_id, conversation_id
         )
-
-        if not is_valid:
-            if "Conversation not found" in validation_errors:
-                raise ResourceNotFoundException(
-                    detail="Conversation not found", error_code="CONVERSATION_NOT_FOUND"
-                )
-            else:
-                raise AuthorizationException(
-                    detail="Access denied to this conversation",
-                    error_code="CONVERSATION_ACCESS_DENIED",
-                )
-
         message_entities = self.repository.get_by_conversation_id(
             conversation_id, skip=skip, limit=limit
         )
@@ -120,7 +70,6 @@ class MessageService(IMessageService):
     def get_user_messages(
         self, user_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[MessageRead]:
-        """Get all messages by a user"""
         message_entities = self.repository.get_by_user_id(
             user_id, skip=skip, limit=limit
         )
@@ -131,25 +80,9 @@ class MessageService(IMessageService):
         conversation_id: UUID,
         user_id: UUID,
     ) -> List[MessageRead]:
-        """Get conversation thread ordered by timestamp"""
-        # Validate user has access to conversation
-        is_valid, validation_errors = (
-            self.conversation_validation_utils.validate_conversation_access(
-                user_id, conversation_id
-            )
+        self.conversation_validation_utils.validate_conversation_access(
+            user_id, conversation_id
         )
-
-        if not is_valid:
-            if "Conversation not found" in validation_errors:
-                raise ResourceNotFoundException(
-                    detail="Conversation not found", error_code="CONVERSATION_NOT_FOUND"
-                )
-            else:
-                raise AuthorizationException(
-                    detail="Access denied to this conversation",
-                    error_code="CONVERSATION_ACCESS_DENIED",
-                )
-
         message_entities = self.repository.get_conversation_thread(conversation_id)
         return [MessageRead.model_validate(msg) for msg in message_entities]
 
@@ -159,49 +92,16 @@ class MessageService(IMessageService):
         user_id: UUID,
         message_update_data: MessageUpdate,
     ) -> MessageRead:
-        """Update message with ownership validation"""
-        # Validate message access
-        is_valid, validation_errors = (
-            self.message_validation_utils.validate_message_access(user_id, message_id)
-        )
-
-        if not is_valid:
-            if "Message not found" in validation_errors:
-                raise ResourceNotFoundException(
-                    detail="Message not found", error_code="MESSAGE_NOT_FOUND"
-                )
-            else:
-                raise AuthorizationException(
-                    detail="Access denied to this conversation",
-                    error_code="CONVERSATION_ACCESS_DENIED",
-                )
-
+        self.message_validation_utils.validate_message_access(user_id, message_id)
         message_entity = self.repository.get_by_id(message_id)
         updated_message = self.repository.update(message_entity.id, message_update_data)
         return MessageRead.model_validate(updated_message)
 
     def delete_message(self, message_id: UUID, user_id: UUID) -> bool:
-        """Delete message with ownership validation"""
-        # Validate message access
-        is_valid, validation_errors = (
-            self.message_validation_utils.validate_message_access(user_id, message_id)
-        )
-
-        if not is_valid:
-            if "Message not found" in validation_errors:
-                raise ResourceNotFoundException(
-                    detail="Message not found", error_code="MESSAGE_NOT_FOUND"
-                )
-            else:
-                raise AuthorizationException(
-                    detail="Access denied to this conversation",
-                    error_code="CONVERSATION_ACCESS_DENIED",
-                )
-
+        self.message_validation_utils.validate_message_access(user_id, message_id)
         return self.repository.delete(message_id)
 
     def _generate_bot_response(self, user_message: str) -> str:
-        """Generate a bot response using Gemini API"""
         api_key = settings.gemini_api_key
         if not api_key:
             return "[Error: Gemini API key not configured]"
