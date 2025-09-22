@@ -4,13 +4,14 @@ import os
 import logging
 from pathlib import Path
 
+from app.interfaces.document_service_interface import IDocumentService
 from app.services.ai_service import AIService
 from app.core.exceptions import DocumentProcessingError, FileValidationError
 
 logger = logging.getLogger(__name__)
 
 
-class DocumentService:
+class DocumentService(IDocumentService):
     """Service for handling document upload and processing operations."""
 
     def __init__(self):

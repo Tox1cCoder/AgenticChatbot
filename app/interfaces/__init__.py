@@ -7,6 +7,7 @@ from .conversation_service_interface import IConversationService
 from .message_service_interface import IMessageService
 from .feedback_service_interface import IFeedbackService
 from .auth_service_interface import IAuthService
+from .document_service_interface import IDocumentService
 
 __all__ = [
     "IUserService",
@@ -14,4 +15,5 @@ __all__ = [
     "IMessageService",
     "IFeedbackService",
     "IAuthService",
+    "IDocumentService",
 ]

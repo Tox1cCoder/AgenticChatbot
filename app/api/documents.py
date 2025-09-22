@@ -1,21 +1,24 @@
 from fastapi import APIRouter, UploadFile, File, Depends
-from typing import Dict, Any
+from typing import Dict, Any, Annotated
+
+from dependency_injector.wiring import Provide, inject
 
 from app.core.auth import get_current_user_id
-from app.core.container import get_container
-from app.services.document_service import DocumentService
+from app.core.container import Container
+from app.interfaces.document_service_interface import IDocumentService
 from app.schemas.responses.api_response import ApiResponse
 
 router = APIRouter(tags=["documents"])
 
 
 @router.post("/documents", response_model=ApiResponse)
+@inject
 async def upload_document(
     file: UploadFile = File(...),
+    document_service: Annotated[
+        IDocumentService, Depends(Provide[Container.document_service])
+    ] = None,
     current_user_id=Depends(get_current_user_id),
-    document_service: DocumentService = Depends(
-        lambda: get_container().document_service()
-    ),
 ) -> ApiResponse:
     """
     Upload and process a document for RAG functionality.
@@ -23,7 +26,7 @@ async def upload_document(
     Args:
         file: The uploaded file (PDF, TXT, or DOCX)
         current_user_id: The authenticated user ID
-        document_service: Document upload service instance
+        document_service: Document service instance
 
     Returns:
         ApiResponse: Success response with processing details

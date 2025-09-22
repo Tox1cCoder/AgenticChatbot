@@ -30,6 +30,7 @@ from app.interfaces import (
     IMessageService,
     IFeedbackService,
     IAuthService,
+    IDocumentService,
 )
 
 
@@ -43,6 +44,7 @@ class Container(containers.DeclarativeContainer):
             "app.api.conversations",
             "app.api.messages",
             "app.api.feedback",
+            "app.api.documents",
         ]
     )
 
@@ -134,7 +136,7 @@ class Container(containers.DeclarativeContainer):
         AIService,
     )
 
-    document_upload_service = providers.Factory(
+    document_service: providers.Provider[IDocumentService] = providers.Factory(
         DocumentService,
     )
 

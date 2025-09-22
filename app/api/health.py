@@ -40,7 +40,7 @@ async def database_health(db: Session = Depends(get_db)) -> dict:
         return {
             "status": "healthy",
             "database_connection": "connected",
-            "timestamp": pendulum.now(),  # datetime.utcnow().isoformat(),
+            "timestamp": pendulum.now(),
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Database error: {str(e)}")

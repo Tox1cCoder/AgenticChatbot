@@ -3,7 +3,13 @@ from uuid import UUID
 import logging
 from datetime import datetime
 
-from ..ai.schemas import AgentMessage, AgentResponse, MessageType, WorkflowConfig
+from ..ai.schemas import (
+    AgentMessage,
+    AgentResponse,
+    MessageType,
+    WorkflowConfig,
+    ConversationState,
+)
 from ..ai.graph import Workflow, create_workflow
 from ..ai.interfaces import IAgentService
 
@@ -38,6 +44,66 @@ class AIService(IAgentService):
         }
 
         logger.info("AIService initialized with streamlined workflow")
+
+    # Implement abstract methods from IAgentService
+    async def process_message(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        message: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        Process a message through the multi-agent system.
+
+        Args:
+            conversation_id: ID of the conversation
+            user_id: ID of the user
+            message: The message to process
+            context: Optional context information
+
+        Returns:
+            str: The response from the agent system
+        """
+        return await self.generate_bot_response(message, conversation_id, user_id)
+
+    async def get_conversation_state(self, conversation_id: UUID) -> ConversationState:
+        """
+        Get the current state of a conversation.
+
+        Args:
+            conversation_id: ID of the conversation
+
+        Returns:
+            ConversationState: Current conversation state
+        """
+        conversation_key = str(conversation_id)
+        context = self.conversation_contexts.get(conversation_key, {})
+
+        # Create a ConversationState from the stored context
+        return ConversationState(
+            conversation_id=conversation_id,
+            user_id=UUID(
+                context.get("user_id", "00000000-0000-0000-0000-000000000000")
+            ),
+            messages=[],  # Could be populated from context if needed
+            context=context.get("user_preferences", {}),
+            current_agent=None,
+            routing_history=context.get("agent_usage", {}),
+            session_metadata=context,
+        )
+
+    async def reset_conversation(self, conversation_id: UUID) -> None:
+        """
+        Reset a conversation to its initial state.
+
+        Args:
+            conversation_id: ID of the conversation to reset
+        """
+        conversation_key = str(conversation_id)
+        if conversation_key in self.conversation_contexts:
+            del self.conversation_contexts[conversation_key]
+            logger.info(f"Reset conversation {conversation_key}")
 
     async def generate_bot_response(
         self,

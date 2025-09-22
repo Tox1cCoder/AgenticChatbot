@@ -3,8 +3,8 @@ from enum import Enum
 import logging
 import re
 
-from ..schemas import AgentMessage, AgentType, MessageType
-from ..interfaces import IAgentRouter
+from ..schemas import AgentMessage, AgentType, MessageType, AgentRequest
+from ..interfaces import IAgentRouter, IAgent
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,45 @@ class Router(IAgentRouter):
 
     def __init__(self):
         self.logger = logging.getLogger("router")
+        self.registered_agents: Dict[str, IAgent] = {}
+
+    async def route_request(self, request: AgentRequest) -> AgentType:
+        """Route a request to the most appropriate agent."""
+        content = request.message.content.lower().strip() if request.message else ""
+
+        # Check for RAG patterns first
+        if self._should_use_rag(content):
+            return AgentType.RAG
+
+        # Default to chat agent
+        return AgentType.CHAT
+
+    async def get_agent_scores(self, request: AgentRequest) -> Dict[AgentType, float]:
+        """Get confidence scores for all available agents."""
+        content = request.message.content.lower().strip() if request.message else ""
+
+        scores = {}
+
+        # Score RAG agent
+        if self._should_use_rag(content):
+            scores[AgentType.RAG] = 0.8
+            scores[AgentType.CHAT] = 0.2
+        else:
+            scores[AgentType.RAG] = 0.2
+            scores[AgentType.CHAT] = 0.8
+
+        return scores
+
+    def register_agent(self, agent: IAgent) -> None:
+        """Register an agent with the router."""
+        self.registered_agents[agent.agent_id] = agent
+        self.logger.info(f"Registered agent: {agent.agent_id} ({agent.agent_type})")
+
+    def unregister_agent(self, agent_id: str) -> None:
+        """Unregister an agent from the router."""
+        if agent_id in self.registered_agents:
+            del self.registered_agents[agent_id]
+            self.logger.info(f"Unregistered agent: {agent_id}")
 
     async def route_message(
         self,

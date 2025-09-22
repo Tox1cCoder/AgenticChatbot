@@ -106,18 +106,15 @@ class MessageService(IMessageService):
     def _generate_bot_response(self, user_message: str) -> str:
         """Generate bot response using the multi-agent system."""
         try:
-
-            # Create AI service instance and generate response
             ai_service = AIService()
             return ai_service.get_bot_response_sync(user_message)
 
         except ImportError as e:
             logger = logging.getLogger(__name__)
-            logger.warning(f"AI service not available, using fallback: {str(e)}")
             return self._generate_bot_response_fallback(user_message)
         except Exception as e:
             logger = logging.getLogger(__name__)
-            logger.error(f"Multi-agent system failed: {str(e)}")
+            logger.error(f"AI service error: {str(e)}")
             return self._generate_bot_response_fallback(user_message)
 
     def _generate_bot_response_fallback(self, user_message: str) -> str:
