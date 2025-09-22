@@ -10,6 +10,7 @@ from app.api import (
     messages_router,
     feedback_router,
 )
+from app.api.documents import router as documents_router
 from app.database.session import get_engine
 from app.api.auth import router as auth_router
 from app.utils.exception_handler import register_exception_handlers
@@ -61,6 +62,7 @@ def create_app() -> FastAPI:
     app.include_router(conversations_router)
     app.include_router(messages_router)
     app.include_router(feedback_router)
+    app.include_router(documents_router, prefix="/api")
 
     return app
 

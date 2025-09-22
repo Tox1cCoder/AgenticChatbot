@@ -334,18 +334,6 @@ def render_login_page():
         tab1, tab2 = st.tabs(["Sign In", "Sign Up"])
 
         with tab1:
-            # with st.expander("Demo User List", expanded=False):
-            #     users = get_users()
-            #     if users:
-            #         for user in users[:5]:
-            #             if st.button(
-            #                 f"{user.get('email', user.get('username', 'Unknown'))}",
-            #                 key=f"quick_login_{user['id']}",
-            #                 use_container_width=True,
-            #             ):
-            #                 st.warning("Placholder")
-            #     else:
-            #         st.info("No users found in database")
 
             with st.form("login_form"):
                 st.markdown("#### Sign in to your account")
@@ -755,6 +743,11 @@ def render_chat_interface():
     # Message input form
     if st.session_state.current_conversation_id:
         with st.form("message_form", clear_on_submit=True):
+            uploaded_file = st.file_uploader(
+                "Upload a document for context",
+                type=["pdf", "txt", "docx"],
+            )
+
             col1, col2 = st.columns([4, 1])
             with col1:
                 message_content = st.text_area(
@@ -767,44 +760,77 @@ def render_chat_interface():
                 st.markdown("<br>", unsafe_allow_html=True)  # Add spacing
                 send_button = st.form_submit_button("Send", use_container_width=True)
 
-            if send_button and message_content.strip():
-                if st.session_state.current_conversation_id == "pending_new":
-                    # Create new conversation on first message
-                    conv_data = {
-                        "title": f"New Chat {datetime.now().strftime('%H:%M')}"
-                    }
-                    conv_result = make_api_request(
-                        "POST",
-                        f"/conversations/",
-                        conv_data,
-                    )
-                    if conv_result and "data" in conv_result:
-                        st.session_state.current_conversation_id = conv_result["data"][
-                            "id"
-                        ]
-                        st.session_state.conversations_list = []  # Force reload
-                    else:
-                        st.error("Failed to create conversation")
-                        return
+            if send_button:
+                if uploaded_file is not None:
+                    # Process the uploaded file
+                    with st.spinner("Processing uploaded file..."):
+                        try:
+                            # Create form data for file upload
+                            files = {"file": uploaded_file}
 
-                # Send user message
-                message_data = {
-                    "conversation_id": st.session_state.current_conversation_id,
-                    "content": message_content,
-                }
-                result = make_api_request("POST", "/messages/", message_data)
-                if result and "data" in result:
-                    # Clear cache and force reload of conversations list to reflect new conversation
-                    st.cache_data.clear()
-                    # Reload all messages from backend to get both user message and bot response
-                    messages = get_messages(
-                        st.session_state.current_conversation_id,
-                        st.session_state.current_user_id,
-                    )
-                    st.session_state.messages = messages or []
-                    # Force refresh conversations list to include new conversation
-                    st.session_state.conversations_list = []
-                    st.rerun()
+                            # Upload file to backend for RAG processing
+                            upload_response = requests.post(
+                                f"{API_BASE_URL}/api/documents",
+                                files=files,
+                                headers={
+                                    "Authorization": f"Bearer {st.session_state.get('auth_token', '')}"
+                                },
+                            )
+
+                            if upload_response.status_code == 200:
+                                upload_result = upload_response.json()
+                                st.success(
+                                    f"✅ File '{uploaded_file.name}' uploaded and processed successfully!"
+                                )
+                                st.info(
+                                    f"Added {upload_result.get('chunks_created', 0)} knowledge chunks to the database."
+                                )
+                            else:
+                                st.error(
+                                    f"❌ Failed to upload file: {upload_response.text}"
+                                )
+
+                        except Exception as e:
+                            st.error(f"❌ Error uploading file: {str(e)}")
+
+                if message_content.strip():
+                    if st.session_state.current_conversation_id == "pending_new":
+                        # Create new conversation on first message
+                        conv_data = {
+                            "title": f"New Chat {datetime.now().strftime('%H:%M')}"
+                        }
+                        conv_result = make_api_request(
+                            "POST",
+                            f"/conversations/",
+                            conv_data,
+                        )
+                        if conv_result and "data" in conv_result:
+                            st.session_state.current_conversation_id = conv_result[
+                                "data"
+                            ]["id"]
+                            st.session_state.conversations_list = []  # Force reload
+                        else:
+                            st.error("Failed to create conversation")
+                            return
+
+                    # Send user message
+                    message_data = {
+                        "conversation_id": st.session_state.current_conversation_id,
+                        "content": message_content,
+                    }
+                    result = make_api_request("POST", "/messages/", message_data)
+                    if result and "data" in result:
+                        # Clear cache and force reload of conversations list to reflect new conversation
+                        st.cache_data.clear()
+                        # Reload all messages from backend to get both user message and bot response
+                        messages = get_messages(
+                            st.session_state.current_conversation_id,
+                            st.session_state.current_user_id,
+                        )
+                        st.session_state.messages = messages or []
+                        # Force refresh conversations list to include new conversation
+                        st.session_state.conversations_list = []
+                        st.rerun()
 
 
 # Main application logic

@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, ConfigDict
 
 class AgentType(str, Enum):
     """Available agent types in the system"""
+
     CHAT = "chat"
     RAG = "rag"
     ROUTER = "router"
@@ -22,6 +23,7 @@ class AgentType(str, Enum):
 
 class MessageRole(str, Enum):
     """Message roles for agent communication"""
+
     USER = "user"
     ASSISTANT = "assistant"
     SYSTEM = "system"
@@ -29,6 +31,7 @@ class MessageRole(str, Enum):
 
 class MessageType(str, Enum):
     """Types of messages in the agent system"""
+
     TEXT = "text"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
@@ -37,6 +40,7 @@ class MessageType(str, Enum):
 
 class AgentCapability(str, Enum):
     """Capabilities that agents can provide"""
+
     CONVERSATION = "conversation"
     DOCUMENT_SEARCH = "document_search"
     KNOWLEDGE_RETRIEVAL = "knowledge_retrieval"
@@ -46,6 +50,7 @@ class AgentCapability(str, Enum):
 
 class RoutingStrategy(str, Enum):
     """Strategies for routing requests to agents"""
+
     CONTENT_BASED = "content_based"
     INTENT_BASED = "intent_based"
     CAPABILITY_BASED = "capability_based"
@@ -55,8 +60,9 @@ class RoutingStrategy(str, Enum):
 # Base schemas for agent communication
 class BaseAgentMessage(BaseModel):
     """Base schema for all agent messages"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     id: UUID = Field(default_factory=uuid4)
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     role: MessageRole
@@ -67,8 +73,9 @@ class BaseAgentMessage(BaseModel):
 
 class AgentRequest(BaseModel):
     """Request sent to an agent"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     request_id: UUID = Field(default_factory=uuid4)
     conversation_id: UUID
     user_id: UUID
@@ -80,8 +87,9 @@ class AgentRequest(BaseModel):
 
 class AgentResponse(BaseModel):
     """Response from an agent"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     response_id: UUID = Field(default_factory=uuid4)
     request_id: UUID
     agent_type: AgentType
@@ -95,8 +103,9 @@ class AgentResponse(BaseModel):
 
 class ToolCall(BaseModel):
     """Schema for tool calls within agent execution"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     id: UUID = Field(default_factory=uuid4)
     name: str
     parameters: Dict[str, Any] = Field(default_factory=dict)
@@ -105,8 +114,9 @@ class ToolCall(BaseModel):
 
 class ToolResult(BaseModel):
     """Schema for tool execution results"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     call_id: UUID
     name: str
     result: Any
@@ -119,8 +129,9 @@ class ToolResult(BaseModel):
 # Agent configuration schemas
 class AgentConfig(BaseModel):
     """Base configuration for all agents"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     agent_id: str
     agent_type: AgentType
     name: str
@@ -136,6 +147,7 @@ class AgentConfig(BaseModel):
 
 class ChatAgentConfig(AgentConfig):
     """Configuration specific to chat agents"""
+
     system_prompt: str = "You are a helpful assistant."
     model_name: str = "gemini-2.5-flash"
     conversation_memory_limit: int = 20
@@ -143,6 +155,7 @@ class ChatAgentConfig(AgentConfig):
 
 class RAGAgentConfig(AgentConfig):
     """Configuration specific to RAG agents"""
+
     vector_store_path: Optional[str] = None
     embedding_model: str = "text-embedding-ada-002"
     similarity_threshold: float = 0.7
@@ -153,8 +166,9 @@ class RAGAgentConfig(AgentConfig):
 
 class RouterConfig(BaseModel):
     """Configuration for the agent router"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     default_strategy: RoutingStrategy = RoutingStrategy.CONTENT_BASED
     fallback_agent: AgentType = AgentType.CHAT
     confidence_threshold: float = 0.6
@@ -165,8 +179,9 @@ class RouterConfig(BaseModel):
 # State management schemas for LangGraph
 class ConversationState(BaseModel):
     """State maintained throughout a conversation"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     conversation_id: UUID
     user_id: UUID
     messages: List[BaseAgentMessage] = Field(default_factory=list)
@@ -182,25 +197,26 @@ class ConversationState(BaseModel):
 
 class GraphState(BaseModel):
     """Complete state for LangGraph workflow"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     # Current request being processed
     current_request: Optional[AgentRequest] = None
     current_response: Optional[AgentResponse] = None
-    
+
     # Conversation state
     conversation: ConversationState
-    
+
     # Workflow state
     next_node: Optional[str] = None
     should_continue: bool = True
     error: Optional[str] = None
-    
+
     # Agent selection and routing
     selected_agent: Optional[AgentType] = None
     routing_confidence: float = 0.0
     available_agents: List[AgentType] = Field(default_factory=list)
-    
+
     # Performance tracking
     workflow_start_time: datetime = Field(default_factory=datetime.utcnow)
     node_execution_times: Dict[str, int] = Field(default_factory=dict)
@@ -209,8 +225,9 @@ class GraphState(BaseModel):
 # Integration schemas for existing system
 class MessageServiceRequest(BaseModel):
     """Request format for integration with existing message service"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     conversation_id: UUID
     user_id: UUID
     user_message: str
@@ -220,8 +237,9 @@ class MessageServiceRequest(BaseModel):
 
 class MessageServiceResponse(BaseModel):
     """Response format for integration with existing message service"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     response_text: str
     agent_used: AgentType
     confidence: float
@@ -233,8 +251,9 @@ class MessageServiceResponse(BaseModel):
 # Agent registration and discovery schemas
 class AgentRegistration(BaseModel):
     """Schema for registering agents in the system"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     config: AgentConfig
     instance_id: str = Field(default_factory=lambda: str(uuid4()))
     registered_at: datetime = Field(default_factory=datetime.utcnow)
@@ -244,22 +263,27 @@ class AgentRegistration(BaseModel):
 
 class AgentRegistry(BaseModel):
     """Registry of all available agents"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     agents: Dict[str, AgentRegistration] = Field(default_factory=dict)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    
+
     def get_agents_by_type(self, agent_type: AgentType) -> List[AgentRegistration]:
         """Get all agents of a specific type"""
         return [
-            agent for agent in self.agents.values()
+            agent
+            for agent in self.agents.values()
             if agent.config.agent_type == agent_type and agent.status == "active"
         ]
-    
-    def get_agents_by_capability(self, capability: AgentCapability) -> List[AgentRegistration]:
+
+    def get_agents_by_capability(
+        self, capability: AgentCapability
+    ) -> List[AgentRegistration]:
         """Get all agents with a specific capability"""
         return [
-            agent for agent in self.agents.values()
+            agent
+            for agent in self.agents.values()
             if capability in agent.config.capabilities and agent.status == "active"
         ]
 
@@ -267,8 +291,9 @@ class AgentRegistry(BaseModel):
 # Error handling schemas
 class AgentError(BaseModel):
     """Schema for agent-specific errors"""
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     error_id: UUID = Field(default_factory=uuid4)
     agent_id: str
     agent_type: AgentType
@@ -284,36 +309,53 @@ class AgentError(BaseModel):
 __all__ = [
     # Enums
     "AgentType",
-    "MessageRole", 
+    "MessageRole",
     "MessageType",
     "AgentCapability",
     "RoutingStrategy",
-    
     # Base communication schemas
     "BaseAgentMessage",
     "AgentRequest",
     "AgentResponse",
     "ToolCall",
     "ToolResult",
-    
     # Configuration schemas
     "AgentConfig",
-    "ChatAgentConfig", 
+    "ChatAgentConfig",
     "RAGAgentConfig",
     "RouterConfig",
-    
     # State management schemas
     "ConversationState",
     "GraphState",
-    
     # Integration schemas
     "MessageServiceRequest",
     "MessageServiceResponse",
-    
     # Registry schemas
     "AgentRegistration",
     "AgentRegistry",
-    
     # Error schemas
     "AgentError",
 ]
+
+
+# Workflow configuration schema
+class WorkflowConfig(BaseModel):
+    """Configuration for the multi-agent workflow"""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    max_iterations: int = 5
+    max_retries: int = 2
+    timeout_seconds: int = 30
+    enable_logging: bool = True
+    enable_langsmith: bool = False
+    langsmith_project: Optional[str] = None
+    enable_human_approval: bool = False
+    debug_mode: bool = False
+
+
+# Add WorkflowConfig to exports
+__all__.append("WorkflowConfig")
+
+# Create alias for BaseAgentMessage as AgentMessage for backward compatibility
+AgentMessage = BaseAgentMessage

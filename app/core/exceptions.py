@@ -69,3 +69,33 @@ class TokenExpiredException(AuthenticationException):
         self, detail: str = "Token has expired", error_code: str = "TOKEN_EXPIRED"
     ):
         super().__init__(detail=detail, error_code=error_code)
+
+
+class FileValidationError(CustomHTTPException):
+    """Exception raised when file validation fails"""
+
+    def __init__(
+        self,
+        detail: str = "File validation failed",
+        error_code: str = "FILE_VALIDATION_ERROR",
+    ):
+        super().__init__(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+            error_code=error_code,
+        )
+
+
+class DocumentProcessingError(CustomHTTPException):
+    """Exception raised when document processing fails"""
+
+    def __init__(
+        self,
+        detail: str = "Document processing failed",
+        error_code: str = "DOCUMENT_PROCESSING_ERROR",
+    ):
+        super().__init__(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=detail,
+            error_code=error_code,
+        )

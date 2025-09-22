@@ -1,0 +1,44 @@
+{
+  "graphs": {
+    "multi_agent_workflow": {
+      "requirements": ["langchain_core", "langgraph", "google-genai"],
+      "checkpointer": "memory",
+      "interrupt_before": [],
+      "interrupt_after": [],
+      "configuration": {
+        "agent": {
+          "description": "Select which agent to use",
+          "default": "chat",
+          "enum": ["chat", "rag", "router"]
+        },
+        "max_iterations": {
+          "description": "Maximum workflow iterations",
+          "type": "integer",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10
+        },
+        "enable_logging": {
+          "description": "Enable comprehensive logging",
+          "type": "boolean",
+          "default": true
+        },
+        "langsmith_project": {
+          "description": "LangSmith project name for tracking",
+          "type": "string",
+          "default": "multi-agent-chatbot"
+        }
+      }
+    }
+  },
+  "env": ".env",
+  "dockerfile_lines": [
+    "FROM python:3.11-slim",
+    "WORKDIR /app",
+    "COPY requirements.txt .",
+    "RUN pip install -r requirements.txt",
+    "COPY . .",
+    "EXPOSE 8080",
+    "CMD [\"python\", \"-m\", \"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8080\"]"
+  ]
+}

@@ -16,6 +16,8 @@ from app.services.user_service import UserService
 from app.services.conversation_service import ConversationService
 from app.services.message_service import MessageService
 from app.services.feedback_service import FeedbackService
+from app.services.ai_service import AIService
+from app.services.document_service import DocumentService
 
 from app.utils.validation.user_validation import UserValidationUtils
 from app.utils.validation.conversation_validation import ConversationValidationUtils
@@ -126,6 +128,14 @@ class Container(containers.DeclarativeContainer):
     auth_service: providers.Provider[IAuthService] = providers.Factory(
         AuthService,
         user_service=user_service,
+    )
+
+    ai_service = providers.Factory(
+        AIService,
+    )
+
+    document_upload_service = providers.Factory(
+        DocumentService,
     )
 
 
