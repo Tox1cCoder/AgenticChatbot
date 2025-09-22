@@ -20,7 +20,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 def get_db() -> Generator[Session, None, None]:
     """
     Dependency function to get database session.
-    
+
     Yields:
         Session: SQLAlchemy database session
     """
@@ -29,3 +29,13 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def get_engine():
+    """
+    Get the SQLAlchemy engine instance.
+
+    Returns:
+        Engine: SQLAlchemy engine
+    """
+    return engine

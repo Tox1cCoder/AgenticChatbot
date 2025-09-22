@@ -10,8 +10,11 @@ from app.api import (
     messages_router,
     feedback_router,
 )
+from app.database.session import get_engine
 from app.api.auth import router as auth_router
 from app.utils.exception_handler import register_exception_handlers
+
+from fastapi_radar import Radar
 
 
 def create_app() -> FastAPI:
@@ -64,6 +67,11 @@ def create_app() -> FastAPI:
 
 # Create the FastAPI app instance
 app = create_app()
+
+engine = get_engine()
+
+radar = Radar(app, db_engine=engine)
+radar.create_tables()
 
 
 @app.get("/")

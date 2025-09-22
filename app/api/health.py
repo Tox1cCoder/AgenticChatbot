@@ -1,4 +1,4 @@
-from datetime import datetime
+import pendulum
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -22,7 +22,7 @@ async def health_check(db: Session = Depends(get_db)) -> dict:
 
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": pendulum.now(),  # datetime.utcnow().isoformat(),
         "database": db_status,
         "message": "Sample Chatbot API is running",
     }
@@ -40,7 +40,7 @@ async def database_health(db: Session = Depends(get_db)) -> dict:
         return {
             "status": "healthy",
             "database_connection": "connected",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": pendulum.now(),  # datetime.utcnow().isoformat(),
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Database error: {str(e)}")
