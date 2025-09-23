@@ -57,15 +57,11 @@ class FeedbackCRUDStrategy(
 
     def get_rating_for_message(self, db: Session, message_id: UUID) -> Optional[float]:
         """Get rating for a message"""
-        stmt = select(func.avg(Feedback.rating)).where(Feedback.message_id == message_id)
+        stmt = select(func.avg(Feedback.rating)).where(
+            Feedback.message_id == message_id
+        )
         result = db.execute(stmt).scalar_one_or_none()
         return result if result is not None else None
-
-    # def get_rating_for_message(self, db: Session, message_id: UUID) -> Optional[float]:
-    #     """Get rating for a message"""
-    #     stmt = select(func(Feedback.rating)).where(Feedback.message_id == message_id)
-    #     result = db.execute(stmt)
-    #     return result if result is not None else None
 
 
 class FeedbackRepository:

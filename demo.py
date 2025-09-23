@@ -15,7 +15,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# CSS with better message container styling
 st.markdown(
     """
 <style>
