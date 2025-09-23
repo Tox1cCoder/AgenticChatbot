@@ -53,24 +53,6 @@ async def get_message_rating_stats(
     )
 
 
-# @router.get(
-#     "/{message_id}/feedbacks/{feedback_id}", response_model=ApiResponse[FeedbackRead]
-# )
-# @inject
-# async def get_feedback(
-#     message_id: UUID,
-#     feedback_id: UUID,
-#     feedback_service: Annotated[
-#         IFeedbackService, Depends(Provide[Container.feedback_service])
-#     ],
-# ) -> ApiResponse[FeedbackRead]:
-#     """Get specific feedback for a message"""
-#     result = feedback_service.get_by_id(feedback_id)
-#     return ApiResponse(
-#         success=True, message="Feedback retrieved successfully", data=result
-#     )
-
-
 @router.get(
     "/{message_id}/feedbacks/user/{user_id}", response_model=ApiResponse[FeedbackRead]
 )

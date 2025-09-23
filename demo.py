@@ -8,14 +8,14 @@ from dateutil import parser
 # API Configuration
 API_BASE_URL = "http://localhost:8000"
 
-# Page Configuration
+# Page Configuration with natural Streamlit layout CSS
 st.set_page_config(
     page_title="ChatBot",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Modern CSS styling
+# CSS with better message container styling
 st.markdown(
     """
 <style>
@@ -24,38 +24,61 @@ st.markdown(
         margin: 0 auto;
     }
     
-    .chat-container {
-        height: 60vh;
-        overflow-y: auto;
-        padding: 20px;
-        background: transparent;
-        border-radius: 10px;
-        border: none;
-        margin-bottom: 20px;
+    /* Message container with visible scrollbar */
+    .chat-messages-container {
+        border: 2px solid #ddd;
+        border-radius: 15px;
+        background: linear-gradient(135deg, #fafafa, #f0f0f0);
+        box-shadow: inset 0 2px 10px rgba(0,0,0,0.1);
+    }
+    
+    .chat-messages-container::-webkit-scrollbar {
+        width: 12px;
+    }
+    
+    .chat-messages-container::-webkit-scrollbar-track {
+        background: #f1f1f1;
+        border-radius: 6px;
+    }
+    
+    .chat-messages-container::-webkit-scrollbar-thumb {
+        background-color: #888;
+        border-radius: 6px;
+        border: 2px solid #f1f1f1;
+    }
+    
+    .chat-messages-container::-webkit-scrollbar-thumb:hover {
+        background-color: #555;
+    }
+    
+    /* Input container styling */
+    .chat-input-container {
+        background: white;
+        border: 2px solid #e0e0e0;
+        border-radius: 15px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
     }
     
     .user-message {
-        background: linear-gradient(135deg, #f8f9fa, #e9ecef);
-        color: #212529;
+        background: linear-gradient(135deg, #007bff, #0056b3);
+        color: white;
         padding: 12px 16px;
         border-radius: 18px 18px 4px 18px;
         margin: 8px 0 8px auto;
         max-width: 70%;
         word-wrap: break-word;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        border-left: 4px solid #007bff;
+        box-shadow: 0 2px 8px rgba(0,123,255,0.3);
     }
     
     .bot-message {
-        background: linear-gradient(135deg, #f8f9fa, #e9ecef);
-        color: #212529;
+        background: linear-gradient(135deg, #28a745, #1e7e34);
+        color: white;
         padding: 12px 16px;
         border-radius: 18px 18px 18px 4px;
         margin: 8px auto 8px 0;
         max-width: 70%;
         word-wrap: break-word;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        border-left: 4px solid #28a745;
+        box-shadow: 0 2px 8px rgba(40,167,69,0.3);
     }
     
     .sidebar-conversation {
@@ -128,7 +151,7 @@ st.markdown(
     
     .message-timestamp {
         font-size: 0.8em;
-        color: #6c757d;
+        color: #ffffff80;
         margin-top: 5px;
     }
     
@@ -142,52 +165,34 @@ st.markdown(
         border-radius: 8px;
     }
     
-    /* Hide Streamlit markdown containers causing white boxes */
-    [data-testid="stMarkdownContainer"] {
-        background: transparent !important;
-        border: none !important;
-        padding: 0 !important;
-        margin: 0 !important;
-    }
-    
-    /* Hide login container visual artifacts */
-    .login-container [data-testid="stMarkdownContainer"] {
-        display: none !important;
-    }
-    
-    /* Remove all floating container elements */
-    div[data-testid="stMarkdownContainer"]:empty {
-        display: none !important;
-    }
-    
-    /* Force transparent background for all markdown containers */
-    .stMarkdown > div {
-        background: transparent !important;
-    }
-    
-    /* Hide conversation-manager and other empty containers */
-    .conversation-manager:empty {
-        display: none !important;
-    }
-    
+    /* Additional CSS for hiding empty containers */
     .login-container:empty {
         display: none !important;
     }
     
-    /* Universal container cleanup - hide all empty divs */
+    .conversation-manager:empty {
+        display: none !important;
+    }
+    
+    .search-container:empty {
+        display: none !important;
+    }
+    
+    /* Hide any empty div containers that may appear */
     div:empty {
         display: none !important;
     }
     
-    /* Force hide blank wrapper containers */
-    div[class*="container"]:empty {
+    /* Specifically target markdown containers that are empty */
+    [data-testid="stMarkdownContainer"]:empty {
         display: none !important;
     }
     
-    /* Additional container hiding for persistent elements */
-    .stContainer > div:empty {
-        display: none !important;
-    }
+    /* Responsive design */
+    @media (max-width: 768px) {
+        .chat-messages-container {
+            height: 50vh !important;
+        }
     }
 </style>
 """,
@@ -449,7 +454,7 @@ def render_login_page():
 
 
 def render_conversation_sidebar():
-    """Render modern conversation sidebar"""
+    """Render conversation sidebar"""
     with st.sidebar:
         st.markdown("### Conversations")
 
@@ -613,7 +618,18 @@ def render_conversation_manager():
 
 
 def render_chat_interface():
-    """Render modern chat interface"""
+    """Render the chat interface"""
+
+    # Load all messages for current conversation
+    if (
+        st.session_state.current_conversation_id
+        and st.session_state.current_conversation_id != "pending_new"
+    ):
+        # Load all messages from API to ensure we have complete conversation
+        all_messages = get_messages(st.session_state.current_conversation_id)
+        if all_messages:
+            st.session_state.messages = all_messages
+
     # Handle conversation title display
     if (
         st.session_state.current_conversation_id
@@ -658,7 +674,22 @@ def render_chat_interface():
             )
         return
 
-    st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+    # Messages container
+    st.markdown(
+        """
+        <div class="chat-messages-container" style="
+            height: 70vh;
+            overflow-y: auto;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 2px solid #e0e0e0;
+            border-radius: 15px;
+            background: linear-gradient(135deg, #fafafa, #f0f0f0);
+            box-shadow: inset 0 2px 10px rgba(0,0,0,0.1);
+        ">
+    """,
+        unsafe_allow_html=True,
+    )
 
     def format_time(iso_string: str) -> str:
         try:
@@ -685,9 +716,9 @@ def render_chat_interface():
             st.markdown(
                 f"""
                 <div style="display: flex; justify-content: flex-end; margin: 10px 0; align-items: flex-start; gap: 10px;">
-                    <div class="user-message" style="background: #f1f1f1; padding: 10px; border-radius: 10px; max-width: 70%;">
+                    <div class="user-message">
                         {msg["content"]}
-                        <div class="message-timestamp" style="font-size: 12px; color: gray; margin-top: 5px;">
+                        <div class="message-timestamp">
                             You • {format_time(msg.get("createdAt", "now"))}
                         </div>
                     </div>
@@ -705,15 +736,15 @@ def render_chat_interface():
             st.markdown(
                 f"""
                 <div style="display: flex; justify-content: flex-start; margin: 10px 0; align-items: flex-start; gap: 10px;">
-                    <div style="border: 2px solid #6c757d; color: #6c757d; border-radius: 50%; 
+                    <div style="border: 2px solid #28a745; color: #28a745; border-radius: 50%; 
                                 width: 35px; height: 35px; display: flex; align-items: center; 
                                 justify-content: center; font-weight: bold; font-size: 14px;">
                         🤖
                     </div>
                     <div style="display: flex; flex-direction: column; gap: 5px; max-width: 70%;">
-                        <div class="bot-message" style="background: #e9ecef; padding: 10px; border-radius: 10px;">
+                        <div class="bot-message">
                             {msg["content"]}
-                            <div class="message-timestamp" style="font-size: 12px; color: gray; margin-top: 5px;">
+                            <div class="message-timestamp">
                                 Assistant • {format_time(msg.get("createdAt", "now"))}
                             </div>
                         </div>
@@ -762,8 +793,22 @@ def render_chat_interface():
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Message input form
+    # Input area below messages
     if st.session_state.current_conversation_id:
+        st.markdown(
+            """
+            <div class="chat-input-container" style="
+                background: white;
+                padding: 25px;
+                border-radius: 15px;
+                border: 2px solid #e0e0e0;
+                box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+                margin-top: 20px;
+            ">
+        """,
+            unsafe_allow_html=True,
+        )
+
         with st.form("message_form", clear_on_submit=True):
             uploaded_file = st.file_uploader(
                 "Upload a document for context",
@@ -775,7 +820,7 @@ def render_chat_interface():
                 message_content = st.text_area(
                     "Message",
                     placeholder="Type your message here...",
-                    height=100,
+                    height=80,
                     label_visibility="collapsed",
                 )
             with col2:
@@ -786,77 +831,61 @@ def render_chat_interface():
                 if uploaded_file is not None:
                     # Process the uploaded file
                     with st.spinner("Processing uploaded file..."):
-                        try:
-                            # Create form data for file upload
-                            files = {"file": uploaded_file}
+                        files = {"file": uploaded_file}
+                        doc_response = make_api_request(
+                            "POST", "/documents/", files=files
+                        )
 
-                            # Upload file to backend for RAG processing
-                            upload_response = requests.post(
-                                f"{API_BASE_URL}/documents",
-                                files=files,
-                                headers={
-                                    "Authorization": f"Bearer {st.session_state.get('auth_token', '')}"
-                                },
-                            )
-
-                            if upload_response.status_code == 200:
-                                upload_result = upload_response.json()
-                                # Handle ApiResponse wrapper format
-                                if upload_result.get("data") is not None:
-                                    data = upload_result["data"]
-                                else:
-                                    data = upload_result
-                                st.success(
-                                    f"✅ File '{uploaded_file.name}' uploaded and processed successfully!"
-                                )
-                                st.info(
-                                    f"Added {data.get('chunks_created', 0)} knowledge chunks to the database."
-                                )
-                            else:
-                                st.error(
-                                    f"❌ Failed to upload file: {upload_response.text}"
-                                )
-
-                        except Exception as e:
-                            st.error(f"❌ Error uploading file: {str(e)}")
+                        if doc_response and doc_response.get("data"):
+                            doc_id = doc_response["data"]["id"]
+                            st.success(f"✅ Document uploaded: {uploaded_file.name}")
+                        else:
+                            st.error("❌ Failed to upload document")
+                            return
 
                 if message_content.strip():
+                    # Handle new conversation creation
                     if st.session_state.current_conversation_id == "pending_new":
-                        # Create new conversation on first message
-                        conv_data = {
-                            "title": f"New Chat {datetime.now().strftime('%H:%M')}"
+                        conversation_data = {
+                            "title": (
+                                message_content[:50] + "..."
+                                if len(message_content) > 50
+                                else message_content
+                            )
                         }
-                        conv_result = make_api_request(
-                            "POST",
-                            f"/conversations/",
-                            conv_data,
+                        conv_response = make_api_request(
+                            "POST", "/conversations/", conversation_data
                         )
-                        if conv_result and conv_result.get("data") is not None:
-                            st.session_state.current_conversation_id = conv_result[
+                        if conv_response and conv_response.get("data"):
+                            st.session_state.current_conversation_id = conv_response[
                                 "data"
                             ]["id"]
-                            st.session_state.conversations_list = []  # Force reload
+                            st.cache_data.clear()
                         else:
                             st.error("Failed to create conversation")
                             return
 
-                    # Send user message
+                    # Send message to API and reload all messages
                     message_data = {
-                        "conversation_id": st.session_state.current_conversation_id,
                         "content": message_content,
+                        "conversation_id": st.session_state.current_conversation_id,
                     }
-                    result = make_api_request("POST", "/messages/", message_data)
-                    if result and "data" in result:
-                        # Clear cache and force reload of conversations list to reflect new conversation
+
+                    with st.spinner("Thinking..."):
+                        response = make_api_request("POST", "/messages/", message_data)
+
+                    if response and response.get("data"):
+                        # Clear cache and reload ALL messages from API
                         st.cache_data.clear()
-                        # Reload all messages from backend to get both user message and bot response
-                        messages = get_messages(
+                        all_messages = get_messages(
                             st.session_state.current_conversation_id
                         )
-                        st.session_state.messages = messages or []
-                        # Force refresh conversations list to include new conversation
-                        st.session_state.conversations_list = []
+                        st.session_state.messages = all_messages or []
                         st.rerun()
+                    else:
+                        st.error("Failed to send message")
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # Main application logic

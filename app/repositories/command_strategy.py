@@ -70,7 +70,15 @@ class DefaultCommandStrategy(
             else input_schema.__dict__
         )
         for field, value in obj_data.items():
-            setattr(db_obj, field, value)
+            if field in ["id", "created_at"]:
+                continue
+            # Check if the field exists on the model and is settable
+            if hasattr(db_obj, field):
+                current_value = getattr(db_obj, field)
+                if isinstance(current_value, UUID) and field == "id":
+                    continue
+
+                setattr(db_obj, field, value)
         db.commit()
         db.refresh(db_obj)
         return db_obj

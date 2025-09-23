@@ -105,7 +105,10 @@ class ConversationRepository:
     ) -> Optional[Conversation]:
         """Update conversation by ID"""
         with self.session_factory() as session:
-            return self._crud_strategy.update(session, id, input_schema)
+            db_obj = self._crud_strategy.get_by_id(session, id)
+            if db_obj is None:
+                return None
+            return self._crud_strategy.update(session, db_obj, input_schema)
 
     def delete(self, id: UUID) -> bool:
         """Delete conversation by ID"""

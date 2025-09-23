@@ -167,9 +167,6 @@ class IAgentRouter(ABC):
 class ITool(ABC):
     """
     Interface for tools that can be used by agents.
-
-    Tools provide specific functionality that agents can leverage
-    to enhance their capabilities.
     """
 
     @property

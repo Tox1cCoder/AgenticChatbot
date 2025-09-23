@@ -55,16 +55,17 @@ class FeedbackCRUDStrategy(
         )
         return db.execute(stmt).scalar_one_or_none()
 
-    def get_average_rating_for_message(self, db: Session, message_id: UUID) -> Optional[float]:
-        """Get average rating for a message"""
+    def get_rating_for_message(self, db: Session, message_id: UUID) -> Optional[float]:
+        """Get rating for a message"""
         stmt = select(func.avg(Feedback.rating)).where(Feedback.message_id == message_id)
-        result = db.execute(stmt).scalar()
+        result = db.execute(stmt).scalar_one_or_none()
         return result if result is not None else None
 
-    def get_comment_count_for_message(self, db: Session, message_id: UUID) -> int:
-        """Get comment count for a message"""
-        stmt = select(func.count(Feedback.comment)).where(Feedback.message_id == message_id, Feedback.comment.isnot(None))
-        return db.execute(stmt).scalar() or 0
+    # def get_rating_for_message(self, db: Session, message_id: UUID) -> Optional[float]:
+    #     """Get rating for a message"""
+    #     stmt = select(func(Feedback.rating)).where(Feedback.message_id == message_id)
+    #     result = db.execute(stmt)
+    #     return result if result is not None else None
 
 
 class FeedbackRepository:
@@ -100,15 +101,10 @@ class FeedbackRepository:
                 session, message_id, user_id
             )
 
-    def get_average_rating_for_message(self, message_id: UUID) -> Optional[float]:
-        """Get average rating for a message"""
+    def get_rating_for_message(self, message_id: UUID) -> Optional[float]:
+        """Get rating for a message"""
         with self.session_factory() as session:
-            return self._crud_strategy.get_average_rating_for_message(session, message_id)
-
-    def get_comment_count_for_message(self, message_id: UUID) -> int:
-        """Get comment count for a message"""
-        with self.session_factory() as session:
-            return self._crud_strategy.get_comment_count_for_message(session, message_id)
+            return self._crud_strategy.get_rating_for_message(session, message_id)
 
     def create(self, input_schema: FeedbackCreate) -> Feedback:
         """Create a new feedback"""
@@ -128,7 +124,10 @@ class FeedbackRepository:
     def update(self, id: UUID, input_schema: FeedbackUpdate) -> Optional[Feedback]:
         """Update feedback by ID"""
         with self.session_factory() as session:
-            return self._crud_strategy.update(session, id, input_schema)
+            db_obj = self._crud_strategy.get_by_id(session, id)
+            if db_obj is None:
+                return None
+            return self._crud_strategy.update(session, db_obj, input_schema)
 
     def delete(self, id: UUID) -> bool:
         """Delete feedback by ID"""

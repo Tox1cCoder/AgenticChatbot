@@ -6,7 +6,11 @@ Usage: from app.utils.exception_handler import register_exception_handlers
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from fastapi.exceptions import HTTPException as FastAPIHTTPException, RequestValidationError
+from fastapi.exceptions import (
+    HTTPException as FastAPIHTTPException,
+    RequestValidationError,
+)
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.core.exceptions import CustomHTTPException
 from app.schemas.responses.api_response import ApiResponse
 
@@ -39,8 +43,32 @@ def register_exception_handlers(app: FastAPI):
             content=api_response.model_dump(by_alias=True, exclude_none=True),
         )
 
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+        if exc.status_code == 404:
+            api_response = ApiResponse(
+                success=False,
+                code="not_found",
+                message=exc.detail or "Resource not found.",
+            )
+            return JSONResponse(
+                status_code=404,
+                content=api_response.model_dump(by_alias=True, exclude_none=True),
+            )
+        api_response = ApiResponse(
+            success=False,
+            code="http_error",
+            message=exc.detail,
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=api_response.model_dump(by_alias=True, exclude_none=True),
+        )
+
     @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    async def validation_exception_handler(
+        request: Request, exc: RequestValidationError
+    ):
         error_details = {}
         for error in exc.errors():
             loc = ".".join(map(str, error["loc"]))
