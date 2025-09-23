@@ -325,7 +325,7 @@ def get_user_messages_paginated(
     page: int = 1,
     limit: int = 10,
     order_by: str = "created_at",
-    order_direction: str = "desc",
+    order_direction: str = "asc",
 ) -> List[Dict[str, Any]]:
     """Get user messages with pagination support"""
     response = make_api_request(
@@ -644,24 +644,17 @@ def render_chat_interface():
     if "has_more_messages" not in st.session_state:
         st.session_state.has_more_messages = True
 
-    # Load initial messages if we're in a conversation or use pagination for all user messages
+    # Only load messages if explicitly in a specific conversation and messages button was clicked
+    # Remove auto-loading for general message view
     if (
         st.session_state.current_conversation_id
         and st.session_state.current_conversation_id != "pending_new"
     ):
-        # For specific conversations, load from conversation endpoint
-        all_messages = get_messages(st.session_state.current_conversation_id)
-        if all_messages:
-            st.session_state.messages = all_messages
-    else:
-        # For general message view, use paginated endpoint
-        if not st.session_state.all_loaded_messages:
-            # Load first 10 messages
-            initial_messages = get_user_messages_paginated(
-                page=1, limit=10, order_by="created_at", order_direction="desc"
-            )
-            st.session_state.all_loaded_messages = initial_messages
-            st.session_state.has_more_messages = len(initial_messages) == 10
+        # For specific conversations, only load if messages are not already loaded
+        if not st.session_state.messages:
+            all_messages = get_messages(st.session_state.current_conversation_id)
+            if all_messages:
+                st.session_state.messages = all_messages
 
     # Handle conversation title display
     if (
@@ -691,9 +684,21 @@ def render_chat_interface():
     elif st.session_state.current_conversation_id == "pending_new":
         st.markdown("# New Chat - Start typing to begin!")
     else:
-        # Welcome screen with recent messages
-        st.markdown("# All Messages")
-        if st.button(
+        # Welcome screen - no auto-loading of messages
+        st.markdown("# Welcome!")
+
+        # Only show load messages button if user wants to see all messages
+        if st.button("📜 Load All My Messages"):
+            if not st.session_state.all_loaded_messages:
+                # Load first 10 messages
+                initial_messages = get_user_messages_paginated(
+                    page=1, limit=10, order_by="created_at", order_direction="asc"
+                )
+                st.session_state.all_loaded_messages = initial_messages
+                st.session_state.has_more_messages = len(initial_messages) == 10
+                st.rerun()
+
+        if st.session_state.all_loaded_messages and st.button(
             "🔄 Load More Messages", disabled=not st.session_state.has_more_messages
         ):
             st.session_state.current_page += 1
@@ -701,7 +706,7 @@ def render_chat_interface():
                 page=st.session_state.current_page,
                 limit=10,
                 order_by="created_at",
-                order_direction="desc",
+                order_direction="asc",
             )
             if more_messages:
                 st.session_state.all_loaded_messages.extend(more_messages)
@@ -745,7 +750,7 @@ def render_chat_interface():
         except Exception:
             return iso_string
 
-    # Display messages from appropriate source
+    # Display messages from appropriate source - only if conversation is selected
     messages_to_display = []
     if (
         st.session_state.current_conversation_id
@@ -753,8 +758,15 @@ def render_chat_interface():
         and st.session_state.messages
     ):
         messages_to_display = st.session_state.messages
-    elif st.session_state.all_loaded_messages:
-        messages_to_display = st.session_state.all_loaded_messages
+    elif (
+        st.session_state.all_loaded_messages
+        and st.session_state.current_conversation_id is None
+    ):
+        # Only show all messages if explicitly loaded and no conversation selected
+        # Sort messages by created_at to ensure chronological order
+        messages_to_display = sorted(
+            st.session_state.all_loaded_messages, key=lambda x: x.get("createdAt", "")
+        )
 
     # Display all messages at once with proper alignment
     for msg in messages_to_display:
@@ -764,7 +776,7 @@ def render_chat_interface():
                 f"""
                 <div style="display: flex; justify-content: flex-end; margin: 10px 0; align-items: flex-start; gap: 10px;">
                     <div class="user-message">
-                        {msg["content"]}
+                        {msg["content"].replace('<', '&lt;').replace('>', '&gt;')}
                         <div class="message-timestamp">
                             You • {format_time(msg.get("createdAt", "now"))}
                         </div>
@@ -790,7 +802,7 @@ def render_chat_interface():
                     </div>
                     <div style="display: flex; flex-direction: column; gap: 5px; max-width: 70%;">
                         <div class="bot-message">
-                            {msg["content"]}
+                            {msg["content"].replace('<', '&lt;').replace('>', '&gt;')}
                             <div class="message-timestamp">
                                 Assistant • {format_time(msg.get("createdAt", "now"))}
                             </div>

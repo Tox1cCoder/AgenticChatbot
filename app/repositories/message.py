@@ -43,7 +43,7 @@ class MessageCRUDStrategy(
                 else:
                     stmt = stmt.order_by(desc(order_column))
         else:
-            # Default ordering
+            # Default ordering - chronological order (oldest first for proper conversation flow)
             stmt = stmt.order_by(Message.created_at.asc())
 
         stmt = stmt.offset(offset).limit(limit)
@@ -81,8 +81,8 @@ class MessageCRUDStrategy(
                 else:
                     stmt = stmt.order_by(desc(order_column))
         else:
-            # Default ordering
-            stmt = stmt.order_by(Message.created_at.desc())
+            # Default ordering - chronological order (oldest first for proper conversation flow)
+            stmt = stmt.order_by(Message.created_at.asc())
 
         stmt = stmt.offset(offset).limit(limit)
         return list(db.execute(stmt).scalars().all())
@@ -125,7 +125,11 @@ class MessageCRUDStrategy(
         self, db: Session, conversation_id: UUID
     ) -> List[Message]:
         """Get all messages in a conversation thread ordered by creation time"""
-        stmt = select(Message).where(Message.conversation_id == conversation_id)
+        stmt = (
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.asc())  # Ensure chronological order
+        )
         return list(db.execute(stmt).scalars().all())
 
 

@@ -33,7 +33,7 @@ class PaginationParams(BaseModel):
     page: int = Field(default=1, ge=1, description="Page number (1-based)")
     limit: int = Field(default=10, ge=1, le=100, description="Number of items per page")
     order_direction: OrderDirection = Field(
-        default=OrderDirection.DESC, alias="orderDirection"
+        default=OrderDirection.ASC, alias="orderDirection"  # Changed default to ASC for chronological order
     )
 
     class Config:
