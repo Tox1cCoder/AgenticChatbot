@@ -43,7 +43,6 @@ async def upload_document(
 
     return ApiResponse(
         success=True,
-        code="ok",
         message=f"Document '{file.filename}' processed successfully",
         data=result,
     )

@@ -10,7 +10,7 @@ class AuthenticationException(CustomHTTPException):
     """Authentication-related exceptions"""
 
     def __init__(
-        self, detail: str = "Authentication failed", error_code: str = "AUTH_FAILED"
+        self, detail: str = "Unauthenticated", error_code: str = "unauthenticated"
     ):
         super().__init__(
             status_code=status.HTTP_401_UNAUTHORIZED,

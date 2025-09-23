@@ -36,7 +36,6 @@ async def create_conversation(
     result = conversation_service.create_conversation(conversation_data, user_id)
     return ApiResponse(
         success=True,
-        code="ok",
         message="Conversation created successfully",
         data=result
     )
@@ -54,7 +53,6 @@ async def get_conversation(
     result = conversation_service.get_by_id(conversation_id)
     return ApiResponse(
         success=True,
-        code="ok",
         message="Conversation retrieved successfully",
         data=result
     )
@@ -77,7 +75,6 @@ async def get_conversations(
     )
     return ApiResponse(
         success=True,
-        code="ok",
         message="Conversations retrieved successfully",
         data=result
     )
@@ -99,7 +96,6 @@ async def get_conversation_thread(
     result = message_service.get_conversation_thread(conversation_id, user_id)
     return ApiResponse(
         success=True,
-        code="ok",
         message="Conversation thread retrieved successfully",
         data=result
     )
@@ -118,6 +114,5 @@ async def delete_conversation(
     conversation_service.delete_conversation(conversation_id, user_id)
     return ApiResponse(
         success=True,
-        code="ok",
         message="Conversation deleted successfully"
     )

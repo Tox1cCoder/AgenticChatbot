@@ -28,7 +28,6 @@ async def create_message(
     result = message_service.create_message(message_data)
     return ApiResponse(
         success=True,
-        code="ok",
         message="Message created successfully",
         data=result
     )
@@ -46,7 +45,6 @@ async def get_message(
     result = message_service.get_by_id(message_id, user_id)
     return ApiResponse(
         success=True,
-        code="ok",
         message="Message retrieved successfully",
         data=result
     )

@@ -119,15 +119,13 @@ Demo: [http://localhost:8501](http://localhost:8501)
 - `GET /messages/conversation/{conversation_id}` — Get messages for a conversation (requires user_id, paginated)
 - `GET /messages/conversation/{conversation_id}/thread` — Get conversation thread (requires user_id)
 
-### Feedback
+### Feedbacks
 
-- `POST /feedback/user/{user_id}` — Create/update feedback for a message
-- `GET /feedback/{feedback_id}` — Get feedback by ID
-- `GET /feedback/message/{message_id}` — Get all feedback for a message (paginated)
-- `GET /feedback/user/{user_id}` — Get all feedback by a user (paginated)
-- `GET /feedback/message/{message_id}/user/{user_id}` — Get user's feedback for a message
-- `GET /feedback/message/{message_id}/stats` — Get rating stats for a message
-- `PUT /feedback/{feedback_id}` — Update feedback (requires user_id)
+- `POST /messages/{message_id}/feedbacks` — Create feedback for a message
+- `GET /messages/{message_id}/feedbacks/{feedback_id}` — Get specific feedback for a message
+- `GET /messages/{message_id}/feedbacks/user/{user_id}` — Get user's feedback for a message
+- `GET /messages/{message_id}/feedbacks/stats` — Get rating stats for a message
+- `PUT /messages/{message_id}/feedbacks/{feedback_id}` — Update feedback (requires user ownership)
 
 ---
 
@@ -412,12 +410,11 @@ Authorization: Bearer {{accessToken}}
 #### 5.1 Rate Assistant Response
 
 ```http
-POST {{baseUrl}}/feedback
+POST {{baseUrl}}/messages/{{messageId}}/feedbacks
 Authorization: Bearer {{accessToken}}
 Content-Type: application/json
 
 {
-  "messageId": "{{messageId}}",
   "rating": 5,
   "comment": "Very helpful response!"
 }
@@ -426,14 +423,14 @@ Content-Type: application/json
 #### 5.2 Get Message Feedback
 
 ```http
-GET {{baseUrl}}/feedback/message/{{messageId}}
+GET {{baseUrl}}/messages/{{messageId}}/feedbacks/user/{{userId}}
 Authorization: Bearer {{accessToken}}
 ```
 
 #### 5.3 Update Feedback
 
 ```http
-PUT {{baseUrl}}/feedback/{{feedbackId}}
+PUT {{baseUrl}}/messages/{{messageId}}/feedbacks/{{feedbackId}}
 Authorization: Bearer {{accessToken}}
 Content-Type: application/json
 

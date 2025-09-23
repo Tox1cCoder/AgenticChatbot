@@ -17,7 +17,6 @@ class ApiResponse(BaseModel, Generic[T]):
     """Generic API response wrapper"""
 
     success: bool = Field(..., description="Indicates if the request was successful")
-    code: str = Field(..., description="Response code")
     message: str = Field(..., description="Response message")
     data: Optional[T] = Field(None, description="Response data")
     error: Optional[Dict[str, Any]] = Field(None, description="Error details")

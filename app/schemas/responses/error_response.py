@@ -16,7 +16,7 @@ class ErrorResponse(BaseModel):
 
     success: bool = Field(False, description="Indicates the request failed")
     message: str = Field(..., description="Error message")
-    error_code: Optional[str] = Field(None, alias="errorCode", description="Error code")
+    code: Optional[str] = Field(None, description="Error code")
     details: Optional[Dict[str, Any]] = Field(
         None, description="Additional error details"
     )

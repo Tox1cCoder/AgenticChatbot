@@ -33,7 +33,6 @@ async def signup(
     created_user = user_service.create_user(user_data)
     return ApiResponse(
         success=True,
-        code="ok",
         message="User created successfully",
         data=created_user
     )
@@ -49,7 +48,6 @@ async def login(
     auth_response = auth_service.authenticate_user(login_data)
     return ApiResponse(
         success=True,
-        code="ok",
         message="Login successful",
         data=TokenResponse(**auth_response)
     )
@@ -67,7 +65,6 @@ async def refresh_token(
     access_token = create_access_token(token_data)
     return ApiResponse(
         success=True,
-        code="ok",
         message="Token refreshed successfully",
         data=RefreshTokenResponse(access_token=access_token)
     )
@@ -85,6 +82,5 @@ async def logout(
 
     return ApiResponse(
         success=True,
-        code="ok",
         message="Successfully logged out. Please discard your tokens.",
     )

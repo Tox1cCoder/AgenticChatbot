@@ -11,11 +11,11 @@ from app.interfaces.feedback_service_interface import IFeedbackService
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
 from app.schemas.responses import ApiResponse
 
-router = APIRouter(prefix="/messages", tags=["feedback"])
+router = APIRouter(prefix="/messages", tags=["feedbacks"])
 
 
 @router.post(
-    "/{message_id}/feedback",
+    "/{message_id}/feedbacks",
     response_model=ApiResponse[FeedbackRead],
     status_code=status.HTTP_201_CREATED,
 )
@@ -32,14 +32,11 @@ async def create_feedback(
     feedback_data.message_id = message_id
     result = feedback_service.create_feedback(feedback_data, user_id)
     return ApiResponse(
-        success=True,
-        code="ok",
-        message="Feedback created successfully",
-        data=result
+        success=True, message="Feedback created successfully", data=result
     )
 
 
-@router.get("/{message_id}/feedback/stats", response_model=ApiResponse[dict])
+@router.get("/{message_id}/feedbacks/stats", response_model=ApiResponse[dict])
 @inject
 async def get_message_rating_stats(
     message_id: UUID,
@@ -51,33 +48,31 @@ async def get_message_rating_stats(
     result = feedback_service.get_message_rating_stats(message_id)
     return ApiResponse(
         success=True,
-        code="ok",
         message="Rating statistics retrieved successfully",
-        data=result
+        data=result,
     )
 
 
-@router.get("/{message_id}/feedback/{feedback_id}", response_model=ApiResponse[FeedbackRead])
-@inject
-async def get_feedback(
-    message_id: UUID,
-    feedback_id: UUID,
-    feedback_service: Annotated[
-        IFeedbackService, Depends(Provide[Container.feedback_service])
-    ],
-) -> ApiResponse[FeedbackRead]:
-    """Get specific feedback for a message"""
-    result = feedback_service.get_by_id(feedback_id)
-    return ApiResponse(
-        success=True,
-        code="ok",
-        message="Feedback retrieved successfully",
-        data=result
-    )
+# @router.get(
+#     "/{message_id}/feedbacks/{feedback_id}", response_model=ApiResponse[FeedbackRead]
+# )
+# @inject
+# async def get_feedback(
+#     message_id: UUID,
+#     feedback_id: UUID,
+#     feedback_service: Annotated[
+#         IFeedbackService, Depends(Provide[Container.feedback_service])
+#     ],
+# ) -> ApiResponse[FeedbackRead]:
+#     """Get specific feedback for a message"""
+#     result = feedback_service.get_by_id(feedback_id)
+#     return ApiResponse(
+#         success=True, message="Feedback retrieved successfully", data=result
+#     )
 
 
 @router.get(
-    "/{message_id}/feedback/user/{user_id}", response_model=ApiResponse[FeedbackRead]
+    "/{message_id}/feedbacks/user/{user_id}", response_model=ApiResponse[FeedbackRead]
 )
 @inject
 async def get_user_feedback_for_message(
@@ -92,14 +87,30 @@ async def get_user_feedback_for_message(
     feedback = feedback_service.get_user_feedback_for_message(message_id, user_id)
     return ApiResponse(
         success=True,
-        code="ok",
         message="User feedback retrieved successfully",
-        data=feedback
+        data=feedback,
+    )
+
+
+@router.get("/{message_id}/feedbacks", response_model=ApiResponse[List[FeedbackRead]])
+@inject
+async def get_message_feedbacks(
+    message_id: UUID,
+    feedback_service: Annotated[
+        IFeedbackService, Depends(Provide[Container.feedback_service])
+    ],
+) -> ApiResponse[List[FeedbackRead]]:
+    """Get all feedbacks for a message"""
+    result = feedback_service.get_feedbacks_by_message_id(message_id)
+    return ApiResponse(
+        success=True,
+        message="Message feedbacks retrieved successfully",
+        data=result,
     )
 
 
 @router.put(
-    "/{message_id}/feedback/{feedback_id}", response_model=ApiResponse[FeedbackRead]
+    "/{message_id}/feedbacks/{feedback_id}", response_model=ApiResponse[FeedbackRead]
 )
 @inject
 async def update_feedback(
@@ -114,8 +125,5 @@ async def update_feedback(
     """Update feedback (requires user ownership)"""
     result = feedback_service.update_feedback(feedback_id, user_id, feedback_data)
     return ApiResponse(
-        success=True,
-        code="ok",
-        message="Feedback updated successfully",
-        data=result
+        success=True, code="ok", message="Feedback updated successfully", data=result
     )

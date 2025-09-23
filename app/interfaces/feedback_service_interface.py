@@ -32,6 +32,13 @@ class IFeedbackService(ABC):
         pass
 
     @abstractmethod
+    def get_feedbacks_by_message_id(
+        self, message_id: UUID, skip: int = 0, limit: int = 100
+    ) -> List[FeedbackRead]:
+        """Get all feedbacks for a message - alias for get_by_message"""
+        pass
+
+    @abstractmethod
     def get_by_user(
         self, user_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[FeedbackRead]:

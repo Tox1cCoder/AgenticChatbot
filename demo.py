@@ -253,12 +253,14 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
                 st.session_state.current_user_id = None
                 st.session_state.show_login = True
             elif error_code == "invalid_input":
-                st.error(f"❌ Validation Error: {error_message}. Details: {error_details}")
+                st.error(
+                    f"❌ Validation Error: {error_message}. Details: {error_details}"
+                )
             else:
                 st.error(f"❌ API Error ({error_code}): {error_message}")
-            return {} # Return empty dict on error
+            return {}  # Return empty dict on error
 
-        return response_data # Return the full response data on success
+        return response_data  # Return the full response data on success
 
     except requests.exceptions.ConnectionError:
         st.error(
@@ -321,7 +323,7 @@ def create_feedback(message_id: str, rating: int, comment: str) -> Dict[str, Any
         "comment": comment,
     }
     response = make_api_request(
-        "POST", f"/messages/{message_id}/feedback", feedback_data
+        "POST", f"/messages/{message_id}/feedbacks", feedback_data
     )
     if response and response.get("data") is not None:
         return response["data"]
@@ -331,7 +333,7 @@ def create_feedback(message_id: str, rating: int, comment: str) -> Dict[str, Any
 @st.cache_data(show_spinner=False)
 def get_feedback_for_message(message_id: str, user_id: str) -> Dict[str, Any]:
     response = make_api_request(
-        "GET", f"/messages/{message_id}/feedback/user/{user_id}"
+        "GET", f"/messages/{message_id}/feedbacks/user/{user_id}"
     )
     if response and response.get("data") is not None:
         return response["data"]
@@ -340,10 +342,19 @@ def get_feedback_for_message(message_id: str, user_id: str) -> Dict[str, Any]:
 
 @st.cache_data(show_spinner=False)
 def get_feedback_stats(message_id: str) -> Dict:
-    response = make_api_request("GET", f"/messages/{message_id}/feedback/stats")
+    response = make_api_request("GET", f"/messages/{message_id}/feedbacks/stats")
     if response and response.get("data") is not None:
         return response["data"]
     return {}
+
+
+@st.cache_data(show_spinner=False)
+def get_feedbacks(message_id: str) -> List[Dict[str, Any]]:
+    """Get all feedbacks for a message"""
+    response = make_api_request("GET", f"/messages/{message_id}/feedbacks")
+    if response and response.get("data") is not None:
+        return response["data"]
+    return []
 
 
 def render_login_page():
@@ -669,7 +680,7 @@ def render_chat_interface():
 
     # Display all messages with proper alignment
     for msg in st.session_state.messages:
-        if msg["sender"] == 1:
+        if msg["sender"] == 1:  # User messages (MessageRole.user = 1)
             # User message
             st.markdown(
                 f"""
@@ -721,23 +732,33 @@ def render_chat_interface():
                     if st.form_submit_button(
                         "Submit Feedback", use_container_width=True
                     ):
-                        create_feedback(msg["id"], rating, comment)
+                        feedback_data = {
+                            "message_id": msg[
+                                "id"
+                            ],  # Include message_id in request body
+                            "rating": rating,
+                            "comment": comment,
+                        }
+                        make_api_request(
+                            "POST",
+                            f"/messages/{msg['id']}/feedbacks",
+                            feedback_data,
+                        )
                         st.success("✅ Feedback submitted!")
                         st.cache_data.clear()  # Clear cache to refresh feedback data
                         st.rerun()
+            # Show existing feedback
+            feedbacks = get_feedbacks(msg["id"])
+            for fb in feedbacks:
+                rating = fb.get("rating", 0)
 
-                if st.button("View My Feedback", key=f"view_feedback_{msg['id']}"):
-                    feedback = get_feedback_for_message(
-                        msg["id"], st.session_state.current_user_id
-                    )
-                    if feedback:
-                        st.write(feedback)
-
-            stats = get_feedback_stats(msg["id"])
-            if stats:
-                st.markdown(
-                    f"⭐ {float(stats.get('rating') or 0):.1f} ({stats.get('comment_count', 0)} comments)"
-                )
+                # Show individual feedback comments
+                with st.expander("View Feedback", expanded=False):
+                    for fb in feedbacks:
+                        if fb.get("comment"):
+                            st.markdown(f"**{fb['rating']}⭐** - {fb['comment']}")
+                        else:
+                            st.markdown(f"**{fb['rating']}⭐**")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -810,7 +831,7 @@ def render_chat_interface():
                             f"/conversations/",
                             conv_data,
                         )
-                        if conv_result and "data" in conv_result:
+                        if conv_result and conv_result.get("data") is not None:
                             st.session_state.current_conversation_id = conv_result[
                                 "data"
                             ]["id"]

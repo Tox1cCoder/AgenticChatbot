@@ -98,6 +98,12 @@ class FeedbackService(IFeedbackService):
         )
         return [FeedbackRead.model_validate(feedback) for feedback in feedback_entities]
 
+    def get_feedbacks_by_message_id(
+        self, message_id: UUID, skip: int = 0, limit: int = 100
+    ) -> List[FeedbackRead]:
+        """Get all feedbacks for a message - alias for get_by_message"""
+        return self.get_by_message(message_id, skip, limit)
+
     def get_by_user(
         self, user_id: UUID, skip: int = 0, limit: int = 100
     ) -> List[FeedbackRead]:
