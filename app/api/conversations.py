@@ -12,7 +12,9 @@ from app.schemas.conversation import (
     ConversationCreate,
     ConversationRead,
 )
-from app.schemas.responses import ApiResponse, SuccessResponse
+from app.interfaces.message_service_interface import IMessageService
+from app.schemas.message import MessageRead
+from app.schemas.responses import ApiResponse
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -32,7 +34,12 @@ async def create_conversation(
 ) -> ApiResponse[ConversationRead]:
     """Create a new conversation for authenticated user"""
     result = conversation_service.create_conversation(conversation_data, user_id)
-    return ApiResponse(data=result, message="Conversation created successfully")
+    return ApiResponse(
+        success=True,
+        code="ok",
+        message="Conversation created successfully",
+        data=result
+    )
 
 
 @router.get("/{conversation_id}", response_model=ApiResponse[ConversationRead])
@@ -45,7 +52,12 @@ async def get_conversation(
 ) -> ApiResponse[ConversationRead]:
     """Get conversation by ID"""
     result = conversation_service.get_by_id(conversation_id)
-    return ApiResponse(data=result, message="Conversation retrieved successfully")
+    return ApiResponse(
+        success=True,
+        code="ok",
+        message="Conversation retrieved successfully",
+        data=result
+    )
 
 
 @router.get("/", response_model=ApiResponse[List[ConversationRead]])
@@ -63,10 +75,37 @@ async def get_conversations(
     result = conversation_service.get_user_conversations(
         user_id, skip=skip, limit=limit
     )
-    return ApiResponse(data=result, message="Conversations retrieved successfully")
+    return ApiResponse(
+        success=True,
+        code="ok",
+        message="Conversations retrieved successfully",
+        data=result
+    )
 
 
-@router.delete("/{conversation_id}", response_model=SuccessResponse)
+@router.get(
+    "/{conversation_id}/messages",
+    response_model=ApiResponse[List[MessageRead]],
+)
+@inject
+async def get_conversation_thread(
+    conversation_id: UUID,
+    message_service: Annotated[
+        IMessageService, Depends(Provide[Container.message_service])
+    ],
+    user_id: UUID = Depends(get_current_user_id),
+) -> ApiResponse[List[MessageRead]]:
+    """Get conversation's messages by timestamp (requires user ownership)"""
+    result = message_service.get_conversation_thread(conversation_id, user_id)
+    return ApiResponse(
+        success=True,
+        code="ok",
+        message="Conversation thread retrieved successfully",
+        data=result
+    )
+
+
+@router.delete("/{conversation_id}", response_model=ApiResponse)
 @inject
 async def delete_conversation(
     conversation_id: UUID,
@@ -74,7 +113,11 @@ async def delete_conversation(
         IConversationService, Depends(Provide[Container.conversation_service])
     ],
     user_id: UUID = Depends(get_current_user_id),
-) -> SuccessResponse:
+) -> ApiResponse:
     """Delete conversation (requires user ownership)"""
     conversation_service.delete_conversation(conversation_id, user_id)
-    return SuccessResponse(message="Conversation deleted successfully")
+    return ApiResponse(
+        success=True,
+        code="ok",
+        message="Conversation deleted successfully"
+    )

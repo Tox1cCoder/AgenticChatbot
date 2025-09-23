@@ -5,12 +5,47 @@ import time
 import asyncio
 from uuid import UUID
 
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
-from sentence_transformers import SentenceTransformer
+# Optional dependencies with availability flags
+try:
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, VectorParams, PointStruct
+
+    QDRANT_AVAILABLE = True
+except ImportError:
+    QDRANT_AVAILABLE = False
+
+try:
+    from sentence_transformers import SentenceTransformer
+
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+
+try:
+    import PyPDF2
+
+    PYPDF2_AVAILABLE = True
+except ImportError:
+    PYPDF2_AVAILABLE = False
+
+try:
+    from docx import Document
+
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
 
 from ..interfaces import BaseAgent
-from ..schemas import AgentMessage, AgentResponse, AgentType, MessageType
+from ..schemas import (
+    AgentMessage,
+    AgentResponse,
+    AgentType,
+    MessageType,
+    AgentRequest,
+    AgentConfig,
+    RAGAgentConfig,
+    AgentCapability,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,30 +58,80 @@ class RAGAgent(BaseAgent):
         qdrant_url: str = "http://localhost:6333",
         collection_name: str = "documents",
     ):
-        super().__init__(AgentType.RAG)
+        # Create a proper RAGAgentConfig instance
+        config = RAGAgentConfig(
+            agent_id="rag_agent",
+            agent_type=AgentType.RAG,
+            name="RAG Agent",
+            description="Document-based question answering with vector search",
+            capabilities=[
+                AgentCapability.DOCUMENT_SEARCH,
+                AgentCapability.KNOWLEDGE_RETRIEVAL,
+            ],
+            vector_store_path=qdrant_url,
+        )
+        super().__init__(config)
         self.logger = logging.getLogger("rag_agent")
 
         self.qdrant_client = None
         self.collection_name = collection_name
         self.vector_mode = False
 
-        self.qdrant_client = QdrantClient(url=qdrant_url)
-        self.vector_mode = True
-        self.logger.info("Qdrant client initialized successfully")
+        if QDRANT_AVAILABLE:
+            self.qdrant_client = QdrantClient(url=qdrant_url)
+            self.vector_mode = True
+            self.logger.info("Qdrant client initialized successfully")
 
         self.embedding_model = None
         self.embedding_dimension = 384  # Default for all-MiniLM-L6-v2
 
-        try:
-            self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-            self.logger.info("Sentence transformer model loaded successfully")
-        except Exception as e:
-            self.logger.warning(f"Failed to load embedding model: {e}")
-            self.vector_mode = False
+        if SENTENCE_TRANSFORMERS_AVAILABLE:
+            try:
+                self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+                self.logger.info("Sentence transformer model loaded successfully")
+            except Exception as e:
+                self.logger.warning(f"Failed to load embedding model: {e}")
+                self.vector_mode = False
 
         # Initialize collection
         if self.vector_mode and self.qdrant_client:
             asyncio.create_task(self._initialize_collection())
+
+    async def _initialize_impl(self) -> None:
+        """Initialize the RAG agent and vector collection."""
+        if self.vector_mode and self.qdrant_client:
+            await self._initialize_collection()
+        self.logger.info("RAG agent initialized successfully")
+
+    async def _cleanup_impl(self) -> None:
+        """Clean up RAG agent resources including Qdrant connections."""
+        if self.qdrant_client:
+            # Close any open connections
+            try:
+                self.qdrant_client.close()
+            except:
+                pass
+        self.logger.info("RAG agent cleaned up successfully")
+
+    async def _health_check_impl(self) -> bool:
+        """Check if the RAG agent is healthy."""
+        if self.vector_mode and QDRANT_AVAILABLE and self.qdrant_client:
+            return True
+        return True  # Can still function without vector mode
+
+    async def can_handle_request(self, request: AgentRequest) -> float:
+        """Determine if this agent can handle the given request."""
+        # Return higher confidence if vector mode is available
+        return 0.9 if self.vector_mode else 0.7
+
+    async def process_request(self, request: AgentRequest) -> AgentResponse:
+        """Process an agent request and return a response."""
+        # Delegate to the existing process_message method
+        return await self.process_message(
+            message=request.message,
+            conversation_id=request.conversation_id,
+            user_id=request.user_id,
+        )
 
     async def _initialize_collection(self):
         """Initialize Qdrant collection if it doesn't exist."""
@@ -338,34 +423,30 @@ class RAGAgent(BaseAgent):
 
     def _extract_pdf_text(self, file_path: str) -> str:
         """Extract text from PDF file."""
-        try:
-            import PyPDF2
-
-            with open(file_path, "rb") as file:
-                reader = PyPDF2.PdfReader(file)
-                text = ""
-                for page in reader.pages:
-                    text += page.extract_text() + "\n"
-                return text
-        except ImportError:
+        if not PYPDF2_AVAILABLE:
             raise ImportError(
                 "PyPDF2 is required for PDF processing. Install with: pip install PyPDF2"
             )
 
+        with open(file_path, "rb") as file:
+            reader = PyPDF2.PdfReader(file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+            return text
+
     def _extract_docx_text(self, file_path: str) -> str:
         """Extract text from DOCX file."""
-        try:
-            from docx import Document
-
-            doc = Document(file_path)
-            text = ""
-            for paragraph in doc.paragraphs:
-                text += paragraph.text + "\n"
-            return text
-        except ImportError:
+        if not DOCX_AVAILABLE:
             raise ImportError(
                 "python-docx is required for DOCX processing. Install with: pip install python-docx"
             )
+
+        doc = Document(file_path)
+        text = ""
+        for paragraph in doc.paragraphs:
+            text += paragraph.text + "\n"
+        return text
 
     async def search_documents(
         self, query: str, user_id: Optional[str] = None, top_k: int = 5

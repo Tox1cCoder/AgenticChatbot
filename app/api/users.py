@@ -21,17 +21,9 @@ async def get_user(
 ) -> ApiResponse[UserRead]:
     """Get user by ID"""
     result = user_service.get_by_id(user_id)
-    return ApiResponse(data=result, message="User retrieved successfully")
-
-
-@router.get("/", response_model=ApiResponse[List[UserRead]])
-@inject
-async def get_users(
-    user_service: Annotated[IUserService, Depends(Provide[Container.user_service])],
-    page: int = 1,
-    limit: int = 100,
-) -> ApiResponse[List[UserRead]]:
-    """Get all users"""
-    skip = (page - 1) * limit
-    result = user_service.get_all(skip=skip, limit=limit)
-    return ApiResponse(data=result, message="Users retrieved successfully")
+    return ApiResponse(
+        success=True,
+        code="ok",
+        message="User retrieved successfully",
+        data=result
+    )

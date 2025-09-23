@@ -1,6 +1,8 @@
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 import logging
+import asyncio
+import concurrent.futures
 from datetime import datetime
 
 from ..ai.schemas import (
@@ -195,16 +197,12 @@ class AIService(IAgentService):
         Returns:
             str: Generated response from the multi-agent system
         """
-        import asyncio
-
         try:
             # Run the async method in a new event loop if needed
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     # If we're already in an event loop, we need to use a different approach
-                    import concurrent.futures
-
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                         future = executor.submit(
                             asyncio.run,

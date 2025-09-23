@@ -2,7 +2,7 @@
 Generic API response wrapper
 """
 
-from typing import Generic, TypeVar, Optional
+from typing import Generic, TypeVar, Optional, Dict, Any
 from pydantic import BaseModel, Field, ConfigDict
 
 T = TypeVar("T")
@@ -16,11 +16,10 @@ def to_camel(string: str) -> str:
 class ApiResponse(BaseModel, Generic[T]):
     """Generic API response wrapper"""
 
-    success: bool = Field(True, description="Indicates if the request was successful")
-    message: str = Field("Success", description="Response message")
+    success: bool = Field(..., description="Indicates if the request was successful")
+    code: str = Field(..., description="Response code")
+    message: str = Field(..., description="Response message")
     data: Optional[T] = Field(None, description="Response data")
-    error_code: Optional[str] = Field(
-        None, alias="errorCode", description="Error code if applicable"
-    )
+    error: Optional[Dict[str, Any]] = Field(None, description="Error details")
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)

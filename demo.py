@@ -237,21 +237,29 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
         elif method == "DELETE":
             response = requests.delete(url, headers=headers)
 
-        if response.status_code >= 400:
-            # Error handling for authentication issues
-            if response.status_code == 403:
+        response_data = response.json()
+
+        if not response_data.get("success"):
+            # Handle API errors based on the new format
+            error_code = response_data.get("code", "unknown_error")
+            error_message = response_data.get("message", "An unknown error occurred.")
+            error_details = response_data.get("error")
+
+            if error_code == "unauthenticated":
                 st.error(
-                    f"🔒 Authentication required. Please log in with proper credentials. (Error {response.status_code})"
+                    f"🔒 Authentication required. Please log in. (Error: {error_message})"
                 )
-                # Clear invalid session state on auth failure
                 st.session_state.auth_token = None
                 st.session_state.current_user_id = None
                 st.session_state.show_login = True
+            elif error_code == "invalid_input":
+                st.error(f"❌ Validation Error: {error_message}. Details: {error_details}")
             else:
-                st.error(f"API Error {response.status_code}: {response.text}")
-            return {}
+                st.error(f"❌ API Error ({error_code}): {error_message}")
+            return {} # Return empty dict on error
 
-        return response.json()
+        return response_data # Return the full response data on success
+
     except requests.exceptions.ConnectionError:
         st.error(
             "❌ Cannot connect to API. Make sure FastAPI server is running on localhost:8000"
@@ -264,17 +272,17 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
 
 # --- Cached API GET functions ---
 @st.cache_data(show_spinner=False)
-def get_users() -> List[Dict[str, Any]]:
-    response = make_api_request("GET", "/users/")
-    if response and "data" in response:
+def get_user(user_id: str) -> Dict[str, Any]:
+    response = make_api_request("GET", f"/users/{user_id}")
+    if response and response.get("data") is not None:
         return response["data"]
-    return []
+    return {}
 
 
 @st.cache_data(show_spinner=False)
-def get_conversations(user_id: str) -> List[Dict[str, Any]]:
+def get_conversations() -> List[Dict[str, Any]]:
     response = make_api_request("GET", f"/conversations/")
-    if response and "data" in response:
+    if response and response.get("data") is not None:
         return response["data"]
     return []
 
@@ -282,7 +290,7 @@ def get_conversations(user_id: str) -> List[Dict[str, Any]]:
 @st.cache_data(show_spinner=False)
 def get_health_api() -> Dict:
     response = make_api_request("GET", "/health/")
-    if response and "data" in response:
+    if response and response.get("data") is not None:
         return response["data"]
     return {}
 
@@ -290,40 +298,56 @@ def get_health_api() -> Dict:
 @st.cache_data(show_spinner=False)
 def get_health_db() -> Dict:
     response = make_api_request("GET", "/health/db")
-    if response and "data" in response:
+    if response and response.get("data") is not None:
         return response["data"]
     return {}
 
 
 @st.cache_data(show_spinner=False)
-def get_messages(conversation_id: str, user_id: str) -> List[Dict[str, Any]]:
+def get_messages(conversation_id: str) -> List[Dict[str, Any]]:
     response = make_api_request(
         "GET",
-        f"/messages/conversations/{conversation_id}/messages/thread",
+        f"/conversations/{conversation_id}/messages",
     )
-    if response and "data" in response:
+    if response and response.get("data") is not None:
         return response["data"]
     return []
 
 
 @st.cache_data(show_spinner=False)
-def get_feedbacks(message_id: str) -> List[Dict[str, Any]]:
-    response = make_api_request("GET", f"/messages/{message_id}/feedback")
-    if response and "data" in response:
+def create_feedback(message_id: str, rating: int, comment: str) -> Dict[str, Any]:
+    feedback_data = {
+        "rating": rating,
+        "comment": comment,
+    }
+    response = make_api_request(
+        "POST", f"/messages/{message_id}/feedback", feedback_data
+    )
+    if response and response.get("data") is not None:
         return response["data"]
-    return []
+    return {}
+
+
+@st.cache_data(show_spinner=False)
+def get_feedback_for_message(message_id: str, user_id: str) -> Dict[str, Any]:
+    response = make_api_request(
+        "GET", f"/messages/{message_id}/feedback/user/{user_id}"
+    )
+    if response and response.get("data") is not None:
+        return response["data"]
+    return {}
 
 
 @st.cache_data(show_spinner=False)
 def get_feedback_stats(message_id: str) -> Dict:
     response = make_api_request("GET", f"/messages/{message_id}/feedback/stats")
-    if response and "data" in response:
+    if response and response.get("data") is not None:
         return response["data"]
     return {}
 
 
 def render_login_page():
-    """Render modern login/signup page"""
+    """Render login/signup page"""
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
@@ -439,7 +463,7 @@ def render_conversation_sidebar():
             and st.session_state.current_user_id
             and st.session_state.auth_token
         ):
-            conversations = get_conversations(st.session_state.current_user_id)
+            conversations = get_conversations()
             if conversations:
                 st.session_state.conversations_list = conversations
 
@@ -460,9 +484,7 @@ def render_conversation_sidebar():
                         if conv["id"] != st.session_state.current_conversation_id:
                             st.session_state.current_conversation_id = conv["id"]
                             # Load all messages at once for the conversation
-                            messages = get_messages(
-                                conv["id"], st.session_state.current_user_id
-                            )
+                            messages = get_messages(conv["id"])
                             st.session_state.messages = messages or []
                             st.rerun()
 
@@ -470,12 +492,9 @@ def render_conversation_sidebar():
 
         # User info and logout
         if st.session_state.current_user_id:
-            users = get_users()
-            current_user = next(
-                (u for u in users if u["id"] == st.session_state.current_user_id), None
-            )
-            if current_user:
-                st.markdown(f"**👤 {current_user['username']}**")
+            user = get_user(st.session_state.current_user_id)
+            if user:
+                st.markdown(f"**👤 {user['username']}**")
                 if st.button("🚪 Sign Out", use_container_width=True):
                     st.session_state.current_user_id = None
                     st.session_state.current_conversation_id = None
@@ -511,9 +530,7 @@ def render_conversation_manager():
                     # Search through messages in conversations
                     filtered_convs = []
                     for conv in st.session_state.conversations_list:
-                        messages = get_messages(
-                            conv["id"], st.session_state.current_user_id
-                        )
+                        messages = get_messages(conv["id"])
                         for msg in messages:
                             if search_term.lower() in msg.get("content", "").lower():
                                 if conv not in filtered_convs:
@@ -524,9 +541,7 @@ def render_conversation_manager():
                     for conv in filtered_convs:
                         with st.expander(f"💬 {conv['title']}", expanded=False):
                             # Show preview of recent messages
-                            messages = get_messages(
-                                conv["id"], st.session_state.current_user_id
-                            )
+                            messages = get_messages(conv["id"])
                             if messages:
                                 for msg in messages[-3:]:  # Show last 3 messages
                                     sender_icon = (
@@ -543,10 +558,7 @@ def render_conversation_manager():
                                         "id"
                                     ]
                                     st.session_state.messages = (
-                                        get_messages(
-                                            conv["id"], st.session_state.current_user_id
-                                        )
-                                        or []
+                                        get_messages(conv["id"]) or []
                                     )
                                     st.session_state.show_conversation_manager = False
                                     st.rerun()
@@ -598,7 +610,7 @@ def render_chat_interface():
     ):
         # Ensure conversations list is loaded
         if not st.session_state.conversations_list and st.session_state.current_user_id:
-            conversations = get_conversations(st.session_state.current_user_id)
+            conversations = get_conversations()
             if conversations:
                 st.session_state.conversations_list = conversations
 
@@ -657,7 +669,7 @@ def render_chat_interface():
 
     # Display all messages with proper alignment
     for msg in st.session_state.messages:
-        if msg["sender"] == 1:  # User messages (MessageRole.user = 1)
+        if msg["sender"] == 1:
             # User message
             st.markdown(
                 f"""
@@ -709,34 +721,23 @@ def render_chat_interface():
                     if st.form_submit_button(
                         "Submit Feedback", use_container_width=True
                     ):
-                        feedback_data = {
-                            "message_id": msg[
-                                "id"
-                            ],  # Include message_id in request body
-                            "rating": rating,
-                            "comment": comment,
-                        }
-                        make_api_request(
-                            "POST",
-                            f"/messages/{msg['id']}/feedback",
-                            feedback_data,
-                        )
+                        create_feedback(msg["id"], rating, comment)
                         st.success("✅ Feedback submitted!")
                         st.cache_data.clear()  # Clear cache to refresh feedback data
                         st.rerun()
-            # Show existing feedback
-            feedbacks = get_feedbacks(msg["id"])
-            for fb in feedbacks:
-                rating = fb.get("rating", 0)
-                st.markdown(f"⭐ {rating:.1f}")
 
-                # Show individual feedback comments
-                with st.expander("View Feedback", expanded=False):
-                    for fb in feedbacks:
-                        if fb.get("comment"):
-                            st.markdown(f"**{fb['rating']}⭐** - {fb['comment']}")
-                        else:
-                            st.markdown(f"**{fb['rating']}⭐**")
+                if st.button("View My Feedback", key=f"view_feedback_{msg['id']}"):
+                    feedback = get_feedback_for_message(
+                        msg["id"], st.session_state.current_user_id
+                    )
+                    if feedback:
+                        st.write(feedback)
+
+            stats = get_feedback_stats(msg["id"])
+            if stats:
+                st.markdown(
+                    f"⭐ {float(stats.get('rating') or 0):.1f} ({stats.get('comment_count', 0)} comments)"
+                )
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -770,7 +771,7 @@ def render_chat_interface():
 
                             # Upload file to backend for RAG processing
                             upload_response = requests.post(
-                                f"{API_BASE_URL}/api/documents",
+                                f"{API_BASE_URL}/documents",
                                 files=files,
                                 headers={
                                     "Authorization": f"Bearer {st.session_state.get('auth_token', '')}"
@@ -779,11 +780,16 @@ def render_chat_interface():
 
                             if upload_response.status_code == 200:
                                 upload_result = upload_response.json()
+                                # Handle ApiResponse wrapper format
+                                if upload_result.get("data") is not None:
+                                    data = upload_result["data"]
+                                else:
+                                    data = upload_result
                                 st.success(
                                     f"✅ File '{uploaded_file.name}' uploaded and processed successfully!"
                                 )
                                 st.info(
-                                    f"Added {upload_result.get('chunks_created', 0)} knowledge chunks to the database."
+                                    f"Added {data.get('chunks_created', 0)} knowledge chunks to the database."
                                 )
                             else:
                                 st.error(
@@ -824,8 +830,7 @@ def render_chat_interface():
                         st.cache_data.clear()
                         # Reload all messages from backend to get both user message and bot response
                         messages = get_messages(
-                            st.session_state.current_conversation_id,
-                            st.session_state.current_user_id,
+                            st.session_state.current_conversation_id
                         )
                         st.session_state.messages = messages or []
                         # Force refresh conversations list to include new conversation

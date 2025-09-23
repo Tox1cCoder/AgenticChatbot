@@ -6,6 +6,7 @@ import logging
 
 from sqlalchemy import create_engine, orm
 from sqlalchemy.orm import Session
+from app.database.base import Base
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +31,6 @@ class Database:
 
     def create_database(self) -> None:
         """Create all database tables."""
-        from app.database.base import Base
-
         Base.metadata.create_all(self._engine)
 
     @contextmanager

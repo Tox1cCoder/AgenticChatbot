@@ -128,12 +128,10 @@ class FeedbackService(IFeedbackService):
         # Validate message exists
         self.message_validation_utils.validate_message_exists(message_id)
 
-        rating = self.repository.get_rating_for_message(message_id)
-
         return {
             "message_id": message_id,
-            "rating": rating,
-            "comment": self.repository.get_comment_for_message(message_id),
+            "rating": self.repository.get_average_rating_for_message(message_id),
+            "comment_count": self.repository.get_comment_count_for_message(message_id),
         }
 
     def update_feedback(

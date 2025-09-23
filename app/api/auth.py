@@ -23,14 +23,20 @@ from app.schemas.responses.token_response import (
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
-@router.post("/signup", response_model=UserRead, status_code=status.HTTP_201_CREATED)
+@router.post("/signup", response_model=ApiResponse[UserRead], status_code=status.HTTP_201_CREATED)
 @inject
 async def signup(
     user_data: UserCreate,
     user_service: Annotated[IUserService, Depends(Provide[Container.user_service])],
-) -> UserRead:
+) -> ApiResponse[UserRead]:
     """Register a new user"""
-    return user_service.create_user(user_data)
+    created_user = user_service.create_user(user_data)
+    return ApiResponse(
+        success=True,
+        code="ok",
+        message="User created successfully",
+        data=created_user
+    )
 
 
 @router.post("/login", response_model=ApiResponse[TokenResponse])
@@ -41,20 +47,30 @@ async def login(
 ) -> ApiResponse[TokenResponse]:
     """Authenticate user and return JWT tokens"""
     auth_response = auth_service.authenticate_user(login_data)
-    return ApiResponse(data=TokenResponse(**auth_response), message="Login successful")
+    return ApiResponse(
+        success=True,
+        code="ok",
+        message="Login successful",
+        data=TokenResponse(**auth_response)
+    )
 
 
-@router.post("/refresh", response_model=RefreshTokenResponse)
+@router.post("/refresh", response_model=ApiResponse[RefreshTokenResponse])
 @inject
 async def refresh_token(
     user_service: Annotated[IUserService, Depends(Provide[Container.user_service])],
     user_id: UUID = Depends(get_refresh_token_user_id),
-) -> RefreshTokenResponse:
+) -> ApiResponse[RefreshTokenResponse]:
     """Get new access token using refresh token"""
     user = user_service.get_by_id(user_id)
     token_data = {"sub": str(user.id)}
     access_token = create_access_token(token_data)
-    return RefreshTokenResponse(access_token=access_token)
+    return ApiResponse(
+        success=True,
+        code="ok",
+        message="Token refreshed successfully",
+        data=RefreshTokenResponse(access_token=access_token)
+    )
 
 
 @router.post("/logout", response_model=ApiResponse)
@@ -65,29 +81,10 @@ async def logout(
 ) -> ApiResponse:
     """Logout endpoint with token invalidation"""
 
-    try:
-        # In a full implementation, you would:
-        # 1. Add the token to a blacklist/revocation list
-        # 2. Store invalidated tokens in Redis or database
-        # 3. Check blacklist in authentication middleware
+    logging.info(f"User {current_user_id} logged out successfully")
 
-        # For now, we'll log the logout action and return success
-        logging.info(f"User {current_user_id} logged out successfully")
-
-        # Future implementation would include:
-        # await auth_service.invalidate_user_tokens(current_user_id)
-
-        return ApiResponse(
-            success=True,
-            message="Successfully logged out. Please discard your tokens.",
-            data={
-                "user_id": str(current_user_id),
-                "logged_out_at": "2024-01-01T00:00:00Z",
-            },
-        )
-
-    except Exception as e:
-        logging.error(f"Logout failed for user {current_user_id}: {e}")
-        return ApiResponse(
-            success=False, message="Logout failed. Please try again.", data=None
-        )
+    return ApiResponse(
+        success=True,
+        code="ok",
+        message="Successfully logged out. Please discard your tokens.",
+    )

@@ -2,7 +2,7 @@ from typing import List, Optional
 from uuid import UUID
 from contextlib import AbstractContextManager
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.models.feedback import Feedback
 from app.repositories.command_strategy import DefaultCommandStrategy
@@ -55,19 +55,16 @@ class FeedbackCRUDStrategy(
         )
         return db.execute(stmt).scalar_one_or_none()
 
-    def get_rating_for_message(self, db: Session, message_id: UUID) -> Optional[float]:
-        """Get rating for a message"""
-        from sqlalchemy import func
-
-        stmt = select(Feedback.rating).where(Feedback.message_id == message_id)
+    def get_average_rating_for_message(self, db: Session, message_id: UUID) -> Optional[float]:
+        """Get average rating for a message"""
+        stmt = select(func.avg(Feedback.rating)).where(Feedback.message_id == message_id)
         result = db.execute(stmt).scalar()
         return result if result is not None else None
 
-    def get_comment_for_message(self, db: Session, message_id: UUID) -> Optional[str]:
-        """Get comment for a message (unique per ERD constraint)"""
-        stmt = select(Feedback.comment).where(Feedback.message_id == message_id)
-        result = db.execute(stmt).scalar()
-        return result if result is not None else None
+    def get_comment_count_for_message(self, db: Session, message_id: UUID) -> int:
+        """Get comment count for a message"""
+        stmt = select(func.count(Feedback.comment)).where(Feedback.message_id == message_id, Feedback.comment.isnot(None))
+        return db.execute(stmt).scalar() or 0
 
 
 class FeedbackRepository:
@@ -103,15 +100,15 @@ class FeedbackRepository:
                 session, message_id, user_id
             )
 
-    def get_rating_for_message(self, message_id: UUID) -> Optional[float]:
-        """Get rating for a message"""
+    def get_average_rating_for_message(self, message_id: UUID) -> Optional[float]:
+        """Get average rating for a message"""
         with self.session_factory() as session:
-            return self._crud_strategy.get_rating_for_message(session, message_id)
+            return self._crud_strategy.get_average_rating_for_message(session, message_id)
 
-    def get_comment_for_message(self, message_id: UUID) -> Optional[str]:
-        """Get comment for a message (unique per ERD constraint)"""
+    def get_comment_count_for_message(self, message_id: UUID) -> int:
+        """Get comment count for a message"""
         with self.session_factory() as session:
-            return self._crud_strategy.get_comment_for_message(session, message_id)
+            return self._crud_strategy.get_comment_count_for_message(session, message_id)
 
     def create(self, input_schema: FeedbackCreate) -> Feedback:
         """Create a new feedback"""

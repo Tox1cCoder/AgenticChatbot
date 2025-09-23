@@ -8,6 +8,7 @@ from uuid import UUID
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 ModelType = TypeVar("ModelType")
 CreateSchemaType = TypeVar("CreateSchemaType")
@@ -76,8 +77,6 @@ class DefaultCommandStrategy(
 
     def delete(self, db: Session, id: Union[int, UUID]) -> bool:
         """Soft delete a record by ID"""
-        from sqlalchemy import select
-
         stmt = select(self.model).where(
             self.model.id == id, self.model.deleted_at.is_(None)
         )

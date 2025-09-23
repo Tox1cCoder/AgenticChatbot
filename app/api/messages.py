@@ -26,7 +26,12 @@ async def create_message(
 ) -> ApiResponse[MessageRead]:
     """Create a new message"""
     result = message_service.create_message(message_data)
-    return ApiResponse(data=result, message="Message created successfully")
+    return ApiResponse(
+        success=True,
+        code="ok",
+        message="Message created successfully",
+        data=result
+    )
 
 @router.get("/{message_id}", response_model=ApiResponse[MessageRead])
 @inject
@@ -39,23 +44,9 @@ async def get_message(
 ) -> ApiResponse[MessageRead]:
     """Get message by ID"""
     result = message_service.get_by_id(message_id, user_id)
-    return ApiResponse(data=result, message="Message retrieved successfully")
-
-
-@router.get(
-    "/conversations/{conversation_id}/messages/thread",
-    response_model=ApiResponse[List[MessageRead]],
-)
-@inject
-async def get_conversation_thread(
-    conversation_id: UUID,
-    message_service: Annotated[
-        IMessageService, Depends(Provide[Container.message_service])
-    ],
-    user_id: UUID = Depends(get_current_user_id),
-) -> ApiResponse[List[MessageRead]]:
-    """Get conversation thread ordered by timestamp (requires user ownership)"""
-    result = message_service.get_conversation_thread(conversation_id, user_id)
     return ApiResponse(
-        data=result, message="Conversation thread retrieved successfully"
+        success=True,
+        code="ok",
+        message="Message retrieved successfully",
+        data=result
     )

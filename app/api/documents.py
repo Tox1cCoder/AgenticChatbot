@@ -8,10 +8,10 @@ from app.core.container import Container
 from app.interfaces.document_service_interface import IDocumentService
 from app.schemas.responses.api_response import ApiResponse
 
-router = APIRouter(tags=["documents"])
+router = APIRouter(prefix="/documents", tags=["documents"])
 
 
-@router.post("/documents", response_model=ApiResponse)
+@router.post("/", response_model=ApiResponse)
 @inject
 async def upload_document(
     file: UploadFile = File(...),
@@ -43,6 +43,7 @@ async def upload_document(
 
     return ApiResponse(
         success=True,
+        code="ok",
         message=f"Document '{file.filename}' processed successfully",
         data=result,
     )
