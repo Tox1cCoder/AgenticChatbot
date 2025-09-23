@@ -45,7 +45,7 @@ class ConversationCRUDStrategy(
                     stmt = stmt.order_by(desc(order_column))
         else:
             # Default ordering
-            stmt = stmt.order_by(Conversation.updated_at.desc())
+            stmt = stmt.order_by(Conversation.updated_at.asc())
 
         stmt = stmt.offset(offset).limit(limit)
         return list(db.execute(stmt).scalars().all())

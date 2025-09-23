@@ -128,7 +128,7 @@ class MessageCRUDStrategy(
         stmt = (
             select(Message)
             .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.asc())  # Ensure chronological order
+            .order_by(Message.created_at.asc())
         )
         return list(db.execute(stmt).scalars().all())
 
