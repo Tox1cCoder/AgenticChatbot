@@ -3,7 +3,7 @@ Conversation service interface definition
 """
 
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 
 from app.schemas.conversation import (
@@ -30,9 +30,14 @@ class IConversationService(ABC):
 
     @abstractmethod
     def get_user_conversations(
-        self, owner_id: UUID, skip: int = 0, limit: int = 100
+        self,
+        owner_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "desc",
     ) -> List[ConversationRead]:
-        """Get all conversations for a user with validation"""
+        """Get all conversations for a user with pagination"""
         pass
 
     @abstractmethod

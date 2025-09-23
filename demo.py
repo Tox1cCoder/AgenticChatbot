@@ -321,6 +321,23 @@ def get_messages(conversation_id: str) -> List[Dict[str, Any]]:
 
 
 @st.cache_data(show_spinner=False)
+def get_user_messages_paginated(
+    page: int = 1,
+    limit: int = 10,
+    order_by: str = "created_at",
+    order_direction: str = "desc",
+) -> List[Dict[str, Any]]:
+    """Get user messages with pagination support"""
+    response = make_api_request(
+        "GET",
+        f"/messages/?page={page}&limit={limit}&order_by={order_by}&order_direction={order_direction}",
+    )
+    if response and response.get("data") is not None:
+        return response["data"]
+    return []
+
+
+@st.cache_data(show_spinner=False)
 def create_feedback(message_id: str, rating: int, comment: str) -> Dict[str, Any]:
     feedback_data = {
         "rating": rating,
@@ -617,17 +634,34 @@ def render_conversation_manager():
 
 
 def render_chat_interface():
-    """Render the chat interface"""
+    """Render the chat interface with pagination support"""
 
-    # Load all messages for current conversation
+    # Initialize pagination state if not exists
+    if "current_page" not in st.session_state:
+        st.session_state.current_page = 1
+    if "all_loaded_messages" not in st.session_state:
+        st.session_state.all_loaded_messages = []
+    if "has_more_messages" not in st.session_state:
+        st.session_state.has_more_messages = True
+
+    # Load initial messages if we're in a conversation or use pagination for all user messages
     if (
         st.session_state.current_conversation_id
         and st.session_state.current_conversation_id != "pending_new"
     ):
-        # Load all messages from API to ensure we have complete conversation
+        # For specific conversations, load from conversation endpoint
         all_messages = get_messages(st.session_state.current_conversation_id)
         if all_messages:
             st.session_state.messages = all_messages
+    else:
+        # For general message view, use paginated endpoint
+        if not st.session_state.all_loaded_messages:
+            # Load first 10 messages
+            initial_messages = get_user_messages_paginated(
+                page=1, limit=10, order_by="created_at", order_direction="desc"
+            )
+            st.session_state.all_loaded_messages = initial_messages
+            st.session_state.has_more_messages = len(initial_messages) == 10
 
     # Handle conversation title display
     if (
@@ -657,21 +691,24 @@ def render_chat_interface():
     elif st.session_state.current_conversation_id == "pending_new":
         st.markdown("# New Chat - Start typing to begin!")
     else:
-        # Welcome screen
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            st.markdown(
-                """
-                # Welcome to Chatbot Demo
-                
-                ### Start a conversation by:
-                - 🆕 Creating a new chat from the sidebar
-                - 📁 Opening an existing conversation
-                
-                Select or create a conversation to begin.
-            """
+        # Welcome screen with recent messages
+        st.markdown("# All Messages")
+        if st.button(
+            "🔄 Load More Messages", disabled=not st.session_state.has_more_messages
+        ):
+            st.session_state.current_page += 1
+            more_messages = get_user_messages_paginated(
+                page=st.session_state.current_page,
+                limit=10,
+                order_by="created_at",
+                order_direction="desc",
             )
-        return
+            if more_messages:
+                st.session_state.all_loaded_messages.extend(more_messages)
+                st.session_state.has_more_messages = len(more_messages) == 10
+            else:
+                st.session_state.has_more_messages = False
+            st.rerun()
 
     # Messages container
     st.markdown(
@@ -708,8 +745,19 @@ def render_chat_interface():
         except Exception:
             return iso_string
 
-    # Display all messages with proper alignment
-    for msg in st.session_state.messages:
+    # Display messages from appropriate source
+    messages_to_display = []
+    if (
+        st.session_state.current_conversation_id
+        and st.session_state.current_conversation_id != "pending_new"
+        and st.session_state.messages
+    ):
+        messages_to_display = st.session_state.messages
+    elif st.session_state.all_loaded_messages:
+        messages_to_display = st.session_state.all_loaded_messages
+
+    # Display all messages at once with proper alignment
+    for msg in messages_to_display:
         if msg["sender"] == 1:  # User messages (MessageRole.user = 1)
             # User message
             st.markdown(

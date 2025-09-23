@@ -2,7 +2,7 @@ from typing import List, Optional
 from uuid import UUID
 from contextlib import AbstractContextManager
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import select
+from sqlalchemy import select, asc, desc
 
 from app.models.conversation import Conversation
 from app.repositories.command_strategy import DefaultCommandStrategy
@@ -21,17 +21,41 @@ class ConversationCRUDStrategy(
         DefaultQueryStrategy.__init__(self, model)
 
     def get_by_owner_id(
-        self, db: Session, owner_id: UUID, skip: int = 0, limit: int = 100
+        self,
+        db: Session,
+        owner_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "desc",
     ) -> List[Conversation]:
-        """Get conversations by owner ID"""
-        stmt = (
-            select(Conversation)
-            .where(Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None))
-            .order_by(Conversation.updated_at.desc())
-            .offset(skip)
-            .limit(limit)
+        """Get conversations by owner ID with page-based pagination and ordering"""
+        offset = (page - 1) * limit
+        stmt = select(Conversation).where(
+            Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
         )
+
+        # Apply ordering if specified
+        if order_by:
+            order_column = getattr(Conversation, order_by, None)
+            if order_column is not None:
+                if order_direction.lower() == "asc":
+                    stmt = stmt.order_by(asc(order_column))
+                else:
+                    stmt = stmt.order_by(desc(order_column))
+        else:
+            # Default ordering
+            stmt = stmt.order_by(Conversation.updated_at.desc())
+
+        stmt = stmt.offset(offset).limit(limit)
         return list(db.execute(stmt).scalars().all())
+
+    def count_by_owner_id(self, db: Session, owner_id: UUID) -> int:
+        """Count conversations by owner ID"""
+        stmt = select(Conversation).where(
+            Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
+        )
+        return len(list(db.execute(stmt).scalars().all()))
 
     def get_with_messages(
         self, db: Session, conversation_id: UUID
@@ -67,11 +91,23 @@ class ConversationRepository:
         self._crud_strategy = ConversationCRUDStrategy(Conversation)
 
     def get_by_owner_id(
-        self, owner_id: UUID, skip: int = 0, limit: int = 100
+        self,
+        owner_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "desc",
     ) -> List[Conversation]:
-        """Get conversations by owner ID"""
+        """Get conversations by owner ID with page-based pagination and ordering"""
         with self.session_factory() as session:
-            return self._crud_strategy.get_by_owner_id(session, owner_id, skip, limit)
+            return self._crud_strategy.get_by_owner_id(
+                session, owner_id, page, limit, order_by, order_direction
+            )
+
+    def count_by_owner_id(self, owner_id: UUID) -> int:
+        """Count conversations by owner ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.count_by_owner_id(session, owner_id)
 
     def get_with_messages(self, conversation_id: UUID) -> Optional[Conversation]:
         """Get conversation with its messages"""
@@ -95,10 +131,10 @@ class ConversationRepository:
         with self.session_factory() as session:
             return self._crud_strategy.get_by_id(session, id)
 
-    def get_all(self, skip: int = 0, limit: int = 100) -> list[Conversation]:
-        """Get all conversations with pagination"""
+    def get_all(self, page: int = 1, limit: int = 10) -> list[Conversation]:
+        """Get all conversations with page-based pagination"""
         with self.session_factory() as session:
-            return self._crud_strategy.get_all(session, skip, limit)
+            return self._crud_strategy.get_all(session, page, limit)
 
     def update(
         self, id: UUID, input_schema: ConversationUpdate

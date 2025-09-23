@@ -2,7 +2,7 @@ from typing import List, Optional
 from uuid import UUID
 from contextlib import AbstractContextManager
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, asc, desc
 
 from app.models.message import Message
 from app.models.conversation import Conversation
@@ -22,17 +22,79 @@ class MessageCRUDStrategy(
         DefaultQueryStrategy.__init__(self, model)
 
     def get_by_conversation_id(
-        self, db: Session, conversation_id: UUID, skip: int = 0, limit: int = 100
+        self,
+        db: Session,
+        conversation_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "asc",
     ) -> List[Message]:
-        """Get messages by conversation ID ordered by creation time"""
+        """Get messages by conversation ID with page-based pagination and ordering"""
+        offset = (page - 1) * limit
+        stmt = select(Message).where(Message.conversation_id == conversation_id)
+
+        # Apply ordering if specified
+        if order_by:
+            order_column = getattr(Message, order_by, None)
+            if order_column is not None:
+                if order_direction.lower() == "asc":
+                    stmt = stmt.order_by(asc(order_column))
+                else:
+                    stmt = stmt.order_by(desc(order_column))
+        else:
+            # Default ordering
+            stmt = stmt.order_by(Message.created_at.asc())
+
+        stmt = stmt.offset(offset).limit(limit)
+        return list(db.execute(stmt).scalars().all())
+
+    def count_by_conversation_id(self, db: Session, conversation_id: UUID) -> int:
+        """Count messages by conversation ID"""
+        stmt = select(Message).where(Message.conversation_id == conversation_id)
+        return len(list(db.execute(stmt).scalars().all()))
+
+    def get_by_user_id(
+        self,
+        db: Session,
+        user_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "desc",
+    ) -> List[Message]:
+        """Get messages by conversation owner (user_id) with page-based pagination and ordering"""
+        offset = (page - 1) * limit
+        # Join with conversations to get messages from user's conversations
         stmt = (
             select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.asc())
-            .offset(skip)
-            .limit(limit)
+            .join(Message.conversation)
+            .where(Message.conversation.has(owner_id=user_id))
         )
+
+        # Apply ordering if specified
+        if order_by:
+            order_column = getattr(Message, order_by, None)
+            if order_column is not None:
+                if order_direction.lower() == "asc":
+                    stmt = stmt.order_by(asc(order_column))
+                else:
+                    stmt = stmt.order_by(desc(order_column))
+        else:
+            # Default ordering
+            stmt = stmt.order_by(Message.created_at.desc())
+
+        stmt = stmt.offset(offset).limit(limit)
         return list(db.execute(stmt).scalars().all())
+
+    def count_by_user_id(self, db: Session, user_id: UUID) -> int:
+        """Count messages by user ID"""
+        stmt = (
+            select(Message)
+            .join(Message.conversation)
+            .where(Message.conversation.has(user_id=user_id))
+        )
+        return len(list(db.execute(stmt).scalars().all()))
 
     def get_conversation_history(
         self, db: Session, conversation_id: UUID, limit: int = 50
@@ -66,21 +128,6 @@ class MessageCRUDStrategy(
         stmt = select(Message).where(Message.conversation_id == conversation_id)
         return list(db.execute(stmt).scalars().all())
 
-    def get_by_user_id(
-        self, db: Session, user_id: UUID, skip: int = 0, limit: int = 100
-    ) -> List[Message]:
-        """Get messages by conversation owner (user_id) with pagination"""
-        # Join with conversations to get messages from user's conversations
-        stmt = (
-            select(Message)
-            .join(Message.conversation)
-            .where(Message.conversation.has(user_id=user_id))
-            .order_by(Message.created_at.desc())
-            .offset(skip)
-            .limit(limit)
-        )
-        return list(db.execute(stmt).scalars().all())
-
 
 class MessageRepository:
     """Repository for Message model using session factory pattern"""
@@ -91,39 +138,44 @@ class MessageRepository:
         self._crud_strategy = MessageCRUDStrategy(Message)
 
     def get_by_conversation_id(
-        self, conversation_id: UUID, skip: int = 0, limit: int = 100
+        self,
+        conversation_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "asc",
     ) -> List[Message]:
-        """Get messages by conversation ID ordered by creation time"""
+        """Get messages by conversation ID with page-based pagination and ordering"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_conversation_id(
-                session, conversation_id, skip, limit
+                session, conversation_id, page, limit, order_by, order_direction
             )
 
-    def get_conversation_history(
-        self, conversation_id: UUID, limit: int = 50
-    ) -> List[Message]:
-        """Get recent conversation history"""
+    def count_by_conversation_id(self, conversation_id: UUID) -> int:
+        """Count messages by conversation ID"""
         with self.session_factory() as session:
-            return self._crud_strategy.get_conversation_history(
-                session, conversation_id, limit
+            return self._crud_strategy.count_by_conversation_id(
+                session, conversation_id
             )
-
-    def get_latest_message(self, conversation_id: UUID) -> Optional[Message]:
-        """Get the latest message in a conversation"""
-        with self.session_factory() as session:
-            return self._crud_strategy.get_latest_message(session, conversation_id)
-
-    def get_conversation_thread(self, conversation_id: UUID) -> List[Message]:
-        """Get all messages in a conversation thread ordered by creation time"""
-        with self.session_factory() as session:
-            return self._crud_strategy.get_conversation_thread(session, conversation_id)
 
     def get_by_user_id(
-        self, user_id: UUID, skip: int = 0, limit: int = 100
+        self,
+        user_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "desc",
     ) -> List[Message]:
-        """Get messages by user ID with pagination"""
+        """Get messages by user ID with page-based pagination and ordering"""
         with self.session_factory() as session:
-            return self._crud_strategy.get_by_user_id(session, user_id, skip, limit)
+            return self._crud_strategy.get_by_user_id(
+                session, user_id, page, limit, order_by, order_direction
+            )
+
+    def count_by_user_id(self, user_id: UUID) -> int:
+        """Count messages by user ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.count_by_user_id(session, user_id)
 
     def create(self, input_schema: MessageCreate) -> Message:
         """Create a new message"""
@@ -135,10 +187,10 @@ class MessageRepository:
         with self.session_factory() as session:
             return self._crud_strategy.get_by_id(session, id)
 
-    def get_all(self, skip: int = 0, limit: int = 100) -> list[Message]:
-        """Get all messages with pagination"""
+    def get_all(self, page: int = 1, limit: int = 10) -> list[Message]:
+        """Get all messages with page-based pagination"""
         with self.session_factory() as session:
-            return self._crud_strategy.get_all(session, skip, limit)
+            return self._crud_strategy.get_all(session, page, limit)
 
     def update(self, id: UUID, input_schema: MessageUpdate) -> Optional[Message]:
         """Update message by ID"""

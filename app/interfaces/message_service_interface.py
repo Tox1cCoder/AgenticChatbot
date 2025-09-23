@@ -3,7 +3,7 @@ Message service interface definition
 """
 
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
@@ -24,16 +24,27 @@ class IMessageService(ABC):
 
     @abstractmethod
     def get_conversation_messages(
-        self, conversation_id: UUID, user_id: UUID, skip: int = 0, limit: int = 100
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "asc",
     ) -> List[MessageRead]:
-        """Get all messages in a conversation with access validation"""
+        """Get all messages in a conversation with pagination"""
         pass
 
     @abstractmethod
     def get_user_messages(
-        self, user_id: UUID, skip: int = 0, limit: int = 100
+        self,
+        user_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "desc",
     ) -> List[MessageRead]:
-        """Get all messages by a user"""
+        """Get all messages by a user with pagination"""
         pass
 
     @abstractmethod

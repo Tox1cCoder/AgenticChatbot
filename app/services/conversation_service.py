@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 
 from app.repositories.conversation import ConversationRepository
@@ -43,11 +43,20 @@ class ConversationService(IConversationService):
         return ConversationRead.model_validate(conversation_entity)
 
     def get_user_conversations(
-        self, owner_id: UUID, skip: int = 0, limit: int = 100
+        self,
+        owner_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "desc",
     ) -> List[ConversationRead]:
         self.user_validation_utils.validate_user_exists(owner_id)
         conversation_entities = self.repository.get_by_owner_id(
-            owner_id, skip=skip, limit=limit
+            owner_id,
+            page=page,
+            limit=limit,
+            order_by=order_by,
+            order_direction=order_direction,
         )
         return [
             ConversationRead.model_validate(conversation_entity)

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 
 from google import genai
@@ -58,22 +58,37 @@ class MessageService(IMessageService):
         self,
         conversation_id: UUID,
         user_id: UUID,
-        skip: int = 0,
-        limit: int = 100,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "asc",
     ) -> List[MessageRead]:
         self.conversation_validation_utils.validate_conversation_access(
             user_id, conversation_id
         )
         message_entities = self.repository.get_by_conversation_id(
-            conversation_id, skip=skip, limit=limit
+            conversation_id,
+            page=page,
+            limit=limit,
+            order_by=order_by,
+            order_direction=order_direction,
         )
         return [MessageRead.model_validate(msg) for msg in message_entities]
 
     def get_user_messages(
-        self, user_id: UUID, skip: int = 0, limit: int = 100
+        self,
+        user_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "desc",
     ) -> List[MessageRead]:
         message_entities = self.repository.get_by_user_id(
-            user_id, skip=skip, limit=limit
+            user_id,
+            page=page,
+            limit=limit,
+            order_by=order_by,
+            order_direction=order_direction,
         )
         return [MessageRead.model_validate(msg) for msg in message_entities]
 

@@ -15,6 +15,7 @@ from app.schemas.conversation import (
 from app.interfaces.message_service_interface import IMessageService
 from app.schemas.message import MessageRead
 from app.schemas.responses import ApiResponse
+from app.schemas.pagination import ConversationPaginationParams, MessagePaginationParams
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -35,9 +36,7 @@ async def create_conversation(
     """Create a new conversation for authenticated user"""
     result = conversation_service.create_conversation(conversation_data, user_id)
     return ApiResponse(
-        success=True,
-        message="Conversation created successfully",
-        data=result
+        success=True, message="Conversation created successfully", data=result
     )
 
 
@@ -52,9 +51,7 @@ async def get_conversation(
     """Get conversation by ID"""
     result = conversation_service.get_by_id(conversation_id)
     return ApiResponse(
-        success=True,
-        message="Conversation retrieved successfully",
-        data=result
+        success=True, message="Conversation retrieved successfully", data=result
     )
 
 
@@ -65,18 +62,18 @@ async def get_conversations(
         IConversationService, Depends(Provide[Container.conversation_service])
     ],
     user_id: UUID = Depends(get_current_user_id),
-    page: int = 1,
-    limit: int = 100,
+    pagination: ConversationPaginationParams = Depends(),
 ) -> ApiResponse[List[ConversationRead]]:
     """Get all conversations for authenticated user"""
-    skip = (page - 1) * limit
     result = conversation_service.get_user_conversations(
-        user_id, skip=skip, limit=limit
+        user_id,
+        page=pagination.page,
+        limit=pagination.limit,
+        order_by=pagination.order_by.value,
+        order_direction=pagination.order_direction.value,
     )
     return ApiResponse(
-        success=True,
-        message="Conversations retrieved successfully",
-        data=result
+        success=True, message="Conversations retrieved successfully", data=result
     )
 
 
@@ -85,19 +82,27 @@ async def get_conversations(
     response_model=ApiResponse[List[MessageRead]],
 )
 @inject
-async def get_conversation_thread(
+async def get_conversation_messages(
     conversation_id: UUID,
     message_service: Annotated[
         IMessageService, Depends(Provide[Container.message_service])
     ],
     user_id: UUID = Depends(get_current_user_id),
+    pagination: MessagePaginationParams = Depends(),
 ) -> ApiResponse[List[MessageRead]]:
-    """Get conversation's messages by timestamp (requires user ownership)"""
-    result = message_service.get_conversation_thread(conversation_id, user_id)
+    """Get conversation's messages (requires user ownership)"""
+    result = message_service.get_conversation_messages(
+        conversation_id,
+        user_id,
+        page=pagination.page,
+        limit=pagination.limit,
+        order_by=pagination.order_by.value,
+        order_direction=pagination.order_direction.value,
+    )
     return ApiResponse(
         success=True,
-        message="Conversation thread retrieved successfully",
-        data=result
+        message="Conversation messages retrieved successfully",
+        data=result,
     )
 
 
@@ -112,7 +117,4 @@ async def delete_conversation(
 ) -> ApiResponse:
     """Delete conversation (requires user ownership)"""
     conversation_service.delete_conversation(conversation_id, user_id)
-    return ApiResponse(
-        success=True,
-        message="Conversation deleted successfully"
-    )
+    return ApiResponse(success=True, message="Conversation deleted successfully")

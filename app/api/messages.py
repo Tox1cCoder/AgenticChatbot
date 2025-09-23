@@ -10,6 +10,7 @@ from app.core.auth import get_current_user_id
 from app.interfaces.message_service_interface import IMessageService
 from app.schemas.message import MessageCreate, MessageRead
 from app.schemas.responses import ApiResponse
+from app.schemas.pagination import MessagePaginationParams
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
@@ -27,10 +28,9 @@ async def create_message(
     """Create a new message"""
     result = message_service.create_message(message_data)
     return ApiResponse(
-        success=True,
-        message="Message created successfully",
-        data=result
+        success=True, message="Message created successfully", data=result
     )
+
 
 @router.get("/{message_id}", response_model=ApiResponse[MessageRead])
 @inject
@@ -44,7 +44,27 @@ async def get_message(
     """Get message by ID"""
     result = message_service.get_by_id(message_id, user_id)
     return ApiResponse(
-        success=True,
-        message="Message retrieved successfully",
-        data=result
+        success=True, message="Message retrieved successfully", data=result
+    )
+
+
+@router.get("/", response_model=ApiResponse[List[MessageRead]])
+@inject
+async def get_user_messages(
+    message_service: Annotated[
+        IMessageService, Depends(Provide[Container.message_service])
+    ],
+    user_id: UUID = Depends(get_current_user_id),
+    pagination: MessagePaginationParams = Depends(),
+) -> ApiResponse[List[MessageRead]]:
+    """Get all messages for authenticated user pagination"""
+    result = message_service.get_user_messages(
+        user_id,
+        page=pagination.page,
+        limit=pagination.limit,
+        order_by=pagination.order_by.value,
+        order_direction=pagination.order_direction.value,
+    )
+    return ApiResponse(
+        success=True, message="User messages retrieved successfully", data=result
     )
