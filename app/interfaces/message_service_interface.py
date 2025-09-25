@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from typing import List, Optional
 from uuid import UUID
 
+from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
 
 
@@ -31,7 +32,7 @@ class IMessageService(ABC):
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "asc",
-    ) -> List[MessageRead]:
+    ) -> Paginator[MessageRead]:
         """Get all messages in a conversation with pagination"""
         pass
 
@@ -43,7 +44,7 @@ class IMessageService(ABC):
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "desc",
-    ) -> List[MessageRead]:
+    ) -> Paginator[MessageRead]:
         """Get all messages by a user with pagination"""
         pass
 

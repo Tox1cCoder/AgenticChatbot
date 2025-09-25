@@ -7,7 +7,10 @@ from sqlalchemy import select, func
 from app.models.feedback import Feedback
 from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.query_strategy import DefaultQueryStrategy
+from app.repositories.utils.pagination import Paginator
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate
+
+from app.utils.validation.pagination_validation import validate_pagination_params
 
 
 class FeedbackCRUDStrategy(
@@ -21,30 +24,56 @@ class FeedbackCRUDStrategy(
         DefaultQueryStrategy.__init__(self, model)
 
     def get_by_message_id(
-        self, db: Session, message_id: UUID, skip: int = 0, limit: int = 100
-    ) -> List[Feedback]:
-        """Get feedback by message ID"""
+        self, db: Session, message_id: UUID, page: int = 1, limit: int = 10
+    ) -> Paginator[Feedback]:
+        """Get feedback by message ID with pagination"""
+
+        validate_pagination_params(page, limit)
+
+        # Get total count first
+        total_stmt = select(func.count()).select_from(
+            select(Feedback).where(Feedback.message_id == message_id).subquery()
+        )
+        total = db.execute(total_stmt).scalar() or 0
+
+        # Get paginated items
+        offset = (page - 1) * limit
         stmt = (
             select(Feedback)
             .where(Feedback.message_id == message_id)
             .order_by(Feedback.created_at.desc())
-            .offset(skip)
+            .offset(offset)
             .limit(limit)
         )
-        return list(db.execute(stmt).scalars().all())
+        items = list(db.execute(stmt).scalars().all())
+
+        return Paginator.create(items, total, page, limit)
 
     def get_by_user_id(
-        self, db: Session, user_id: UUID, skip: int = 0, limit: int = 100
-    ) -> List[Feedback]:
-        """Get feedback by user ID"""
+        self, db: Session, user_id: UUID, page: int = 1, limit: int = 10
+    ) -> Paginator[Feedback]:
+        """Get feedback by user ID with pagination"""
+
+        validate_pagination_params(page, limit)
+
+        # Get total count first
+        total_stmt = select(func.count()).select_from(
+            select(Feedback).where(Feedback.user_id == user_id).subquery()
+        )
+        total = db.execute(total_stmt).scalar() or 0
+
+        # Get paginated items
+        offset = (page - 1) * limit
         stmt = (
             select(Feedback)
             .where(Feedback.user_id == user_id)
             .order_by(Feedback.created_at.desc())
-            .offset(skip)
+            .offset(offset)
             .limit(limit)
         )
-        return list(db.execute(stmt).scalars().all())
+        items = list(db.execute(stmt).scalars().all())
+
+        return Paginator.create(items, total, page, limit)
 
     def get_by_message_and_user(
         self, db: Session, message_id: UUID, user_id: UUID
@@ -73,20 +102,20 @@ class FeedbackRepository:
         self._crud_strategy = FeedbackCRUDStrategy(Feedback)
 
     def get_by_message_id(
-        self, message_id: UUID, skip: int = 0, limit: int = 100
-    ) -> List[Feedback]:
-        """Get feedback by message ID"""
+        self, message_id: UUID, page: int = 1, limit: int = 10
+    ) -> Paginator[Feedback]:
+        """Get feedback by message ID with pagination"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_message_id(
-                session, message_id, skip, limit
+                session, message_id, page, limit
             )
 
     def get_by_user_id(
-        self, user_id: UUID, skip: int = 0, limit: int = 100
-    ) -> List[Feedback]:
-        """Get feedback by user ID"""
+        self, user_id: UUID, page: int = 1, limit: int = 10
+    ) -> Paginator[Feedback]:
+        """Get feedback by user ID with pagination"""
         with self.session_factory() as session:
-            return self._crud_strategy.get_by_user_id(session, user_id, skip, limit)
+            return self._crud_strategy.get_by_user_id(session, user_id, page, limit)
 
     def get_by_message_and_user(
         self, message_id: UUID, user_id: UUID
@@ -112,10 +141,17 @@ class FeedbackRepository:
         with self.session_factory() as session:
             return self._crud_strategy.get_by_id(session, id)
 
-    def get_all(self, skip: int = 0, limit: int = 100) -> list[Feedback]:
+    def get_all(self, page: int = 1, limit: int = 10) -> Paginator[Feedback]:
         """Get all feedback with pagination"""
         with self.session_factory() as session:
-            return self._crud_strategy.get_all(session, skip, limit)
+            # Get total count
+            total = session.query(Feedback).count()
+
+            # Get paginated items
+            offset = (page - 1) * limit
+            items = session.query(Feedback).offset(offset).limit(limit).all()
+
+            return Paginator.create(items, total, page, limit)
 
     def update(self, id: UUID, input_schema: FeedbackUpdate) -> Optional[Feedback]:
         """Update feedback by ID"""
@@ -134,3 +170,9 @@ class FeedbackRepository:
         """Check if feedback exists"""
         with self.session_factory() as session:
             return self._crud_strategy.exists(session, id)
+
+    def user_owns_feedback(self, user_id: UUID, feedback_id: UUID) -> bool:
+        """Check if a user owns a specific feedback entry"""
+        with self.session_factory() as session:
+            feedback = self._crud_strategy.get_by_id(session, feedback_id)
+            return feedback is not None and feedback.user_id == user_id

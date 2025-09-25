@@ -3,6 +3,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from app.repositories.conversation import ConversationRepository
+from app.repositories.utils.pagination import Paginator
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationUpdate,
@@ -11,6 +12,7 @@ from app.schemas.conversation import (
 from app.factories.conversation_factory import ConversationFactory
 from app.utils.validation.user_validation import UserValidationUtils
 from app.utils.validation.conversation_validation import ConversationValidationUtils
+from app.utils.validation.pagination_validation import validate_pagination_params
 from app.interfaces.conversation_service_interface import IConversationService
 
 
@@ -49,19 +51,27 @@ class ConversationService(IConversationService):
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "desc",
-    ) -> List[ConversationRead]:
+    ) -> Paginator[ConversationRead]:
+        # Validate pagination parameters at service layer
+        validate_pagination_params(page, limit)
+
         self.user_validation_utils.validate_user_exists(owner_id)
-        conversation_entities = self.repository.get_by_owner_id(
+        paginated_conversations = self.repository.get_by_owner_id(
             owner_id,
             page=page,
             limit=limit,
             order_by=order_by,
             order_direction=order_direction,
         )
-        return [
+        # Convert items to ConversationRead schemas
+        conversation_reads = [
             ConversationRead.model_validate(conversation_entity)
-            for conversation_entity in conversation_entities
+            for conversation_entity in paginated_conversations.items
         ]
+        # Return new Paginator with converted items
+        return Paginator.create(
+            conversation_reads, paginated_conversations.meta.total, page, limit
+        )
 
     def get_conversation_with_messages(
         self, conversation_id: UUID, owner_id: UUID

@@ -1,7 +1,7 @@
 from typing import List
 from uuid import UUID
 from typing import Annotated
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, status, HTTPException
 
 from dependency_injector.wiring import Provide, inject
 
@@ -10,7 +10,9 @@ from app.core.auth import get_current_user_id
 from app.interfaces.message_service_interface import IMessageService
 from app.schemas.message import MessageCreate, MessageRead
 from app.schemas.responses import ApiResponse
+from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.schemas.pagination import MessagePaginationParams
+from app.utils.validation.pagination_validation import PaginationError
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
@@ -48,7 +50,7 @@ async def get_message(
     )
 
 
-@router.get("/", response_model=ApiResponse[List[MessageRead]])
+@router.get("/", response_model=PaginatedApiResponse[MessageRead])
 @inject
 async def get_user_messages(
     message_service: Annotated[
@@ -56,15 +58,15 @@ async def get_user_messages(
     ],
     user_id: UUID = Depends(get_current_user_id),
     pagination: MessagePaginationParams = Depends(),
-) -> ApiResponse[List[MessageRead]]:
-    """Get all messages for authenticated user pagination"""
-    result = message_service.get_user_messages(
+) -> PaginatedApiResponse[MessageRead]:
+    """Get all messages for authenticated user with pagination"""
+    paginated_result = message_service.get_user_messages(
         user_id,
         page=pagination.page,
         limit=pagination.limit,
         order_by=pagination.order_by.value,
         order_direction=pagination.order_direction.value,
     )
-    return ApiResponse(
-        success=True, message="User messages retrieved successfully", data=result
+    return PaginatedApiResponse.from_paginator(
+        paginated_result, "User messages retrieved successfully"
     )

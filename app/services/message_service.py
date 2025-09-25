@@ -6,11 +6,13 @@ from google import genai
 
 from app.core.config import settings
 from app.repositories.message import MessageRepository
+from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
 from app.models.enums import MessageRole
 from app.factories.message_factory import MessageFactory
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 from app.utils.validation.message_validation import MessageValidationUtils
+from app.utils.validation.pagination_validation import validate_pagination_params
 from app.interfaces.message_service_interface import IMessageService
 from app.services.ai_service import AIService
 import logging
@@ -62,18 +64,28 @@ class MessageService(IMessageService):
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "asc",
-    ) -> List[MessageRead]:
+    ) -> Paginator[MessageRead]:
+        # Validate pagination parameters at service layer
+        validate_pagination_params(page, limit)
+
         self.conversation_validation_utils.validate_conversation_access(
             user_id, conversation_id
         )
-        message_entities = self.repository.get_by_conversation_id(
+        paginated_messages = self.repository.get_by_conversation_id(
             conversation_id,
             page=page,
             limit=limit,
             order_by=order_by,
             order_direction=order_direction,
         )
-        return [MessageRead.model_validate(msg) for msg in message_entities]
+        # Convert items to MessageRead schemas
+        message_reads = [
+            MessageRead.model_validate(msg) for msg in paginated_messages.items
+        ]
+        # Return new Paginator with converted items
+        return Paginator.create(
+            message_reads, paginated_messages.meta.total, page, limit
+        )
 
     def get_user_messages(
         self,
@@ -82,15 +94,25 @@ class MessageService(IMessageService):
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "desc",
-    ) -> List[MessageRead]:
-        message_entities = self.repository.get_by_user_id(
+    ) -> Paginator[MessageRead]:
+        # Validate pagination parameters at service layer
+        validate_pagination_params(page, limit)
+
+        paginated_messages = self.repository.get_by_user_id(
             user_id,
             page=page,
             limit=limit,
             order_by=order_by,
             order_direction=order_direction,
         )
-        return [MessageRead.model_validate(msg) for msg in message_entities]
+        # Convert items to MessageRead schemas
+        message_reads = [
+            MessageRead.model_validate(msg) for msg in paginated_messages.items
+        ]
+        # Return new Paginator with converted items
+        return Paginator.create(
+            message_reads, paginated_messages.meta.total, page, limit
+        )
 
     def get_conversation_thread(
         self,

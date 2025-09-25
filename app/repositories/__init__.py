@@ -1,8 +1,7 @@
-# Import all repositories for easy access
-from app.repositories.user import UserRepository
-from app.repositories.conversation import ConversationRepository
-from app.repositories.message import MessageRepository
-from app.repositories.feedback import FeedbackRepository
+"""Lazy-loading exports for repository classes."""
+
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
 
 __all__ = [
     "UserRepository",
@@ -10,3 +9,25 @@ __all__ = [
     "MessageRepository",
     "FeedbackRepository",
 ]
+
+_MODULE_MAP = {
+    "UserRepository": "user",
+    "ConversationRepository": "conversation",
+    "MessageRepository": "message",
+    "FeedbackRepository": "feedback",
+}
+
+if TYPE_CHECKING:
+    from .user import UserRepository
+    from .conversation import ConversationRepository
+    from .message import MessageRepository
+    from .feedback import FeedbackRepository
+
+
+def __getattr__(name: str) -> Any:
+    """Dynamically load repository classes when accessed via package imports."""
+
+    if name in _MODULE_MAP:
+        module = import_module(f"{__name__}.{_MODULE_MAP[name]}")
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

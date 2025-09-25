@@ -7,7 +7,10 @@ from sqlalchemy import select, asc, desc
 from app.models.conversation import Conversation
 from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.query_strategy import DefaultQueryStrategy
+from app.repositories.utils.pagination import Paginator
 from app.schemas.conversation import ConversationCreate, ConversationUpdate
+
+from app.utils.validation.pagination_validation import validate_pagination_params
 
 
 class ConversationCRUDStrategy(
@@ -28,8 +31,14 @@ class ConversationCRUDStrategy(
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "desc",
-    ) -> List[Conversation]:
+    ) -> Paginator[Conversation]:
         """Get conversations by owner ID with page-based pagination and ordering"""
+
+        validate_pagination_params(page, limit)
+        # Get total count first
+        total = self.count_by_owner_id(db, owner_id)
+
+        # Get paginated items
         offset = (page - 1) * limit
         stmt = select(Conversation).where(
             Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
@@ -44,11 +53,12 @@ class ConversationCRUDStrategy(
                 else:
                     stmt = stmt.order_by(desc(order_column))
         else:
-            # Default ordering
             stmt = stmt.order_by(Conversation.updated_at.asc())
 
         stmt = stmt.offset(offset).limit(limit)
-        return list(db.execute(stmt).scalars().all())
+        items = list(db.execute(stmt).scalars().all())
+
+        return Paginator.create(items, total, page, limit)
 
     def count_by_owner_id(self, db: Session, owner_id: UUID) -> int:
         """Count conversations by owner ID"""
@@ -97,8 +107,9 @@ class ConversationRepository:
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "desc",
-    ) -> List[Conversation]:
+    ) -> Paginator[Conversation]:
         """Get conversations by owner ID with page-based pagination and ordering"""
+        validate_pagination_params(page, limit)
         with self.session_factory() as session:
             return self._crud_strategy.get_by_owner_id(
                 session, owner_id, page, limit, order_by, order_direction

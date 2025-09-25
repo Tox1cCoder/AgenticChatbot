@@ -93,9 +93,12 @@ class FeedbackService(IFeedbackService):
         # Validate message exists
         self.message_validation_utils.validate_message_exists(message_id)
 
-        feedback_entities = self.repository.get_by_message_id(
-            message_id, skip=skip, limit=limit
+        # Convert skip to page for repository call
+        page = (skip // limit) + 1 if limit > 0 else 1
+        paginated_result = self.repository.get_by_message_id(
+            message_id, page=page, limit=limit
         )
+        feedback_entities = paginated_result.items
         return [FeedbackRead.model_validate(feedback) for feedback in feedback_entities]
 
     def get_feedbacks_by_message_id(
@@ -111,9 +114,12 @@ class FeedbackService(IFeedbackService):
         # Validate user exists
         self.user_validation_utils.validate_user_exists(user_id)
 
-        feedback_entities = self.repository.get_by_user_id(
-            user_id, skip=skip, limit=limit
+        # Convert skip to page for repository call
+        page = (skip // limit) + 1 if limit > 0 else 1
+        paginated_result = self.repository.get_by_user_id(
+            user_id, page=page, limit=limit
         )
+        feedback_entities = paginated_result.items
         return [FeedbackRead.model_validate(feedback) for feedback in feedback_entities]
 
     def get_user_feedback_for_message(

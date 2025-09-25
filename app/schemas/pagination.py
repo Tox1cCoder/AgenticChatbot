@@ -2,8 +2,6 @@ from enum import Enum
 from typing import TypeVar, Generic, List, Optional
 from pydantic import BaseModel, Field
 
-T = TypeVar("T")
-
 
 class OrderDirection(str, Enum):
     """Enum for order direction values"""
@@ -33,7 +31,7 @@ class PaginationParams(BaseModel):
     page: int = Field(default=1, ge=1, description="Page number (1-based)")
     limit: int = Field(default=10, ge=1, le=100, description="Number of items per page")
     order_direction: OrderDirection = Field(
-        default=OrderDirection.ASC, alias="orderDirection"  # Changed default to ASC for chronological order
+        default=OrderDirection.ASC, alias="orderDirection" 
     )
 
     class Config:
@@ -53,15 +51,3 @@ class MessagePaginationParams(PaginationParams):
 
     order_by: MessageOrderBy = Field(default=MessageOrderBy.CREATED_AT, alias="orderBy")
 
-
-class PaginatedResponse(BaseModel, Generic[T]):
-    """Generic paginated response schema"""
-
-    items: List[T] = Field(description="List of items")
-    page: int = Field(description="Current page number")
-    limit: int = Field(description="Items per page")
-    total_count: int = Field(description="Total number of items", alias="totalCount")
-    has_next: bool = Field(description="Whether there are more pages", alias="hasNext")
-
-    class Config:
-        populate_by_name = True

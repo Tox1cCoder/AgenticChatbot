@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import json
 from typing import Dict, Optional, Any, List
+from upload_support import render_upload_section, render_document_list
 from datetime import datetime, timedelta
 from dateutil import parser
 
@@ -113,15 +114,21 @@ def get_user(user_id: str) -> Dict[str, Any]:
 
 
 @st.cache_data(show_spinner=False)
-def get_conversations() -> List[Dict[str, Any]]:
-    response = make_api_request("GET", "/conversations/")
-    return response.get("data", [])
+def get_conversations(page: int = 1, limit: int = 20) -> Dict[str, Any]:
+    """Get paginated conversations"""
+    response = make_api_request("GET", f"/conversations/?page={page}&limit={limit}")
+    return response  # Returns full response with meta and items
 
 
 @st.cache_data(show_spinner=False)
-def get_messages(conversation_id: str) -> List[Dict[str, Any]]:
-    response = make_api_request("GET", f"/conversations/{conversation_id}/messages")
-    return response.get("data", [])
+def get_messages(
+    conversation_id: str, page: int = 1, limit: int = 50
+) -> Dict[str, Any]:
+    """Get paginated conversation messages"""
+    response = make_api_request(
+        "GET", f"/conversations/{conversation_id}/messages?page={page}&limit={limit}"
+    )
+    return response  # Returns full response with meta and items
 
 
 @st.cache_data(show_spinner=False)
@@ -130,12 +137,13 @@ def get_user_messages_paginated(
     limit: int = 10,
     order_by: str = "created_at",
     order_direction: str = "asc",
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
+    """Get paginated user messages"""
     response = make_api_request(
         "GET",
         f"/messages/?page={page}&limit={limit}&order_by={order_by}&order_direction={order_direction}",
     )
-    return response.get("data", [])
+    return response  # Returns full response with meta and items
 
 
 def render_login_page():
@@ -244,9 +252,11 @@ def render_conversation_sidebar():
             and st.session_state.current_user_id
             and st.session_state.auth_token
         ):
-            conversations = get_conversations()
-            if conversations:
-                st.session_state.conversations_list = conversations
+            conversations_response = get_conversations()
+            if conversations_response and conversations_response.get("data"):
+                st.session_state.conversations_list = conversations_response["data"][
+                    "items"
+                ]
 
         if st.session_state.conversations_list:
             sorted_conversations = sorted(
@@ -266,9 +276,18 @@ def render_conversation_sidebar():
                 ):
                     if conv["id"] != st.session_state.current_conversation_id:
                         st.session_state.current_conversation_id = conv["id"]
-                        messages = get_messages(conv["id"])
-                        st.session_state.messages = messages or []
+                        messages_response = get_messages(conv["id"])
+                        if messages_response and messages_response.get("data"):
+                            st.session_state.messages = messages_response["data"][
+                                "items"
+                            ]
+                        else:
+                            st.session_state.messages = []
                         st.rerun()
+
+        # Document upload and list section for selected conversation
+        # render_upload_section()
+        # render_document_list()
 
         st.divider()
 
@@ -302,25 +321,32 @@ def render_conversation_manager():
                 if search_term:
                     filtered_convs = []
                     for conv in st.session_state.conversations_list:
-                        messages = get_messages(conv["id"])
-                        for msg in messages:
-                            if search_term.lower() in msg.get("content", "").lower():
-                                if conv not in filtered_convs:
-                                    filtered_convs.append(conv)
-                                break
+                        messages_response = get_messages(conv["id"])
+                        if messages_response and messages_response.get("data"):
+                            messages = messages_response["data"]["items"]
+                            for msg in messages:
+                                if (
+                                    search_term.lower()
+                                    in msg.get("content", "").lower()
+                                ):
+                                    if conv not in filtered_convs:
+                                        filtered_convs.append(conv)
+                                    break
 
                 if filtered_convs:
                     for conv in filtered_convs:
                         with st.expander(f"💬 {conv['title']}", expanded=False):
-                            messages = get_messages(conv["id"])
-                            if messages:
-                                for msg in messages[-3:]:
-                                    sender_icon = (
-                                        "👤" if msg["sender"] == "user" else "🤖"
-                                    )
-                                    st.markdown(
-                                        f"{sender_icon} **{msg['sender']}:** {msg['content'][:100]}..."
-                                    )
+                            messages_response = get_messages(conv["id"])
+                            if messages_response and messages_response.get("data"):
+                                messages = messages_response["data"]["items"]
+                                if messages:
+                                    for msg in messages[-3:]:
+                                        sender_icon = (
+                                            "👤" if msg["sender"] == "user" else "🤖"
+                                        )
+                                        st.markdown(
+                                            f"{sender_icon} **{msg['sender']}:** {msg['content'][:100]}..."
+                                        )
 
                             col_open, col_delete = st.columns(2)
                             with col_open:
@@ -328,9 +354,15 @@ def render_conversation_manager():
                                     st.session_state.current_conversation_id = conv[
                                         "id"
                                     ]
-                                    st.session_state.messages = (
-                                        get_messages(conv["id"]) or []
-                                    )
+                                    messages_response = get_messages(conv["id"])
+                                    if messages_response and messages_response.get(
+                                        "data"
+                                    ):
+                                        st.session_state.messages = messages_response[
+                                            "data"
+                                        ]["items"]
+                                    else:
+                                        st.session_state.messages = []
                                     st.session_state.show_conversation_manager = False
                                     st.rerun()
 
@@ -379,14 +411,16 @@ def render_chat_interface():
         and st.session_state.current_conversation_id != "pending_new"
     ):
         if not st.session_state.messages:
-            all_messages = get_messages(st.session_state.current_conversation_id)
-            if all_messages:
-                st.session_state.messages = all_messages
+            messages_response = get_messages(st.session_state.current_conversation_id)
+            if messages_response and messages_response.get("data"):
+                st.session_state.messages = messages_response["data"]["items"]
 
     if not st.session_state.conversations_list and st.session_state.current_user_id:
-        conversations = get_conversations()
-        if conversations:
-            st.session_state.conversations_list = conversations
+        conversations_response = get_conversations()
+        if conversations_response and conversations_response.get("data"):
+            st.session_state.conversations_list = conversations_response["data"][
+                "items"
+            ]
 
     current_conv = next(
         (
@@ -533,10 +567,13 @@ def render_chat_interface():
 
                     if response and response.get("data"):
                         st.cache_data.clear()
-                        all_messages = get_messages(
+                        messages_response = get_messages(
                             st.session_state.current_conversation_id
                         )
-                        st.session_state.messages = all_messages or []
+                        if messages_response and messages_response.get("data"):
+                            st.session_state.messages = messages_response["data"][
+                                "items"
+                            ]
                         st.rerun()
                     else:
                         st.error("Failed to send message")

@@ -8,7 +8,10 @@ from app.models.message import Message
 from app.models.conversation import Conversation
 from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.query_strategy import DefaultQueryStrategy
+from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate
+
+from app.utils.validation.pagination_validation import validate_pagination_params
 
 
 class MessageCRUDStrategy(
@@ -29,8 +32,15 @@ class MessageCRUDStrategy(
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "asc",
-    ) -> List[Message]:
+    ) -> Paginator[Message]:
         """Get messages by conversation ID with page-based pagination and ordering"""
+
+        validate_pagination_params(page, limit)
+
+        # Get total count first
+        total = self.count_by_conversation_id(db, conversation_id)
+
+        # Get paginated items
         offset = (page - 1) * limit
         stmt = select(Message).where(Message.conversation_id == conversation_id)
 
@@ -47,7 +57,9 @@ class MessageCRUDStrategy(
             stmt = stmt.order_by(Message.created_at.asc())
 
         stmt = stmt.offset(offset).limit(limit)
-        return list(db.execute(stmt).scalars().all())
+        items = list(db.execute(stmt).scalars().all())
+
+        return Paginator.create(items, total, page, limit)
 
     def count_by_conversation_id(self, db: Session, conversation_id: UUID) -> int:
         """Count messages by conversation ID"""
@@ -62,8 +74,15 @@ class MessageCRUDStrategy(
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "desc",
-    ) -> List[Message]:
+    ) -> Paginator[Message]:
         """Get messages by conversation owner (user_id) with page-based pagination and ordering"""
+
+        validate_pagination_params(page, limit)
+
+        # Get total count first
+        total = self.count_by_user_id(db, user_id)
+
+        # Get paginated items
         offset = (page - 1) * limit
         # Join with conversations to get messages from user's conversations
         stmt = (
@@ -85,14 +104,16 @@ class MessageCRUDStrategy(
             stmt = stmt.order_by(Message.created_at.asc())
 
         stmt = stmt.offset(offset).limit(limit)
-        return list(db.execute(stmt).scalars().all())
+        items = list(db.execute(stmt).scalars().all())
+
+        return Paginator.create(items, total, page, limit)
 
     def count_by_user_id(self, db: Session, user_id: UUID) -> int:
         """Count messages by user ID"""
         stmt = (
             select(Message)
             .join(Message.conversation)
-            .where(Message.conversation.has(user_id=user_id))
+            .where(Message.conversation.has(owner_id=user_id))
         )
         return len(list(db.execute(stmt).scalars().all()))
 
@@ -107,7 +128,7 @@ class MessageCRUDStrategy(
             .limit(limit)
         )
         messages = list(db.execute(stmt).scalars().all())
-        return list(reversed(messages))  # Return in chronological order
+        return list(reversed(messages))
 
     def get_latest_message(
         self, db: Session, conversation_id: UUID
@@ -148,7 +169,7 @@ class MessageRepository:
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "asc",
-    ) -> List[Message]:
+    ) -> Paginator[Message]:
         """Get messages by conversation ID with page-based pagination and ordering"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_conversation_id(
@@ -169,7 +190,7 @@ class MessageRepository:
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "desc",
-    ) -> List[Message]:
+    ) -> Paginator[Message]:
         """Get messages by user ID with page-based pagination and ordering"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_user_id(

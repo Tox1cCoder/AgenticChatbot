@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from typing import List, Optional
 from uuid import UUID
 
+from app.repositories.utils.pagination import Paginator
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationUpdate,
@@ -36,7 +37,7 @@ class IConversationService(ABC):
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "desc",
-    ) -> List[ConversationRead]:
+    ) -> Paginator[ConversationRead]:
         """Get all conversations for a user with pagination"""
         pass
 
