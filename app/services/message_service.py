@@ -162,9 +162,7 @@ class MessageService(IMessageService):
         if api_key.startswith("GEMINI_API_KEY="):
             api_key = api_key.split("=", 1)[-1].strip()
 
-        system_prompt = (
-            "You are a helpful chatbot. Please answer in a short, concise sentence."
-        )
+        system_prompt = "You are a helpful assistant."
         prompt = f"{system_prompt}\nUser: {user_message}"
 
         try:

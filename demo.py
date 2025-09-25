@@ -17,22 +17,22 @@ st.markdown(
 <style>
     .main-container { max-width: 1200px; margin: 0 auto; }
     .chat-messages-container {
-        border: 2px solid #ddd; border-radius: 15px; background: linear-gradient(135deg, #fafafa, #f0f0f0);
-        box-shadow: inset 0 2px 10px rgba(0,0,0,0.1);
+        border: 1px solid #e2e8f0; border-radius: 18px; background: #ffffff;
+        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
     }
     .chat-input-container {
-        background: white; border: 2px solid #e0e0e0; border-radius: 15px;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        background: #ffffff; border: 1px solid #e2e8f0; border-radius: 18px;
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
     }
     .user-message {
-        background: linear-gradient(135deg, #007bff, #0056b3); color: white;
+        background: #ffffff; color: #1f2937; border: 1px solid #93c5fd;
         padding: 12px 16px; border-radius: 18px 18px 4px 18px; margin: 8px 0 8px auto;
-        max-width: 70%; word-wrap: break-word; box-shadow: 0 2px 8px rgba(0,123,255,0.3);
+        max-width: 72%; word-wrap: break-word; box-shadow: 0 8px 20px rgba(59, 130, 246, 0.16);
     }
     .bot-message {
-        background: linear-gradient(135deg, #28a745, #1e7e34); color: white;
+        background: #ffffff; color: #1f2937; border: 1px solid #86efac;
         padding: 12px 16px; border-radius: 18px 18px 18px 4px; margin: 8px auto 8px 0;
-        max-width: 70%; word-wrap: break-word; box-shadow: 0 2px 8px rgba(40,167,69,0.3);
+        max-width: 72%; word-wrap: break-word; box-shadow: 0 8px 20px rgba(34, 197, 94, 0.16);
     }
     .sidebar-conversation {
         background: #f8f9fa; border-radius: 8px; padding: 10px; margin: 5px 0;
@@ -46,7 +46,7 @@ st.markdown(
         max-width: 400px; margin: 0 auto; padding: 40px 20px; background: white;
         border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.1);
     }
-    .message-timestamp { font-size: 0.8em; color: #ffffff80; margin-top: 5px; }
+    .message-timestamp { font-size: 0.8em; color: #64748b; margin-top: 5px; }
     div:empty { display: none !important; }
 </style>
 """,
@@ -69,6 +69,19 @@ if "show_conversation_manager" not in st.session_state:
     st.session_state.show_conversation_manager = False
 if "auth_token" not in st.session_state:
     st.session_state.auth_token = None
+if "conversation_messages_meta" not in st.session_state:
+    st.session_state.conversation_messages_meta = None
+if "conversation_messages_page" not in st.session_state:
+    st.session_state.conversation_messages_page = 0
+if "has_more_messages" not in st.session_state:
+    st.session_state.has_more_messages = True
+
+
+def reset_conversation_state() -> None:
+    st.session_state.messages = []
+    st.session_state.conversation_messages_meta = None
+    st.session_state.conversation_messages_page = 0
+    st.session_state.has_more_messages = True
 
 
 def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
@@ -122,12 +135,18 @@ def get_conversations(page: int = 1, limit: int = 20) -> Dict[str, Any]:
 
 @st.cache_data(show_spinner=False)
 def get_messages(
-    conversation_id: str, page: int = 1, limit: int = 50
+    conversation_id: str,
+    page: int = 1,
+    limit: int = 10,
+    order_by: str = "created_at",
+    order_direction: str = "desc",
 ) -> Dict[str, Any]:
     """Get paginated conversation messages"""
-    response = make_api_request(
-        "GET", f"/conversations/{conversation_id}/messages?page={page}&limit={limit}"
+    endpoint = (
+        f"/conversations/{conversation_id}/messages"
+        f"?page={page}&limit={limit}&orderBy={order_by}&orderDirection={order_direction}"
     )
+    response = make_api_request("GET", endpoint)
     return response  # Returns full response with meta and items
 
 
@@ -238,7 +257,7 @@ def render_conversation_sidebar():
 
         if st.button("New Chat", use_container_width=True):
             st.session_state.current_conversation_id = "pending_new"
-            st.session_state.messages = []
+            reset_conversation_state()
             st.rerun()
 
         if st.button("Manage Conversations", use_container_width=True):
@@ -276,13 +295,7 @@ def render_conversation_sidebar():
                 ):
                     if conv["id"] != st.session_state.current_conversation_id:
                         st.session_state.current_conversation_id = conv["id"]
-                        messages_response = get_messages(conv["id"])
-                        if messages_response and messages_response.get("data"):
-                            st.session_state.messages = messages_response["data"][
-                                "items"
-                            ]
-                        else:
-                            st.session_state.messages = []
+                        reset_conversation_state()
                         st.rerun()
 
         # Document upload and list section for selected conversation
@@ -298,7 +311,7 @@ def render_conversation_sidebar():
                 if st.button("🚪 Sign Out", use_container_width=True):
                     st.session_state.current_user_id = None
                     st.session_state.current_conversation_id = None
-                    st.session_state.messages = []
+                    reset_conversation_state()
                     st.session_state.conversations_list = []
                     st.session_state.auth_token = None
                     st.session_state.show_login = True
@@ -340,9 +353,17 @@ def render_conversation_manager():
                             if messages_response and messages_response.get("data"):
                                 messages = messages_response["data"]["items"]
                                 if messages:
-                                    for msg in messages[-3:]:
+                                    recent_messages = sorted(
+                                        messages,
+                                        key=lambda x: x.get("createdAt", ""),
+                                        reverse=True,
+                                    )[:3]
+                                    for msg in recent_messages:
+                                        sender_value = msg.get("sender")
                                         sender_icon = (
-                                            "👤" if msg["sender"] == "user" else "🤖"
+                                            "👤"
+                                            if sender_value in (1, "user")
+                                            else "🤖"
                                         )
                                         st.markdown(
                                             f"{sender_icon} **{msg['sender']}:** {msg['content'][:100]}..."
@@ -354,15 +375,7 @@ def render_conversation_manager():
                                     st.session_state.current_conversation_id = conv[
                                         "id"
                                     ]
-                                    messages_response = get_messages(conv["id"])
-                                    if messages_response and messages_response.get(
-                                        "data"
-                                    ):
-                                        st.session_state.messages = messages_response[
-                                            "data"
-                                        ]["items"]
-                                    else:
-                                        st.session_state.messages = []
+                                    reset_conversation_state()
                                     st.session_state.show_conversation_manager = False
                                     st.rerun()
 
@@ -384,7 +397,7 @@ def render_conversation_manager():
                                             st.session_state.current_conversation_id = (
                                                 None
                                             )
-                                            st.session_state.messages = []
+                                            reset_conversation_state()
                                         st.cache_data.clear()
                                         st.success(f"✅ Deleted '{conv['title']}'")
                                         st.rerun()
@@ -399,44 +412,90 @@ def render_conversation_manager():
 
 
 def render_chat_interface():
-    if "current_page" not in st.session_state:
-        st.session_state.current_page = 1
-    if "all_loaded_messages" not in st.session_state:
-        st.session_state.all_loaded_messages = []
-    if "has_more_messages" not in st.session_state:
-        st.session_state.has_more_messages = True
+    conversation_id = st.session_state.get("current_conversation_id")
+    user_id = st.session_state.get("current_user_id")
 
-    if (
-        st.session_state.current_conversation_id
-        and st.session_state.current_conversation_id != "pending_new"
-    ):
-        if not st.session_state.messages:
-            messages_response = get_messages(st.session_state.current_conversation_id)
-            if messages_response and messages_response.get("data"):
-                st.session_state.messages = messages_response["data"]["items"]
-
-    if not st.session_state.conversations_list and st.session_state.current_user_id:
+    if not st.session_state.conversations_list and user_id:
         conversations_response = get_conversations()
         if conversations_response and conversations_response.get("data"):
             st.session_state.conversations_list = conversations_response["data"][
                 "items"
             ]
 
+    def load_messages_page(page: int, *, show_spinner: bool = False) -> None:
+        conv_id = st.session_state.get("current_conversation_id")
+        if not conv_id or conv_id == "pending_new":
+            return
+
+        fetch_page = lambda: get_messages(
+            conv_id,
+            page=page,
+            limit=10,
+            order_direction="desc",
+        )
+
+        if show_spinner:
+            with st.spinner("Loading messages..."):
+                response = fetch_page()
+        else:
+            response = fetch_page()
+
+        if response and response.get("data"):
+            data = response["data"]
+            items = data.get("items", [])
+            meta = data.get("meta", {})
+
+            existing_messages = {msg["id"]: msg for msg in st.session_state.messages}
+            for item in items:
+                existing_messages[item["id"]] = item
+
+            def sort_key(message: Dict[str, Any]):
+                timestamp = message.get("createdAt")
+                if not timestamp:
+                    return datetime.min
+                try:
+                    return parser.isoparse(timestamp)
+                except Exception:
+                    return datetime.min
+
+            sorted_messages = sorted(existing_messages.values(), key=sort_key)
+
+            st.session_state.messages = sorted_messages
+            st.session_state.conversation_messages_meta = meta
+
+            current_page = meta.get("current_page", page)
+            last_page = meta.get("last_page", current_page)
+            st.session_state.conversation_messages_page = current_page
+            st.session_state.has_more_messages = current_page < last_page
+        else:
+            st.session_state.conversation_messages_page = max(
+                st.session_state.conversation_messages_page, page
+            )
+            st.session_state.has_more_messages = False
+
+    if conversation_id and conversation_id != "pending_new":
+        if st.session_state.conversation_messages_page == 0:
+            load_messages_page(1, show_spinner=True)
+
     current_conv = next(
-        (
-            c
-            for c in st.session_state.conversations_list
-            if c["id"] == st.session_state.current_conversation_id
-        ),
+        (c for c in st.session_state.conversations_list if c["id"] == conversation_id),
         None,
     )
 
     if current_conv:
         st.markdown(f"# {current_conv['title']}")
-    elif st.session_state.current_conversation_id == "pending_new":
+    elif conversation_id == "pending_new":
         st.markdown("# New Chat - Start typing to begin!")
     else:
         st.markdown("# Welcome! Select a conversation to view messages")
+
+    if conversation_id and conversation_id not in (None, "pending_new"):
+        if st.session_state.has_more_messages:
+            if st.button("⬆️ Load older messages", key="load_more_messages"):
+                next_page = st.session_state.conversation_messages_page + 1
+                load_messages_page(next_page, show_spinner=True)
+        elif st.session_state.conversation_messages_page > 0:
+            st.caption("All caught up — showing the entire thread.")
 
     st.markdown(
         """<div class="chat-messages-container" style="height: 70vh; overflow-y: auto; padding: 20px; margin-bottom: 20px;">""",
@@ -455,19 +514,16 @@ def render_chat_interface():
         except Exception:
             return iso_string
 
-    messages_to_display = []
-    if (
-        st.session_state.current_conversation_id
-        and st.session_state.current_conversation_id != "pending_new"
-        and st.session_state.messages
-    ):
-        messages_to_display = st.session_state.messages
-    elif (
-        st.session_state.all_loaded_messages
-        and st.session_state.current_conversation_id is None
-    ):
-        messages_to_display = sorted(
-            st.session_state.all_loaded_messages, key=lambda x: x.get("createdAt", "")
+    messages_to_display = (
+        st.session_state.messages
+        if conversation_id and conversation_id != "pending_new"
+        else []
+    )
+
+    if not messages_to_display and conversation_id not in (None, "pending_new"):
+        st.markdown(
+            "<div style='text-align:center; color:#94a3b8;'>No messages yet — send the first one!</div>",
+            unsafe_allow_html=True,
         )
 
     for msg in messages_to_display:
@@ -500,9 +556,9 @@ def render_chat_interface():
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    if st.session_state.current_conversation_id:
+    if conversation_id:
         st.markdown(
-            '<div class="chat-input-container" style="background: white; padding: 25px; border-radius: 15px; border: 2px solid #e0e0e0; box-shadow: 0 4px 15px rgba(0,0,0,0.1); margin-top: 20px;">',
+            '<div class="chat-input-container" style="background: white; padding: 25px; border-radius: 18px; border: 1px solid #e2e8f0; box-shadow: 0 10px 24px rgba(15,23,42,0.08); margin-top: 20px;">',
             unsafe_allow_html=True,
         )
 
@@ -537,7 +593,7 @@ def render_chat_interface():
                             return
 
                 if message_content.strip():
-                    if st.session_state.current_conversation_id == "pending_new":
+                    if conversation_id == "pending_new":
                         conversation_data = {
                             "title": (
                                 message_content[:50] + "..."
@@ -553,6 +609,7 @@ def render_chat_interface():
                                 "data"
                             ]["id"]
                             st.cache_data.clear()
+                            reset_conversation_state()
                         else:
                             st.error("Failed to create conversation")
                             return
@@ -567,13 +624,8 @@ def render_chat_interface():
 
                     if response and response.get("data"):
                         st.cache_data.clear()
-                        messages_response = get_messages(
-                            st.session_state.current_conversation_id
-                        )
-                        if messages_response and messages_response.get("data"):
-                            st.session_state.messages = messages_response["data"][
-                                "items"
-                            ]
+                        reset_conversation_state()
+                        load_messages_page(1)
                         st.rerun()
                     else:
                         st.error("Failed to send message")
