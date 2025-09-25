@@ -114,17 +114,6 @@ class MessageService(IMessageService):
             message_reads, paginated_messages.meta.total, page, limit
         )
 
-    def get_conversation_thread(
-        self,
-        conversation_id: UUID,
-        user_id: UUID,
-    ) -> List[MessageRead]:
-        self.conversation_validation_utils.validate_conversation_access(
-            user_id, conversation_id
-        )
-        message_entities = self.repository.get_conversation_thread(conversation_id)
-        return [MessageRead.model_validate(msg) for msg in message_entities]
-
     def update_message(
         self,
         message_id: UUID,

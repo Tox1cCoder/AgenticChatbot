@@ -37,7 +37,7 @@ streamlit run demo.py
 
 ### 2. Environment Variables
 
-Create a `.env` file in `app/core/` (or edit the existing one) and set:
+Create a `.env` file in the project root directory (or edit the existing one) and set:
 
 ```env
 DATABASE_URL=postgresql://username:password@localhost:5432/chatbot

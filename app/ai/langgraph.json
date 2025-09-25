@@ -31,7 +31,7 @@
       }
     }
   },
-  "env": ".env",
+  "env": "../../.env",
   "dockerfile_lines": [
     "FROM python:3.11-slim",
     "WORKDIR /app",

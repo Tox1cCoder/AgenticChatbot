@@ -26,7 +26,7 @@ class FeedbackCRUDStrategy(
         return db.execute(statement).scalar_one_or_none()
 
     def get_by_user_id(self, db: Session, user_id: UUID) -> List[Feedback]:
-        """Get all feedback by user ID (no pagination needed for user's own feedback)"""
+        """Get all feedback by user ID"""
         statement = (
             select(Feedback)
             .where(Feedback.user_id == user_id)

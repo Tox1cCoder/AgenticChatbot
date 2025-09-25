@@ -44,7 +44,7 @@ class MessageCRUDStrategy(
         offset = (page - 1) * limit
         statement = select(Message).where(Message.conversation_id == conversation_id)
 
-        # Apply ordering if specified with attribute validation
+        # Apply ordering if specified
         if order_by and hasattr(Message, order_by):
             order_column = getattr(Message, order_by)
             statement = statement.order_by(
@@ -91,7 +91,7 @@ class MessageCRUDStrategy(
             .where(Message.conversation.has(owner_id=user_id))
         )
 
-        # Apply ordering if specified with attribute validation
+        # Apply ordering if specified
         if order_by and hasattr(Message, order_by):
             order_column = getattr(Message, order_by)
             statement = statement.order_by(
@@ -116,30 +116,6 @@ class MessageCRUDStrategy(
             .where(Message.conversation.has(owner_id=user_id))
         )
         return len(list(db.execute(statement).scalars().all()))
-
-    def get_conversation_history(
-        self, db: Session, conversation_id: UUID, limit: int = 50
-    ) -> List[Message]:
-        """Get recent conversation history"""
-        statement = (
-            select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.desc())
-            .limit(limit)
-        )
-        messages = list(db.execute(statement).scalars().all())
-        return list(reversed(messages))
-
-    def get_conversation_thread(
-        self, db: Session, conversation_id: UUID
-    ) -> List[Message]:
-        """Get all messages in a conversation thread ordered by creation time"""
-        statement = (
-            select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.asc())
-        )
-        return list(db.execute(statement).scalars().all())
 
 
 class MessageRepository:
