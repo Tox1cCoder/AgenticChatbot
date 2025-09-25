@@ -1,10 +1,8 @@
 from fastapi import APIRouter, UploadFile, File, Depends
 from typing import Dict, Any, Annotated
 
-from dependency_injector.wiring import Provide, inject
-
+from app.core.dependency_injection import AppAutoInjector
 from app.core.auth import get_current_user_id
-from app.core.container import Container
 from app.interfaces.document_service_interface import IDocumentService
 from app.schemas.responses.api_response import ApiResponse
 
@@ -12,12 +10,10 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 
 
 @router.post("/", response_model=ApiResponse)
-@inject
+@AppAutoInjector.auto_inject()
 async def upload_document(
     file: UploadFile = File(...),
-    document_service: Annotated[
-        IDocumentService, Depends(Provide[Container.document_service])
-    ] = None,
+    document_service: IDocumentService = None,
     current_user_id=Depends(get_current_user_id),
 ) -> ApiResponse:
     """

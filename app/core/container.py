@@ -141,6 +141,19 @@ class Container(containers.DeclarativeContainer):
     )
 
 
+# Initialize auto-injection wiring map before container instantiation
+def setup_auto_injection(container_ref: Container | type[Container] | None = None):
+    """Setup auto-injection wiring maps."""
+    from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
+
+    target = container_ref or Container
+    AppAutoInjector.setup_wiring_map(target)
+    AppContainerInjector.setup_wiring_map(target)
+
+
+setup_auto_injection(Container)
+
+
 # Create global container instance
 container = Container()
 

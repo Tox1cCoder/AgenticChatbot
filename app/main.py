@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.core.container import Container
+from app.core.container import get_container, setup_auto_injection
 from app.api import (
     users_router,
     conversations_router,
@@ -21,7 +21,11 @@ def create_app() -> FastAPI:
     """Create and configure FastAPI application"""
 
     # Initialize the dependency injection container
-    container = Container()
+    container = get_container()
+
+    # Setup auto-injection wiring maps (idempotent)
+    setup_auto_injection(container)
+
     container.wire(
         modules=[
             "app.api.auth",

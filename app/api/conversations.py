@@ -2,9 +2,7 @@ from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, status, HTTPException, Query
 
-from dependency_injector.wiring import Provide, inject
-
-from app.core.container import Container
+from app.core.dependency_injection import AppAutoInjector
 from app.core.auth import get_current_user_id
 from app.interfaces.conversation_service_interface import IConversationService
 from app.schemas.conversation import (
@@ -26,13 +24,11 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
     response_model=ApiResponse[ConversationRead],
     status_code=status.HTTP_201_CREATED,
 )
-@inject
+@AppAutoInjector.auto_inject()
 async def create_conversation(
     conversation_data: ConversationCreate,
+    conversation_service: IConversationService,
     user_id: UUID = Depends(get_current_user_id),
-    conversation_service: IConversationService = Depends(
-        Provide[Container.conversation_service]
-    ),
 ) -> ApiResponse[ConversationRead]:
     """Create a new conversation for authenticated user"""
     result = conversation_service.create_conversation(conversation_data, user_id)
@@ -42,12 +38,10 @@ async def create_conversation(
 
 
 @router.get("/{conversation_id}", response_model=ApiResponse[ConversationRead])
-@inject
+@AppAutoInjector.auto_inject()
 async def get_conversation(
     conversation_id: UUID,
-    conversation_service: IConversationService = Depends(
-        Provide[Container.conversation_service]
-    ),
+    conversation_service: IConversationService,
 ) -> ApiResponse[ConversationRead]:
     """Get conversation by ID"""
     result = conversation_service.get_by_id(conversation_id)
@@ -57,11 +51,9 @@ async def get_conversation(
 
 
 @router.get("/", response_model=PaginatedApiResponse[ConversationRead])
-@inject
+@AppAutoInjector.auto_inject()
 async def get_conversations(
-    conversation_service: IConversationService = Depends(
-        Provide[Container.conversation_service]
-    ),
+    conversation_service: IConversationService,
     user_id: UUID = Depends(get_current_user_id),
     pagination: ConversationPaginationParams = Depends(),
     include_messages: bool = Query(
@@ -91,10 +83,10 @@ async def get_conversations(
     "/{conversation_id}/messages",
     response_model=PaginatedApiResponse[MessageRead],
 )
-@inject
+@AppAutoInjector.auto_inject()
 async def get_conversation_messages(
     conversation_id: UUID,
-    message_service: IMessageService = Depends(Provide[Container.message_service]),
+    message_service: IMessageService,
     user_id: UUID = Depends(get_current_user_id),
     pagination: MessagePaginationParams = Depends(),
 ) -> PaginatedApiResponse[MessageRead]:
@@ -113,12 +105,10 @@ async def get_conversation_messages(
 
 
 @router.delete("/{conversation_id}", response_model=ApiResponse)
-@inject
+@AppAutoInjector.auto_inject()
 async def delete_conversation(
     conversation_id: UUID,
-    conversation_service: IConversationService = Depends(
-        Provide[Container.conversation_service]
-    ),
+    conversation_service: IConversationService,
     user_id: UUID = Depends(get_current_user_id),
 ) -> ApiResponse:
     """Delete conversation (requires user ownership)"""

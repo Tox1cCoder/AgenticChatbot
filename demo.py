@@ -155,7 +155,7 @@ def get_conversations(
             f"&include_messages={include_messages}&message_limit={message_limit}"
         )
     response = make_api_request("GET", endpoint)
-    return response  # Returns full response with meta and items
+    return response
 
 
 @st.cache_data(show_spinner=False)
@@ -419,6 +419,23 @@ def render_conversation_manager():
                                     st.markdown(
                                         f"{sender_icon} **{msg['sender']}:** {msg['content'][:100]}..."
                                     )
+                            else:
+                                # Fallback: directly get messages for this conversation
+                                messages_response = get_messages(
+                                    conv["id"], page=1, limit=3
+                                )
+                                if messages_response and messages_response.get("data"):
+                                    messages = messages_response["data"]["items"]
+                                    for msg in messages:
+                                        sender_value = msg.get("sender")
+                                        sender_icon = (
+                                            "👤"
+                                            if sender_value in (1, "user")
+                                            else "🤖"
+                                        )
+                                        st.markdown(
+                                            f"{sender_icon} **{msg['sender']}:** {msg['content'][:100]}..."
+                                        )
 
                             col_open, col_delete = st.columns(2)
                             with col_open:

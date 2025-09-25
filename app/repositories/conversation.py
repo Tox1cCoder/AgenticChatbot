@@ -106,7 +106,11 @@ class ConversationCRUDStrategy(
         # Apply ordering with proper defaults and attribute validation
         if order_by and hasattr(Conversation, order_by):
             order_column = getattr(Conversation, order_by)
-            statement = statement.order_by(asc(order_column) if order_direction.lower() == "asc" else desc(order_column))
+            statement = statement.order_by(
+                asc(order_column)
+                if order_direction.lower() == "asc"
+                else desc(order_column)
+            )
         else:
             # Default to most recently updated conversations first
             statement = statement.order_by(desc(Conversation.updated_at))
@@ -116,13 +120,13 @@ class ConversationCRUDStrategy(
 
         # Load recent messages for each conversation
         for conversation in conversations:
-            message_stmt = (
+            message_statement = (
                 select(Message)
                 .where(Message.conversation_id == conversation.id)
                 .order_by(desc(Message.created_at))
                 .limit(message_limit)
             )
-            recent_messages = list(db.execute(message_stmt).scalars().all())
+            recent_messages = list(db.execute(message_statement).scalars().all())
             # Reverse to get the oldest first
             conversation.messages = recent_messages[::-1]
 

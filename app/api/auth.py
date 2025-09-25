@@ -2,9 +2,7 @@ import logging
 from fastapi import APIRouter, Depends, status
 from uuid import UUID
 
-from dependency_injector.wiring import Provide, inject
-
-from app.core.container import Container
+from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.user_service_interface import IUserService
 from app.interfaces.auth_service_interface import IAuthService
 from app.core.security import create_access_token
@@ -20,40 +18,38 @@ from app.schemas.responses.token_response import (
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
-@router.post("/signup", response_model=ApiResponse[UserRead], status_code=status.HTTP_201_CREATED)
-@inject
+@router.post(
+    "/signup", response_model=ApiResponse[UserRead], status_code=status.HTTP_201_CREATED
+)
+@AppAutoInjector.auto_inject()
 async def signup(
     user_data: UserCreate,
-    user_service: IUserService = Depends(Provide[Container.user_service]),
+    user_service: IUserService,
 ) -> ApiResponse[UserRead]:
     """Register a new user"""
     created_user = user_service.create_user(user_data)
     return ApiResponse(
-        success=True,
-        message="User created successfully",
-        data=created_user
+        success=True, message="User created successfully", data=created_user
     )
 
 
 @router.post("/login", response_model=ApiResponse[TokenResponse])
-@inject
+@AppAutoInjector.auto_inject()
 async def login(
     login_data: LoginRequest,
-    auth_service: IAuthService = Depends(Provide[Container.auth_service]),
+    auth_service: IAuthService,
 ) -> ApiResponse[TokenResponse]:
     """Authenticate user and return JWT tokens"""
     auth_response = auth_service.authenticate_user(login_data)
     return ApiResponse(
-        success=True,
-        message="Login successful",
-        data=TokenResponse(**auth_response)
+        success=True, message="Login successful", data=TokenResponse(**auth_response)
     )
 
 
 @router.post("/refresh", response_model=ApiResponse[RefreshTokenResponse])
-@inject
+@AppAutoInjector.auto_inject()
 async def refresh_token(
-    user_service: IUserService = Depends(Provide[Container.user_service]),
+    user_service: IUserService,
     user_id: UUID = Depends(get_refresh_token_user_id),
 ) -> ApiResponse[RefreshTokenResponse]:
     """Get new access token using refresh token"""
@@ -63,14 +59,14 @@ async def refresh_token(
     return ApiResponse(
         success=True,
         message="Token refreshed successfully",
-        data=RefreshTokenResponse(access_token=access_token)
+        data=RefreshTokenResponse(access_token=access_token),
     )
 
 
 @router.post("/logout", response_model=ApiResponse)
-@inject
+@AppAutoInjector.auto_inject()
 async def logout(
-    auth_service: IAuthService = Depends(Provide[Container.auth_service]),
+    auth_service: IAuthService,
     current_user_id: UUID = Depends(get_current_user_id),
 ) -> ApiResponse:
     """Logout endpoint with token invalidation"""

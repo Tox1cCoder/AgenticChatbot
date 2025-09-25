@@ -3,9 +3,7 @@ from uuid import UUID
 from typing import Annotated
 from fastapi import APIRouter, Depends, status
 
-from dependency_injector.wiring import Provide, inject
-
-from app.core.container import Container
+from app.core.dependency_injection import AppAutoInjector
 from app.core.auth import get_current_user_id
 from app.interfaces.feedback_service_interface import IFeedbackService
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
@@ -19,11 +17,11 @@ router = APIRouter(prefix="/messages", tags=["feedbacks"])
     response_model=ApiResponse[FeedbackRead],
     status_code=status.HTTP_201_CREATED,
 )
-@inject
+@AppAutoInjector.auto_inject()
 async def create_feedback(
     message_id: UUID,
     feedback_data: FeedbackCreate,
-    feedback_service: IFeedbackService = Depends(Provide[Container.feedback_service]),
+    feedback_service: IFeedbackService,
     user_id: UUID = Depends(get_current_user_id),
 ) -> ApiResponse[FeedbackRead]:
     """Create a new feedback for a message or update existing feedback"""
@@ -35,10 +33,10 @@ async def create_feedback(
 
 
 @router.get("/{message_id}/feedbacks/stats", response_model=ApiResponse[dict])
-@inject
+@AppAutoInjector.auto_inject()
 async def get_message_rating_stats(
     message_id: UUID,
-    feedback_service: IFeedbackService = Depends(Provide[Container.feedback_service]),
+    feedback_service: IFeedbackService,
 ) -> ApiResponse[dict]:
     """Get rating statistics for a message"""
     result = feedback_service.get_message_rating_stats(message_id)
@@ -52,11 +50,11 @@ async def get_message_rating_stats(
 @router.get(
     "/{message_id}/feedbacks/user/{user_id}", response_model=ApiResponse[FeedbackRead]
 )
-@inject
+@AppAutoInjector.auto_inject()
 async def get_user_feedback_for_message(
     message_id: UUID,
     user_id: UUID,
-    feedback_service: IFeedbackService = Depends(Provide[Container.feedback_service]),
+    feedback_service: IFeedbackService,
     authenticated_user_id: UUID = Depends(get_current_user_id),
 ) -> ApiResponse[FeedbackRead]:
     """Get authenticated user's feedback for a message (user_id must match authenticated user)"""
@@ -69,10 +67,10 @@ async def get_user_feedback_for_message(
 
 
 @router.get("/{message_id}/feedbacks", response_model=ApiResponse[FeedbackRead])
-@inject
+@AppAutoInjector.auto_inject()
 async def get_message_feedback(
     message_id: UUID,
-    feedback_service: IFeedbackService = Depends(Provide[Container.feedback_service]),
+    feedback_service: IFeedbackService,
 ) -> ApiResponse[FeedbackRead]:
     """Get feedback for a message"""
     result = feedback_service.get_by_message(message_id)
@@ -86,12 +84,12 @@ async def get_message_feedback(
 @router.put(
     "/{message_id}/feedbacks/{feedback_id}", response_model=ApiResponse[FeedbackRead]
 )
-@inject
+@AppAutoInjector.auto_inject()
 async def update_feedback(
     message_id: UUID,
     feedback_id: UUID,
     feedback_data: FeedbackUpdate,
-    feedback_service: IFeedbackService = Depends(Provide[Container.feedback_service]),
+    feedback_service: IFeedbackService,
     user_id: UUID = Depends(get_current_user_id),
 ) -> ApiResponse[FeedbackRead]:
     """Update feedback (requires user ownership)"""

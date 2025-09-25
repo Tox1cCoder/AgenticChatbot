@@ -3,9 +3,7 @@ from uuid import UUID
 from typing import Annotated
 from fastapi import APIRouter, Depends, status, HTTPException
 
-from dependency_injector.wiring import Provide, inject
-
-from app.core.container import Container
+from app.core.dependency_injection import AppAutoInjector
 from app.core.auth import get_current_user_id
 from app.interfaces.message_service_interface import IMessageService
 from app.schemas.message import MessageCreate, MessageRead
@@ -20,10 +18,10 @@ router = APIRouter(prefix="/messages", tags=["messages"])
 @router.post(
     "/", response_model=ApiResponse[MessageRead], status_code=status.HTTP_201_CREATED
 )
-@inject
+@AppAutoInjector.auto_inject()
 async def create_message(
     message_data: MessageCreate,
-    message_service: IMessageService = Depends(Provide[Container.message_service]),
+    message_service: IMessageService,
 ) -> ApiResponse[MessageRead]:
     """Create a new message"""
     result = message_service.create_message(message_data)
@@ -33,10 +31,10 @@ async def create_message(
 
 
 @router.get("/{message_id}", response_model=ApiResponse[MessageRead])
-@inject
+@AppAutoInjector.auto_inject()
 async def get_message(
     message_id: UUID,
-    message_service: IMessageService = Depends(Provide[Container.message_service]),
+    message_service: IMessageService,
     user_id: UUID = Depends(get_current_user_id),
 ) -> ApiResponse[MessageRead]:
     """Get message by ID"""
@@ -47,9 +45,9 @@ async def get_message(
 
 
 @router.get("/", response_model=PaginatedApiResponse[MessageRead])
-@inject
+@AppAutoInjector.auto_inject()
 async def get_user_messages(
-    message_service: IMessageService = Depends(Provide[Container.message_service]),
+    message_service: IMessageService,
     user_id: UUID = Depends(get_current_user_id),
     pagination: MessagePaginationParams = Depends(),
 ) -> PaginatedApiResponse[MessageRead]:
