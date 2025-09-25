@@ -2,9 +2,10 @@ from typing import List, Optional
 from uuid import UUID
 from contextlib import AbstractContextManager
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import select, asc, desc
+from sqlalchemy import select, asc, desc, func
 
 from app.models.conversation import Conversation
+from app.models.message import Message
 from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.query_strategy import DefaultQueryStrategy
 from app.repositories.utils.pagination import Paginator
@@ -44,16 +45,16 @@ class ConversationCRUDStrategy(
             Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
         )
 
-        # Apply ordering if specified
-        if order_by:
-            order_column = getattr(Conversation, order_by, None)
-            if order_column is not None:
-                if order_direction.lower() == "asc":
-                    statement = statement.order_by(asc(order_column))
-                else:
-                    statement = statement.order_by(desc(order_column))
+        # Apply ordering
+        if order_by and hasattr(Conversation, order_by):
+            order_column = getattr(Conversation, order_by)
+            if order_direction.lower() == "asc":
+                statement = statement.order_by(asc(order_column))
+            else:
+                statement = statement.order_by(desc(order_column))
         else:
-            statement = statement.order_by(Conversation.updated_at.asc())
+            # Default to most recently updated conversations first
+            statement = statement.order_by(desc(Conversation.updated_at))
 
         statement = statement.offset(offset).limit(limit)
         items = list(db.execute(statement).scalars().all())
@@ -79,6 +80,53 @@ class ConversationCRUDStrategy(
             )
         )
         return db.execute(statement).scalar_one_or_none()
+
+    def get_with_recent_messages(
+        self,
+        db: Session,
+        owner_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        message_limit: int = 3,
+        order_by: Optional[str] = None,
+        order_direction: str = "desc",
+    ) -> Paginator[Conversation]:
+        """Get conversations with limited recent messages"""
+        validate_pagination_params(page, limit)
+
+        # Get total count
+        total = self.count_by_owner_id(db, owner_id)
+
+        # Get paginated conversations
+        offset = (page - 1) * limit
+        statement = select(Conversation).where(
+            Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
+        )
+
+        # Apply ordering with proper defaults and attribute validation
+        if order_by and hasattr(Conversation, order_by):
+            order_column = getattr(Conversation, order_by)
+            statement = statement.order_by(asc(order_column) if order_direction.lower() == "asc" else desc(order_column))
+        else:
+            # Default to most recently updated conversations first
+            statement = statement.order_by(desc(Conversation.updated_at))
+
+        statement = statement.offset(offset).limit(limit)
+        conversations = list(db.execute(statement).scalars().all())
+
+        # Load recent messages for each conversation
+        for conversation in conversations:
+            message_stmt = (
+                select(Message)
+                .where(Message.conversation_id == conversation.id)
+                .order_by(desc(Message.created_at))
+                .limit(message_limit)
+            )
+            recent_messages = list(db.execute(message_stmt).scalars().all())
+            # Reverse to get the oldest first
+            conversation.messages = recent_messages[::-1]
+
+        return Paginator.create(conversations, total, page, limit)
 
     def user_owns_conversation(
         self, db: Session, owner_id: UUID, conversation_id: UUID
@@ -107,13 +155,26 @@ class ConversationRepository:
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "desc",
+        include_messages: bool = False,
+        message_limit: int = 3,
     ) -> Paginator[Conversation]:
-        """Get conversations by owner ID with page-based pagination and ordering"""
+        """Get conversations by owner ID with optional message inclusion"""
         validate_pagination_params(page, limit)
         with self.session_factory() as session:
-            return self._crud_strategy.get_by_owner_id(
-                session, owner_id, page, limit, order_by, order_direction
-            )
+            if include_messages:
+                return self._crud_strategy.get_with_recent_messages(
+                    session,
+                    owner_id,
+                    page,
+                    limit,
+                    message_limit,
+                    order_by,
+                    order_direction,
+                )
+            else:
+                return self._crud_strategy.get_by_owner_id(
+                    session, owner_id, page, limit, order_by, order_direction
+                )
 
     def count_by_owner_id(self, owner_id: UUID) -> int:
         """Count conversations by owner ID"""

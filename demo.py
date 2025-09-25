@@ -142,9 +142,19 @@ def get_user(user_id: str) -> Dict[str, Any]:
 
 
 @st.cache_data(show_spinner=False)
-def get_conversations(page: int = 1, limit: int = 20) -> Dict[str, Any]:
-    """Get paginated conversations"""
-    response = make_api_request("GET", f"/conversations/?page={page}&limit={limit}")
+def get_conversations(
+    page: int = 1,
+    limit: int = 20,
+    include_messages: bool = False,
+    message_limit: int = 3,
+) -> Dict[str, Any]:
+    """Get paginated conversations with optional message inclusion"""
+    endpoint = f"/conversations/?page={page}&limit={limit}"
+    if include_messages:
+        endpoint += (
+            f"&include_messages={include_messages}&message_limit={message_limit}"
+        )
+    response = make_api_request("GET", endpoint)
     return response  # Returns full response with meta and items
 
 
@@ -286,7 +296,10 @@ def render_conversation_sidebar():
             and st.session_state.current_user_id
             and st.session_state.auth_token
         ):
-            conversations_response = get_conversations()
+            # Use consistent endpoint - get conversations with recent messages for sidebar preview
+            conversations_response = get_conversations(
+                include_messages=True, message_limit=3
+            )
             if conversations_response and conversations_response.get("data"):
                 st.session_state.conversations_list = conversations_response["data"][
                     "items"
@@ -302,8 +315,23 @@ def render_conversation_sidebar():
             for conv in sorted_conversations:
                 is_active = conv["id"] == st.session_state.current_conversation_id
 
+                # Show conversation title and latest message preview if available
+                display_title = conv["title"]
+                if conv.get("messages") and len(conv["messages"]) > 0:
+                    # Show last 3 messages preview
+                    messages_preview = []
+                    for msg in conv["messages"][:3]:  # Get up to 3 messages
+                        sender_icon = "👤" if msg.get("sender") == 1 else "🤖"
+                        content_preview = msg.get("content", "")[:25]
+                        if len(content_preview) < len(msg.get("content", "")):
+                            content_preview += "..."
+                        messages_preview.append(f"{sender_icon} {content_preview}")
+
+                    preview_text = "\n".join(messages_preview)
+                    display_title = f"{conv['title']}\n{preview_text}"
+
                 if st.button(
-                    conv["title"],
+                    display_title,
                     key=f"conv_{conv['id']}",
                     use_container_width=True,
                     type="primary" if is_active else "secondary",
@@ -364,25 +392,33 @@ def render_conversation_manager():
                 if filtered_convs:
                     for conv in filtered_convs:
                         with st.expander(f"💬 {conv['title']}", expanded=False):
-                            messages_response = get_messages(conv["id"])
-                            if messages_response and messages_response.get("data"):
-                                messages = messages_response["data"]["items"]
-                                if messages:
-                                    recent_messages = sorted(
-                                        messages,
-                                        key=lambda x: x.get("createdAt", ""),
-                                        reverse=True,
-                                    )[:3]
-                                    for msg in recent_messages:
-                                        sender_value = msg.get("sender")
-                                        sender_icon = (
-                                            "👤"
-                                            if sender_value in (1, "user")
-                                            else "🤖"
-                                        )
-                                        st.markdown(
-                                            f"{sender_icon} **{msg['sender']}:** {msg['content'][:100]}..."
-                                        )
+                            # Use the same consistent endpoint for conversation details
+                            # Get conversations with messages included to show preview
+                            conv_with_messages_response = get_conversations(
+                                page=1, limit=1, include_messages=True, message_limit=3
+                            )
+
+                            # Find this conversation's details with messages
+                            conv_details = None
+                            if (
+                                conv_with_messages_response
+                                and conv_with_messages_response.get("data")
+                            ):
+                                items = conv_with_messages_response["data"]["items"]
+                                conv_details = next(
+                                    (c for c in items if c["id"] == conv["id"]), None
+                                )
+
+                            # Display recent messages if available
+                            if conv_details and conv_details.get("messages"):
+                                for msg in conv_details["messages"]:
+                                    sender_value = msg.get("sender")
+                                    sender_icon = (
+                                        "👤" if sender_value in (1, "user") else "🤖"
+                                    )
+                                    st.markdown(
+                                        f"{sender_icon} **{msg['sender']}:** {msg['content'][:100]}..."
+                                    )
 
                             col_open, col_delete = st.columns(2)
                             with col_open:
@@ -431,7 +467,10 @@ def render_chat_interface():
     user_id = st.session_state.get("current_user_id")
 
     if not st.session_state.conversations_list and user_id:
-        conversations_response = get_conversations()
+        # Use consistent endpoint for initial conversation loading
+        conversations_response = get_conversations(
+            include_messages=True, message_limit=3
+        )
         if conversations_response and conversations_response.get("data"):
             st.session_state.conversations_list = conversations_response["data"][
                 "items"

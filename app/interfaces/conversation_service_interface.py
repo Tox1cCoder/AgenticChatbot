@@ -30,15 +30,17 @@ class IConversationService(ABC):
         pass
 
     @abstractmethod
-    def get_user_conversations(
+    def get_by_user_id(
         self,
         owner_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = None,
+        order_by: Optional[str] = "created_at",
         order_direction: str = "desc",
+        include_messages: bool = False,
+        message_limit: int = 3,
     ) -> Paginator[ConversationRead]:
-        """Get all conversations for a user with pagination"""
+        """Get all conversations for a user with optional message inclusion"""
         pass
 
     @abstractmethod

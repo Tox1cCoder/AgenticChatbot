@@ -3,19 +3,27 @@ Pagination utilities for repository layer
 """
 
 from typing import Any, List, TypeVar, Generic
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 import math
 
 T = TypeVar("T")
 
 
+def to_camel(string: str) -> str:
+    """Convert snake_case to camelCase"""
+    parts = string.split("_")
+    return parts[0] + "".join(word.capitalize() for word in parts[1:])
+
+
 class PaginationMeta(BaseModel):
     """Holds pagination metadata"""
 
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
     total: int
-    per_page: int
-    current_page: int
-    last_page: int
+    per_page: int = Field(alias="perPage")
+    current_page: int = Field(alias="currentPage")
+    last_page: int = Field(alias="lastPage")
 
     @classmethod
     def calculate(

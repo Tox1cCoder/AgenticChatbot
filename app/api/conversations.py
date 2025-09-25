@@ -1,6 +1,6 @@
-from typing import List
+from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, status, HTTPException
+from fastapi import APIRouter, Depends, status, HTTPException, Query
 
 from dependency_injector.wiring import Provide, inject
 
@@ -64,14 +64,23 @@ async def get_conversations(
     ),
     user_id: UUID = Depends(get_current_user_id),
     pagination: ConversationPaginationParams = Depends(),
+    include_messages: bool = Query(
+        False, description="Include recent messages in conversations"
+    ),
+    message_limit: int = Query(
+        3,
+        description="Number of recent messages to include when include_messages is true",
+    ),
 ) -> PaginatedApiResponse[ConversationRead]:
-    """Get all conversations for authenticated user"""
-    paginated_result = conversation_service.get_user_conversations(
+    """Get all conversations for authenticated user with optional message inclusion"""
+    paginated_result = conversation_service.get_by_user_id(
         user_id,
         page=pagination.page,
         limit=pagination.limit,
         order_by=pagination.order_by.value,
         order_direction=pagination.order_direction.value,
+        include_messages=include_messages,
+        message_limit=message_limit,
     )
     return PaginatedApiResponse.from_paginator(
         paginated_result, "Conversations retrieved successfully"

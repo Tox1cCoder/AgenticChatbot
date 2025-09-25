@@ -44,14 +44,17 @@ class ConversationService(IConversationService):
         conversation_entity = self.repository.get_by_id(conversation_id)
         return ConversationRead.model_validate(conversation_entity)
 
-    def get_user_conversations(
+    def get_by_user_id(
         self,
         owner_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = None,
+        order_by: Optional[str] = "created_at",
         order_direction: str = "desc",
+        include_messages: bool = False,
+        message_limit: int = 3,
     ) -> Paginator[ConversationRead]:
+        """Get user conversations with optional message inclusion"""
         # Validate pagination parameters at service layer
         validate_pagination_params(page, limit)
 
@@ -62,6 +65,8 @@ class ConversationService(IConversationService):
             limit=limit,
             order_by=order_by,
             order_direction=order_direction,
+            include_messages=include_messages,
+            message_limit=message_limit,
         )
         # Convert items to ConversationRead schemas
         conversation_reads = [

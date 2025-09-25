@@ -44,16 +44,16 @@ class MessageCRUDStrategy(
         offset = (page - 1) * limit
         statement = select(Message).where(Message.conversation_id == conversation_id)
 
-        # Apply ordering if specified
-        if order_by:
-            order_column = getattr(Message, order_by, None)
-            if order_column is not None:
-                if order_direction.lower() == "asc":
-                    statement = statement.order_by(asc(order_column))
-                else:
-                    statement = statement.order_by(desc(order_column))
+        # Apply ordering if specified with attribute validation
+        if order_by and hasattr(Message, order_by):
+            order_column = getattr(Message, order_by)
+            statement = statement.order_by(
+                asc(order_column)
+                if order_direction.lower() == "asc"
+                else desc(order_column)
+            )
         else:
-            # Default ordering - chronological order (oldest first for proper conversation flow)
+            # Default ordering
             statement = statement.order_by(Message.created_at.asc())
 
         statement = statement.offset(offset).limit(limit)
@@ -91,14 +91,14 @@ class MessageCRUDStrategy(
             .where(Message.conversation.has(owner_id=user_id))
         )
 
-        # Apply ordering if specified
-        if order_by:
-            order_column = getattr(Message, order_by, None)
-            if order_column is not None:
-                if order_direction.lower() == "asc":
-                    statement = statement.order_by(asc(order_column))
-                else:
-                    statement = statement.order_by(desc(order_column))
+        # Apply ordering if specified with attribute validation
+        if order_by and hasattr(Message, order_by):
+            order_column = getattr(Message, order_by)
+            statement = statement.order_by(
+                asc(order_column)
+                if order_direction.lower() == "asc"
+                else desc(order_column)
+            )
         else:
             # Default ordering
             statement = statement.order_by(Message.created_at.asc())

@@ -58,11 +58,12 @@ class FeedbackService(IFeedbackService):
             feedback_create_data.message_id
         )
 
-        existing_feedback_entity = self.repository.get_by_message_and_user(
-            feedback_create_data.message_id, user_id
+        existing_feedback_entity = self.repository.get_by_message_id(
+            feedback_create_data.message_id
         )
 
-        if existing_feedback_entity:
+        # Check if this specific user already has feedback for this message
+        if existing_feedback_entity and existing_feedback_entity.user_id == user_id:
             update_data = FeedbackUpdate(
                 rating=feedback_create_data.rating, comment=feedback_create_data.comment
             )
@@ -86,40 +87,22 @@ class FeedbackService(IFeedbackService):
             )
         return FeedbackRead.model_validate(feedback_entity)
 
-    def get_by_message(
-        self, message_id: UUID, skip: int = 0, limit: int = 100
-    ) -> List[FeedbackRead]:
-        """Get all feedback for a message"""
+    def get_by_message(self, message_id: UUID) -> Optional[FeedbackRead]:
+        """Get feedback for a message (1-1 relationship per ERD)"""
         # Validate message exists
         self.message_validation_utils.validate_message_exists(message_id)
 
-        # Convert skip to page for repository call
-        page = (skip // limit) + 1 if limit > 0 else 1
-        paginated_result = self.repository.get_by_message_id(
-            message_id, page=page, limit=limit
-        )
-        feedback_entities = paginated_result.items
-        return [FeedbackRead.model_validate(feedback) for feedback in feedback_entities]
+        feedback_entity = self.repository.get_by_message_id(message_id)
+        if feedback_entity:
+            return FeedbackRead.model_validate(feedback_entity)
+        return None
 
-    def get_feedbacks_by_message_id(
-        self, message_id: UUID, skip: int = 0, limit: int = 100
-    ) -> List[FeedbackRead]:
-        """Get all feedbacks for a message - alias for get_by_message"""
-        return self.get_by_message(message_id, skip, limit)
-
-    def get_by_user(
-        self, user_id: UUID, skip: int = 0, limit: int = 100
-    ) -> List[FeedbackRead]:
-        """Get all feedback by a user"""
+    def get_by_user(self, user_id: UUID) -> List[FeedbackRead]:
+        """Get all feedback by a user (no pagination needed for user's own feedback)"""
         # Validate user exists
         self.user_validation_utils.validate_user_exists(user_id)
 
-        # Convert skip to page for repository call
-        page = (skip // limit) + 1 if limit > 0 else 1
-        paginated_result = self.repository.get_by_user_id(
-            user_id, page=page, limit=limit
-        )
-        feedback_entities = paginated_result.items
+        feedback_entities = self.repository.get_by_user_id(user_id)
         return [FeedbackRead.model_validate(feedback) for feedback in feedback_entities]
 
     def get_user_feedback_for_message(
@@ -132,8 +115,12 @@ class FeedbackService(IFeedbackService):
         # Validate user exists
         self.user_validation_utils.validate_user_exists(user_id)
 
-        feedback_entity = self.repository.get_by_message_and_user(message_id, user_id)
-        return FeedbackRead.model_validate(feedback_entity) if feedback_entity else None
+        feedback_entity = self.repository.get_by_message_id(message_id)
+
+        # Check if the feedback exists and belongs to the specified user
+        if feedback_entity and feedback_entity.user_id == user_id:
+            return FeedbackRead.model_validate(feedback_entity)
+        return None
 
     def get_message_rating_stats(self, message_id: UUID) -> dict:
         """Get rating statistics for a message"""
