@@ -16,13 +16,28 @@ st.markdown(
     """
 <style>
     .main-container { max-width: 1200px; margin: 0 auto; }
+    .chat-wrapper {
+        display: flex; flex-direction: column; gap: 20px;
+        height: calc(100vh - 220px); min-height: 460px;
+    }
     .chat-messages-container {
         border: 1px solid #e2e8f0; border-radius: 18px; background: #ffffff;
         box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+        flex: 1 1 auto; overflow-y: auto; padding: 20px; margin-bottom: 0;
+    }
+    .chat-messages-container::-webkit-scrollbar {
+        width: 8px;
+    }
+    .chat-messages-container::-webkit-scrollbar-thumb {
+        background: #cbd5f5; border-radius: 4px;
     }
     .chat-input-container {
         background: #ffffff; border: 1px solid #e2e8f0; border-radius: 18px;
         box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+        padding: 25px;
+    }
+    .chat-input-sticky {
+        position: sticky; bottom: 0; z-index: 5;
     }
     .user-message {
         background: #ffffff; color: #1f2937; border: 1px solid #93c5fd;
@@ -497,10 +512,8 @@ def render_chat_interface():
         elif st.session_state.conversation_messages_page > 0:
             st.caption("All caught up — showing the entire thread.")
 
-    st.markdown(
-        """<div class="chat-messages-container" style="height: 70vh; overflow-y: auto; padding: 20px; margin-bottom: 20px;">""",
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="chat-wrapper">', unsafe_allow_html=True)
+    st.markdown('<div class="chat-messages-container">', unsafe_allow_html=True)
 
     def format_time(iso_string: str) -> str:
         try:
@@ -558,7 +571,7 @@ def render_chat_interface():
 
     if conversation_id:
         st.markdown(
-            '<div class="chat-input-container" style="background: white; padding: 25px; border-radius: 18px; border: 1px solid #e2e8f0; box-shadow: 0 10px 24px rgba(15,23,42,0.08); margin-top: 20px;">',
+            '<div class="chat-input-container chat-input-sticky">',
             unsafe_allow_html=True,
         )
 
@@ -631,6 +644,8 @@ def render_chat_interface():
                         st.error("Failed to send message")
 
         st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def main():

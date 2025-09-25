@@ -85,10 +85,10 @@ class DefaultCommandStrategy(
 
     def delete(self, db: Session, id: Union[int, UUID]) -> bool:
         """Soft delete a record by ID"""
-        stmt = select(self.model).where(
+        statement = select(self.model).where(
             self.model.id == id, self.model.deleted_at.is_(None)
         )
-        db_obj = db.execute(stmt).scalar_one_or_none()
+        db_obj = db.execute(statement).scalar_one_or_none()
 
         if db_obj:
             db_obj.deleted_at = datetime.now(timezone.utc)

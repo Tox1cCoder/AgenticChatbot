@@ -1,7 +1,4 @@
-"""Authentication API endpoints for user login, signup, and token management"""
-
 import logging
-from typing import Annotated
 from fastapi import APIRouter, Depends, status
 from uuid import UUID
 
@@ -27,7 +24,7 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 @inject
 async def signup(
     user_data: UserCreate,
-    user_service: Annotated[IUserService, Depends(Provide[Container.user_service])],
+    user_service: IUserService = Depends(Provide[Container.user_service]),
 ) -> ApiResponse[UserRead]:
     """Register a new user"""
     created_user = user_service.create_user(user_data)
@@ -42,7 +39,7 @@ async def signup(
 @inject
 async def login(
     login_data: LoginRequest,
-    auth_service: Annotated[IAuthService, Depends(Provide[Container.auth_service])],
+    auth_service: IAuthService = Depends(Provide[Container.auth_service]),
 ) -> ApiResponse[TokenResponse]:
     """Authenticate user and return JWT tokens"""
     auth_response = auth_service.authenticate_user(login_data)
@@ -56,7 +53,7 @@ async def login(
 @router.post("/refresh", response_model=ApiResponse[RefreshTokenResponse])
 @inject
 async def refresh_token(
-    user_service: Annotated[IUserService, Depends(Provide[Container.user_service])],
+    user_service: IUserService = Depends(Provide[Container.user_service]),
     user_id: UUID = Depends(get_refresh_token_user_id),
 ) -> ApiResponse[RefreshTokenResponse]:
     """Get new access token using refresh token"""
@@ -73,7 +70,7 @@ async def refresh_token(
 @router.post("/logout", response_model=ApiResponse)
 @inject
 async def logout(
-    auth_service: Annotated[IAuthService, Depends(Provide[Container.auth_service])],
+    auth_service: IAuthService = Depends(Provide[Container.auth_service]),
     current_user_id: UUID = Depends(get_current_user_id),
 ) -> ApiResponse:
     """Logout endpoint with token invalidation"""

@@ -31,21 +31,21 @@ class FeedbackCRUDStrategy(
         validate_pagination_params(page, limit)
 
         # Get total count first
-        total_stmt = select(func.count()).select_from(
+        total_statement = select(func.count()).select_from(
             select(Feedback).where(Feedback.message_id == message_id).subquery()
         )
-        total = db.execute(total_stmt).scalar() or 0
+        total = db.execute(total_statement).scalar() or 0
 
         # Get paginated items
         offset = (page - 1) * limit
-        stmt = (
+        statement = (
             select(Feedback)
             .where(Feedback.message_id == message_id)
             .order_by(Feedback.created_at.desc())
             .offset(offset)
             .limit(limit)
         )
-        items = list(db.execute(stmt).scalars().all())
+        items = list(db.execute(statement).scalars().all())
 
         return Paginator.create(items, total, page, limit)
 
@@ -57,39 +57,30 @@ class FeedbackCRUDStrategy(
         validate_pagination_params(page, limit)
 
         # Get total count first
-        total_stmt = select(func.count()).select_from(
+        total_statement = select(func.count()).select_from(
             select(Feedback).where(Feedback.user_id == user_id).subquery()
         )
-        total = db.execute(total_stmt).scalar() or 0
+        total = db.execute(total_statement).scalar() or 0
 
         # Get paginated items
         offset = (page - 1) * limit
-        stmt = (
+        statement = (
             select(Feedback)
             .where(Feedback.user_id == user_id)
             .order_by(Feedback.created_at.desc())
             .offset(offset)
             .limit(limit)
         )
-        items = list(db.execute(stmt).scalars().all())
+        items = list(db.execute(statement).scalars().all())
 
         return Paginator.create(items, total, page, limit)
 
-    def get_by_message_and_user(
-        self, db: Session, message_id: UUID, user_id: UUID
-    ) -> Optional[Feedback]:
-        """Get feedback by message and user (should be unique per ERD)"""
-        stmt = select(Feedback).where(
-            Feedback.message_id == message_id, Feedback.user_id == user_id
-        )
-        return db.execute(stmt).scalar_one_or_none()
-
     def get_rating_for_message(self, db: Session, message_id: UUID) -> Optional[float]:
         """Get rating for a message"""
-        stmt = select(func.avg(Feedback.rating)).where(
+        statement = select(func.avg(Feedback.rating)).where(
             Feedback.message_id == message_id
         )
-        result = db.execute(stmt).scalar_one_or_none()
+        result = db.execute(statement).scalar_one_or_none()
         return result if result is not None else None
 
 

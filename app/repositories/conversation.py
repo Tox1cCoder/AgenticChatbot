@@ -40,7 +40,7 @@ class ConversationCRUDStrategy(
 
         # Get paginated items
         offset = (page - 1) * limit
-        stmt = select(Conversation).where(
+        statement = select(Conversation).where(
             Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
         )
 
@@ -49,47 +49,47 @@ class ConversationCRUDStrategy(
             order_column = getattr(Conversation, order_by, None)
             if order_column is not None:
                 if order_direction.lower() == "asc":
-                    stmt = stmt.order_by(asc(order_column))
+                    statement = statement.order_by(asc(order_column))
                 else:
-                    stmt = stmt.order_by(desc(order_column))
+                    statement = statement.order_by(desc(order_column))
         else:
-            stmt = stmt.order_by(Conversation.updated_at.asc())
+            statement = statement.order_by(Conversation.updated_at.asc())
 
-        stmt = stmt.offset(offset).limit(limit)
-        items = list(db.execute(stmt).scalars().all())
+        statement = statement.offset(offset).limit(limit)
+        items = list(db.execute(statement).scalars().all())
 
         return Paginator.create(items, total, page, limit)
 
     def count_by_owner_id(self, db: Session, owner_id: UUID) -> int:
         """Count conversations by owner ID"""
-        stmt = select(Conversation).where(
+        statement = select(Conversation).where(
             Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
         )
-        return len(list(db.execute(stmt).scalars().all()))
+        return len(list(db.execute(statement).scalars().all()))
 
     def get_with_messages(
         self, db: Session, conversation_id: UUID
     ) -> Optional[Conversation]:
         """Get conversation with its messages"""
-        stmt = (
+        statement = (
             select(Conversation)
             .options(joinedload(Conversation.messages))
             .where(
                 Conversation.id == conversation_id, Conversation.deleted_at.is_(None)
             )
         )
-        return db.execute(stmt).scalar_one_or_none()
+        return db.execute(statement).scalar_one_or_none()
 
     def user_owns_conversation(
         self, db: Session, owner_id: UUID, conversation_id: UUID
     ) -> bool:
         """Check if user owns the conversation"""
-        stmt = select(Conversation.id).where(
+        statement = select(Conversation.id).where(
             Conversation.id == conversation_id,
             Conversation.owner_id == owner_id,
             Conversation.deleted_at.is_(None),
         )
-        return db.execute(stmt).scalar() is not None
+        return db.execute(statement).scalar() is not None
 
 
 class ConversationRepository:

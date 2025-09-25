@@ -21,31 +21,31 @@ class UserCRUDStrategy(
 
     def get_by_email(self, db: Session, email: str) -> Optional[User]:
         """Get user by email address"""
-        stmt = select(User).where(User.email == email)
-        return db.execute(stmt).scalar_one_or_none()
+        statement = select(User).where(User.email == email)
+        return db.execute(statement).scalar_one_or_none()
 
     def get_by_username(self, db: Session, username: str) -> Optional[User]:
         """Get user by username"""
-        stmt = select(User).where(User.username == username)
-        return db.execute(stmt).scalar_one_or_none()
+        statement = select(User).where(User.username == username)
+        return db.execute(statement).scalar_one_or_none()
 
     def email_exists(
         self, db: Session, email: str, exclude_id: Optional[UUID] = None
     ) -> bool:
         """Check if email already exists"""
-        stmt = select(User.id).where(User.email == email)
+        statement = select(User.id).where(User.email == email)
         if exclude_id:
-            stmt = stmt.where(User.id != exclude_id)
-        return db.execute(stmt).scalar() is not None
+            statement = statement.where(User.id != exclude_id)
+        return db.execute(statement).scalar() is not None
 
     def username_exists(
         self, db: Session, username: str, exclude_id: Optional[UUID] = None
     ) -> bool:
         """Check if username already exists"""
-        stmt = select(User.id).where(User.username == username)
+        statement = select(User.id).where(User.username == username)
         if exclude_id:
-            stmt = stmt.where(User.id != exclude_id)
-        return db.execute(stmt).scalar() is not None
+            statement = statement.where(User.id != exclude_id)
+        return db.execute(statement).scalar() is not None
 
 
 class UserRepository:

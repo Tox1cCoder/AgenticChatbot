@@ -23,9 +23,7 @@ router = APIRouter(prefix="/messages", tags=["feedbacks"])
 async def create_feedback(
     message_id: UUID,
     feedback_data: FeedbackCreate,
-    feedback_service: Annotated[
-        IFeedbackService, Depends(Provide[Container.feedback_service])
-    ],
+    feedback_service: IFeedbackService = Depends(Provide[Container.feedback_service]),
     user_id: UUID = Depends(get_current_user_id),
 ) -> ApiResponse[FeedbackRead]:
     """Create a new feedback for a message or update existing feedback"""
@@ -40,9 +38,7 @@ async def create_feedback(
 @inject
 async def get_message_rating_stats(
     message_id: UUID,
-    feedback_service: Annotated[
-        IFeedbackService, Depends(Provide[Container.feedback_service])
-    ],
+    feedback_service: IFeedbackService = Depends(Provide[Container.feedback_service]),
 ) -> ApiResponse[dict]:
     """Get rating statistics for a message"""
     result = feedback_service.get_message_rating_stats(message_id)
@@ -60,9 +56,7 @@ async def get_message_rating_stats(
 async def get_user_feedback_for_message(
     message_id: UUID,
     user_id: UUID,
-    feedback_service: Annotated[
-        IFeedbackService, Depends(Provide[Container.feedback_service])
-    ],
+    feedback_service: IFeedbackService = Depends(Provide[Container.feedback_service]),
     authenticated_user_id: UUID = Depends(get_current_user_id),
 ) -> ApiResponse[FeedbackRead]:
     """Get authenticated user's feedback for a message (user_id must match authenticated user)"""
@@ -78,9 +72,7 @@ async def get_user_feedback_for_message(
 @inject
 async def get_message_feedbacks(
     message_id: UUID,
-    feedback_service: Annotated[
-        IFeedbackService, Depends(Provide[Container.feedback_service])
-    ],
+    feedback_service: IFeedbackService = Depends(Provide[Container.feedback_service]),
 ) -> ApiResponse[List[FeedbackRead]]:
     """Get all feedbacks for a message"""
     result = feedback_service.get_feedbacks_by_message_id(message_id)
@@ -99,9 +91,7 @@ async def update_feedback(
     message_id: UUID,
     feedback_id: UUID,
     feedback_data: FeedbackUpdate,
-    feedback_service: Annotated[
-        IFeedbackService, Depends(Provide[Container.feedback_service])
-    ],
+    feedback_service: IFeedbackService = Depends(Provide[Container.feedback_service]),
     user_id: UUID = Depends(get_current_user_id),
 ) -> ApiResponse[FeedbackRead]:
     """Update feedback (requires user ownership)"""

@@ -42,29 +42,29 @@ class MessageCRUDStrategy(
 
         # Get paginated items
         offset = (page - 1) * limit
-        stmt = select(Message).where(Message.conversation_id == conversation_id)
+        statement = select(Message).where(Message.conversation_id == conversation_id)
 
         # Apply ordering if specified
         if order_by:
             order_column = getattr(Message, order_by, None)
             if order_column is not None:
                 if order_direction.lower() == "asc":
-                    stmt = stmt.order_by(asc(order_column))
+                    statement = statement.order_by(asc(order_column))
                 else:
-                    stmt = stmt.order_by(desc(order_column))
+                    statement = statement.order_by(desc(order_column))
         else:
             # Default ordering - chronological order (oldest first for proper conversation flow)
-            stmt = stmt.order_by(Message.created_at.asc())
+            statement = statement.order_by(Message.created_at.asc())
 
-        stmt = stmt.offset(offset).limit(limit)
-        items = list(db.execute(stmt).scalars().all())
+        statement = statement.offset(offset).limit(limit)
+        items = list(db.execute(statement).scalars().all())
 
         return Paginator.create(items, total, page, limit)
 
     def count_by_conversation_id(self, db: Session, conversation_id: UUID) -> int:
         """Count messages by conversation ID"""
-        stmt = select(Message).where(Message.conversation_id == conversation_id)
-        return len(list(db.execute(stmt).scalars().all()))
+        statement = select(Message).where(Message.conversation_id == conversation_id)
+        return len(list(db.execute(statement).scalars().all()))
 
     def get_by_user_id(
         self,
@@ -85,7 +85,7 @@ class MessageCRUDStrategy(
         # Get paginated items
         offset = (page - 1) * limit
         # Join with conversations to get messages from user's conversations
-        stmt = (
+        statement = (
             select(Message)
             .join(Message.conversation)
             .where(Message.conversation.has(owner_id=user_id))
@@ -96,62 +96,50 @@ class MessageCRUDStrategy(
             order_column = getattr(Message, order_by, None)
             if order_column is not None:
                 if order_direction.lower() == "asc":
-                    stmt = stmt.order_by(asc(order_column))
+                    statement = statement.order_by(asc(order_column))
                 else:
-                    stmt = stmt.order_by(desc(order_column))
+                    statement = statement.order_by(desc(order_column))
         else:
-            # Default ordering - chronological order (oldest first for proper conversation flow)
-            stmt = stmt.order_by(Message.created_at.asc())
+            # Default ordering
+            statement = statement.order_by(Message.created_at.asc())
 
-        stmt = stmt.offset(offset).limit(limit)
-        items = list(db.execute(stmt).scalars().all())
+        statement = statement.offset(offset).limit(limit)
+        items = list(db.execute(statement).scalars().all())
 
         return Paginator.create(items, total, page, limit)
 
     def count_by_user_id(self, db: Session, user_id: UUID) -> int:
         """Count messages by user ID"""
-        stmt = (
+        statement = (
             select(Message)
             .join(Message.conversation)
             .where(Message.conversation.has(owner_id=user_id))
         )
-        return len(list(db.execute(stmt).scalars().all()))
+        return len(list(db.execute(statement).scalars().all()))
 
     def get_conversation_history(
         self, db: Session, conversation_id: UUID, limit: int = 50
     ) -> List[Message]:
         """Get recent conversation history"""
-        stmt = (
+        statement = (
             select(Message)
             .where(Message.conversation_id == conversation_id)
             .order_by(Message.created_at.desc())
             .limit(limit)
         )
-        messages = list(db.execute(stmt).scalars().all())
+        messages = list(db.execute(statement).scalars().all())
         return list(reversed(messages))
-
-    def get_latest_message(
-        self, db: Session, conversation_id: UUID
-    ) -> Optional[Message]:
-        """Get the latest message in a conversation"""
-        stmt = (
-            select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.desc())
-            .limit(1)
-        )
-        return db.execute(stmt).scalar_one_or_none()
 
     def get_conversation_thread(
         self, db: Session, conversation_id: UUID
     ) -> List[Message]:
         """Get all messages in a conversation thread ordered by creation time"""
-        stmt = (
+        statement = (
             select(Message)
             .where(Message.conversation_id == conversation_id)
             .order_by(Message.created_at.asc())
         )
-        return list(db.execute(stmt).scalars().all())
+        return list(db.execute(statement).scalars().all())
 
 
 class MessageRepository:

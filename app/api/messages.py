@@ -23,9 +23,7 @@ router = APIRouter(prefix="/messages", tags=["messages"])
 @inject
 async def create_message(
     message_data: MessageCreate,
-    message_service: Annotated[
-        IMessageService, Depends(Provide[Container.message_service])
-    ],
+    message_service: IMessageService = Depends(Provide[Container.message_service]),
 ) -> ApiResponse[MessageRead]:
     """Create a new message"""
     result = message_service.create_message(message_data)
@@ -38,9 +36,7 @@ async def create_message(
 @inject
 async def get_message(
     message_id: UUID,
-    message_service: Annotated[
-        IMessageService, Depends(Provide[Container.message_service])
-    ],
+    message_service: IMessageService = Depends(Provide[Container.message_service]),
     user_id: UUID = Depends(get_current_user_id),
 ) -> ApiResponse[MessageRead]:
     """Get message by ID"""
@@ -53,9 +49,7 @@ async def get_message(
 @router.get("/", response_model=PaginatedApiResponse[MessageRead])
 @inject
 async def get_user_messages(
-    message_service: Annotated[
-        IMessageService, Depends(Provide[Container.message_service])
-    ],
+    message_service: IMessageService = Depends(Provide[Container.message_service]),
     user_id: UUID = Depends(get_current_user_id),
     pagination: MessagePaginationParams = Depends(),
 ) -> PaginatedApiResponse[MessageRead]:

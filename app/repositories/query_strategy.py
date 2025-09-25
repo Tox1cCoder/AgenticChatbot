@@ -39,21 +39,21 @@ class DefaultQueryStrategy(QueryStrategy[ModelType]):
 
     def get_by_id(self, db: Session, id: Union[int, UUID]) -> Optional[ModelType]:
         """Get a record by ID (excluding soft deleted)"""
-        stmt = select(self.model).where(
+        statement = select(self.model).where(
             self.model.id == id, self.model.deleted_at.is_(None)
         )
-        return db.execute(stmt).scalar_one_or_none()
+        return db.execute(statement).scalar_one_or_none()
 
     def get_all(self, db: Session, page: int = 1, limit: int = 10) -> List[ModelType]:
         """Get all records with page-based pagination (excluding soft deleted)"""
         offset = (page - 1) * limit
-        stmt = (
+        statement = (
             select(self.model)
             .where(self.model.deleted_at.is_(None))
             .offset(offset)
             .limit(limit)
         )
-        return list(db.execute(stmt).scalars().all())
+        return list(db.execute(statement).scalars().all())
 
     def get_all_with_ordering(
         self,
@@ -65,28 +65,28 @@ class DefaultQueryStrategy(QueryStrategy[ModelType]):
     ) -> List[ModelType]:
         """Get all records with page-based pagination and dynamic ordering (excluding soft deleted)"""
         offset = (page - 1) * limit
-        stmt = select(self.model).where(self.model.deleted_at.is_(None))
+        statement = select(self.model).where(self.model.deleted_at.is_(None))
 
         # Apply ordering if specified
         if order_by:
             order_column = getattr(self.model, order_by, None)
             if order_column is not None:
                 if order_direction.lower() == "asc":
-                    stmt = stmt.order_by(asc(order_column))
+                    statement = statement.order_by(asc(order_column))
                 else:
-                    stmt = stmt.order_by(desc(order_column))
+                    statement = statement.order_by(desc(order_column))
 
-        stmt = stmt.offset(offset).limit(limit)
-        return list(db.execute(stmt).scalars().all())
+        statement = statement.offset(offset).limit(limit)
+        return list(db.execute(statement).scalars().all())
 
     def count_all(self, db: Session) -> int:
         """Count all records (excluding soft deleted)"""
-        stmt = select(self.model).where(self.model.deleted_at.is_(None))
-        return len(list(db.execute(stmt).scalars().all()))
+        statement = select(self.model).where(self.model.deleted_at.is_(None))
+        return len(list(db.execute(statement).scalars().all()))
 
     def exists(self, db: Session, id: Union[int, UUID]) -> bool:
         """Check if a record exists by ID (excluding soft deleted)"""
-        stmt = select(self.model.id).where(
+        statement = select(self.model.id).where(
             self.model.id == id, self.model.deleted_at.is_(None)
         )
-        return db.execute(stmt).scalar() is not None
+        return db.execute(statement).scalar() is not None
