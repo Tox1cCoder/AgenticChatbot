@@ -4,13 +4,9 @@ Generic API response wrapper
 
 from typing import Generic, TypeVar, Optional, Dict, Any
 from pydantic import BaseModel, Field, ConfigDict
+from app.utils.case_conversion import to_camel_case as to_camel
 
 T = TypeVar("T")
-
-
-def to_camel(string: str) -> str:
-    parts = string.split("_")
-    return parts[0] + "".join(word.capitalize() for word in parts[1:])
 
 
 class ApiResponse(BaseModel, Generic[T]):

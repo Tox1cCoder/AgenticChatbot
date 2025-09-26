@@ -1,6 +1,7 @@
 from enum import Enum
 from typing import TypeVar, Generic, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
+from app.utils.case_conversion import to_camel_case as to_camel
 
 
 class OrderDirection(str, Enum):

@@ -37,10 +37,10 @@ class IConversationService(ABC):
         limit: int = 10,
         order_by: str = "updated_at",
         order_direction: str = "desc",
-        include_messages: bool = False,
+        include: List[str] = None,
         latest_messages: int = 3,
     ) -> Paginator[ConversationRead]:
-        """Get all conversations for a user with optional message inclusion"""
+        """Get all conversations for a user with optional includes"""
         pass
 
     @abstractmethod

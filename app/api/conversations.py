@@ -56,22 +56,22 @@ async def get_conversations(
     user_id: UUID,
     pagination: ConversationPaginationParams,
     include: List[str] = Query(
-        default=[], description="Array of includes like ['messages']"
+        default=[], description="Array of includes like ['messages', 'feedback']"
     ),
     latest_messages: int = Query(
         3,
+        alias="latestMessages",
         description="Number of latest messages to include when 'messages' in include array",
     ),
 ) -> PaginatedApiResponse[ConversationRead]:
     """Get all conversations for authenticated user with optional includes"""
-    include_messages = "messages" in include
     paginated_result = conversation_service.get_by_user_id(
         user_id,
         page=pagination.page,
         limit=pagination.limit,
         order_by=pagination.order_by.value,
         order_direction=pagination.order_direction.value,
-        include_messages=include_messages,
+        include=include,
         latest_messages=latest_messages,
     )
     return PaginatedApiResponse.from_paginator(

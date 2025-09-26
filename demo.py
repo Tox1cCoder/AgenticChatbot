@@ -183,7 +183,7 @@ def get_user_messages_paginated(
     """Get paginated user messages"""
     response = make_api_request(
         "GET",
-        f"/messages/?page={page}&limit={limit}&order_by={order_by}&order_direction={order_direction}",
+        f"/messages/?page={page}&limit={limit}&orderBy={order_by}&orderDirection={order_direction}",
     )
     return response  # Returns full response with meta and items
 
@@ -651,7 +651,7 @@ def render_chat_interface():
                                 "Submit Feedback", use_container_width=True
                             ):
                                 feedback_data = {
-                                    "message_id": msg["id"],
+                                    "messageId": msg["id"],
                                     "rating": rating,
                                     "comment": comment,
                                 }
@@ -741,7 +741,7 @@ def render_chat_interface():
 
                     message_data = {
                         "content": message_content,
-                        "conversation_id": st.session_state.current_conversation_id,
+                        "conversationId": st.session_state.current_conversation_id,
                     }
 
                     with st.spinner("Thinking..."):

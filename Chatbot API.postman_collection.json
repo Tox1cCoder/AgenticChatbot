@@ -1,707 +1,651 @@
 {
-	"info": {
-		"_postman_id": "62a30d98-c3e9-4172-aca0-b945bad5351b",
-		"name": "Chatbot API",
-		"description": "Complete API testing workflow for the Chatbot application",
-		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-		"_exporter_id": "47733298",
-		"_collection_link": "https://duythai-nguyen0208-2591537.postman.co/workspace/Duy-Th%C3%A1i-Nguy%E1%BB%85n's-Workspace~d5c33d8c-fbc4-4e95-8e82-32d06aaa6835/collection/47733298-62a30d98-c3e9-4172-aca0-b945bad5351b?action=share&source=collection_link&creator=47733298"
-	},
-	"item": [
-		{
-			"name": "Authentication",
-			"item": [
-				{
-					"name": "Sign Up",
-					"event": [
-						{
-							"listen": "test",
-							"script": {
-								"exec": [
-									"if (pm.response.code === 201) {",
-									"    const response = pm.response.json();",
-									"    pm.environment.set('user_id', response.id);",
-									"}",
-									""
-								],
-								"type": "text/javascript",
-								"packages": {}
-							}
-						},
-						{
-							"listen": "prerequest",
-							"script": {
-								"packages": {},
-								"type": "text/javascript"
-							}
-						}
-					],
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"username\": \"test_user\",\n  \"email\": \"test@example.com\",\n  \"password\": \"testpassword123\"\n}"
-						},
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/auth/signup",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"auth",
-								"signup"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Login",
-					"event": [
-						{
-							"listen": "test",
-							"script": {
-								"exec": [
-									"if (pm.response.code === 200) {",
-									"    const response = pm.response.json();",
-									"    pm.environment.set('ACCESS_TOKEN', response.data.accessToken);",
-									"    pm.environment.set('REFRESH_TOKEN', response.data.refreshToken);",
-									"    pm.collectionVariables.set('userId', response.data.userId);",
-									"}"
-								],
-								"type": "text/javascript",
-								"packages": {}
-							}
-						}
-					],
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"email\": \"test@example.com\",\n  \"password\": \"testpassword123\"\n}"
-						},
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/auth/login",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"auth",
-								"login"
-							]
-						}
-					},
-					"response": []
-				}
-			]
-		},
-		{
-			"name": "User Management",
-			"item": [
-				{
-					"name": "Get Current User",
-					"event": [
-						{
-							"listen": "test",
-							"script": {
-								"exec": [
-									""
-								],
-								"type": "text/javascript",
-								"packages": {}
-							}
-						},
-						{
-							"listen": "prerequest",
-							"script": {
-								"packages": {},
-								"type": "text/javascript"
-							}
-						}
-					],
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{ACCESS_TOKEN}}"
-							}
-						],
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/users/{{userId}}",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"users",
-								"{{userId}}"
-							]
-						}
-					},
-					"response": []
-				}
-			]
-		},
-		{
-			"name": "Conversation Management",
-			"item": [
-				{
-					"name": "Create Conversation",
-					"event": [
-						{
-							"listen": "test",
-							"script": {
-								"exec": [
-									"if (pm.response.code === 201) {",
-									"    const response = pm.response.json();",
-									"    pm.collectionVariables.set('conversation_id', response.data.id);",
-									"}"
-								],
-								"type": "text/javascript",
-								"packages": {}
-							}
-						}
-					],
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							},
-							{
-								"key": "Authorization",
-								"value": "Bearer {{ACCESS_TOKEN}}"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"title\": \"Test Conversation\"\n}"
-						},
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/conversations/",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"conversations",
-								""
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get All Conversations",
-					"event": [
-						{
-							"listen": "test",
-							"script": {
-								"exec": [
-									"pm.test('Response is paginated', function () {",
-									"    var jsonData = pm.response.json();",
-									"    pm.expect(jsonData.data).to.be.an('object');",
-									"    pm.expect(jsonData.data.items).to.be.an('array');",
-									"    pm.expect(jsonData.data.page).to.eql(1);",
-									"    pm.expect(jsonData.data.limit).to.eql(2);",
-									"});"
-								],
-								"type": "text/javascript",
-								"packages": {},
-								"requests": {}
-							}
-						}
-					],
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{ACCESS_TOKEN}}"
-							}
-						],
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/conversations/?page=3&limit=5&orderBy=updated_at&orderDirection=desc",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"conversations",
-								""
-							],
-							"query": [
-								{
-									"key": "page",
-									"value": "3"
-								},
-								{
-									"key": "limit",
-									"value": "5"
-								},
-								{
-									"key": "orderBy",
-									"value": "updated_at"
-								},
-								{
-									"key": "orderDirection",
-									"value": "desc"
-								}
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get Conversation by ID",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{ACCESS_TOKEN}}"
-							}
-						],
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"conversations",
-								"{{conversation_id}}"
-							]
-						}
-					},
-					"response": []
-				}
-			]
-		},
-		{
-			"name": "Message Management",
-			"item": [
-				{
-					"name": "Send Message",
-					"event": [
-						{
-							"listen": "test",
-							"script": {
-								"exec": [
-									"if (pm.response.code === 201) {",
-									"    const response = pm.response.json();",
-									"    pm.collectionVariables.set('message_id', response.data.id);",
-									"}"
-								],
-								"type": "text/javascript",
-								"packages": {}
-							}
-						}
-					],
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							},
-							{
-								"key": "Authorization",
-								"value": "Bearer {{ACCESS_TOKEN}}"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"conversation_id\": \"{{conversation_id}}\",\n  \"content\": \"Hello, this is a test message!\"\n}"
-						},
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/messages/",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"messages",
-								""
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get Conversation Messages",
-					"event": [
-						{
-							"listen": "test",
-							"script": {
-								"exec": [
-									"pm.test('Response is paginated', function () {",
-									"    var jsonData = pm.response.json();",
-									"    pm.expect(jsonData.data).to.be.an('object');",
-									"    pm.expect(jsonData.data.items).to.be.an('array');",
-									"    pm.expect(jsonData.data.page).to.eql(1);",
-									"    pm.expect(jsonData.data.limit).to.eql(2);",
-									"});"
-								],
-								"type": "text/javascript"
-							}
-						}
-					],
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{ACCESS_TOKEN}}"
-							}
-						],
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}/messages?page=1&limit=2&orderBy=created_at&orderDirection=asc",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"conversations",
-								"{{conversation_id}}",
-								"messages"
-							],
-							"query": [
-								{
-									"key": "page",
-									"value": "1"
-								},
-								{
-									"key": "limit",
-									"value": "2"
-								},
-								{
-									"key": "orderBy",
-									"value": "created_at"
-								},
-								{
-									"key": "orderDirection",
-									"value": "asc"
-								}
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get All Messages (Paginated)",
-					"event": [
-						{
-							"listen": "test",
-							"script": {
-								"exec": [
-									"pm.test('Response is paginated', function () {",
-									"    var jsonData = pm.response.json();",
-									"    pm.expect(jsonData.data).to.be.an('object');",
-									"    pm.expect(jsonData.data.items).to.be.an('array');",
-									"    pm.expect(jsonData.data.page).to.eql(1);",
-									"    pm.expect(jsonData.data.limit).to.eql(2);",
-									"});"
-								],
-								"type": "text/javascript",
-								"packages": {},
-								"requests": {}
-							}
-						}
-					],
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{ACCESS_TOKEN}}"
-							}
-						],
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/messages/?page=1&limit=5&orderBy=created_at&orderDirection=asc",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"messages",
-								""
-							],
-							"query": [
-								{
-									"key": "page",
-									"value": "1"
-								},
-								{
-									"key": "limit",
-									"value": "5"
-								},
-								{
-									"key": "orderBy",
-									"value": "created_at"
-								},
-								{
-									"key": "orderDirection",
-									"value": "asc"
-								}
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get Message by ID",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{ACCESS_TOKEN}}"
-							}
-						],
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"messages",
-								"{{message_id}}"
-							]
-						}
-					},
-					"response": []
-				}
-			]
-		},
-		{
-			"name": "Feedback Management",
-			"item": [
-				{
-					"name": "Submit Feedback",
-					"event": [
-						{
-							"listen": "test",
-							"script": {
-								"exec": [
-									"if (pm.response.code === 201) {",
-									"    const response = pm.response.json();",
-									"    if (response.data && response.data.id) {",
-									"        pm.collectionVariables.set('feedback_id', response.data.id);",
-									"    }",
-									"}"
-								],
-								"type": "text/javascript",
-								"packages": {},
-								"requests": {}
-							}
-						}
-					],
-					"request": {
-						"method": "POST",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							},
-							{
-								"key": "Authorization",
-								"value": "Bearer {{ACCESS_TOKEN}}"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"messageId\": \"{{message_id}}\",\n  \"rating\": 5,\n  \"comment\": \"Great response!\"\n}"
-						},
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"messages",
-								"{{message_id}}",
-								"feedbacks"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Update Feedback",
-					"request": {
-						"method": "PUT",
-						"header": [
-							{
-								"key": "Content-Type",
-								"value": "application/json"
-							},
-							{
-								"key": "Authorization",
-								"value": "Bearer {{ACCESS_TOKEN}}"
-							}
-						],
-						"body": {
-							"mode": "raw",
-							"raw": "{\n  \"messageId\": \"{{message_id}}\",\n  \"rating\": 5,\n  \"comment\": \"Great response!\"\n}"
-						},
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks/{{feedback_id}}",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"messages",
-								"{{message_id}}",
-								"feedbacks",
-								"{{feedback_id}}"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get Message Feedbacks",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{ACCESS_TOKEN}}"
-							}
-						],
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"messages",
-								"{{message_id}}",
-								"feedbacks"
-							]
-						}
-					},
-					"response": []
-				},
-				{
-					"name": "Get Feedback Stats",
-					"request": {
-						"method": "GET",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{ACCESS_TOKEN}}"
-							}
-						],
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks/stats",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"messages",
-								"{{message_id}}",
-								"feedbacks",
-								"stats"
-							]
-						}
-					},
-					"response": []
-				}
-			]
-		},
-		{
-			"name": "Cleanup",
-			"item": [
-				{
-					"name": "Delete Conversation",
-					"request": {
-						"method": "DELETE",
-						"header": [
-							{
-								"key": "Authorization",
-								"value": "Bearer {{ACCESS_TOKEN}}"
-							}
-						],
-						"url": {
-							"raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}",
-							"host": [
-								"{{HOST}}"
-							],
-							"port": "{{PORT}}",
-							"path": [
-								"conversations",
-								"{{conversation_id}}"
-							]
-						}
-					},
-					"response": []
-				}
-			]
-		}
-	],
-	"variable": [
-		{
-			"key": "HOST",
-			"value": "http://localhost",
-			"type": "string"
-		},
-		{
-			"key": "PORT",
-			"value": "8000",
-			"type": "string"
-		},
-		{
-			"key": "ACCESS_TOKEN",
-			"value": "",
-			"type": "string"
-		},
-		{
-			"key": "REFRESH_TOKEN",
-			"value": "",
-			"type": "string"
-		},
-		{
-			"key": "userId",
-			"value": "",
-			"type": "string"
-		},
-		{
-			"key": "conversation_id",
-			"value": "",
-			"type": "string"
-		},
-		{
-			"key": "message_id",
-			"value": "",
-			"type": "string"
-		},
-		{
-			"key": "feedback_id",
-			"value": "",
-			"type": "string"
-		}
-	]
+  "info": {
+    "_postman_id": "62a30d98-c3e9-4172-aca0-b945bad5351b",
+    "name": "Chatbot API",
+    "description": "Complete API testing workflow for the Chatbot application",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "47733298",
+    "_collection_link": "https://duythai-nguyen0208-2591537.postman.co/workspace/Duy-Th%C3%A1i-Nguy%E1%BB%85n's-Workspace~d5c33d8c-fbc4-4e95-8e82-32d06aaa6835/collection/47733298-62a30d98-c3e9-4172-aca0-b945bad5351b?action=share&source=collection_link&creator=47733298"
+  },
+  "item": [
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Sign Up",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    const response = pm.response.json();",
+                  "    pm.environment.set('user_id', response.id);",
+                  "}",
+                  ""
+                ],
+                "type": "text/javascript",
+                "packages": {}
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "packages": {},
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"test_user\",\n  \"email\": \"test@example.com\",\n  \"password\": \"testpassword123\"\n}"
+            },
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/auth/signup",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["auth", "signup"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const response = pm.response.json();",
+                  "    pm.environment.set('ACCESS_TOKEN', response.data.accessToken);",
+                  "    pm.environment.set('REFRESH_TOKEN', response.data.refreshToken);",
+                  "    pm.collectionVariables.set('userId', response.data.userId);",
+                  "}"
+                ],
+                "type": "text/javascript",
+                "packages": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"test@example.com\",\n  \"password\": \"testpassword123\"\n}"
+            },
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/auth/login",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["auth", "login"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "User Management",
+      "item": [
+        {
+          "name": "Get Current User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [""],
+                "type": "text/javascript",
+                "packages": {}
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "packages": {},
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/users/{{userId}}",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["users", "{{userId}}"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Conversation Management",
+      "item": [
+        {
+          "name": "Create Conversation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    const response = pm.response.json();",
+                  "    pm.collectionVariables.set('conversation_id', response.data.id);",
+                  "}"
+                ],
+                "type": "text/javascript",
+                "packages": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Test Conversation\"\n}"
+            },
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["conversations", ""]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get All Conversations",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const jsonData = pm.response.json();",
+                  "pm.test('Response includes pagination metadata', function () {",
+                  "    pm.expect(jsonData.data).to.be.an('object');",
+                  "    pm.expect(jsonData.data.meta).to.be.an('object');",
+                  "    pm.expect(jsonData.data.meta.currentPage).to.eql(3);",
+                  "    pm.expect(jsonData.data.meta.perPage).to.eql(5);",
+                  "});",
+                  "pm.test('Items array is returned', function () {",
+                  "    pm.expect(jsonData.data.items).to.be.an('array');",
+                  "});",
+                  "pm.test('Messages are included when requested', function () {",
+                  "    const items = jsonData.data.items || [];",
+                  "    if (items.length) {",
+                  "        pm.expect(items[0]).to.have.property('messages');",
+                  "    }",
+                  "});"
+                ],
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/?page=3&limit=5&orderBy=updated_at&orderDirection=desc&include=messages&latestMessages=3",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["conversations", ""],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "3"
+                },
+                {
+                  "key": "limit",
+                  "value": "5"
+                },
+                {
+                  "key": "orderBy",
+                  "value": "updated_at"
+                },
+                {
+                  "key": "orderDirection",
+                  "value": "desc"
+                },
+                {
+                  "key": "include",
+                  "value": "messages"
+                },
+                {
+                  "key": "latestMessages",
+                  "value": "3"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Conversation by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["conversations", "{{conversation_id}}"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Message Management",
+      "item": [
+        {
+          "name": "Send Message",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    const response = pm.response.json();",
+                  "    pm.collectionVariables.set('message_id', response.data.id);",
+                  "}"
+                ],
+                "type": "text/javascript",
+                "packages": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversation_id\": \"{{conversation_id}}\",\n  \"content\": \"Hello, this is a test message!\"\n}"
+            },
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["messages", ""]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Conversation Messages",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const jsonData = pm.response.json();",
+                  "pm.test('Response is paginated', function () {",
+                  "    pm.expect(jsonData.data).to.be.an('object');",
+                  "    pm.expect(jsonData.data.meta).to.be.an('object');",
+                  "    pm.expect(jsonData.data.meta.currentPage).to.eql(1);",
+                  "    pm.expect(jsonData.data.meta.perPage).to.eql(2);",
+                  "});",
+                  "pm.test('Items array is returned', function () {",
+                  "    pm.expect(jsonData.data.items).to.be.an('array');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}/messages?page=1&limit=2&orderBy=created_at&orderDirection=asc",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["conversations", "{{conversation_id}}", "messages"],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "2"
+                },
+                {
+                  "key": "orderBy",
+                  "value": "created_at"
+                },
+                {
+                  "key": "orderDirection",
+                  "value": "asc"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get All Messages (Paginated)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const jsonData = pm.response.json();",
+                  "pm.test('Response is paginated', function () {",
+                  "    pm.expect(jsonData.data).to.be.an('object');",
+                  "    pm.expect(jsonData.data.meta).to.be.an('object');",
+                  "    pm.expect(jsonData.data.meta.currentPage).to.eql(1);",
+                  "    pm.expect(jsonData.data.meta.perPage).to.eql(5);",
+                  "});",
+                  "pm.test('Items array is returned', function () {",
+                  "    pm.expect(jsonData.data.items).to.be.an('array');",
+                  "});"
+                ],
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/?page=1&limit=5&orderBy=created_at&orderDirection=asc",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["messages", ""],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "5"
+                },
+                {
+                  "key": "orderBy",
+                  "value": "created_at"
+                },
+                {
+                  "key": "orderDirection",
+                  "value": "asc"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Message by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["messages", "{{message_id}}"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Feedback Management",
+      "item": [
+        {
+          "name": "Submit Feedback",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    const response = pm.response.json();",
+                  "    if (response.data && response.data.id) {",
+                  "        pm.collectionVariables.set('feedback_id', response.data.id);",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"messageId\": \"{{message_id}}\",\n  \"rating\": 5,\n  \"comment\": \"Great response!\"\n}"
+            },
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["messages", "{{message_id}}", "feedbacks"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Feedback",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"messageId\": \"{{message_id}}\",\n  \"rating\": 5,\n  \"comment\": \"Great response!\"\n}"
+            },
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks/{{feedback_id}}",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": [
+                "messages",
+                "{{message_id}}",
+                "feedbacks",
+                "{{feedback_id}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Message Feedbacks",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["messages", "{{message_id}}", "feedbacks"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Feedback Stats",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks/stats",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["messages", "{{message_id}}", "feedbacks", "stats"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Cleanup",
+      "item": [
+        {
+          "name": "Delete Conversation",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["conversations", "{{conversation_id}}"]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "HOST",
+      "value": "http://localhost",
+      "type": "string"
+    },
+    {
+      "key": "PORT",
+      "value": "8000",
+      "type": "string"
+    },
+    {
+      "key": "ACCESS_TOKEN",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "REFRESH_TOKEN",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "userId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "conversation_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "message_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "feedback_id",
+      "value": "",
+      "type": "string"
+    }
+  ]
 }

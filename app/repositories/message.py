@@ -30,7 +30,7 @@ class MessageCRUDStrategy(
         conversation_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = None,
+        order_by: str = "created_at",
         order_direction: str = "asc",
     ) -> Paginator[Message]:
         """Get messages by conversation ID with page-based pagination and ordering"""
@@ -45,7 +45,7 @@ class MessageCRUDStrategy(
         statement = select(Message).where(Message.conversation_id == conversation_id)
 
         # Apply ordering if specified
-        if order_by and hasattr(Message, order_by):
+        if hasattr(Message, order_by):
             order_column = getattr(Message, order_by)
             statement = statement.order_by(
                 asc(order_column)
@@ -72,7 +72,7 @@ class MessageCRUDStrategy(
         user_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = None,
+        order_by: str = "created_at",
         order_direction: str = "desc",
     ) -> Paginator[Message]:
         """Get messages by conversation owner (user_id) with page-based pagination and ordering"""
@@ -92,7 +92,7 @@ class MessageCRUDStrategy(
         )
 
         # Apply ordering if specified
-        if order_by and hasattr(Message, order_by):
+        if hasattr(Message, order_by):
             order_column = getattr(Message, order_by)
             statement = statement.order_by(
                 asc(order_column)

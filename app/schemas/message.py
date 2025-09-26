@@ -4,11 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, ConfigDict
 from app.models.enums import MessageRole
-
-
-def to_camel(string: str) -> str:
-    parts = string.split("_")
-    return parts[0] + "".join(word.capitalize() for word in parts[1:])
+from app.utils.case_conversion import to_camel_case as to_camel
 
 
 class MessageCreate(BaseModel):
@@ -39,9 +35,7 @@ class MessageRead(BaseModel):
     updated_at: datetime
     deleted_at: Optional[datetime]
     conversation_id: UUID
-    sender: int = Field(
-        ..., description="Message sender: 1=user, 2=assistant"
-    )
+    sender: int = Field(..., description="Message sender: 1=user, 2=assistant")
     content: str = Field(..., min_length=1, description="Message content")
 
 

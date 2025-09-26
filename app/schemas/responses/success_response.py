@@ -3,11 +3,7 @@ Success Response Schema
 """
 
 from pydantic import BaseModel, Field, ConfigDict
-
-
-def to_camel(string: str) -> str:
-    parts = string.split("_")
-    return parts[0] + "".join(word.capitalize() for word in parts[1:])
+from app.utils.case_conversion import to_camel_case as to_camel
 
 
 class SuccessResponse(BaseModel):

@@ -67,8 +67,8 @@ class DefaultQueryStrategy(QueryStrategy[ModelType]):
         offset = (page - 1) * limit
         statement = select(self.model).where(self.model.deleted_at.is_(None))
 
-        # Apply ordering if specified with attribute validation
-        if order_by and hasattr(self.model, order_by):
+        # Apply ordering
+        if hasattr(self.model, order_by):
             order_column = getattr(self.model, order_by)
             statement = statement.order_by(
                 asc(order_column)

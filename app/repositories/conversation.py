@@ -45,7 +45,7 @@ class ConversationCRUDStrategy(
             Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
         )
         # Apply ordering if specified
-        if order_by and hasattr(Conversation, order_by):
+        if hasattr(Conversation, order_by):
             order_column = getattr(Conversation, order_by)
             statement = statement.order_by(
                 asc(order_column)
@@ -97,7 +97,7 @@ class ConversationCRUDStrategy(
         )
 
         # Apply ordering if specified
-        if order_by and hasattr(Conversation, order_by):
+        if hasattr(Conversation, order_by):
             order_column = getattr(Conversation, order_by)
             statement = statement.order_by(
                 asc(order_column)
@@ -121,7 +121,6 @@ class ConversationCRUDStrategy(
             recent_messages = list(db.execute(message_statement).scalars().all())
             # Reverse to get the oldest first and set as attribute for access in service layer
             conversation.messages = recent_messages[::-1]
-            # Also set in __dict__ to ensure service layer can access via __dict__.get("messages")
             conversation.__dict__["messages"] = recent_messages[::-1]
 
         return conversations
@@ -153,13 +152,16 @@ class ConversationRepository:
         limit: int = 10,
         order_by: str = "updated_at",
         order_direction: str = "desc",
-        include_messages: bool = False,
+        include: List[str] = None,
         latest_messages: int = 3,
     ) -> Paginator[Conversation]:
-        """Get conversations by owner ID with optional message inclusion"""
+        """Get conversations by owner ID with optional includes"""
+        if include is None:
+            include = []
+
         validate_pagination_params(page, limit)
         with self.session_factory() as session:
-            if include_messages:
+            if "messages" in include:
                 conversations = self._crud_strategy.get_with_recent_messages(
                     session,
                     owner_id,
