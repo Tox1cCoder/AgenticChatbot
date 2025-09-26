@@ -15,7 +15,6 @@ class ConversationOrderBy(str, Enum):
 
     CREATED_AT = "created_at"
     UPDATED_AT = "updated_at"
-    TITLE = "title"
 
 
 class MessageOrderBy(str, Enum):
@@ -31,7 +30,7 @@ class PaginationParams(BaseModel):
     page: int = Field(default=1, ge=1, description="Page number (1-based)")
     limit: int = Field(default=10, ge=1, le=100, description="Number of items per page")
     order_direction: OrderDirection = Field(
-        default=OrderDirection.ASC, alias="orderDirection" 
+        default=OrderDirection.DESC, alias="orderDirection"
     )
 
     class Config:
@@ -50,4 +49,3 @@ class MessagePaginationParams(PaginationParams):
     """Pagination parameters for messages with order_by restored"""
 
     order_by: MessageOrderBy = Field(default=MessageOrderBy.CREATED_AT, alias="orderBy")
-

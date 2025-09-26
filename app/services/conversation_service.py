@@ -32,10 +32,6 @@ class ConversationService(IConversationService):
     def _convert_to_read_schema(
         self, conversation_entity, include_messages: bool = False
     ) -> ConversationRead:
-        """
-        Safely convert a conversation entity to ConversationRead schema,
-        avoiding SQLAlchemy lazy loading issues
-        """
         conv_dict = {
             "id": conversation_entity.id,
             "created_at": conversation_entity.created_at,
@@ -45,16 +41,19 @@ class ConversationService(IConversationService):
             "title": conversation_entity.title,
         }
 
-        # Only include messages if they were explicitly loaded and we want them
         if include_messages:
             try:
-                # Check if messages are loaded (this won't trigger lazy loading)
-                messages = conversation_entity.__dict__.get("messages")
+                # Prefer the relationship attribute but fall back to __dict__ access.
+                messages = getattr(conversation_entity, "messages", None)
+                if messages is None:
+                    messages = conversation_entity.__dict__.get("messages")
+
                 if messages is not None:
                     from app.schemas.message import MessageRead
 
                     conv_dict["messages"] = [
-                        MessageRead.model_validate(message) for message in messages
+                        MessageRead.model_validate(message)
+                        for message in list(messages)
                     ]
                 else:
                     conv_dict["messages"] = None
@@ -87,14 +86,28 @@ class ConversationService(IConversationService):
         owner_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = "created_at",
+        order_by: str = "updated_at",
         order_direction: str = "desc",
         include_messages: bool = False,
-        message_limit: int = 3,
+        latest_messages: int = 3,
     ) -> Paginator[ConversationRead]:
         """Get user conversations with optional message inclusion"""
-        # Validate pagination parameters at service layer
+        # Validate pagination parameters
         validate_pagination_params(page, limit)
+
+        # Validate order_by field
+        valid_order_fields = ["created_at", "updated_at"]
+        if order_by not in valid_order_fields:
+            raise ValueError(
+                f"Invalid order_by field. Must be one of: {valid_order_fields}"
+            )
+
+        # Validate order_direction
+        valid_directions = ["asc", "desc"]
+        if order_direction.lower() not in valid_directions:
+            raise ValueError(
+                f"Invalid order_direction. Must be one of: {valid_directions}"
+            )
 
         self.user_validation_utils.validate_user_exists(owner_id)
         paginated_conversations = self.repository.get_by_owner_id(
@@ -104,7 +117,7 @@ class ConversationService(IConversationService):
             order_by=order_by,
             order_direction=order_direction,
             include_messages=include_messages,
-            message_limit=message_limit,
+            latest_messages=latest_messages,
         )
         # Convert items to ConversationRead schemas using the helper
         conversation_reads = [

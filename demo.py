@@ -146,14 +146,12 @@ def get_conversations(
     page: int = 1,
     limit: int = 20,
     include_messages: bool = False,
-    message_limit: int = 3,
+    latest_messages: int = 3,
 ) -> Dict[str, Any]:
     """Get paginated conversations with optional message inclusion"""
     endpoint = f"/conversations/?page={page}&limit={limit}"
     if include_messages:
-        endpoint += (
-            f"&include_messages={include_messages}&message_limit={message_limit}"
-        )
+        endpoint += f"&include=messages&latestMessages={latest_messages}"
     response = make_api_request("GET", endpoint)
     return response
 
@@ -188,6 +186,27 @@ def get_user_messages_paginated(
         f"/messages/?page={page}&limit={limit}&order_by={order_by}&order_direction={order_direction}",
     )
     return response  # Returns full response with meta and items
+
+
+@st.cache_data(show_spinner=False)
+def get_feedback(message_id: str) -> Optional[Dict[str, Any]]:
+    """Get feedback for a specific message (1-1 relationship)"""
+    response = make_api_request("GET", f"/messages/{message_id}/feedbacks")
+    if not response:
+        return None
+
+    data = response.get("data")
+
+    # API may return a single feedback object or wrap it in a list – normalise to a dict.
+    if isinstance(data, dict):
+        return data
+
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                return item
+
+    return None
 
 
 def render_login_page():
@@ -296,7 +315,6 @@ def render_conversation_sidebar():
             and st.session_state.current_user_id
             and st.session_state.auth_token
         ):
-            # Load conversations without messages for sidebar (messages only needed in conversation manager)
             conversations_response = get_conversations(include_messages=False)
             if conversations_response and conversations_response.get("data"):
                 st.session_state.conversations_list = conversations_response["data"][
@@ -353,11 +371,11 @@ def render_conversation_manager():
         with col2:
             st.markdown("### Conversation Manager")
 
-            # Load conversations with messages for the manager (separate from sidebar)
+            # Load conversations with messages for the manager
             if st.session_state.current_user_id:
                 with st.spinner("Loading conversations with messages..."):
                     manager_conversations_response = get_conversations(
-                        include_messages=True, message_limit=3
+                        include_messages=True, latest_messages=3
                     )
                     if (
                         manager_conversations_response
@@ -399,19 +417,6 @@ def render_conversation_manager():
                                     if conv not in filtered_convs:
                                         filtered_convs.append(conv)
                                     break
-                        else:
-                            # Only make API call if no messages are pre-loaded (fallback)
-                            messages_response = get_messages(conv["id"])
-                            if messages_response and messages_response.get("data"):
-                                messages = messages_response["data"]["items"]
-                                for msg in messages:
-                                    if (
-                                        search_term.lower()
-                                        in msg.get("content", "").lower()
-                                    ):
-                                        if conv not in filtered_convs:
-                                            filtered_convs.append(conv)
-                                        break
 
                 if filtered_convs:
                     for conv in filtered_convs:
@@ -433,26 +438,7 @@ def render_conversation_manager():
                                         f"{sender_icon} **{sender_name}:** {msg['content'][:100]}..."
                                     )
                             else:
-                                messages_response = get_messages(
-                                    conv["id"], page=1, limit=3
-                                )
-                                if messages_response and messages_response.get("data"):
-                                    messages = messages_response["data"]["items"]
-                                    for msg in messages:
-                                        sender_value = msg.get("sender")
-                                        sender_icon = (
-                                            "👤"
-                                            if sender_value in (1, "user")
-                                            else "🤖"
-                                        )
-                                        sender_name = (
-                                            "user"
-                                            if sender_value in (1, "user")
-                                            else "assistant"
-                                        )
-                                        st.markdown(
-                                            f"{sender_icon} **{sender_name}:** {msg['content'][:100]}..."
-                                        )
+                                st.markdown("No messages available")
 
                             col_open, col_delete = st.columns(2)
                             with col_open:
@@ -611,7 +597,11 @@ def render_chat_interface():
         )
 
     for msg in messages_to_display:
-        if msg["sender"] == 1:
+        sender_value = msg.get("sender")
+        is_user_message = sender_value in (1, "user", "USER", "User")
+
+        if is_user_message:
+            # User message with no feedback option
             st.markdown(
                 f"""
                 <div style="display: flex; justify-content: flex-end; margin: 10px 0; align-items: flex-start; gap: 10px;">
@@ -625,18 +615,69 @@ def render_chat_interface():
                 unsafe_allow_html=True,
             )
         else:
-            st.markdown(
-                f"""
-                <div style="display: flex; justify-content: flex-start; margin: 10px 0; align-items: flex-start; gap: 10px;">
-                    <div style="border: 2px solid #28a745; color: #28a745; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">🤖</div>
-                    <div class="bot-message">
-                        {msg["content"].replace('<', '&lt;').replace('>', '&gt;')}
-                        <div class="message-timestamp">Assistant • {format_time(msg.get("createdAt", "now"))}</div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            # Assistant message with feedback option
+            with st.container():
+                avatar_col, content_col = st.columns([1, 11])
+
+                with avatar_col:
+                    st.markdown(
+                        """
+                        <div style="display: flex; justify-content: center; margin: 10px 0;">
+                            <div style="border: 2px solid #28a745; color: #28a745; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">🤖</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                with content_col:
+                    st.markdown(
+                        f"""
+                        <div class="bot-message" style="margin: 10px 0;">
+                            {msg["content"].replace('<', '&lt;').replace('>', '&gt;')}
+                            <div class="message-timestamp">Assistant • {format_time(msg.get("createdAt", "now"))}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    with st.popover("💭", help="Give feedback"):
+                        st.markdown("### Provide Feedback")
+
+                        with st.form(f"feedback_form_{msg['id']}"):
+                            rating = st.selectbox("Rating", [1, 2, 3, 4, 5], index=4)
+                            comment = st.text_area("Comment (optional)", height=100)
+
+                            if st.form_submit_button(
+                                "Submit Feedback", use_container_width=True
+                            ):
+                                feedback_data = {
+                                    "message_id": msg["id"],
+                                    "rating": rating,
+                                    "comment": comment,
+                                }
+                                response = make_api_request(
+                                    "POST",
+                                    f"/messages/{msg['id']}/feedbacks",
+                                    feedback_data,
+                                )
+                                if response:
+                                    st.success("✅ Feedback submitted!")
+                                    st.cache_data.clear()
+                                    st.rerun()
+
+                    # Show existing feedback directly beneath the bot message
+                    feedback = get_feedback(msg["id"])
+                    if isinstance(feedback, dict) and feedback:
+                        rating = feedback.get("rating")
+                        comment_text = feedback.get("comment")
+
+                        if rating is not None:
+                            st.markdown(f"⭐ {rating}/5")
+
+                        if comment_text:
+                            preview = comment_text[:100]
+                            suffix = "..." if len(comment_text) > 100 else ""
+                            st.markdown(f'💭 *"{preview}{suffix}"*')
 
     st.markdown("</div>", unsafe_allow_html=True)
 

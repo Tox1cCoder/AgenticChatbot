@@ -55,15 +55,16 @@ async def get_conversations(
     conversation_service: IConversationService,
     user_id: UUID,
     pagination: ConversationPaginationParams,
-    include_messages: bool = Query(
-        False, description="Include recent messages in conversations"
+    include: List[str] = Query(
+        default=[], description="Array of includes like ['messages']"
     ),
-    message_limit: int = Query(
+    latest_messages: int = Query(
         3,
-        description="Number of recent messages to include when include_messages is true",
+        description="Number of latest messages to include when 'messages' in include array",
     ),
 ) -> PaginatedApiResponse[ConversationRead]:
-    """Get all conversations for authenticated user with optional message inclusion"""
+    """Get all conversations for authenticated user with optional includes"""
+    include_messages = "messages" in include
     paginated_result = conversation_service.get_by_user_id(
         user_id,
         page=pagination.page,
@@ -71,7 +72,7 @@ async def get_conversations(
         order_by=pagination.order_by.value,
         order_direction=pagination.order_direction.value,
         include_messages=include_messages,
-        message_limit=message_limit,
+        latest_messages=latest_messages,
     )
     return PaginatedApiResponse.from_paginator(
         paginated_result, "Conversations retrieved successfully"

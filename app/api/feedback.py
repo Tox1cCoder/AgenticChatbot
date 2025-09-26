@@ -65,18 +65,19 @@ async def get_user_feedback_for_message(
     )
 
 
-@router.get("/{message_id}/feedbacks", response_model=ApiResponse[FeedbackRead])
+@router.get("/{message_id}/feedbacks", response_model=ApiResponse[List[FeedbackRead]])
 @AppAutoInjector.auto_inject()
-async def get_message_feedback(
+async def get_message_feedbacks(
     message_id: UUID,
     feedback_service: IFeedbackService,
-) -> ApiResponse[FeedbackRead]:
-    """Get feedback for a message"""
+) -> ApiResponse[List[FeedbackRead]]:
+    """Get all feedbacks for a message"""
     result = feedback_service.get_by_message(message_id)
+    feedback_list = [result] if result else []
     return ApiResponse(
         success=True,
-        message="Message feedback retrieved successfully",
-        data=result,
+        message="Message feedbacks retrieved successfully",
+        data=feedback_list,
     )
 
 
