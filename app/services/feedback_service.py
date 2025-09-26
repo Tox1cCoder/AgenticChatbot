@@ -32,14 +32,6 @@ class FeedbackService(IFeedbackService):
     ):
         """
         Initialize FeedbackService with injected dependencies.
-
-        Args:
-            feedback_repository: Injected feedback repository
-            message_repository: Injected message repository
-            user_repository: Injected user repository
-            user_validation_utils: Injected user validation utils
-            message_validation_utils: Injected message validation utils
-            feedback_validation_utils: Injected feedback validation utils
         """
         self.repository = feedback_repository
         self.message_repository = message_repository

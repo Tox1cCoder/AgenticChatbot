@@ -346,7 +346,7 @@ def render_conversation_sidebar():
                         st.rerun()
 
         # Document upload and list section for selected conversation
-        # render_upload_section()
+        render_upload_section()
         # render_document_list()
 
         st.divider()

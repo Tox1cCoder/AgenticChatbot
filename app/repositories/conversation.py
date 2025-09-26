@@ -169,7 +169,6 @@ class ConversationRepository:
                     order_by,
                     order_direction,
                 )
-                # Return as paginated result for API consistency but without actual pagination
                 total = len(conversations)
                 return Paginator.create(conversations, total, 1, total)
             else:

@@ -17,7 +17,7 @@ class DocumentService(IDocumentService):
     def __init__(self):
         self.logger = logging.getLogger("document_upload_service")
         self.allowed_types = [".pdf", ".txt", ".docx"]
-        self.max_file_size = 10 * 1024 * 1024  # 10MB
+        self.max_file_size = 20 * 1024 * 1024  # 10MB
 
     async def upload_and_process_document(
         self, file_content: bytes, filename: str, file_size: int, user_id: str

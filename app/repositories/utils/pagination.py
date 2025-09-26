@@ -4,15 +4,10 @@ Pagination utilities for repository layer
 
 from typing import Any, List, TypeVar, Generic
 from pydantic import BaseModel, ConfigDict, Field
+from app.utils.case_conversion import to_camel_case as to_camel
 import math
 
 T = TypeVar("T")
-
-
-def to_camel(string: str) -> str:
-    """Convert snake_case to camelCase"""
-    parts = string.split("_")
-    return parts[0] + "".join(word.capitalize() for word in parts[1:])
 
 
 class PaginationMeta(BaseModel):

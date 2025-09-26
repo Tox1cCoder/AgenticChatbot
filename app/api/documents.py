@@ -16,17 +16,6 @@ async def upload_document(
     current_user_id: UUID,
     file: UploadFile = File(...),
 ) -> ApiResponse:
-    """
-    Upload and process a document for RAG functionality.
-
-    Args:
-        file: The uploaded file (PDF, TXT, or DOCX)
-        current_user_id: The authenticated user ID
-        document_service: Document service instance
-
-    Returns:
-        ApiResponse: Success response with processing details
-    """
 
     file_content = await file.read()
 
@@ -40,5 +29,22 @@ async def upload_document(
     return ApiResponse(
         success=True,
         message=f"Document '{file.filename}' processed successfully",
+        data=result,
+    )
+
+
+@router.get("/", response_model=ApiResponse)
+@AppAutoInjector.auto_inject()
+async def list_documents(
+    document_service: IDocumentService,
+    current_user_id: UUID,
+) -> ApiResponse:
+
+    # result = await document_service.list_documents(user_id=str(current_user_id))
+    result = {"documents": "List of documents would be here"}
+
+    return ApiResponse(
+        success=True,
+        message="Documents retrieved successfully",
         data=result,
     )

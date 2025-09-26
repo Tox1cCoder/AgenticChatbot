@@ -34,7 +34,7 @@ class ConversationService(IConversationService):
     ) -> ConversationRead:
         if include is None:
             include = []
-            
+
         conv_dict = {
             "id": conversation_entity.id,
             "created_at": conversation_entity.created_at,
@@ -44,10 +44,8 @@ class ConversationService(IConversationService):
             "title": conversation_entity.title,
         }
 
-        # Handle messages inclusion
         if "messages" in include:
             try:
-                # Prefer the relationship attribute but fall back to __dict__ access.
                 messages = getattr(conversation_entity, "messages", None)
                 if messages is None:
                     messages = conversation_entity.__dict__.get("messages")
@@ -66,28 +64,20 @@ class ConversationService(IConversationService):
         else:
             conv_dict["messages"] = None
 
-        # Handle feedback inclusion (for future extension)
-        if "feedback" in include:
-            try:
-                # Prepare for feedback inclusion if needed in the future
-                feedback = getattr(conversation_entity, "feedback", None)
-                if feedback is None:
-                    feedback = conversation_entity.__dict__.get("feedback")
-                    
-                if feedback is not None:
-                    # Import feedback schema when needed
-                    # from app.schemas.feedback import FeedbackRead
-                    # conv_dict["feedback"] = [
-                    #     FeedbackRead.model_validate(fb)
-                    #     for fb in list(feedback)
-                    # ]
-                    conv_dict["feedback"] = None  # Placeholder for now
-                else:
-                    conv_dict["feedback"] = None
-            except Exception:
-                conv_dict["feedback"] = None
-        else:
-            conv_dict["feedback"] = None
+        # if "feedback" in include:
+        #     try:
+        #         feedback = getattr(conversation_entity, "feedback", None)
+        #         if feedback is None:
+        #             feedback = conversation_entity.__dict__.get("feedback")
+
+        #         if feedback is not None:
+        #             conv_dict["feedback"] = None
+        #         else:
+        #             conv_dict["feedback"] = None
+        #     except Exception:
+        #         conv_dict["feedback"] = None
+        # else:
+        #     conv_dict["feedback"] = None
 
         return ConversationRead.model_validate(conv_dict)
 
@@ -99,9 +89,7 @@ class ConversationService(IConversationService):
             conversation_create_data, owner_id
         )
         created_conversation = self.repository.create(conversation_entity)
-        return self._convert_to_read_schema(
-            created_conversation, include=[]
-        )
+        return self._convert_to_read_schema(created_conversation, include=[])
 
     def get_by_id(self, conversation_id: UUID) -> ConversationRead:
         self.conversation_validation_utils.validate_conversation_exists(conversation_id)
@@ -121,7 +109,7 @@ class ConversationService(IConversationService):
         """Get user conversations with optional includes"""
         if include is None:
             include = []
-            
+
         # Validate pagination parameters
         validate_pagination_params(page, limit)
 
@@ -149,11 +137,9 @@ class ConversationService(IConversationService):
             include=include,
             latest_messages=latest_messages,
         )
-        # Convert items to ConversationRead schemas using the helper
+        # Convert items to ConversationRead schemas
         conversation_reads = [
-            self._convert_to_read_schema(
-                conversation_entity, include=include
-            )
+            self._convert_to_read_schema(conversation_entity, include=include)
             for conversation_entity in paginated_conversations.items
         ]
 
@@ -184,9 +170,7 @@ class ConversationService(IConversationService):
         updated_conversation = self.repository.update(
             conversation_entity.id, conversation_update_data
         )
-        return self._convert_to_read_schema(
-            updated_conversation, include=[]
-        )
+        return self._convert_to_read_schema(updated_conversation, include=[])
 
     def delete_conversation(self, conversation_id: UUID, owner_id: UUID) -> bool:
         self.conversation_validation_utils.validate_conversation_access(

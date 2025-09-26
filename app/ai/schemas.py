@@ -357,5 +357,5 @@ class WorkflowConfig(BaseModel):
 # Add WorkflowConfig to exports
 __all__.append("WorkflowConfig")
 
-# Create alias for BaseAgentMessage as AgentMessage for backward compatibility
+# Create alias for BaseAgentMessage as AgentMessage
 AgentMessage = BaseAgentMessage

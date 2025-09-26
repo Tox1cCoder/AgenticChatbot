@@ -94,7 +94,7 @@ class Workflow:
 
         except Exception as e:
             logger.error(f"Routing failed: {e}")
-            state["selected_agent"] = "chat_agent"  # Default fallback
+            state["selected_agent"] = "chat_agent" 
 
         return state
 

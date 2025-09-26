@@ -118,7 +118,7 @@ class AppAutoInjector(AutoInjector):
 
     @classmethod
     def auto_inject(cls):
-        """Decorator factory to auto-wire FastAPI route parameters with enhanced auth support."""
+        """Decorator factory to auto-wire FastAPI route parameters."""
         from app.core.auth import get_current_user_id, get_refresh_token_user_id
         from app.schemas.pagination import (
             MessagePaginationParams,

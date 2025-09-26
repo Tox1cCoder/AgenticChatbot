@@ -177,7 +177,6 @@ class AIService(IAgentService):
             execution_time = (datetime.now() - start_time).total_seconds()
             self._update_stats(execution_time, False)
 
-            # Return a fallback response
             return f"I apologize, but I encountered an error while processing your message. Please try again."
 
     def get_bot_response_sync(

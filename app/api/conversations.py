@@ -61,7 +61,7 @@ async def get_conversations(
     latest_messages: int = Query(
         3,
         alias="latestMessages",
-        description="Number of latest messages to include when 'messages' in include array",
+        description="Number of latest messages to include",
     ),
 ) -> PaginatedApiResponse[ConversationRead]:
     """Get all conversations for authenticated user with optional includes"""

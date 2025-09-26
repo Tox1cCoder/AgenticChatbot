@@ -65,7 +65,7 @@ class MessageService(IMessageService):
         order_by: Optional[str] = None,
         order_direction: str = "asc",
     ) -> Paginator[MessageRead]:
-        # Validate pagination parameters at service layer
+        # Validate pagination parameters
         validate_pagination_params(page, limit)
 
         self.conversation_validation_utils.validate_conversation_access(
@@ -95,7 +95,7 @@ class MessageService(IMessageService):
         order_by: Optional[str] = None,
         order_direction: str = "desc",
     ) -> Paginator[MessageRead]:
-        # Validate pagination parameters at service layer
+        # Validate pagination parameters
         validate_pagination_params(page, limit)
 
         paginated_messages = self.repository.get_by_user_id(
@@ -144,7 +144,7 @@ class MessageService(IMessageService):
             return self._generate_bot_response_fallback(user_message)
 
     def _generate_bot_response_fallback(self, user_message: str) -> str:
-        """Fallback bot response generation using original Gemini implementation."""
+        """Bot response generation"""
         api_key = settings.gemini_api_key
         if not api_key:
             return "[Error: Gemini API key not configured]"
