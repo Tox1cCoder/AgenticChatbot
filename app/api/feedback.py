@@ -1,10 +1,9 @@
 from typing import List
 from uuid import UUID
 from typing import Annotated
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, status
 
 from app.core.dependency_injection import AppAutoInjector
-from app.core.auth import get_current_user_id
 from app.interfaces.feedback_service_interface import IFeedbackService
 from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
 from app.schemas.responses import ApiResponse
@@ -22,7 +21,7 @@ async def create_feedback(
     message_id: UUID,
     feedback_data: FeedbackCreate,
     feedback_service: IFeedbackService,
-    user_id: UUID = Depends(get_current_user_id),
+    user_id: UUID,
 ) -> ApiResponse[FeedbackRead]:
     """Create a new feedback for a message or update existing feedback"""
     feedback_data.message_id = message_id
@@ -55,7 +54,7 @@ async def get_user_feedback_for_message(
     message_id: UUID,
     user_id: UUID,
     feedback_service: IFeedbackService,
-    authenticated_user_id: UUID = Depends(get_current_user_id),
+    authenticated_user_id: UUID,
 ) -> ApiResponse[FeedbackRead]:
     """Get authenticated user's feedback for a message (user_id must match authenticated user)"""
     feedback = feedback_service.get_user_feedback_for_message(message_id, user_id)
@@ -90,7 +89,7 @@ async def update_feedback(
     feedback_id: UUID,
     feedback_data: FeedbackUpdate,
     feedback_service: IFeedbackService,
-    user_id: UUID = Depends(get_current_user_id),
+    user_id: UUID,
 ) -> ApiResponse[FeedbackRead]:
     """Update feedback (requires user ownership)"""
     result = feedback_service.update_feedback(feedback_id, user_id, feedback_data)

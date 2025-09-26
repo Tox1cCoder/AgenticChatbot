@@ -1,9 +1,8 @@
 from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, status, HTTPException, Query
+from fastapi import APIRouter, status, HTTPException, Query
 
 from app.core.dependency_injection import AppAutoInjector
-from app.core.auth import get_current_user_id
 from app.interfaces.conversation_service_interface import IConversationService
 from app.schemas.conversation import (
     ConversationCreate,
@@ -28,7 +27,7 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 async def create_conversation(
     conversation_data: ConversationCreate,
     conversation_service: IConversationService,
-    user_id: UUID = Depends(get_current_user_id),
+    user_id: UUID,
 ) -> ApiResponse[ConversationRead]:
     """Create a new conversation for authenticated user"""
     result = conversation_service.create_conversation(conversation_data, user_id)
@@ -54,8 +53,8 @@ async def get_conversation(
 @AppAutoInjector.auto_inject()
 async def get_conversations(
     conversation_service: IConversationService,
-    user_id: UUID = Depends(get_current_user_id),
-    pagination: ConversationPaginationParams = Depends(),
+    user_id: UUID,
+    pagination: ConversationPaginationParams,
     include_messages: bool = Query(
         False, description="Include recent messages in conversations"
     ),
@@ -87,8 +86,8 @@ async def get_conversations(
 async def get_conversation_messages(
     conversation_id: UUID,
     message_service: IMessageService,
-    user_id: UUID = Depends(get_current_user_id),
-    pagination: MessagePaginationParams = Depends(),
+    user_id: UUID,
+    pagination: MessagePaginationParams,
 ) -> PaginatedApiResponse[MessageRead]:
     """Get conversation's messages (requires user ownership)"""
     paginated_result = message_service.get_conversation_messages(
@@ -109,7 +108,7 @@ async def get_conversation_messages(
 async def delete_conversation(
     conversation_id: UUID,
     conversation_service: IConversationService,
-    user_id: UUID = Depends(get_current_user_id),
+    user_id: UUID,
 ) -> ApiResponse:
     """Delete conversation (requires user ownership)"""
     conversation_service.delete_conversation(conversation_id, user_id)

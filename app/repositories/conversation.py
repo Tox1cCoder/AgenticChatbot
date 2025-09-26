@@ -30,7 +30,7 @@ class ConversationCRUDStrategy(
         owner_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = "updated_at",
+        order_by: Optional[str] = None,
         order_direction: str = "desc",
     ) -> Paginator[Conversation]:
         """Get conversations by owner ID with page-based pagination and ordering"""
@@ -44,17 +44,17 @@ class ConversationCRUDStrategy(
         statement = select(Conversation).where(
             Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
         )
-
-        # Apply ordering
+        # Apply ordering if specified
         if order_by and hasattr(Conversation, order_by):
             order_column = getattr(Conversation, order_by)
-            if order_direction.lower() == "asc":
-                statement = statement.order_by(asc(order_column))
-            else:
-                statement = statement.order_by(desc(order_column))
+            statement = statement.order_by(
+                asc(order_column)
+                if order_direction.lower() == "asc"
+                else desc(order_column)
+            )
         else:
-            # Default to most recently updated conversations first
-            statement = statement.order_by(desc(Conversation.updated_at))
+            # Default ordering
+            statement = statement.order_by(Conversation.updated_at.desc())
 
         statement = statement.offset(offset).limit(limit)
         items = list(db.execute(statement).scalars().all())
@@ -88,7 +88,7 @@ class ConversationCRUDStrategy(
         page: int = 1,
         limit: int = 10,
         message_limit: int = 3,
-        order_by: Optional[str] = "updated_at",
+        order_by: Optional[str] = None,
         order_direction: str = "desc",
     ) -> Paginator[Conversation]:
         """Get conversations with limited recent messages"""
@@ -102,16 +102,18 @@ class ConversationCRUDStrategy(
         statement = select(Conversation).where(
             Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
         )
-        # Apply ordering
+
+        # Apply ordering if specified
         if order_by and hasattr(Conversation, order_by):
             order_column = getattr(Conversation, order_by)
-            if order_direction.lower() == "asc":
-                statement = statement.order_by(asc(order_column))
-            else:
-                statement = statement.order_by(desc(order_column))
+            statement = statement.order_by(
+                asc(order_column)
+                if order_direction.lower() == "asc"
+                else desc(order_column)
+            )
         else:
-            # Default to most recently updated conversations first
-            statement = statement.order_by(desc(Conversation.updated_at))
+            # Default ordering
+            statement = statement.order_by(Conversation.u.desc())
 
         statement = statement.offset(offset).limit(limit)
         conversations = list(db.execute(statement).scalars().all())

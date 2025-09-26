@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env from the workspace root (two levels up from this file)
+# Load .env from the workspace root
 dotenv_path = Path(__file__).parent.parent.parent / ".env"
 if dotenv_path.exists():
     load_dotenv(dotenv_path)

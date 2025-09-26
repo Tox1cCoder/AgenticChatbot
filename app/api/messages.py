@@ -1,10 +1,9 @@
 from typing import List
 from uuid import UUID
 from typing import Annotated
-from fastapi import APIRouter, Depends, status, HTTPException
+from fastapi import APIRouter, status, HTTPException
 
 from app.core.dependency_injection import AppAutoInjector
-from app.core.auth import get_current_user_id
 from app.interfaces.message_service_interface import IMessageService
 from app.schemas.message import MessageCreate, MessageRead
 from app.schemas.responses import ApiResponse
@@ -35,7 +34,7 @@ async def create_message(
 async def get_message(
     message_id: UUID,
     message_service: IMessageService,
-    user_id: UUID = Depends(get_current_user_id),
+    user_id: UUID,
 ) -> ApiResponse[MessageRead]:
     """Get message by ID"""
     result = message_service.get_by_id(message_id, user_id)
@@ -48,8 +47,8 @@ async def get_message(
 @AppAutoInjector.auto_inject()
 async def get_user_messages(
     message_service: IMessageService,
-    user_id: UUID = Depends(get_current_user_id),
-    pagination: MessagePaginationParams = Depends(),
+    user_id: UUID,
+    pagination: MessagePaginationParams,
 ) -> PaginatedApiResponse[MessageRead]:
     """Get all messages for authenticated user with pagination"""
     paginated_result = message_service.get_user_messages(

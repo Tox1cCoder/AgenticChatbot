@@ -1,7 +1,7 @@
 from typing import List
 from uuid import UUID
 from typing import Annotated
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, status
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.user_service_interface import IUserService

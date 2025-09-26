@@ -107,15 +107,6 @@ class AppAutoInjector(AutoInjector):
         """Setup the wiring map with container providers."""
         container_ref = container
 
-        from app.interfaces import (
-            IUserService,
-            IConversationService,
-            IMessageService,
-            IFeedbackService,
-            IAuthService,
-            IDocumentService,
-        )
-
         cls.wiring_map = {
             IUserService: getattr(container_ref, "user_service"),
             IConversationService: getattr(container_ref, "conversation_service"),
@@ -124,6 +115,73 @@ class AppAutoInjector(AutoInjector):
             IAuthService: getattr(container_ref, "auth_service"),
             IDocumentService: getattr(container_ref, "document_service"),
         }
+
+    @classmethod
+    def auto_inject(cls):
+        """Decorator factory to auto-wire FastAPI route parameters with enhanced auth support."""
+        from app.core.auth import get_current_user_id, get_refresh_token_user_id
+        from app.schemas.pagination import (
+            MessagePaginationParams,
+            ConversationPaginationParams,
+        )
+        from uuid import UUID
+
+        def decorator(func):
+            sig = inspect.signature(func)
+            new_params = []
+
+            for name, param in sig.parameters.items():
+                ann = param.annotation
+
+                # Handle services from wiring_map
+                if ann in cls.wiring_map and (
+                    param.default == inspect.Parameter.empty or param.default is None
+                ):
+                    provider = cls.wiring_map[ann]
+
+                    def create_dependency(provider=provider):
+                        return lambda: provider()
+
+                    param = param.replace(default=Depends(create_dependency()))
+
+                # Handle authentication parameters
+                elif ann == UUID and param.default == inspect.Parameter.empty:
+                    # Auto-inject authentication based on parameter name
+                    if name in ["user_id", "current_user_id", "authenticated_user_id"]:
+                        param = param.replace(default=Depends(get_current_user_id))
+                    elif name in ["refresh_user_id"]:
+                        param = param.replace(
+                            default=Depends(get_refresh_token_user_id)
+                        )
+
+                # Handle pagination parameters
+                elif (
+                    ann in [MessagePaginationParams, ConversationPaginationParams]
+                    and param.default == inspect.Parameter.empty
+                ):
+                    param = param.replace(default=Depends())
+
+                new_params.append(param)
+
+            def wrapper_factory():
+                if inspect.iscoroutinefunction(func):
+
+                    @functools.wraps(func)
+                    async def wrapper(*args, **kwargs):
+                        return await func(*args, **kwargs)
+
+                else:
+
+                    @functools.wraps(func)
+                    def wrapper(*args, **kwargs):
+                        return func(*args, **kwargs)
+
+                wrapper.__signature__ = sig.replace(parameters=new_params)
+                return wrapper
+
+            return wrapper_factory()
+
+        return decorator
 
 
 class AppContainerInjector(ContainerInjector):

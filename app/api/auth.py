@@ -1,12 +1,11 @@
 import logging
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, status
 from uuid import UUID
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.user_service_interface import IUserService
 from app.interfaces.auth_service_interface import IAuthService
 from app.core.security import create_access_token
-from app.core.auth import get_refresh_token_user_id, get_current_user_id
 from app.schemas.user import UserCreate, UserRead
 from app.schemas.responses.api_response import ApiResponse
 from app.schemas.responses.token_response import (
@@ -50,10 +49,10 @@ async def login(
 @AppAutoInjector.auto_inject()
 async def refresh_token(
     user_service: IUserService,
-    user_id: UUID = Depends(get_refresh_token_user_id),
+    refresh_user_id: UUID,
 ) -> ApiResponse[RefreshTokenResponse]:
     """Get new access token using refresh token"""
-    user = user_service.get_by_id(user_id)
+    user = user_service.get_by_id(refresh_user_id)
     token_data = {"sub": str(user.id)}
     access_token = create_access_token(token_data)
     return ApiResponse(
@@ -67,7 +66,7 @@ async def refresh_token(
 @AppAutoInjector.auto_inject()
 async def logout(
     auth_service: IAuthService,
-    current_user_id: UUID = Depends(get_current_user_id),
+    current_user_id: UUID,
 ) -> ApiResponse:
     """Logout endpoint with token invalidation"""
 
