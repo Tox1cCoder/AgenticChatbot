@@ -56,7 +56,7 @@ async def get_conversations(
     user_id: UUID,
     pagination: ConversationPaginationParams,
     include: List[str] = Query(
-        default=[], description="Array of includes like ['messages', 'feedback']"
+        default=[], description="Array of includes e.g. ['messages', 'feedback']"
     ),
     latest_messages: int = Query(
         3,
@@ -69,7 +69,7 @@ async def get_conversations(
         user_id,
         page=pagination.page,
         limit=pagination.limit,
-        order_by=pagination.order_by.value,
+        order_by=pagination.order_by.to_snake_case(),
         order_direction=pagination.order_direction.value,
         include=include,
         latest_messages=latest_messages,
@@ -96,7 +96,7 @@ async def get_conversation_messages(
         user_id,
         page=pagination.page,
         limit=pagination.limit,
-        order_by=pagination.order_by.value,
+        order_by=pagination.order_by.to_snake_case(),
         order_direction=pagination.order_direction.value,
     )
     return PaginatedApiResponse.from_paginator(

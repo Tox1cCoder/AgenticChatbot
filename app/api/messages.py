@@ -55,7 +55,7 @@ async def get_user_messages(
         user_id,
         page=pagination.page,
         limit=pagination.limit,
-        order_by=pagination.order_by.value,
+        order_by=pagination.order_by.to_snake_case(),
         order_direction=pagination.order_direction.value,
     )
     return PaginatedApiResponse.from_paginator(

@@ -1,7 +1,5 @@
 """
 Centralized exception handler registration for FastAPI API layer.
-Usage: from app.utils.exception_handler import register_exception_handlers
-       register_exception_handlers(app)
 """
 
 from fastapi import FastAPI, Request

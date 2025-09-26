@@ -56,7 +56,7 @@ async def get_user_feedback_for_message(
     feedback_service: IFeedbackService,
     authenticated_user_id: UUID,
 ) -> ApiResponse[FeedbackRead]:
-    """Get authenticated user's feedback for a message (user_id must match authenticated user)"""
+    """Get authenticated user's feedback for a message"""
     feedback = feedback_service.get_user_feedback_for_message(message_id, user_id)
     return ApiResponse(
         success=True,
