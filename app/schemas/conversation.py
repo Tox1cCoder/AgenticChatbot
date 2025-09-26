@@ -1,8 +1,9 @@
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from uuid import UUID
 
 from pydantic import BaseModel, Field, ConfigDict
+from app.schemas.message import MessageRead
 
 
 def to_camel(string: str) -> str:
@@ -39,6 +40,9 @@ class ConversationRead(BaseModel):
     title: str = Field(
         ..., min_length=1, max_length=255, description="Conversation title"
     )
+    messages: Optional[List["MessageRead"]] = Field(
+        default=None, description="Recent messages in the conversation (when requested)"
+    )
 
 
 class ConversationInDB(BaseModel):
@@ -54,3 +58,7 @@ class ConversationInDB(BaseModel):
     title: str = Field(
         ..., min_length=1, max_length=255, description="Conversation title"
     )
+
+
+# Update forward reference
+ConversationRead.model_rebuild()

@@ -29,6 +29,42 @@ class ConversationService(IConversationService):
         self.user_validation_utils = user_validation_utils
         self.conversation_validation_utils = conversation_validation_utils
 
+    def _convert_to_read_schema(
+        self, conversation_entity, include_messages: bool = False
+    ) -> ConversationRead:
+        """
+        Safely convert a conversation entity to ConversationRead schema,
+        avoiding SQLAlchemy lazy loading issues
+        """
+        conv_dict = {
+            "id": conversation_entity.id,
+            "created_at": conversation_entity.created_at,
+            "updated_at": conversation_entity.updated_at,
+            "deleted_at": conversation_entity.deleted_at,
+            "owner_id": conversation_entity.owner_id,
+            "title": conversation_entity.title,
+        }
+
+        # Only include messages if they were explicitly loaded and we want them
+        if include_messages:
+            try:
+                # Check if messages are loaded (this won't trigger lazy loading)
+                messages = conversation_entity.__dict__.get("messages")
+                if messages is not None:
+                    from app.schemas.message import MessageRead
+
+                    conv_dict["messages"] = [
+                        MessageRead.model_validate(message) for message in messages
+                    ]
+                else:
+                    conv_dict["messages"] = None
+            except Exception:
+                conv_dict["messages"] = None
+        else:
+            conv_dict["messages"] = None
+
+        return ConversationRead.model_validate(conv_dict)
+
     def create_conversation(
         self, conversation_create_data: ConversationCreate, owner_id: UUID
     ) -> ConversationRead:
@@ -37,12 +73,14 @@ class ConversationService(IConversationService):
             conversation_create_data, owner_id
         )
         created_conversation = self.repository.create(conversation_entity)
-        return ConversationRead.model_validate(created_conversation)
+        return self._convert_to_read_schema(
+            created_conversation, include_messages=False
+        )
 
     def get_by_id(self, conversation_id: UUID) -> ConversationRead:
         self.conversation_validation_utils.validate_conversation_exists(conversation_id)
         conversation_entity = self.repository.get_by_id(conversation_id)
-        return ConversationRead.model_validate(conversation_entity)
+        return self._convert_to_read_schema(conversation_entity, include_messages=False)
 
     def get_by_user_id(
         self,
@@ -68,11 +106,14 @@ class ConversationService(IConversationService):
             include_messages=include_messages,
             message_limit=message_limit,
         )
-        # Convert items to ConversationRead schemas
+        # Convert items to ConversationRead schemas using the helper
         conversation_reads = [
-            ConversationRead.model_validate(conversation_entity)
+            self._convert_to_read_schema(
+                conversation_entity, include_messages=include_messages
+            )
             for conversation_entity in paginated_conversations.items
         ]
+
         # Return new Paginator with converted items
         return Paginator.create(
             conversation_reads, paginated_conversations.meta.total, page, limit
@@ -85,7 +126,7 @@ class ConversationService(IConversationService):
             owner_id, conversation_id
         )
         conversation_entity = self.repository.get_with_messages(conversation_id)
-        return ConversationRead.model_validate(conversation_entity)
+        return self._convert_to_read_schema(conversation_entity, include_messages=True)
 
     def update_conversation(
         self,
@@ -100,7 +141,9 @@ class ConversationService(IConversationService):
         updated_conversation = self.repository.update(
             conversation_entity.id, conversation_update_data
         )
-        return ConversationRead.model_validate(updated_conversation)
+        return self._convert_to_read_schema(
+            updated_conversation, include_messages=False
+        )
 
     def delete_conversation(self, conversation_id: UUID, owner_id: UUID) -> bool:
         self.conversation_validation_utils.validate_conversation_access(

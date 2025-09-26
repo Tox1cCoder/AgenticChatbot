@@ -296,10 +296,8 @@ def render_conversation_sidebar():
             and st.session_state.current_user_id
             and st.session_state.auth_token
         ):
-            # Use consistent endpoint - get conversations with recent messages for sidebar preview
-            conversations_response = get_conversations(
-                include_messages=True, message_limit=3
-            )
+            # Load conversations without messages for sidebar (messages only needed in conversation manager)
+            conversations_response = get_conversations(include_messages=False)
             if conversations_response and conversations_response.get("data"):
                 st.session_state.conversations_list = conversations_response["data"][
                     "items"
@@ -315,20 +313,8 @@ def render_conversation_sidebar():
             for conv in sorted_conversations:
                 is_active = conv["id"] == st.session_state.current_conversation_id
 
-                # Show conversation title and latest message preview if available
+                # Show only conversation title in sidebar
                 display_title = conv["title"]
-                if conv.get("messages") and len(conv["messages"]) > 0:
-                    # Show last 3 messages preview
-                    messages_preview = []
-                    for msg in conv["messages"][:3]:  # Get up to 3 messages
-                        sender_icon = "👤" if msg.get("sender") == 1 else "🤖"
-                        content_preview = msg.get("content", "")[:25]
-                        if len(content_preview) < len(msg.get("content", "")):
-                            content_preview += "..."
-                        messages_preview.append(f"{sender_icon} {content_preview}")
-
-                    preview_text = "\n".join(messages_preview)
-                    display_title = f"{conv['title']}\n{preview_text}"
 
                 if st.button(
                     display_title,
@@ -367,19 +353,44 @@ def render_conversation_manager():
         with col2:
             st.markdown("### Conversation Manager")
 
+            # Load conversations with messages for the manager (separate from sidebar)
+            if st.session_state.current_user_id:
+                with st.spinner("Loading conversations with messages..."):
+                    manager_conversations_response = get_conversations(
+                        include_messages=True, message_limit=3
+                    )
+                    if (
+                        manager_conversations_response
+                        and manager_conversations_response.get("data")
+                    ):
+                        manager_conversations = manager_conversations_response["data"][
+                            "items"
+                        ]
+                    else:
+                        manager_conversations = []
+            else:
+                manager_conversations = []
+
             search_term = st.text_input(
                 "🔍 Search conversations:", placeholder="Type to search..."
             )
 
-            if st.session_state.conversations_list:
-                filtered_convs = st.session_state.conversations_list
+            if manager_conversations:
+                filtered_convs = manager_conversations
 
                 if search_term:
                     filtered_convs = []
-                    for conv in st.session_state.conversations_list:
-                        messages_response = get_messages(conv["id"])
-                        if messages_response and messages_response.get("data"):
-                            messages = messages_response["data"]["items"]
+                    for conv in manager_conversations:
+                        # Check if conversation title contains search term
+                        if search_term.lower() in conv.get("title", "").lower():
+                            if conv not in filtered_convs:
+                                filtered_convs.append(conv)
+                            continue
+
+                        # Check messages that are already included in the conversation
+                        messages = conv.get("messages", [])
+                        if messages:
+                            # Use pre-loaded messages to avoid API call
                             for msg in messages:
                                 if (
                                     search_term.lower()
@@ -388,39 +399,40 @@ def render_conversation_manager():
                                     if conv not in filtered_convs:
                                         filtered_convs.append(conv)
                                     break
+                        else:
+                            # Only make API call if no messages are pre-loaded (fallback)
+                            messages_response = get_messages(conv["id"])
+                            if messages_response and messages_response.get("data"):
+                                messages = messages_response["data"]["items"]
+                                for msg in messages:
+                                    if (
+                                        search_term.lower()
+                                        in msg.get("content", "").lower()
+                                    ):
+                                        if conv not in filtered_convs:
+                                            filtered_convs.append(conv)
+                                        break
 
                 if filtered_convs:
                     for conv in filtered_convs:
                         with st.expander(f"💬 {conv['title']}", expanded=False):
-                            # Use the same consistent endpoint for conversation details
-                            # Get conversations with messages included to show preview
-                            conv_with_messages_response = get_conversations(
-                                page=1, limit=1, include_messages=True, message_limit=3
-                            )
-
-                            # Find this conversation's details with messages
-                            conv_details = None
-                            if (
-                                conv_with_messages_response
-                                and conv_with_messages_response.get("data")
-                            ):
-                                items = conv_with_messages_response["data"]["items"]
-                                conv_details = next(
-                                    (c for c in items if c["id"] == conv["id"]), None
-                                )
-
-                            # Display recent messages if available
-                            if conv_details and conv_details.get("messages"):
-                                for msg in conv_details["messages"]:
+                            # Check if this conversation already has messages from include_messages
+                            if conv.get("messages"):
+                                # Use the messages that were already included
+                                for msg in conv["messages"]:
                                     sender_value = msg.get("sender")
                                     sender_icon = (
                                         "👤" if sender_value in (1, "user") else "🤖"
                                     )
+                                    sender_name = (
+                                        "user"
+                                        if sender_value in (1, "user")
+                                        else "assistant"
+                                    )
                                     st.markdown(
-                                        f"{sender_icon} **{msg['sender']}:** {msg['content'][:100]}..."
+                                        f"{sender_icon} **{sender_name}:** {msg['content'][:100]}..."
                                     )
                             else:
-                                # Fallback: directly get messages for this conversation
                                 messages_response = get_messages(
                                     conv["id"], page=1, limit=3
                                 )
@@ -433,8 +445,13 @@ def render_conversation_manager():
                                             if sender_value in (1, "user")
                                             else "🤖"
                                         )
+                                        sender_name = (
+                                            "user"
+                                            if sender_value in (1, "user")
+                                            else "assistant"
+                                        )
                                         st.markdown(
-                                            f"{sender_icon} **{msg['sender']}:** {msg['content'][:100]}..."
+                                            f"{sender_icon} **{sender_name}:** {msg['content'][:100]}..."
                                         )
 
                             col_open, col_delete = st.columns(2)
@@ -484,10 +501,8 @@ def render_chat_interface():
     user_id = st.session_state.get("current_user_id")
 
     if not st.session_state.conversations_list and user_id:
-        # Use consistent endpoint for initial conversation loading
-        conversations_response = get_conversations(
-            include_messages=True, message_limit=3
-        )
+        # Load conversations without messages (messages only needed in conversation manager)
+        conversations_response = get_conversations(include_messages=False)
         if conversations_response and conversations_response.get("data"):
             st.session_state.conversations_list = conversations_response["data"][
                 "items"

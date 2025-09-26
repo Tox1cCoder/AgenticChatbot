@@ -113,7 +113,7 @@ class ConversationCRUDStrategy(
             )
         else:
             # Default ordering
-            statement = statement.order_by(Conversation.u.desc())
+            statement = statement.order_by(Conversation.updated_at.desc())
 
         statement = statement.offset(offset).limit(limit)
         conversations = list(db.execute(statement).scalars().all())
