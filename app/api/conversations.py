@@ -64,7 +64,7 @@ async def get_conversations(
         description="Number of latest messages to include",
     ),
 ) -> PaginatedApiResponse[ConversationRead]:
-    """Get all conversations for authenticated user with optional includes"""
+    """Get all conversations for authenticated user"""
     paginated_result = conversation_service.get_by_user_id(
         user_id,
         page=pagination.page,

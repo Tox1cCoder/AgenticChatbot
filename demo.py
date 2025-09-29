@@ -47,7 +47,8 @@ st.markdown(
     .bot-message {
         background: #ffffff; color: #1f2937; border: 1px solid #86efac;
         padding: 12px 16px; border-radius: 18px 18px 18px 4px; margin: 8px auto 8px 0;
-        max-width: 72%; word-wrap: break-word; box-shadow: 0 8px 20px rgba(34, 197, 94, 0.16);
+        max-width: 60%; white-space: normal; line-height: 1.5;
+        box-shadow: 0 8px 20px rgba(34, 197, 94, 0.16);
     }
     .sidebar-conversation {
         background: #f8f9fa; border-radius: 8px; padding: 10px; margin: 5px 0;
@@ -61,7 +62,7 @@ st.markdown(
         max-width: 400px; margin: 0 auto; padding: 40px 20px; background: white;
         border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.1);
     }
-    .message-timestamp { font-size: 0.8em; color: #64748b; margin-top: 5px; }
+    .message-timestamp { font-size: 0.8em; color: #64748b; margin-top: 5px; white-space: nowrap; }
     div:empty { display: none !important; }
 </style>
 """,
@@ -161,7 +162,7 @@ def get_messages(
     conversation_id: str,
     page: int = 1,
     limit: int = 10,
-    order_by: str = "created_at",
+    order_by: str = "createdAt",
     order_direction: str = "desc",
 ) -> Dict[str, Any]:
     """Get paginated conversation messages"""
@@ -177,7 +178,7 @@ def get_messages(
 def get_user_messages_paginated(
     page: int = 1,
     limit: int = 10,
-    order_by: str = "created_at",
+    order_by: str = "createdAt",
     order_direction: str = "asc",
 ) -> Dict[str, Any]:
     """Get paginated user messages"""
@@ -616,68 +617,67 @@ def render_chat_interface():
             )
         else:
             # Assistant message with feedback option
-            with st.container():
-                avatar_col, content_col = st.columns([1, 11])
-
-                with avatar_col:
-                    st.markdown(
-                        """
-                        <div style="display: flex; justify-content: center; margin: 10px 0;">
-                            <div style="border: 2px solid #28a745; color: #28a745; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">🤖</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-
-                with content_col:
-                    st.markdown(
-                        f"""
-                        <div class="bot-message" style="margin: 10px 0;">
+            st.markdown(
+                f"""
+                <div style="display: flex; justify-content: flex-start; margin: 10px 0; align-items: flex-start; gap: 10px;">
+                    <div style="border: 2px solid #28a745; color: #28a745; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; flex-shrink: 0;">🤖</div>
+                    <div style="display: flex; flex-direction: column;">
+                        <div class="bot-message" style="margin: 0;">
                             {msg["content"].replace('<', '&lt;').replace('>', '&gt;')}
-                            <div class="message-timestamp">Assistant • {format_time(msg.get("createdAt", "now"))}</div>
                         </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+                        <div class="message-timestamp">Assistant • {format_time(msg.get("createdAt", "now"))}</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-                    with st.popover("💭", help="Give feedback"):
-                        st.markdown("### Provide Feedback")
+            # Add feedback section below the message
+            with st.container():
+                st.markdown(
+                    '<div style="margin-left: 45px;">', unsafe_allow_html=True
+                )  # Align with message content
 
-                        with st.form(f"feedback_form_{msg['id']}"):
-                            rating = st.selectbox("Rating", [1, 2, 3, 4, 5], index=4)
-                            comment = st.text_area("Comment (optional)", height=100)
+                with st.popover("💭", help="Give feedback"):
+                    st.markdown("### Provide Feedback")
 
-                            if st.form_submit_button(
-                                "Submit Feedback", use_container_width=True
-                            ):
-                                feedback_data = {
-                                    "messageId": msg["id"],
-                                    "rating": rating,
-                                    "comment": comment,
-                                }
-                                response = make_api_request(
-                                    "POST",
-                                    f"/messages/{msg['id']}/feedbacks",
-                                    feedback_data,
-                                )
-                                if response:
-                                    st.success("✅ Feedback submitted!")
-                                    st.cache_data.clear()
-                                    st.rerun()
+                    with st.form(f"feedback_form_{msg['id']}"):
+                        rating = st.selectbox("Rating", [1, 2, 3, 4, 5], index=4)
+                        comment = st.text_area("Comment (optional)", height=100)
 
-                    # Show existing feedback directly beneath the bot message
-                    feedback = get_feedback(msg["id"])
-                    if isinstance(feedback, dict) and feedback:
-                        rating = feedback.get("rating")
-                        comment_text = feedback.get("comment")
+                        if st.form_submit_button(
+                            "Submit Feedback", use_container_width=True
+                        ):
+                            feedback_data = {
+                                "messageId": msg["id"],
+                                "rating": rating,
+                                "comment": comment,
+                            }
+                            response = make_api_request(
+                                "POST",
+                                f"/messages/{msg['id']}/feedbacks",
+                                feedback_data,
+                            )
+                            if response:
+                                st.success("✅ Feedback submitted!")
+                                st.cache_data.clear()
+                                st.rerun()
 
-                        if rating is not None:
-                            st.markdown(f"⭐ {rating}/5")
+                # Show existing feedback directly beneath the bot message
+                feedback = get_feedback(msg["id"])
+                if isinstance(feedback, dict) and feedback:
+                    rating = feedback.get("rating")
+                    comment_text = feedback.get("comment")
 
-                        if comment_text:
-                            preview = comment_text[:100]
-                            suffix = "..." if len(comment_text) > 100 else ""
-                            st.markdown(f'💭 *"{preview}{suffix}"*')
+                    if rating is not None:
+                        st.markdown(f"⭐ {rating}/5")
+
+                    if comment_text:
+                        preview = comment_text[:100]
+                        suffix = "..." if len(comment_text) > 100 else ""
+                        st.markdown(f'💭 *"{preview}{suffix}"*')
+
+                st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
