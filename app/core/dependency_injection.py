@@ -21,6 +21,7 @@ from app.repositories.user import UserRepository
 from app.repositories.conversation import ConversationRepository
 from app.repositories.message import MessageRepository
 from app.repositories.feedback import FeedbackRepository
+from app.repositories.document import DocumentRepository
 from app.utils.validation.user_validation import UserValidationUtils
 from app.utils.validation.conversation_validation import (
     ConversationValidationUtils,
@@ -164,6 +165,19 @@ class AppAutoInjector(AutoInjector):
                 new_params.append(param)
 
             def wrapper_factory():
+                # Separate parameters with and without defaults to maintain proper ordering
+                params_without_default = []
+                params_with_default = []
+
+                for param in new_params:
+                    if param.default == inspect.Parameter.empty:
+                        params_without_default.append(param)
+                    else:
+                        params_with_default.append(param)
+
+                # Combine them in the correct order: non-default first, then default
+                ordered_params = params_without_default + params_with_default
+
                 if inspect.iscoroutinefunction(func):
 
                     @functools.wraps(func)
@@ -176,7 +190,7 @@ class AppAutoInjector(AutoInjector):
                     def wrapper(*args, **kwargs):
                         return func(*args, **kwargs)
 
-                wrapper.__signature__ = sig.replace(parameters=new_params)
+                wrapper.__signature__ = sig.replace(parameters=ordered_params)
                 return wrapper
 
             return wrapper_factory()
@@ -205,6 +219,7 @@ class AppContainerInjector(ContainerInjector):
             ConversationRepository: getattr(container_ref, "conversation_repository"),
             MessageRepository: getattr(container_ref, "message_repository"),
             FeedbackRepository: getattr(container_ref, "feedback_repository"),
+            DocumentRepository: getattr(container_ref, "document_repository"),
             # Validation utilities
             UserValidationUtils: getattr(container_ref, "user_validation_utils"),
             ConversationValidationUtils: getattr(

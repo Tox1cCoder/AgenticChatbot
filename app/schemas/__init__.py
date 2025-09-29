@@ -23,6 +23,13 @@ from app.schemas.feedback import (
     FeedbackRead,
     FeedbackInDB,
 )
+from app.schemas.document import (
+    DocumentCreate,
+    DocumentResponse,
+    DocumentUpdate,
+    DocumentListResponse,
+    DocumentStatus,
+)
 
 __all__ = [
     # User schemas
@@ -45,4 +52,10 @@ __all__ = [
     "FeedbackUpdate",
     "FeedbackRead",
     "FeedbackInDB",
+    # Document schemas
+    "DocumentCreate",
+    "DocumentResponse",
+    "DocumentUpdate",
+    "DocumentListResponse",
+    "DocumentStatus",
 ]

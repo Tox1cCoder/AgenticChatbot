@@ -7,5 +7,12 @@ class MessageRole(enum.IntEnum):
     assistant = 2
 
 
-# SQLAlchemy type
+class DocumentStatus(enum.IntEnum):
+    processing = 1
+    ready = 2
+    failed = 3
+
+
+# SQLAlchemy types
 MessageRoleType = Integer
+DocumentStatusType = Integer

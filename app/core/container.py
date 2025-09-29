@@ -10,6 +10,7 @@ from app.repositories.user import UserRepository
 from app.repositories.conversation import ConversationRepository
 from app.repositories.message import MessageRepository
 from app.repositories.feedback import FeedbackRepository
+from app.repositories.document import DocumentRepository
 
 from app.services.auth_service import AuthService
 from app.services.user_service import UserService
@@ -75,6 +76,11 @@ class Container(containers.DeclarativeContainer):
 
     feedback_repository = providers.Factory(
         FeedbackRepository,
+        session_factory=db.provided.session,
+    )
+
+    document_repository = providers.Factory(
+        DocumentRepository,
         session_factory=db.provided.session,
     )
 

@@ -27,6 +27,7 @@ class Conversation(Base):
     # Relationships
     user = relationship("User", back_populates="conversations")
     messages = relationship("Message", back_populates="conversation")
+    documents = relationship("Document", back_populates="conversation")
 
     def __repr__(self) -> str:
         return f"<Conversation(id={self.id}, title='{self.title}', owner_id={self.owner_id})>"

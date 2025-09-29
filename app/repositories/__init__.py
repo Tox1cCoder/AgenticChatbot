@@ -8,6 +8,8 @@ __all__ = [
     "ConversationRepository",
     "MessageRepository",
     "FeedbackRepository",
+    "DocumentRepository",
+    "DocumentChunkRepository",
 ]
 
 _MODULE_MAP = {
@@ -15,6 +17,8 @@ _MODULE_MAP = {
     "ConversationRepository": "conversation",
     "MessageRepository": "message",
     "FeedbackRepository": "feedback",
+    "DocumentRepository": "document",
+    "DocumentChunkRepository": "document",
 }
 
 if TYPE_CHECKING:
@@ -22,6 +26,7 @@ if TYPE_CHECKING:
     from .conversation import ConversationRepository
     from .message import MessageRepository
     from .feedback import FeedbackRepository
+    from .document import DocumentRepository, DocumentChunkRepository
 
 
 def __getattr__(name: str) -> Any:
