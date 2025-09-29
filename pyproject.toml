@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
     "alembic>=1.12.1",
     "bcrypt",
+    "celery[redis]>=5.3.4",
     "dependency-injector",
     "email-validator>=2.1.0",
     "fastapi>=0.104.1",
@@ -20,6 +21,9 @@ dependencies = [
     "psycopg2-binary>=2.9.9",
     "PyJWT",
     "python-multipart>=0.0.6",
+    "qdrant-client",
+    "redis>=5.0.1",
+    "sentence-transformers",
     "sqlalchemy>=2.0.23",
     "uvicorn[standard]>=0.24.0",
     "langchain",

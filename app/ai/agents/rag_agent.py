@@ -284,7 +284,11 @@ class RAGAgent(BaseAgent):
         return f"I found some information about '{query}', but couldn't format it properly. Please try rephrasing your question."
 
     async def process_document(
-        self, file_path: str, filename: str, user_id: str
+        self,
+        file_path: str,
+        filename: str,
+        document_id: str,
+        conversation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process an uploaded document and optionally store it in the vector database.
@@ -292,7 +296,8 @@ class RAGAgent(BaseAgent):
         Args:
             file_path: Path to the uploaded file
             filename: Original filename
-            user_id: ID of the user uploading the document
+            document_id: ID of the document record in database
+            conversation_id: ID of the conversation this document belongs to
 
         Returns:
             Dict with processing results
@@ -319,7 +324,7 @@ class RAGAgent(BaseAgent):
             stored_chunks = 0
             if self.vector_mode:
                 stored_chunks = await self._store_chunks_in_vector_db(
-                    chunks, filename, user_id
+                    chunks, filename, document_id, conversation_id
                 )
 
             processing_time = time.time() - start_time
@@ -373,7 +378,11 @@ class RAGAgent(BaseAgent):
         return chunks
 
     async def _store_chunks_in_vector_db(
-        self, chunks: List[str], filename: str, user_id: str
+        self,
+        chunks: List[str],
+        filename: str,
+        document_id: str,
+        conversation_id: Optional[str] = None,
     ) -> int:
         """Store text chunks in Qdrant vector database."""
 
@@ -390,20 +399,21 @@ class RAGAgent(BaseAgent):
 
                 # Create point for Qdrant
                 point = PointStruct(
-                    id=f"{user_id}_{filename}_{i}_{int(time.time())}",
+                    id=f"{document_id}_{filename}_{i}_{int(time.time())}",
                     vector=embedding,
                     payload={
                         "content": chunk,
                         "source": filename,
-                        "user_id": user_id,
+                        "document_id": document_id,
+                        "conversation_id": conversation_id,
                         "chunk_index": i,
                         "timestamp": datetime.now().isoformat(),
+                        "file_type": (
+                            filename.split(".")[-1] if "." in filename else "unknown"
+                        ),
                         "metadata": {
-                            "file_type": (
-                                filename.split(".")[-1]
-                                if "." in filename
-                                else "unknown"
-                            )
+                            "processing_timestamp": datetime.now().isoformat(),
+                            "chunk_length": len(chunk),
                         },
                     },
                 )
@@ -449,14 +459,14 @@ class RAGAgent(BaseAgent):
         return text
 
     async def search_documents(
-        self, query: str, user_id: Optional[str] = None, top_k: int = 5
+        self, query: str, conversation_id: Optional[str] = None, top_k: int = 5
     ) -> List[Dict[str, Any]]:
         """
         Public method to search documents.
 
         Args:
             query: Search query
-            user_id: Optional user ID to filter results
+            conversation_id: Optional conversation ID to filter results
             top_k: Number of results to return
 
         Returns:

@@ -43,9 +43,21 @@ class MessageService(IMessageService):
         created_message = self.repository.create(message_entity)
 
         if message_create_data.role == MessageRole.user:
+            # Check if there are documents being processed for this conversation
+            processing_message = self._check_processing_documents(
+                message_create_data.conversation_id
+            )
+
+            if processing_message:
+                bot_response_content = processing_message
+            else:
+                bot_response_content = self._generate_bot_response(
+                    message_create_data.content
+                )
+
             bot_response_entity = MessageFactory.create_bot_response(
                 conversation_id=message_create_data.conversation_id,
-                content=self._generate_bot_response(message_create_data.content),
+                content=bot_response_content,
             )
             self.repository.create(bot_response_entity)
 
@@ -128,6 +140,36 @@ class MessageService(IMessageService):
     def delete_message(self, message_id: UUID, user_id: UUID) -> bool:
         self.message_validation_utils.validate_message_access(user_id, message_id)
         return self.repository.delete(message_id)
+
+    def _check_processing_documents(self, conversation_id: UUID) -> Optional[str]:
+        """Check if there are documents being processed for this conversation."""
+        from app.database.session import get_db
+        from app.models.document import Document
+        from app.schemas.document import DocumentStatus
+        from sqlalchemy.orm import Session
+
+        db: Session = next(get_db())
+        try:
+            # Check for documents in processing state for this conversation
+            processing_docs = (
+                db.query(Document)
+                .filter(
+                    Document.conversation_id == conversation_id,
+                    Document.status == DocumentStatus.PROCESSING.value,
+                )
+                .all()
+            )
+
+            if processing_docs:
+                doc_names = [doc.filename for doc in processing_docs]
+                if len(doc_names) == 1:
+                    return f"Your document '{doc_names[0]}' is still being processed. Please wait for processing to complete before asking questions about it."
+                else:
+                    return f"Your documents {', '.join(doc_names)} are still being processed. Please wait for processing to complete before asking questions about them."
+
+            return None
+        finally:
+            db.close()
 
     def _generate_bot_response(self, user_message: str) -> str:
         """Generate bot response using the multi-agent system."""

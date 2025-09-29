@@ -34,8 +34,12 @@ async def upload_document(
             status_code=status.HTTP_400_BAD_REQUEST, detail="No file provided"
         )
 
-    # Create basic document record for now
+    # Read file content for background processing
+    file_content = await file.read()
+
+    # Create document record with processing status
     from app.schemas.document import DocumentCreate, DocumentStatus
+    from app.workers.celery_app import celery_app
 
     document_data = DocumentCreate(
         conversation_id=conversation_id,
@@ -44,11 +48,18 @@ async def upload_document(
         status=DocumentStatus.PROCESSING,
     )
 
+    # Create document record in database
     document = await document_service.create_document(document_data)
+
+    # Start background processing task using task registry
+    celery_app.send_task(
+        "app.workers.document_processor.process_document_task",
+        args=[str(document.id), file_content, file.filename],
+    )
 
     return ApiResponse(
         success=True,
-        message=f"Document '{file.filename}' uploaded successfully",
+        message=f"Document '{file.filename}' uploaded successfully and is being processed in the background.",
         data=document.model_dump(),
     )
 
