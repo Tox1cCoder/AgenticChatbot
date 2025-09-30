@@ -1,8 +1,12 @@
 from typing import Optional, List
 import logging
+import os
 from uuid import UUID
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
+from app.core.exceptions.validation import FileValidationError
+from app.core.exceptions.resource import ResourceNotFoundException
 from app.interfaces.document_service_interface import IDocumentService
 from app.repositories.document import DocumentRepository
 from app.schemas.document import (
@@ -102,3 +106,43 @@ class DocumentService(IDocumentService):
         """Update document status."""
         update_data = DocumentUpdate(status=status)
         return await self.update_document(document_id, update_data)
+
+    async def validate_and_create_document(
+        self,
+        filename: str,
+        file_content: bytes,
+        content_type: str,
+        conversation_id: UUID,
+    ) -> DocumentResponse:
+        """Validate file and create document record with validations."""
+        # Validate filename
+        if not filename:
+            raise FileValidationError(detail="No file provided")
+
+        # Get settings
+        settings = get_settings()
+        max_size_bytes = settings.max_file_size_mb * 1024 * 1024
+
+        # Validate file size
+        if len(file_content) > max_size_bytes:
+            raise FileValidationError(
+                detail=f"File size exceeds maximum allowed size of {settings.max_file_size_mb}MB"
+            )
+
+        # Validate file extension
+        allowed_extensions = {".txt", ".pdf", ".docx"}
+        file_extension = os.path.splitext(filename)[1].lower()
+        if file_extension not in allowed_extensions:
+            raise FileValidationError(
+                detail=f"Unsupported file type. Allowed: {', '.join(allowed_extensions)}"
+            )
+
+        # Create document record
+        document_data = DocumentCreate(
+            conversation_id=conversation_id,
+            filename=filename,
+            file_type=content_type or "unknown",
+            status=DocumentStatus.PROCESSING,
+        )
+
+        return await self.create_document(document_data)

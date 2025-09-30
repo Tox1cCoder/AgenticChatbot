@@ -14,27 +14,8 @@ from contextlib import contextmanager
 import json
 import functools
 
-# LangSmith imports
-try:
-    from langsmith import Client, RunTree
-    from langsmith.run_helpers import traceable
-
-    LANGSMITH_AVAILABLE = True
-except ImportError:
-    LANGSMITH_AVAILABLE = False
-
-    # Create dummy decorators if LangSmith is not available
-    def traceable(func):
-        return func
-
-    class Client:
-        def __init__(self, *args, **kwargs):
-            pass
-
-    class RunTree:
-        def __init__(self, *args, **kwargs):
-            pass
-
+from langsmith import Client, RunTree
+from langsmith.run_helpers import traceable
 
 from ..schemas import AgentMessage, AgentResponse, WorkflowConfig
 
@@ -65,7 +46,7 @@ class LangSmithTracker:
             enabled: Whether tracking is enabled
         """
         self.project_name = project_name
-        self.enabled = enabled and LANGSMITH_AVAILABLE
+        self.enabled = enabled
 
         if self.enabled:
             # Initialize LangSmith client
@@ -85,12 +66,7 @@ class LangSmithTracker:
             logger.info(f"LangSmith tracking enabled for project: {project_name}")
         else:
             self.client = None
-            if not LANGSMITH_AVAILABLE:
-                logger.warning(
-                    "LangSmith not available - install with 'pip install langsmith'"
-                )
-            else:
-                logger.info("LangSmith tracking disabled")
+            logger.info("LangSmith tracking disabled")
 
         # Track active runs
         self.active_runs: Dict[str, RunTree] = {}

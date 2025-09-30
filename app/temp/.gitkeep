@@ -1,0 +1,10 @@
+# Temporary File Storage
+
+This directory is used for temporary storage of uploaded files during processing.
+
+Files are automatically cleaned up after processing is complete.
+
+## Structure
+- Upload files are stored here temporarily during Celery processing
+- Files are removed after successful processing or failure
+- Directory is created automatically if it doesn't exist

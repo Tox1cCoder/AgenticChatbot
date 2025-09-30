@@ -81,6 +81,42 @@ class Settings(BaseSettings):
         env="GEMINI_API_KEY",
     )
 
+    # Qdrant Configuration
+    qdrant_url: str = Field(
+        default="http://localhost:6333",
+        description="Qdrant vector database URL",
+        env="QDRANT_URL",
+    )
+    qdrant_collection_name: str = Field(
+        default="documents",
+        description="Qdrant collection name for document storage",
+        env="QDRANT_COLLECTION_NAME",
+    )
+
+    # Redis Configuration
+    celery_broker_url: str = Field(
+        default="redis://localhost:6379/0",
+        description="Celery broker URL",
+        env="CELERY_BROKER_URL",
+    )
+    celery_result_backend: str = Field(
+        default="redis://localhost:6379/0",
+        description="Celery result backend URL",
+        env="CELERY_RESULT_BACKEND",
+    )
+
+    # File Storage Configuration
+    temp_storage_path: str = Field(
+        default="app/temp",
+        description="Temporary file storage path",
+        env="TEMP_STORAGE_PATH",
+    )
+    max_file_size_mb: int = Field(
+        default=50,
+        description="Maximum file upload size in MB",
+        env="MAX_FILE_SIZE_MB",
+    )
+
     # Application metadata
     app_name: str = Field(
         default="Sample Chatbot",

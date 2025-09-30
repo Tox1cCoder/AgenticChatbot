@@ -1,66 +1,63 @@
+import logging
+from typing import Annotated
+from uuid import UUID
+
 from fastapi import (
     APIRouter,
     Depends,
     File,
     Form,
     UploadFile,
-    HTTPException,
     status,
 )
-from typing import List, Optional, Dict, Any, Annotated
-from uuid import UUID
 
+from app.core.dependency_injection import AppAutoInjector
+from app.core.exceptions.validation import FileValidationError
+from app.core.exceptions.resource import ResourceNotFoundException
+from app.interfaces.document_service_interface import IDocumentService
 from app.schemas.document import (
     DocumentResponse,
     DocumentListResponse,
     DocumentUpdate,
+    DocumentCreate,
+    DocumentStatus,
 )
-from app.core.dependency_injection import AppAutoInjector
-from app.interfaces.document_service_interface import IDocumentService
 from app.schemas.responses.api_response import ApiResponse
+from app.services.document_processing_service import DocumentProcessingService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
-@router.post("/upload", response_model=ApiResponse)
+@router.post("/upload", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
 @AppAutoInjector.auto_inject()
 async def upload_document(
     document_service: IDocumentService,
     file: UploadFile = File(...),
     conversation_id: UUID = Form(...),
 ) -> ApiResponse:
-    if not file.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="No file provided"
-        )
-
-    # Read file content for background processing
+    """Upload a document and start background processing"""
     file_content = await file.read()
 
-    # Create document record with processing status
-    from app.schemas.document import DocumentCreate, DocumentStatus
-    from app.workers.celery_app import celery_app
-
-    document_data = DocumentCreate(
+    # Validate and create document
+    document = await document_service.validate_and_create_document(
+        filename=file.filename or "",
+        file_content=file_content,
+        content_type=file.content_type or "unknown",
         conversation_id=conversation_id,
-        filename=file.filename,
-        file_type=file.content_type or "unknown",
-        status=DocumentStatus.PROCESSING,
     )
 
-    # Create document record in database
-    document = await document_service.create_document(document_data)
-
-    # Start background processing task using task registry
-    celery_app.send_task(
-        "app.workers.document_processor.process_document_task",
-        args=[str(document.id), file_content, file.filename],
+    # Start background processing
+    processing_service = DocumentProcessingService()
+    task_info = await processing_service.start_processing_task(
+        str(document.id), file_content, file.filename or "unknown"
     )
 
     return ApiResponse(
         success=True,
         message=f"Document '{file.filename}' uploaded successfully and is being processed in the background.",
-        data=document.model_dump(),
+        data={"document": document.model_dump(), "processing": task_info},
     )
 
 
@@ -69,10 +66,11 @@ async def upload_document(
 async def get_document(
     document_service: IDocumentService, current_user_id: UUID, document_id: UUID
 ) -> ApiResponse:
+    """Get document by ID"""
     document = await document_service.get_document(document_id)
 
     if not document:
-        return ApiResponse(success=False, message="Document not found", data=None)
+        raise ResourceNotFoundException(detail="Document not found")
 
     return ApiResponse(
         success=True,
@@ -109,10 +107,11 @@ async def update_document(
     document_id: UUID,
     update_data: DocumentUpdate,
 ) -> ApiResponse:
+    """Update document"""
     document = await document_service.update_document(document_id, update_data)
 
     if not document:
-        return ApiResponse(success=False, message="Document not found", data=None)
+        raise ResourceNotFoundException(detail="Document not found")
 
     return ApiResponse(
         success=True,
@@ -126,12 +125,11 @@ async def update_document(
 async def delete_document(
     document_service: IDocumentService, current_user_id: UUID, document_id: UUID
 ) -> ApiResponse:
+    """Delete document"""
     success = await document_service.delete_document(document_id)
 
     if not success:
-        return ApiResponse(
-            success=False, message="Document not found or access denied", data=None
-        )
+        raise ResourceNotFoundException(detail="Document not found or access denied")
 
     return ApiResponse(
         success=True,
