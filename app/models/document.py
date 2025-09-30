@@ -15,7 +15,7 @@ class Document(Base):
         UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False
     )
     filename = Column(String(255), nullable=False)
-    file_type = Column(String(50), nullable=False)
+    file_type = Column(String(100), nullable=False)
     status = Column(
         Integer, nullable=False, default=1
     )  # 1=processing, 2=ready, 3=failed

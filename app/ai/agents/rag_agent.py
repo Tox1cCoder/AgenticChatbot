@@ -9,7 +9,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from sentence_transformers import SentenceTransformer
 import PyPDF2
-from docx import Document
+from docx import Document as DocxDocument
 
 from ..interfaces import BaseAgent
 from ..schemas import (
@@ -487,7 +487,7 @@ class RAGAgent(BaseAgent):
 
     def _extract_docx_text(self, file_path: str) -> str:
         """Extract text from DOCX file."""
-        doc = Document(file_path)
+        doc = DocxDocument(file_path)
         text = ""
         for paragraph in doc.paragraphs:
             text += paragraph.text + "\n"
