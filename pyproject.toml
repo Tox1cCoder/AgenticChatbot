@@ -5,30 +5,53 @@ build-backend = "hatchling.build"
 [project]
 name = "sample-chatbot"
 version = "0.1.0"
-description = "A sample chatbot application with FastAPI and PostgreSQL"
+description = "A RAG-powered chatbot with FastAPI, PostgreSQL, LangGraph, and Qdrant vector search"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "alembic>=1.12.1",
-    "bcrypt",
-    "celery[redis]>=5.3.4",
-    "dependency-injector",
-    "email-validator>=2.1.0",
+    # Core Framework
     "fastapi>=0.104.1",
-    "google-generativeai",
+    "uvicorn[standard]>=0.24.0",
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
-    "psycopg2-binary>=2.9.9",
-    "PyJWT",
     "python-multipart>=0.0.6",
-    "qdrant-client",
-    "redis>=5.0.1",
-    "sentence-transformers",
+    
+    # Database & ORM
     "sqlalchemy>=2.0.23",
-    "uvicorn[standard]>=0.24.0",
-    "langchain",
-    "langgraph",
-    "langsmith",
+    "alembic>=1.12.1",
+    "psycopg2-binary>=2.9.9",
+    
+    # Authentication & Security
+    "PyJWT>=2.8.0",
+    "bcrypt>=4.1.0",
+    "email-validator>=2.1.0",
+    
+    # Dependency Injection
+    "dependency-injector>=4.41.0",
+    
+    # Task Queue & Background Processing
+    "celery[redis]>=5.3.4",
+    "redis>=5.0.1",
+    
+    # AI & LangChain Ecosystem
+    "langchain>=0.1.0",
+    "langchain-community>=0.0.20",
+    "langchain-core>=0.1.0",
+    "langgraph>=0.0.20",
+    "langsmith>=0.0.80",
+    "google-generativeai>=0.3.0",
+    
+    # Vector Database & Embeddings
+    "qdrant-client>=1.7.0",
+    "sentence-transformers>=2.2.2",
+    
+    # Document Processing
+    "pypdf>=3.17.0",
+    "python-docx>=1.1.0",
+    "openpyxl>=3.1.2",
+    
+    # Utilities
+    "fastapi-radar>=0.0.2",
 ]
 
 [project.optional-dependencies]

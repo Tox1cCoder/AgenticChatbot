@@ -28,7 +28,7 @@ class RAGAgent:
         self.collection_name = collection_name
         self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
         self.embedding_dimension = 384
-        self.model_name = "gemini-2.0-flash-exp"
+        self.model_name = "gemini-2.5-flash"
         self.gemini_client = None
         self._init_gemini()
         self._init_collection()
@@ -71,7 +71,7 @@ class RAGAgent:
         query = message.content
         conversation_history = message.metadata.get("history", [])
 
-        retrieved_docs = await self._search(query)
+        retrieved_docs = await self._search(query, conversation_id=conversation_id)
 
         prompt = build_rag_prompt(query, retrieved_docs, conversation_history)
 
@@ -103,14 +103,30 @@ class RAGAgent:
             },
         )
 
-    async def _search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    async def _search(
+        self, query: str, top_k: int = 5, conversation_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         query_embedding = self.embedding_model.encode(query).tolist()
+
+        # Build filter for conversation_id if provided
+        search_filter = None
+        if conversation_id:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+            search_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="conversation_id", match=MatchValue(value=conversation_id)
+                    )
+                ]
+            )
 
         search_results = self.qdrant_client.search(
             collection_name=self.collection_name,
             query_vector=query_embedding,
             limit=top_k,
             score_threshold=0.7,
+            query_filter=search_filter,
         )
 
         results = []
@@ -130,18 +146,10 @@ class RAGAgent:
         return results
 
     async def _generate(self, prompt: str) -> str:
-        if not self.gemini_client:
-            logger.error("Gemini client not initialized")
-            return "Error: Gemini API not configured"
-
-        try:
-            response = self.gemini_client.models.generate_content(
-                model=self.model_name, contents=prompt
-            )
-            return response.text if hasattr(response, "text") else str(response)
-        except Exception as e:
-            logger.error(f"Gemini API error: {e}")
-            return f"Error generating response: {str(e)}"
+        response = self.gemini_client.models.generate_content(
+            model=self.model_name, contents=prompt
+        )
+        return response.text if hasattr(response, "text") else str(response)
 
     async def process_document(
         self,
@@ -272,3 +280,75 @@ class RAGAgent:
 
         logger.info(f"Stored {len(points)} chunks in vector database")
         return len(points)
+
+    async def initialize(self):
+        """Initialize the RAG agent (already done in __init__, but provided for compatibility)"""
+        logger.info("RAG Agent initialized")
+        return True
+
+    async def cleanup(self):
+        """Cleanup resources (close connections if needed)"""
+        try:
+            if hasattr(self.qdrant_client, "close"):
+                self.qdrant_client.close()
+            logger.info("RAG Agent cleaned up successfully")
+        except Exception as e:
+            logger.warning(f"Error during RAG Agent cleanup: {e}")
+
+    def get_status(self) -> dict:
+        """Get the current status of the RAG agent"""
+        try:
+            collections = self.qdrant_client.get_collections()
+            collection_exists = any(
+                c.name == self.collection_name for c in collections.collections
+            )
+
+            collection_info = None
+            if collection_exists:
+                collection_info = self.qdrant_client.get_collection(
+                    self.collection_name
+                )
+
+            return {
+                "status": "healthy",
+                "collection_exists": collection_exists,
+                "collection_name": self.collection_name,
+                "vectors_count": (
+                    collection_info.vectors_count if collection_info else 0
+                ),
+                "embedding_model": "all-MiniLM-L6-v2",
+                "embedding_dimension": self.embedding_dimension,
+            }
+        except Exception as e:
+            logger.error(f"Error getting RAG agent status: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+            }
+
+    async def delete_document_vectors(self, document_id: str) -> dict:
+        """Delete all vectors associated with a document ID"""
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+            delete_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="document_id", match=MatchValue(value=document_id)
+                    )
+                ]
+            )
+
+            self.qdrant_client.delete(
+                collection_name=self.collection_name, points_selector=delete_filter
+            )
+
+            logger.info(f"Deleted vectors for document {document_id}")
+            return {
+                "success": True,
+                "document_id": document_id,
+                "message": f"Vectors deleted for document {document_id}",
+            }
+        except Exception as e:
+            logger.error(f"Error deleting vectors for document {document_id}: {e}")
+            return {"success": False, "document_id": document_id, "error": str(e)}

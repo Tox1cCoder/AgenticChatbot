@@ -94,16 +94,23 @@ def upload_document(uploaded_file) -> Optional[Dict[str, Any]]:
 
 
 def get_uploaded_documents() -> Dict[str, Any]:
-    """Get list of uploaded documents for current user"""
+    """Get list of uploaded documents for current conversation"""
     try:
         headers = {}
         if st.session_state.get("auth_token"):
             headers["Authorization"] = f"Bearer {st.session_state.auth_token}"
 
-        response = requests.get(
-            f"{st.session_state.get('API_BASE_URL', 'http://localhost:8000')}/documents/",
-            headers=headers,
-        )
+        # Get documents for the specific conversation
+        if (
+            st.session_state.get("current_conversation_id")
+            and st.session_state.current_conversation_id != "pending_new"
+        ):
+            response = requests.get(
+                f"{st.session_state.get('API_BASE_URL', 'http://localhost:8000')}/documents/conversation/{st.session_state.current_conversation_id}",
+                headers=headers,
+            )
+        else:
+            return {}
 
         if response.status_code == 200:
             return response.json()
@@ -116,47 +123,62 @@ def get_uploaded_documents() -> Dict[str, Any]:
 
 
 def render_document_list():
-    """Render list of uploaded documents for current conversation"""
+    """Render list of uploaded documents for current conversation with status"""
     # Only show document list if a conversation is selected
     if (
         st.session_state.get("current_conversation_id")
         and st.session_state.current_conversation_id != "pending_new"
     ):
         with st.expander("📚 Conversation Documents", expanded=False):
-            docs = get_uploaded_documents()
-            if docs and docs.get("data"):
-                # Filter documents for current conversation if conversation_id is available
-                conversation_docs = []
-                for doc in docs["data"]:
-                    # If document has conversation_id, only show if it matches current conversation
-                    doc_conv_id = doc.get("conversation_id")
-                    if (
-                        doc_conv_id is None
-                        or doc_conv_id == st.session_state.current_conversation_id
-                    ):
-                        conversation_docs.append(doc)
+            docs_response = get_uploaded_documents()
 
-                if conversation_docs:
-                    for doc in conversation_docs:
-                        col1, col2 = st.columns([3, 1])
+            if docs_response and docs_response.get("data"):
+                doc_list = docs_response.get("data", {})
+                documents = doc_list.get("documents", [])
+
+                if documents:
+                    st.caption(f"Total: {doc_list.get('total', 0)} document(s)")
+
+                    for doc in documents:
+                        # Status mapping
+                        status_map = {
+                            1: {"icon": "⏳", "text": "Processing", "color": "orange"},
+                            2: {"icon": "✅", "text": "Ready", "color": "green"},
+                            3: {"icon": "❌", "text": "Failed", "color": "red"},
+                        }
+
+                        status_info = status_map.get(
+                            doc.get("status"),
+                            {"icon": "❓", "text": "Unknown", "color": "gray"},
+                        )
+
+                        col1, col2, col3 = st.columns([3, 1, 1])
                         with col1:
-                            st.text(doc.get("filename", "Unknown"))
-                            if doc.get("conversation_id"):
-                                st.caption("📎 Linked to conversation")
-                            else:
-                                st.caption("📄 Global document")
+                            st.text(
+                                f"{status_info['icon']} {doc.get('filename', 'Unknown')}"
+                            )
+                            st.caption(
+                                f"Uploaded: {doc.get('upload_time', 'N/A')[:16]}"
+                            )
                         with col2:
+                            st.markdown(
+                                f":{status_info['color']}[**{status_info['text']}**]"
+                            )
+                        with col3:
                             if st.button(
                                 "🗑️",
-                                key=f"del_{doc.get('id')}_{st.session_state.current_conversation_id}",
-                                help="Delete",
+                                key=f"del_{doc.get('id')}",
+                                help="Delete document",
                             ):
-                                delete_document(doc.get("id"))
-                                st.rerun()
+                                if delete_document(doc.get("id")):
+                                    st.cache_data.clear()
+                                    st.rerun()
+
+                        st.divider()
                 else:
-                    st.text("No documents in this conversation")
+                    st.info("No documents in this conversation")
             else:
-                st.text("No documents uploaded yet")
+                st.info("No documents uploaded yet")
 
 
 def delete_document(document_id: str) -> bool:

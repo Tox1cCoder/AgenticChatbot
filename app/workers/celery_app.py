@@ -25,10 +25,7 @@ celery_app.conf.worker_prefetch_multiplier = 1
 celery_app.conf.task_acks_late = True
 celery_app.conf.task_reject_on_worker_lost = True
 
-celery_app.autodiscover_tasks(["app.workers"])
-
-
-try:
-    from app.workers import cleanup_tasks
-except ImportError:
-    pass
+celery_app.conf.imports = (
+    "app.workers.document_processor",
+    "app.workers.cleanup_tasks",
+)

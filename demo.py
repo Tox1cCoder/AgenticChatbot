@@ -364,7 +364,7 @@ def render_conversation_sidebar():
 
         # Document upload and list section for selected conversation
         render_upload_section()
-        # render_document_list()
+        render_document_list()
 
         st.divider()
 
@@ -372,7 +372,7 @@ def render_conversation_sidebar():
             user = get_user(st.session_state.current_user_id)
             if user:
                 st.markdown(f"**👤 {user['username']}**")
-                if st.button("🚪 Sign Out", use_container_width=True):
+                if st.button("Sign Out", use_container_width=True):
                     st.session_state.current_user_id = None
                     st.session_state.current_conversation_id = None
                     reset_conversation_state()
@@ -705,9 +705,6 @@ def render_chat_interface():
         )
 
         with st.form("message_form", clear_on_submit=True):
-            uploaded_file = st.file_uploader(
-                "Upload a document for context", type=["pdf", "txt", "docx"]
-            )
 
             col1, col2 = st.columns([4, 1])
             with col1:
@@ -722,18 +719,6 @@ def render_chat_interface():
                 send_button = st.form_submit_button("Send", use_container_width=True)
 
             if send_button:
-                if uploaded_file is not None:
-                    with st.spinner("Processing uploaded file..."):
-                        files = {"file": uploaded_file}
-                        doc_response = make_api_request(
-                            "POST", "/documents/", files=files
-                        )
-                        if doc_response and doc_response.get("data"):
-                            st.success(f"✅ Document uploaded: {uploaded_file.name}")
-                        else:
-                            st.error("❌ Failed to upload document")
-                            return
-
                 if message_content.strip():
                     if conversation_id == "pending_new":
                         conversation_data = {

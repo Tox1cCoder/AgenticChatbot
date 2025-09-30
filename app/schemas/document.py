@@ -23,7 +23,7 @@ class DocumentBase(BaseModel):
 
     filename: str
     file_type: str
-    status: int = DocumentStatus.PROCESSING
+    status: int = DocumentStatus.PROCESSING.value
 
 
 class DocumentCreate(DocumentBase):

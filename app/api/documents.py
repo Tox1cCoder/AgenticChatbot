@@ -40,7 +40,6 @@ async def upload_document(
     """Upload a document and start background processing"""
     file_content = await file.read()
 
-    # Validate and create document
     document = await document_service.validate_and_create_document(
         filename=file.filename or "",
         file_content=file_content,
@@ -67,6 +66,7 @@ async def get_document(
     document_service: IDocumentService, current_user_id: UUID, document_id: UUID
 ) -> ApiResponse:
     """Get document by ID"""
+
     document = await document_service.get_document(document_id)
 
     if not document:
@@ -108,11 +108,15 @@ async def update_document(
     update_data: DocumentUpdate,
 ) -> ApiResponse:
     """Update document"""
+    logger.info(f"Update document request: {document_id} by user: {current_user_id}")
+
     document = await document_service.update_document(document_id, update_data)
 
     if not document:
+        logger.warning(f"Document not found for update: {document_id}")
         raise ResourceNotFoundException(detail="Document not found")
 
+    logger.info(f"Document updated successfully: {document_id}")
     return ApiResponse(
         success=True,
         message="Document updated successfully",
@@ -126,10 +130,20 @@ async def delete_document(
     document_service: IDocumentService, current_user_id: UUID, document_id: UUID
 ) -> ApiResponse:
     """Delete document"""
+    logger.info(f"Delete document request: {document_id} by user: {current_user_id}")
+
     success = await document_service.delete_document(document_id)
 
     if not success:
+        logger.warning(f"Document not found for deletion: {document_id}")
         raise ResourceNotFoundException(detail="Document not found or access denied")
+
+    logger.info(f"Document deleted successfully: {document_id}")
+    return ApiResponse(
+        success=True,
+        message="Document deleted successfully",
+        data={"deleted_document_id": document_id},
+    )
 
     return ApiResponse(
         success=True,

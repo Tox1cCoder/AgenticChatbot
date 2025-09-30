@@ -3,7 +3,9 @@ import logging
 import os
 from uuid import UUID
 from sqlalchemy.orm import Session
+import asyncio
 
+from app.ai.agents.rag_agent import RAGAgent
 from app.core.config import get_settings
 from app.core.exceptions.validation import FileValidationError
 from app.core.exceptions.resource import ResourceNotFoundException
@@ -65,10 +67,34 @@ class DocumentService(IDocumentService):
             db.close()
 
     async def delete_document(self, document_id: UUID) -> bool:
-        """Delete document."""
+        """Delete document and its vectors from Qdrant."""
         db: Session = next(get_db())
         try:
             document_repo = DocumentRepository(db)
+
+            # Delete vectors from Qdrant first
+            try:
+                settings = get_settings()
+                rag_agent = RAGAgent(
+                    qdrant_url=settings.qdrant_url,
+                    collection_name=settings.qdrant_collection_name,
+                )
+                await rag_agent.initialize()
+                result = await rag_agent.delete_document_vectors(str(document_id))
+                await rag_agent.cleanup()
+
+                if result.get("success"):
+                    logger.info(
+                        f"Successfully deleted vectors for document {document_id}"
+                    )
+                else:
+                    logger.warning(
+                        f"Failed to delete vectors for document {document_id}: {result.get('error')}"
+                    )
+            except Exception as e:
+                logger.error(f"Error deleting vectors for document {document_id}: {e}")
+
+            # Delete from database
             return document_repo.delete(document_id)
         finally:
             db.close()
@@ -142,7 +168,7 @@ class DocumentService(IDocumentService):
             conversation_id=conversation_id,
             filename=filename,
             file_type=content_type or "unknown",
-            status=DocumentStatus.PROCESSING,
+            status=DocumentStatus.PROCESSING.value,
         )
 
         return await self.create_document(document_data)

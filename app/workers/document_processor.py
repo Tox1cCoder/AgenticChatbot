@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.agents.rag_agent import RAGAgent
 from app.core.config import get_settings
-from app.database.session import get_db
+from app.database.session import SessionLocal
 from app.models.document import Document
 from app.repositories.document import DocumentRepository
 from app.schemas.document import DocumentUpdate, DocumentStatus
@@ -45,7 +45,7 @@ def process_document_task(
         f"Starting document processing task {task_id} for document {document_id}"
     )
 
-    db: Session = next(get_db())
+    db = SessionLocal()
     document_repo = DocumentRepository(db)
 
     try:
@@ -156,7 +156,7 @@ def process_document_task(
 
 @celery_app.task(name="app.workers.document_processor.cleanup_failed_documents")
 def cleanup_failed_documents() -> Dict[str, Any]:
-    db: Session = next(get_db())
+    db = SessionLocal()
     document_repo = DocumentRepository(db)
 
     try:
