@@ -85,24 +85,10 @@ class IAgent(ABC):
         """
         pass
 
-    @abstractmethod
-    async def health_check(self) -> bool:
-        """
-        Check if the agent is healthy and ready to process requests.
-
-        Returns:
-            bool: True if healthy, False otherwise
-        """
-        pass
 
     @abstractmethod
     async def initialize(self) -> None:
         """Initialize the agent and any required resources"""
-        pass
-
-    @abstractmethod
-    async def cleanup(self) -> None:
-        """Clean up any resources used by the agent"""
         pass
 
 
@@ -319,27 +305,6 @@ class BaseAgent(IAgent):
         self._initialized = True
         self._logger.info(f"Agent {self.agent_id} initialized successfully")
 
-    async def cleanup(self) -> None:
-        """Clean up agent resources"""
-        if not self._initialized:
-            return
-
-        self._logger.info(f"Cleaning up agent {self.agent_id}")
-        await self._cleanup_impl()
-        self._initialized = False
-        self._logger.info(f"Agent {self.agent_id} cleaned up successfully")
-
-    async def health_check(self) -> bool:
-        """Check agent health"""
-        if not self._initialized:
-            return False
-
-        try:
-            return await self._health_check_impl()
-        except Exception as e:
-            self._logger.error(f"Health check failed for agent {self.agent_id}: {e}")
-            return False
-
     def register_tool(self, tool: ITool) -> None:
         """
         Register a tool with this agent.
@@ -416,17 +381,6 @@ class BaseAgent(IAgent):
     async def _initialize_impl(self) -> None:
         """Implementation-specific initialization"""
         pass
-
-    @abstractmethod
-    async def _cleanup_impl(self) -> None:
-        """Implementation-specific cleanup"""
-        pass
-
-    @abstractmethod
-    async def _health_check_impl(self) -> bool:
-        """Implementation-specific health check"""
-        pass
-
 
 class BaseTool(ITool):
     """

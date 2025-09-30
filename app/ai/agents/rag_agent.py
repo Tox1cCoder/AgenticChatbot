@@ -1,10 +1,11 @@
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+from uuid import UUID
 import logging
 import time
 import asyncio
-from uuid import UUID
 
+from google import genai
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from sentence_transformers import SentenceTransformer
@@ -21,7 +22,16 @@ from ..schemas import (
     AgentConfig,
     RAGAgentConfig,
     AgentCapability,
+    MessageRole,
 )
+from ..memory import get_memory_manager
+from ..prompts import (
+    RAG_AGENT_SYSTEM_PROMPT,
+    RAG_NO_RESULTS_TEMPLATE,
+    ERROR_NO_DOCUMENTS_FOUND,
+    get_rag_response_with_context,
+)
+from ...core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +55,8 @@ class RAGAgent(BaseAgent):
             ],
             vector_store_path=qdrant_url,
         )
-        super().__init__(config)
-        self.logger = logging.getLogger("rag_agent")
+        # Pass logger to BaseAgent constructor
+        super().__init__(config, logging.getLogger("rag_agent"))
 
         # Initialize Qdrant client
         self.qdrant_client = QdrantClient(url=qdrant_url)
@@ -56,28 +66,37 @@ class RAGAgent(BaseAgent):
         # Initialize embedding model
         self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
         self.embedding_dimension = 384  # Default for all-MiniLM-L6-v2
-        self.logger.info("Sentence transformer model loaded successfully")
 
-        # Initialize collection
-        asyncio.create_task(self._initialize_collection())
+        # Initialize Gemini client
+        self._init_gemini_client()
+
+        # Flag to track if collection is initialized
+        self._collection_initialized = False
+
+    def _init_gemini_client(self) -> None:
+        """Initialize the Gemini API client."""
+        try:
+            api_key = settings.gemini_api_key
+            if not api_key:
+                self.logger.error("Gemini API key not configured")
+                self.gemini_client = None
+                return
+
+            # Clean up the API key if it has the prefix
+            if api_key.startswith("GEMINI_API_KEY="):
+                api_key = api_key.split("=", 1)[-1].strip()
+
+            self.gemini_client = genai.Client(api_key=api_key)
+            self.logger.info("Gemini client initialized successfully")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Gemini client: {e}")
+            self.gemini_client = None
 
     async def _initialize_impl(self) -> None:
         """Initialize the RAG agent and vector collection."""
         await self._initialize_collection()
+        self._collection_initialized = True
         self.logger.info("RAG agent initialized successfully")
-
-    async def _cleanup_impl(self) -> None:
-        """Clean up RAG agent resources including Qdrant connections."""
-        if self.qdrant_client:
-            try:
-                self.qdrant_client.close()
-            except:
-                pass
-        self.logger.info("RAG agent cleaned up successfully")
-
-    async def _health_check_impl(self) -> bool:
-        """Check if the RAG agent is healthy."""
-        return True
 
     async def can_handle_request(self, request: AgentRequest) -> float:
         """Determine if this agent can handle the given request."""
@@ -94,6 +113,9 @@ class RAGAgent(BaseAgent):
 
     async def _initialize_collection(self):
         """Initialize Qdrant collection if it doesn't exist."""
+        if self._collection_initialized:
+            return
+
         try:
             collections = self.qdrant_client.get_collections()
             if not any(
@@ -123,8 +145,32 @@ class RAGAgent(BaseAgent):
     ) -> AgentResponse:
         """Process a message using RAG functionality with vector search"""
 
+        # Ensure collection is initialized
+        if not self._collection_initialized:
+            await self._initialize_collection()
+            self._collection_initialized = True
+
         try:
             query = message.content
+
+            # Get memory manager and conversation memory
+            memory_manager = get_memory_manager()
+            conversation_memory = None
+
+            if conversation_id and user_id:
+                try:
+                    conversation_memory = await memory_manager.get_memory(
+                        UUID(conversation_id), UUID(user_id)
+                    )
+
+                    # Add current message to memory (for context only)
+                    conversation_memory.add_message(message)
+
+                    # Get recent conversation history for context
+                    recent_messages = conversation_memory.get_recent_messages(limit=3)
+
+                except Exception as e:
+                    self.logger.warning(f"Could not load conversation memory: {e}")
 
             # Perform search
             search_results = await self._vector_search(query)
@@ -155,10 +201,14 @@ class RAGAgent(BaseAgent):
             response_content = self._generate_response(query, search_results)
 
             response_message = AgentMessage(
-                role=message.role,
+                role=MessageRole.ASSISTANT,
                 content=response_content,
-                message_type=message.message_type,
+                message_type=MessageType.TEXT,
             )
+
+            # Store response in memory (for context only)
+            if conversation_memory:
+                conversation_memory.add_message(response_message)
 
             return AgentResponse(
                 response_id=message.id,
@@ -177,6 +227,7 @@ class RAGAgent(BaseAgent):
                     "timestamp": datetime.now().isoformat(),
                     "citations": citations,  # Include citation details for traceability
                     "primary_source": citations[0] if citations else None,
+                    "memory_enabled": conversation_memory is not None,
                 },
             )
 
@@ -184,8 +235,8 @@ class RAGAgent(BaseAgent):
             self.logger.error(f"RAG processing failed: {e}")
 
             error_message = AgentMessage(
-                role=message.role,
-                content="I apologize, but I couldn't find the information you're looking for. Please try rephrasing your question.",
+                role=MessageRole.ASSISTANT,
+                content=ERROR_NO_DOCUMENTS_FOUND,
                 message_type=MessageType.ERROR,
             )
 
@@ -240,7 +291,7 @@ class RAGAgent(BaseAgent):
         """Generate a response with proper citations based on search results."""
 
         if not search_results:
-            return f"I couldn't find specific information about '{query}' in my knowledge base. Could you please rephrase your question or provide more context?"
+            return RAG_NO_RESULTS_TEMPLATE.format(query=query)
 
         if isinstance(search_results, list) and search_results:
             # Use the best result for primary response
@@ -250,26 +301,14 @@ class RAGAgent(BaseAgent):
             page_number = result.get("page_number")
             score = result.get("score", 0.0)
 
-            # Format citation
-            citation = f"'{source}'"
-            if page_number:
-                citation = f"'{source}' (page {page_number})"
-
-            # Truncate content for quote if too long
-            quote = content[:300] + "..." if len(content) > 300 else content
-
-            # Build response with citation
-            response = f'According to {citation}:\n\n"{quote}"\n\n'
-
-            # Add relevance indicator
-            if score > 0.8:
-                response += (
-                    "This information appears to be highly relevant to your query."
-                )
-            elif score > 0.7:
-                response += "This information seems relevant to your query."
-            else:
-                response += "This information may be related to your query."
+            # Use the helper function from prompts.py
+            response = get_rag_response_with_context(
+                query=query,
+                content=content,
+                source=source,
+                page_number=page_number,
+                score=score,
+            )
 
             # Add additional sources if available
             if len(search_results) > 1:
@@ -307,6 +346,11 @@ class RAGAgent(BaseAgent):
         Returns:
             Dict with processing results
         """
+
+        # Ensure collection is initialized
+        if not self._collection_initialized:
+            await self._initialize_collection()
+            self._collection_initialized = True
 
         start_time = time.time()
 

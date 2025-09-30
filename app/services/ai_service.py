@@ -8,6 +8,7 @@ from datetime import datetime
 from ..ai.schemas import (
     AgentMessage,
     AgentResponse,
+    MessageRole,
     MessageType,
     WorkflowConfig,
     ConversationState,
@@ -124,60 +125,51 @@ class AIService(IAgentService):
         Returns:
             str: Generated response from the multi-agent system
         """
-        try:
-            start_time = datetime.now()
-            self.stats["total_requests"] += 1
+        start_time = datetime.now()
+        self.stats["total_requests"] += 1
 
-            # Convert to agent message format
-            agent_message = AgentMessage(
-                content=user_message,
-                message_type=MessageType.USER,
-                metadata={
-                    "conversation_id": (
-                        str(conversation_id) if conversation_id else None
-                    ),
-                    "user_id": str(user_id) if user_id else None,
-                    "timestamp": start_time.isoformat(),
-                    "source": "message_service",
-                },
-            )
+        # Convert to agent message format
+        agent_message = AgentMessage(
+            role=MessageRole.USER,
+            content=user_message,
+            message_type=MessageType.TEXT,
+            metadata={
+                "conversation_id": (str(conversation_id) if conversation_id else None),
+                "user_id": str(user_id) if user_id else None,
+                "timestamp": start_time.isoformat(),
+                "source": "message_service",
+            },
+        )
 
-            # Get conversation context if available
-            conversation_key = str(conversation_id) if conversation_id else "default"
-            context = self.conversation_contexts.get(conversation_key, {})
+        # Get conversation context if available
+        conversation_key = str(conversation_id) if conversation_id else "default"
+        context = self.conversation_contexts.get(conversation_key, {})
 
-            logger.info(
-                f"Processing message for conversation {conversation_key}: {user_message[:100]}..."
-            )
+        logger.info(
+            f"Processing message for conversation {conversation_key}: {user_message[:100]}..."
+        )
 
-            # Execute the multi-agent workflow
-            response = await self.workflow.execute(
-                message=agent_message,
-                conversation_id=str(conversation_id) if conversation_id else None,
-                user_id=str(user_id) if user_id else None,
-            )
+        # Execute the multi-agent workflow
+        response = await self.workflow.execute(
+            message=agent_message,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            user_id=str(user_id) if user_id else None,
+        )
 
-            # Update conversation context
-            self._update_conversation_context(conversation_key, agent_message, response)
+        # Update conversation context
+        self._update_conversation_context(conversation_key, agent_message, response)
 
-            # Calculate metrics
-            execution_time = (datetime.now() - start_time).total_seconds()
-            self._update_stats(execution_time, True)
+        # Calculate metrics
+        execution_time = (datetime.now() - start_time).total_seconds()
+        self._update_stats(execution_time, True)
 
-            # Extract response content
-            response_content = (
-                response.content if response else "[Error: No response generated]"
-            )
+        # Extract response content
+        response_content = (
+            response.message.content if response else "[Error: No response generated]"
+        )
 
-            logger.info(f"Response generated successfully in {execution_time:.2f}s")
-            return response_content
-
-        except Exception as e:
-            logger.error(f"Failed to generate bot response: {str(e)}")
-            execution_time = (datetime.now() - start_time).total_seconds()
-            self._update_stats(execution_time, False)
-
-            return f"I apologize, but I encountered an error while processing your message. Please try again."
+        logger.info(f"Response generated successfully in {execution_time:.2f}s")
+        return response_content
 
     def get_bot_response_sync(
         self,
@@ -196,35 +188,28 @@ class AIService(IAgentService):
         Returns:
             str: Generated response from the multi-agent system
         """
+        # Run the async method in a new event loop if needed
         try:
-            # Run the async method in a new event loop if needed
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # If we're already in an event loop, we need to use a different approach
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(
-                            asyncio.run,
-                            self.generate_bot_response(
-                                user_message, conversation_id, user_id
-                            ),
-                        )
-                        return future.result(timeout=self.config.timeout_seconds)
-                else:
-                    return loop.run_until_complete(
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're already in an event loop, we need to use a different approach
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(
+                        asyncio.run,
                         self.generate_bot_response(
                             user_message, conversation_id, user_id
-                        )
+                        ),
                     )
-            except RuntimeError:
-                # No event loop exists, create one
-                return asyncio.run(
+                    return future.result(timeout=self.config.timeout_seconds)
+            else:
+                return loop.run_until_complete(
                     self.generate_bot_response(user_message, conversation_id, user_id)
                 )
-
-        except Exception as e:
-            logger.error(f"Synchronous bot response generation failed: {str(e)}")
-            return f"I apologize, but I encountered an error while processing your message. Please try again."
+        except RuntimeError:
+            # No event loop exists, create one
+            return asyncio.run(
+                self.generate_bot_response(user_message, conversation_id, user_id)
+            )
 
     def _update_conversation_context(
         self, conversation_key: str, message: AgentMessage, response: AgentResponse

@@ -2,7 +2,7 @@ from typing import List, Optional
 from uuid import UUID
 from contextlib import AbstractContextManager
 from sqlalchemy.orm import Session
-from sqlalchemy import select, asc, desc
+from sqlalchemy import select, asc, desc, or_
 
 from app.models.message import Message
 from app.models.conversation import Conversation
@@ -116,6 +116,40 @@ class MessageCRUDStrategy(
             .where(Message.conversation.has(owner_id=user_id))
         )
         return len(list(db.execute(statement).scalars().all()))
+
+    def search_by_content(
+        self,
+        db: Session,
+        conversation_id: UUID,
+        query: str,
+        limit: int = 10,
+    ) -> List[Message]:
+        """
+        Search messages by content in a specific conversation.
+
+        Args:
+            db: Database session
+            conversation_id: ID of the conversation to search in
+            query: Search query string
+            limit: Maximum number of results to return
+
+        Returns:
+            List of matching messages ordered by relevance (most recent first)
+        """
+        # Use case-insensitive pattern matching
+        search_pattern = f"%{query}%"
+
+        statement = (
+            select(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.content.ilike(search_pattern),
+            )
+            .order_by(Message.created_at.desc())
+            .limit(limit)
+        )
+
+        return list(db.execute(statement).scalars().all())
 
 
 class MessageRepository:

@@ -39,7 +39,7 @@ class Router(IAgentRouter):
     ]
 
     def __init__(self):
-        self.logger = logging.getLogger("router")
+        self._logger = logging.getLogger("router")
         self.registered_agents: Dict[str, IAgent] = {}
 
     async def route_request(self, request: AgentRequest) -> AgentType:
@@ -72,13 +72,13 @@ class Router(IAgentRouter):
     def register_agent(self, agent: IAgent) -> None:
         """Register an agent with the router."""
         self.registered_agents[agent.agent_id] = agent
-        self.logger.info(f"Registered agent: {agent.agent_id} ({agent.agent_type})")
+        self._logger.info(f"Registered agent: {agent.agent_id} ({agent.agent_type})")
 
     def unregister_agent(self, agent_id: str) -> None:
         """Unregister an agent from the router."""
         if agent_id in self.registered_agents:
             del self.registered_agents[agent_id]
-            self.logger.info(f"Unregistered agent: {agent_id}")
+            self._logger.info(f"Unregistered agent: {agent_id}")
 
     async def route_message(
         self,
@@ -93,18 +93,20 @@ class Router(IAgentRouter):
         # Check for RAG patterns first
         if self._should_use_rag(content):
             if "rag_agent" in available_agents:
-                self.logger.info(f"Routing to RAG agent for: {message.content[:50]}...")
+                self._logger.info(
+                    f"Routing to RAG agent for: {message.content[:50]}..."
+                )
                 return "rag_agent"
 
         # Default to chat agent
         if "chat_agent" in available_agents:
-            self.logger.info(f"Routing to Chat agent for: {message.content[:50]}...")
+            self._logger.info(f"Routing to Chat agent for: {message.content[:50]}...")
             return "chat_agent"
 
         # Fallback to first available agent
         if available_agents:
             agent = available_agents[0]
-            self.logger.warning(f"Using fallback agent {agent}")
+            self._logger.warning(f"Using fallback agent {agent}")
             return agent
 
         raise ValueError("No available agents for routing")

@@ -2,9 +2,6 @@ from __future__ import annotations
 from typing import List, Optional
 from uuid import UUID
 
-from google import genai
-
-from app.core.config import settings
 from app.repositories.message import MessageRepository
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
@@ -18,6 +15,9 @@ from app.services.ai_service import AIService
 import logging
 
 
+logger = logging.getLogger(__name__)
+
+
 class MessageService(IMessageService):
     """Service layer for Message operations"""
 
@@ -26,10 +26,13 @@ class MessageService(IMessageService):
         message_repository: MessageRepository,
         conversation_validation_utils: ConversationValidationUtils,
         message_validation_utils: MessageValidationUtils,
+        ai_service: Optional[AIService] = None,
     ):
         self.repository = message_repository
         self.conversation_validation_utils = conversation_validation_utils
         self.message_validation_utils = message_validation_utils
+        # Initialize AI service for bot response generation
+        self.ai_service = ai_service or AIService()
 
     def create_message(self, message_create_data: MessageCreate) -> MessageRead:
         self.conversation_validation_utils.validate_conversation_exists(
@@ -51,8 +54,11 @@ class MessageService(IMessageService):
             if processing_message:
                 bot_response_content = processing_message
             else:
-                bot_response_content = self._generate_bot_response(
-                    message_create_data.content
+                # Delegate bot response generation to AIService
+                bot_response_content = self.ai_service.get_bot_response_sync(
+                    user_message=message_create_data.content,
+                    conversation_id=message_create_data.conversation_id,
+                    user_id=None,  # Can be extracted from conversation if needed
                 )
 
             bot_response_entity = MessageFactory.create_bot_response(
@@ -170,37 +176,3 @@ class MessageService(IMessageService):
             return None
         finally:
             db.close()
-
-    def _generate_bot_response(self, user_message: str) -> str:
-        """Generate bot response using the multi-agent system."""
-        try:
-            ai_service = AIService()
-            return ai_service.get_bot_response_sync(user_message)
-
-        except ImportError as e:
-            logger = logging.getLogger(__name__)
-            return self._generate_bot_response_fallback(user_message)
-        except Exception as e:
-            logger = logging.getLogger(__name__)
-            logger.error(f"AI service error: {str(e)}")
-            return self._generate_bot_response_fallback(user_message)
-
-    def _generate_bot_response_fallback(self, user_message: str) -> str:
-        """Bot response generation"""
-        api_key = settings.gemini_api_key
-        if not api_key:
-            return "[Error: Gemini API key not configured]"
-        if api_key.startswith("GEMINI_API_KEY="):
-            api_key = api_key.split("=", 1)[-1].strip()
-
-        system_prompt = "You are a helpful assistant."
-        prompt = f"{system_prompt}\nUser: {user_message}"
-
-        try:
-            client = genai.Client(api_key=api_key)
-            response = client.models.generate_content(
-                model="gemini-2.5-flash", contents=prompt
-            )
-            return response.text if hasattr(response, "text") else str(response)
-        except Exception as e:
-            return f"[Gemini API error: {str(e)}]"

@@ -10,6 +10,7 @@ from .schemas import AgentMessage, AgentResponse, AgentType, MessageType, Workfl
 from .agents.router import Router
 from .agents.chat_agent import ChatAgent
 from .agents.rag_agent import RAGAgent
+from .memory import get_memory_manager
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +42,31 @@ class Workflow:
         # Available agents for routing
         self.agents = {"chat_agent": self.chat_agent, "rag_agent": self.rag_agent}
 
+        # Initialize agents asynchronously
+        self._agents_initialized = False
+
+        # Statistics tracking
+        self._execution_stats = {
+            "total_executions": 0,
+            "successful_executions": 0,
+            "failed_executions": 0,
+            "agent_usage": {"chat_agent": 0, "rag_agent": 0},
+        }
+
         # Build the graph
         self.graph = self._build_graph()
 
         logger.info("Workflow initialized with streamlined agent system")
+
+    async def _ensure_agents_initialized(self) -> None:
+        """Ensure all agents are initialized."""
+        if self._agents_initialized:
+            return
+
+        await self.chat_agent.initialize()
+        await self.rag_agent.initialize()
+        self._agents_initialized = True
+        logger.info("All agents initialized successfully")
 
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph workflow."""
@@ -82,19 +104,14 @@ class Workflow:
             logger.error("No current message to route")
             return state
 
-        try:
-            # Route using router
-            available_agents = list(self.agents.keys())
-            selected_agent = await self.router.route_message(
-                current_message, available_agents
-            )
+        # Route using router
+        available_agents = list(self.agents.keys())
+        selected_agent = await self.router.route_message(
+            current_message, available_agents
+        )
 
-            state["selected_agent"] = selected_agent
-            logger.info(f"Message routed to: {selected_agent}")
-
-        except Exception as e:
-            logger.error(f"Routing failed: {e}")
-            state["selected_agent"] = "chat_agent" 
+        state["selected_agent"] = selected_agent
+        logger.info(f"Message routed to: {selected_agent}")
 
         return state
 
@@ -105,23 +122,13 @@ class Workflow:
         if not current_message:
             return state
 
-        try:
-            response = await self.chat_agent.process_message(
-                current_message,
-                conversation_id=state.get("conversation_id"),
-                user_id=state.get("user_id"),
-            )
-            state["response"] = response
-            logger.info("Chat agent processing completed")
-
-        except Exception as e:
-            logger.error(f"Chat agent failed: {e}")
-            # Create fallback response
-            state["response"] = AgentResponse(
-                content="I apologize, but I encountered an error. Please try again.",
-                agent_id="chat_agent",
-                response_type="error",
-            )
+        response = await self.chat_agent.process_message(
+            current_message,
+            conversation_id=state.get("conversation_id"),
+            user_id=state.get("user_id"),
+        )
+        state["response"] = response
+        logger.info("Chat agent processing completed")
 
         return state
 
@@ -132,23 +139,13 @@ class Workflow:
         if not current_message:
             return state
 
-        try:
-            response = await self.rag_agent.process_message(
-                current_message,
-                conversation_id=state.get("conversation_id"),
-                user_id=state.get("user_id"),
-            )
-            state["response"] = response
-            logger.info("RAG agent processing completed")
-
-        except Exception as e:
-            logger.error(f"RAG agent failed: {e}")
-            # Create fallback response
-            state["response"] = AgentResponse(
-                content="I apologize, but I couldn't find the information you're looking for. Please try rephrasing your question.",
-                agent_id="rag_agent",
-                response_type="error",
-            )
+        response = await self.rag_agent.process_message(
+            current_message,
+            conversation_id=state.get("conversation_id"),
+            user_id=state.get("user_id"),
+        )
+        state["response"] = response
+        logger.info("RAG agent processing completed")
 
         return state
 
@@ -181,32 +178,48 @@ class Workflow:
     ) -> Optional[AgentResponse]:
         """Execute the workflow for a given message."""
 
-        try:
-            # Initialize state
-            initial_state = GraphState(
-                messages=[message],
-                current_message=message,
-                response=None,
-                selected_agent=None,
-                conversation_id=conversation_id,
-                user_id=user_id,
-                iteration_count=0,
-                start_time=datetime.now(),
-            )
+        # Ensure agents are initialized
+        await self._ensure_agents_initialized()
 
-            # Execute the graph
-            result = await self.graph.ainvoke(initial_state)
+        # Update statistics
+        self._execution_stats["total_executions"] += 1
 
-            # Return the response
-            return result.get("response")
+        # Initialize state
+        initial_state = GraphState(
+            messages=[message],
+            current_message=message,
+            response=None,
+            selected_agent=None,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            iteration_count=0,
+            start_time=datetime.now(),
+        )
 
-        except Exception as e:
-            logger.error(f"Workflow execution failed: {e}")
-            return AgentResponse(
-                content="I apologize, but I encountered an error while processing your request.",
-                agent_id="system",
-                response_type="error",
-            )
+        # Execute the graph
+        result = await self.graph.ainvoke(initial_state)
+
+        # Update statistics
+        if result.get("response"):
+            self._execution_stats["successful_executions"] += 1
+            selected_agent = result.get("selected_agent")
+            if selected_agent in self._execution_stats["agent_usage"]:
+                self._execution_stats["agent_usage"][selected_agent] += 1
+        else:
+            self._execution_stats["failed_executions"] += 1
+
+        # Return the response
+        return result.get("response")
+
+    def get_execution_stats(self) -> Dict[str, Any]:
+        """Get workflow execution statistics."""
+        return self._execution_stats.copy()
+
+    async def cleanup(self) -> None:
+        """Clean up workflow resources."""
+        await self.chat_agent.cleanup()
+        await self.rag_agent.cleanup()
+        logger.info("Workflow cleanup completed")
 
 
 # Factory function
