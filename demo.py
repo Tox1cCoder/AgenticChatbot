@@ -552,8 +552,9 @@ def render_chat_interface():
             st.session_state.messages = sorted_messages
             st.session_state.conversation_messages_meta = meta
 
-            current_page = meta.get("current_page", page)
-            last_page = meta.get("last_page", current_page)
+            # API returns camelCase keys (currentPage, lastPage)
+            current_page = meta.get("currentPage", meta.get("current_page", page))
+            last_page = meta.get("lastPage", meta.get("last_page", current_page))
             st.session_state.conversation_messages_page = current_page
             st.session_state.has_more_messages = current_page < last_page
         else:

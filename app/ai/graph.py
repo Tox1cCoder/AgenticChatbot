@@ -86,13 +86,18 @@ class MultiAgentWorkflow:
         user_id = state.get("user_id")
 
         if conversation_id and user_id:
-            try:
-                conv_memory = await memory_manager.get_memory(
-                    UUID(conversation_id), UUID(user_id)
-                )
-                conversation_history = conv_memory.get_recent_messages(limit=10)
-            except Exception as e:
-                logger.warning(f"Could not load memory: {e}")
+            conv_id_uuid = UUID(conversation_id)
+            user_id_uuid = UUID(user_id)
+
+            conv_memory = await memory_manager.get_memory(
+                conv_id_uuid, user_id_uuid, force_refresh=True
+            )
+            conversation_history = conv_memory.get_recent_messages(
+                limit=10, exclude_last=1
+            )
+            logger.info(
+                f"Loaded {len(conversation_history)} messages from memory for conversation {conversation_id}"
+            )
 
         agent_msg = AgentMessage(
             role=MessageRole.USER,
@@ -108,13 +113,6 @@ class MultiAgentWorkflow:
         state.setdefault("messages", []).append(
             AIMessage(content=response.message.content)
         )
-
-        if conversation_id and user_id:
-            try:
-                conv_memory.add_message(agent_msg)
-                conv_memory.add_message(response.message)
-            except:
-                pass
 
         return state
 
@@ -137,13 +135,18 @@ class MultiAgentWorkflow:
         user_id = state.get("user_id")
 
         if conversation_id and user_id:
-            try:
-                conv_memory = await memory_manager.get_memory(
-                    UUID(conversation_id), UUID(user_id)
-                )
-                conversation_history = conv_memory.get_recent_messages(limit=10)
-            except Exception as e:
-                logger.warning(f"Could not load memory: {e}")
+            conv_id_uuid = UUID(conversation_id)
+            user_id_uuid = UUID(user_id)
+
+            conv_memory = await memory_manager.get_memory(
+                conv_id_uuid, user_id_uuid, force_refresh=True
+            )
+            conversation_history = conv_memory.get_recent_messages(
+                limit=10, exclude_last=1
+            )
+            logger.info(
+                f"Loaded {len(conversation_history)} messages from memory for conversation {conversation_id}"
+            )
 
         agent_msg = AgentMessage(
             role=MessageRole.USER,
@@ -159,13 +162,6 @@ class MultiAgentWorkflow:
         state.setdefault("messages", []).append(
             AIMessage(content=response.message.content)
         )
-
-        if conversation_id and user_id:
-            try:
-                conv_memory.add_message(agent_msg)
-                conv_memory.add_message(response.message)
-            except:
-                pass
 
         return state
 

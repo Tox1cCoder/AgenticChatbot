@@ -19,7 +19,9 @@ class AIService:
     ) -> str:
 
         response = await self.workflow.execute(
-            message=message, conversation_id=str(conversation_id), user_id=str(user_id)
+            message=message,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            user_id=str(user_id) if user_id else None,
         )
 
         if response and response.message:
@@ -33,6 +35,15 @@ class AIService:
         conversation_id: Optional[UUID] = None,
         user_id: Optional[UUID] = None,
     ) -> str:
+
+        if conversation_id is None or user_id is None:
+            logger.warning("Conversation ID or User ID is None")
+            response = await self.workflow.execute(
+                message=user_message, conversation_id=None, user_id=None
+            )
+            if response and response.message:
+                return response.message.content
+            return "Error: No response generated"
 
         return await self.process_message(
             conversation_id=conversation_id,

@@ -54,11 +54,17 @@ class MessageService(IMessageService):
             if processing_message:
                 bot_response_content = processing_message
             else:
+                # Get the user_id from the conversation
+                conversation = self.conversation_validation_utils.conversation_repository.get_by_id(
+                    message_create_data.conversation_id
+                )
+                user_id = conversation.owner_id if conversation else None
+
                 # Delegate bot response generation to AIService
                 bot_response_content = await self.ai_service.generate_bot_response(
                     user_message=message_create_data.content,
                     conversation_id=message_create_data.conversation_id,
-                    user_id=None,  # Can be extracted from conversation if needed
+                    user_id=user_id,
                 )
 
             bot_response_entity = MessageFactory.create_bot_response(

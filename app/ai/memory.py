@@ -23,8 +23,8 @@ class ConversationMemory:
         self._message_repo = MessageCRUDStrategy(Message)
         self._initialized = False
 
-    async def initialize(self):
-        if self._initialized:
+    async def initialize(self, force_refresh: bool = False):
+        if self._initialized and not force_refresh:
             return
 
         try:
@@ -39,12 +39,17 @@ class ConversationMemory:
                     order_direction="desc",
                 )
 
+                if force_refresh:
+                    self._messages.clear()
+
                 for msg in reversed(messages.items):
                     agent_msg = self._db_to_agent_message(msg)
                     if agent_msg:
                         self._messages.append(agent_msg)
 
-                logger.info(f"Loaded {len(messages.items)} messages from database")
+                logger.info(
+                    f"Loaded {len(messages.items)} messages from database for conversation {self.conversation_id}"
+                )
             finally:
                 db.close()
 
@@ -57,12 +62,26 @@ class ConversationMemory:
         self._messages.append(message)
 
     def get_recent_messages(
-        self, limit: Optional[int] = None, include_system: bool = False
+        self,
+        limit: Optional[int] = None,
+        include_system: bool = False,
+        exclude_last: int = 0,
     ) -> List[AgentMessage]:
+        """
+        Get recent messages from memory.
+
+        Args:
+            limit: Maximum number of messages to return
+            include_system: Whether to include system messages
+            exclude_last: Number of most recent messages to exclude
+        """
         messages = list(self._messages)
 
         if not include_system:
             messages = [m for m in messages if m.role != MessageRole.SYSTEM]
+
+        if exclude_last > 0:
+            messages = messages[:-exclude_last] if len(messages) > exclude_last else []
 
         if limit:
             messages = messages[-limit:]
@@ -103,7 +122,7 @@ class MemoryManager:
         logger.info("MemoryManager initialized")
 
     async def get_memory(
-        self, conversation_id: UUID, user_id: UUID
+        self, conversation_id: UUID, user_id: UUID, force_refresh: bool = False
     ) -> ConversationMemory:
         key = str(conversation_id)
 
@@ -111,8 +130,17 @@ class MemoryManager:
             memory = ConversationMemory(conversation_id, user_id, self.max_messages)
             self._memories[key] = memory
             await memory.initialize()
+        elif force_refresh:
+            await self._memories[key].initialize(force_refresh=True)
 
         return self._memories[key]
+
+    async def refresh_memory(self, conversation_id: UUID):
+        """Refresh memory for a conversation by reloading from database"""
+        key = str(conversation_id)
+        if key in self._memories:
+            await self._memories[key].initialize(force_refresh=True)
+            logger.info(f"Refreshed memory for conversation {conversation_id}")
 
     def clear_memory(self, conversation_id: UUID):
         key = str(conversation_id)
