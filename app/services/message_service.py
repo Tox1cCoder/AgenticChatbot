@@ -34,7 +34,7 @@ class MessageService(IMessageService):
         # Initialize AI service for bot response generation
         self.ai_service = ai_service or AIService()
 
-    def create_message(self, message_create_data: MessageCreate) -> MessageRead:
+    async def create_message(self, message_create_data: MessageCreate) -> MessageRead:
         self.conversation_validation_utils.validate_conversation_exists(
             message_create_data.conversation_id
         )
@@ -55,7 +55,7 @@ class MessageService(IMessageService):
                 bot_response_content = processing_message
             else:
                 # Delegate bot response generation to AIService
-                bot_response_content = self.ai_service.get_bot_response_sync(
+                bot_response_content = await self.ai_service.generate_bot_response(
                     user_message=message_create_data.content,
                     conversation_id=message_create_data.conversation_id,
                     user_id=None,  # Can be extracted from conversation if needed

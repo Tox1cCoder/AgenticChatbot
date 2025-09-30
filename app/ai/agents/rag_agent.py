@@ -1,9 +1,7 @@
-from typing import List, Dict, Any, Optional
-from datetime import datetime
-from uuid import UUID
 import logging
+from typing import Optional, List, Dict, Any
 import time
-import asyncio
+from datetime import datetime
 
 from google import genai
 from qdrant_client import QdrantClient
@@ -12,130 +10,56 @@ from sentence_transformers import SentenceTransformer
 import PyPDF2
 from docx import Document as DocxDocument
 
-from ..interfaces import BaseAgent
-from ..schemas import (
-    AgentMessage,
-    AgentResponse,
-    AgentType,
-    MessageType,
-    AgentRequest,
-    AgentConfig,
-    RAGAgentConfig,
-    AgentCapability,
-    MessageRole,
-)
-from ..memory import get_memory_manager
-from ..prompts import (
-    RAG_AGENT_SYSTEM_PROMPT,
-    RAG_NO_RESULTS_TEMPLATE,
-    ERROR_NO_DOCUMENTS_FOUND,
-    get_rag_response_with_context,
-)
+from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from ..prompts import build_rag_prompt
 from ...core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-class RAGAgent(BaseAgent):
+class RAGAgent:
 
     def __init__(
         self,
         qdrant_url: str = "http://localhost:6333",
         collection_name: str = "documents",
     ):
-
-        config = RAGAgentConfig(
-            agent_id="rag_agent",
-            agent_type=AgentType.RAG,
-            name="RAG Agent",
-            description="Document-based question answering with vector search",
-            capabilities=[
-                AgentCapability.DOCUMENT_SEARCH,
-                AgentCapability.KNOWLEDGE_RETRIEVAL,
-            ],
-            vector_store_path=qdrant_url,
-        )
-        # Pass logger to BaseAgent constructor
-        super().__init__(config, logging.getLogger("rag_agent"))
-
-        # Initialize Qdrant client
         self.qdrant_client = QdrantClient(url=qdrant_url)
         self.collection_name = collection_name
-        self.logger.info("Qdrant client initialized successfully")
-
-        # Initialize embedding model
         self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-        self.embedding_dimension = 384  # Default for all-MiniLM-L6-v2
+        self.embedding_dimension = 384
+        self.model_name = "gemini-2.0-flash-exp"
+        self.gemini_client = None
+        self._init_gemini()
+        self._init_collection()
 
-        # Initialize Gemini client
-        self._init_gemini_client()
-
-        # Flag to track if collection is initialized
-        self._collection_initialized = False
-
-    def _init_gemini_client(self) -> None:
-        """Initialize the Gemini API client."""
-        try:
-            api_key = settings.gemini_api_key
-            if not api_key:
-                self.logger.error("Gemini API key not configured")
-                self.gemini_client = None
-                return
-
-            # Clean up the API key if it has the prefix
-            if api_key.startswith("GEMINI_API_KEY="):
-                api_key = api_key.split("=", 1)[-1].strip()
-
-            self.gemini_client = genai.Client(api_key=api_key)
-            self.logger.info("Gemini client initialized successfully")
-        except Exception as e:
-            self.logger.error(f"Failed to initialize Gemini client: {e}")
-            self.gemini_client = None
-
-    async def _initialize_impl(self) -> None:
-        """Initialize the RAG agent and vector collection."""
-        await self._initialize_collection()
-        self._collection_initialized = True
-        self.logger.info("RAG agent initialized successfully")
-
-    async def can_handle_request(self, request: AgentRequest) -> float:
-        """Determine if this agent can handle the given request."""
-        return 0.9
-
-    async def process_request(self, request: AgentRequest) -> AgentResponse:
-        """Process an agent request and return a response."""
-        # Delegate to the existing process_message method
-        return await self.process_message(
-            message=request.message,
-            conversation_id=request.conversation_id,
-            user_id=request.user_id,
-        )
-
-    async def _initialize_collection(self):
-        """Initialize Qdrant collection if it doesn't exist."""
-        if self._collection_initialized:
+    def _init_gemini(self):
+        api_key = settings.gemini_api_key
+        if not api_key:
+            logger.error("Gemini API key not configured")
             return
 
+        if api_key.startswith("GEMINI_API_KEY="):
+            api_key = api_key.split("=", 1)[-1].strip()
+
+        self.gemini_client = genai.Client(api_key=api_key)
+        logger.info("Gemini client initialized for RAG Agent")
+
+    def _init_collection(self):
         try:
             collections = self.qdrant_client.get_collections()
-            if not any(
-                collection.name == self.collection_name
-                for collection in collections.collections
-            ):
+            if not any(c.name == self.collection_name for c in collections.collections):
                 self.qdrant_client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
                         size=self.embedding_dimension, distance=Distance.COSINE
                     ),
                 )
-                self.logger.info(f"Created Qdrant collection: {self.collection_name}")
+                logger.info(f"Created Qdrant collection: {self.collection_name}")
             else:
-                self.logger.info(
-                    f"Qdrant collection already exists: {self.collection_name}"
-                )
+                logger.info(f"Qdrant collection exists: {self.collection_name}")
         except Exception as e:
-            self.logger.error(f"Failed to initialize Qdrant collection: {e}")
-            raise
+            logger.error(f"Failed to initialize Qdrant collection: {e}")
 
     async def process_message(
         self,
@@ -143,121 +67,45 @@ class RAGAgent(BaseAgent):
         conversation_id: Optional[str] = None,
         user_id: Optional[str] = None,
     ) -> AgentResponse:
-        """Process a message using RAG functionality with vector search"""
 
-        # Ensure collection is initialized
-        if not self._collection_initialized:
-            await self._initialize_collection()
-            self._collection_initialized = True
+        query = message.content
+        conversation_history = message.metadata.get("history", [])
 
-        try:
-            query = message.content
+        retrieved_docs = await self._search(query)
 
-            # Get memory manager and conversation memory
-            memory_manager = get_memory_manager()
-            conversation_memory = None
+        prompt = build_rag_prompt(query, retrieved_docs, conversation_history)
 
-            if conversation_id and user_id:
-                try:
-                    conversation_memory = await memory_manager.get_memory(
-                        UUID(conversation_id), UUID(user_id)
-                    )
+        response_text = await self._generate(prompt)
 
-                    # Add current message to memory (for context only)
-                    conversation_memory.add_message(message)
+        response_message = AgentMessage(
+            role=MessageRole.ASSISTANT, content=response_text
+        )
 
-                    # Get recent conversation history for context
-                    recent_messages = conversation_memory.get_recent_messages(limit=3)
+        citations = [
+            {
+                "source": doc.get("source", "unknown"),
+                "page_number": doc.get("page_number"),
+                "score": doc.get("score", 0.0),
+            }
+            for doc in retrieved_docs[:3]
+        ]
 
-                except Exception as e:
-                    self.logger.warning(f"Could not load conversation memory: {e}")
+        return AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=response_message,
+            metadata={
+                "model": self.model_name,
+                "conversation_id": conversation_id,
+                "documents_found": len(retrieved_docs),
+                "citations": citations,
+                "context_messages": len(conversation_history),
+            },
+        )
 
-            # Perform search
-            search_results = await self._vector_search(query)
-
-            # Prepare citation information for metadata
-            citations = []
-            for result in search_results:
-                citation_info = {
-                    "source": result.get("source", "unknown"),
-                    "page_number": result.get("page_number"),
-                    "chunk_id": result.get("chunk_id"),
-                    "document_id": result.get("document_id"),
-                    "chunk_index": result.get("chunk_index"),
-                    "score": result.get("score", 0.0),
-                }
-                citations.append(citation_info)
-
-            # Log document usage for traceability
-            self.logger.info(
-                f"RAG Query: '{query[:100]}...' | Documents used: {len(search_results)} | "
-                f"Primary source: {citations[0]['source'] if citations else 'none'} "
-                f"(page {citations[0]['page_number']}) "
-                if citations and citations[0].get("page_number")
-                else "" f"| Chunk ID: {citations[0]['chunk_id']}" if citations else ""
-            )
-
-            # Generate response based on retrieved documents
-            response_content = self._generate_response(query, search_results)
-
-            response_message = AgentMessage(
-                role=MessageRole.ASSISTANT,
-                content=response_content,
-                message_type=MessageType.TEXT,
-            )
-
-            # Store response in memory (for context only)
-            if conversation_memory:
-                conversation_memory.add_message(response_message)
-
-            return AgentResponse(
-                response_id=message.id,
-                request_id=message.id,
-                agent_type=AgentType.RAG,
-                agent_id="rag_agent",
-                message=response_message,
-                confidence=0.85,
-                processing_time_ms=250,
-                metadata={
-                    "agent_type": "rag",
-                    "query": query,
-                    "documents_found": (
-                        len(search_results) if isinstance(search_results, list) else 1
-                    ),
-                    "timestamp": datetime.now().isoformat(),
-                    "citations": citations,  # Include citation details for traceability
-                    "primary_source": citations[0] if citations else None,
-                    "memory_enabled": conversation_memory is not None,
-                },
-            )
-
-        except Exception as e:
-            self.logger.error(f"RAG processing failed: {e}")
-
-            error_message = AgentMessage(
-                role=MessageRole.ASSISTANT,
-                content=ERROR_NO_DOCUMENTS_FOUND,
-                message_type=MessageType.ERROR,
-            )
-
-            return AgentResponse(
-                response_id=message.id,
-                request_id=message.id,
-                agent_type=AgentType.RAG,
-                agent_id="rag_agent",
-                message=error_message,
-                confidence=0.0,
-                processing_time_ms=100,
-                error=str(e),
-            )
-
-    async def _vector_search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """Perform vector search using Qdrant."""
-
-        # Generate query embedding
+    async def _search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         query_embedding = self.embedding_model.encode(query).tolist()
 
-        # Search in Qdrant
         search_results = self.qdrant_client.search(
             collection_name=self.collection_name,
             query_vector=query_embedding,
@@ -265,67 +113,35 @@ class RAGAgent(BaseAgent):
             score_threshold=0.7,
         )
 
-        # Format results with all metadata
-        formatted_results = []
+        results = []
         for result in search_results:
-            formatted_results.append(
+            results.append(
                 {
                     "content": result.payload.get("content", ""),
                     "source": result.payload.get("source", "unknown"),
                     "score": result.score,
+                    "page_number": result.payload.get("page_number"),
                     "document_id": result.payload.get("document_id", ""),
                     "conversation_id": result.payload.get("conversation_id", ""),
                     "chunk_index": result.payload.get("chunk_index", 0),
-                    "page_number": result.payload.get("page_number", None),
-                    "file_type": result.payload.get("file_type", "unknown"),
-                    "chunk_id": result.id,
-                    "metadata": result.payload.get("metadata", {}),
                 }
             )
 
-        return formatted_results
+        return results
 
-    def _generate_response(
-        self, query: str, search_results: List[Dict[str, Any]]
-    ) -> str:
-        """Generate a response with proper citations based on search results."""
+    async def _generate(self, prompt: str) -> str:
+        if not self.gemini_client:
+            logger.error("Gemini client not initialized")
+            return "Error: Gemini API not configured"
 
-        if not search_results:
-            return RAG_NO_RESULTS_TEMPLATE.format(query=query)
-
-        if isinstance(search_results, list) and search_results:
-            # Use the best result for primary response
-            result = search_results[0]
-            content = result.get("content", "")
-            source = result.get("source", "unknown")
-            page_number = result.get("page_number")
-            score = result.get("score", 0.0)
-
-            # Use the helper function from prompts.py
-            response = get_rag_response_with_context(
-                query=query,
-                content=content,
-                source=source,
-                page_number=page_number,
-                score=score,
+        try:
+            response = self.gemini_client.models.generate_content(
+                model=self.model_name, contents=prompt
             )
-
-            # Add additional sources if available
-            if len(search_results) > 1:
-                response += "\n\nAdditional relevant sources found:"
-                for i, additional_result in enumerate(
-                    search_results[1:4], start=2
-                ):  # Show up to 3 more sources
-                    add_source = additional_result.get("source", "unknown")
-                    add_page = additional_result.get("page_number")
-                    add_citation = f"'{add_source}'"
-                    if add_page:
-                        add_citation = f"'{add_source}' (page {add_page})"
-                    response += f"\n  {i}. {add_citation}"
-
-            return response
-
-        return f"I found some information about '{query}', but couldn't format it properly. Please try rephrasing your question."
+            return response.text if hasattr(response, "text") else str(response)
+        except Exception as e:
+            logger.error(f"Gemini API error: {e}")
+            return f"Error generating response: {str(e)}"
 
     async def process_document(
         self,
@@ -334,104 +150,70 @@ class RAGAgent(BaseAgent):
         document_id: str,
         conversation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Process an uploaded document and optionally store it in the vector database.
-
-        Args:
-            file_path: Path to the uploaded file
-            filename: Original filename
-            document_id: ID of the document record in database
-            conversation_id: ID of the conversation this document belongs to
-
-        Returns:
-            Dict with processing results
-        """
-
-        # Ensure collection is initialized
-        if not self._collection_initialized:
-            await self._initialize_collection()
-            self._collection_initialized = True
 
         start_time = time.time()
 
-        try:
-            chunks_with_metadata = []
+        chunks_with_metadata = []
 
-            # Read the document
-            if filename.lower().endswith(".txt"):
-                with open(file_path, "r", encoding="utf-8") as f:
-                    text_content = f.read()
-                # Create chunks without page numbers for text files
-                chunks = self._create_chunks(
-                    text_content, max_chunk_size=1000, overlap=200
-                )
-                chunks_with_metadata = [
-                    {"text": chunk, "page_number": None} for chunk in chunks
-                ]
+        if filename.lower().endswith(".txt"):
+            with open(file_path, "r", encoding="utf-8") as f:
+                text_content = f.read()
+            chunks = self._create_chunks(text_content)
+            chunks_with_metadata = [
+                {"text": chunk, "page_number": None} for chunk in chunks
+            ]
 
-            elif filename.lower().endswith(".pdf"):
-                # Extract PDF with page information
-                pages_data = self._extract_pdf_text_with_pages(file_path)
-                # Create chunks with page tracking
-                for page_data in pages_data:
-                    page_chunks = self._create_chunks(
-                        page_data["text"], max_chunk_size=1000, overlap=200
-                    )
-                    for chunk in page_chunks:
-                        chunks_with_metadata.append(
-                            {"text": chunk, "page_number": page_data["page_number"]}
-                        )
+        elif filename.lower().endswith(".pdf"):
+            with open(file_path, "rb") as f:
+                reader = PyPDF2.PdfReader(f)
+                for page_num, page in enumerate(reader.pages, start=1):
+                    text = page.extract_text()
+                    if text.strip():
+                        chunks = self._create_chunks(text)
+                        for chunk in chunks:
+                            chunks_with_metadata.append(
+                                {"text": chunk, "page_number": page_num}
+                            )
 
-            elif filename.lower().endswith(".docx"):
-                text_content = self._extract_docx_text(file_path)
-                chunks = self._create_chunks(
-                    text_content, max_chunk_size=1000, overlap=200
-                )
-                chunks_with_metadata = [
-                    {"text": chunk, "page_number": None} for chunk in chunks
-                ]
-            else:
-                raise ValueError(f"Unsupported file type: {filename}")
+        elif filename.lower().endswith(".docx"):
+            doc = DocxDocument(file_path)
+            text_content = "\n".join([p.text for p in doc.paragraphs])
+            chunks = self._create_chunks(text_content)
+            chunks_with_metadata = [
+                {"text": chunk, "page_number": None} for chunk in chunks
+            ]
 
-            # Store chunks in vector database
-            stored_chunks = await self._store_chunks_in_vector_db(
-                chunks_with_metadata, filename, document_id, conversation_id
-            )
+        else:
+            raise ValueError(f"Unsupported file type: {filename}")
 
-            processing_time = time.time() - start_time
+        stored_chunks = await self._store_chunks(
+            chunks_with_metadata, filename, document_id, conversation_id
+        )
 
-            self.logger.info(
-                f"Processed document {filename}: {len(chunks_with_metadata)} chunks, {stored_chunks} stored in {processing_time:.2f}s"
-            )
+        processing_time = time.time() - start_time
 
-            return {
-                "chunks_created": len(chunks_with_metadata),
-                "chunks_stored": stored_chunks,
-                "processing_time": processing_time,
-                "filename": filename,
-            }
+        logger.info(
+            f"Processed document {filename}: {len(chunks_with_metadata)} chunks in {processing_time:.2f}s"
+        )
 
-        except Exception as e:
-            self.logger.error(f"Document processing failed for {filename}: {str(e)}")
-            raise
+        return {
+            "chunks_created": len(chunks_with_metadata),
+            "chunks_stored": stored_chunks,
+            "processing_time": processing_time,
+            "filename": filename,
+        }
 
     def _create_chunks(
         self, text: str, max_chunk_size: int = 1000, overlap: int = 200
     ) -> List[str]:
-        """Create overlapping text chunks for better retrieval."""
-
-        # Split by paragraphs first
         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
 
         chunks = []
         current_chunk = ""
 
         for paragraph in paragraphs:
-            # If adding this paragraph would exceed max size, finalize current chunk
             if len(current_chunk) + len(paragraph) > max_chunk_size and current_chunk:
                 chunks.append(current_chunk.strip())
-
-                # Create overlap with previous chunk
                 words = current_chunk.split()
                 if len(words) > overlap:
                     overlap_text = " ".join(words[-overlap:])
@@ -441,125 +223,52 @@ class RAGAgent(BaseAgent):
             else:
                 current_chunk += "\n\n" + paragraph if current_chunk else paragraph
 
-        # Add the last chunk
         if current_chunk.strip():
             chunks.append(current_chunk.strip())
 
         return chunks
 
-    async def _store_chunks_in_vector_db(
+    async def _store_chunks(
         self,
         chunks_with_metadata: List[Dict[str, Any]],
         filename: str,
         document_id: str,
         conversation_id: Optional[str] = None,
     ) -> int:
-        """Store text chunks with metadata in Qdrant vector database."""
 
-        try:
-            points = []
+        points = []
 
-            for i, chunk_data in enumerate(chunks_with_metadata):
-                chunk_text = (
-                    chunk_data.get("text", chunk_data)
-                    if isinstance(chunk_data, dict)
-                    else chunk_data
-                )
-                page_number = (
-                    chunk_data.get("page_number")
-                    if isinstance(chunk_data, dict)
-                    else None
-                )
-
-                # Generate embedding for the chunk
-                embedding = self.embedding_model.encode(chunk_text).tolist()
-
-                # Create point for Qdrant
-                point = PointStruct(
-                    id=f"{document_id}_{filename}_{i}_{int(time.time())}",
-                    vector=embedding,
-                    payload={
-                        "content": chunk_text,
-                        "source": filename,
-                        "document_id": document_id,
-                        "conversation_id": conversation_id,
-                        "chunk_index": i,
-                        "page_number": page_number,
-                        "timestamp": datetime.now().isoformat(),
-                        "file_type": (
-                            filename.split(".")[-1] if "." in filename else "unknown"
-                        ),
-                        "metadata": {
-                            "processing_timestamp": datetime.now().isoformat(),
-                            "chunk_length": len(chunk_text),
-                        },
-                    },
-                )
-                points.append(point)
-
-            # Store in Qdrant
-            self.qdrant_client.upsert(
-                collection_name=self.collection_name, points=points
+        for i, chunk_data in enumerate(chunks_with_metadata):
+            chunk_text = (
+                chunk_data.get("text", chunk_data)
+                if isinstance(chunk_data, dict)
+                else chunk_data
+            )
+            page_number = (
+                chunk_data.get("page_number") if isinstance(chunk_data, dict) else None
             )
 
-            self.logger.info(f"Stored {len(points)} chunks in vector database")
-            return len(points)
+            embedding = self.embedding_model.encode(chunk_text).tolist()
 
-        except Exception as e:
-            self.logger.error(f"Failed to store chunks in vector database: {e}")
-            raise
+            point = PointStruct(
+                id=f"{document_id}_{filename}_{i}_{int(time.time())}",
+                vector=embedding,
+                payload={
+                    "content": chunk_text,
+                    "source": filename,
+                    "document_id": document_id,
+                    "conversation_id": conversation_id,
+                    "chunk_index": i,
+                    "page_number": page_number,
+                    "timestamp": datetime.now().isoformat(),
+                    "file_type": (
+                        filename.split(".")[-1] if "." in filename else "unknown"
+                    ),
+                },
+            )
+            points.append(point)
 
-    def _extract_pdf_text(self, file_path: str) -> str:
-        """Extract text from PDF file."""
-        with open(file_path, "rb") as file:
-            reader = PyPDF2.PdfReader(file)
-            text = ""
-            for page in reader.pages:
-                text += page.extract_text() + "\n"
-            return text
+        self.qdrant_client.upsert(collection_name=self.collection_name, points=points)
 
-    def _extract_pdf_text_with_pages(self, file_path: str) -> List[Dict[str, Any]]:
-        """Extract text from PDF file with page numbers."""
-        with open(file_path, "rb") as file:
-            reader = PyPDF2.PdfReader(file)
-            pages_data = []
-            for page_num, page in enumerate(reader.pages, start=1):
-                text = page.extract_text()
-                if text.strip():
-                    pages_data.append({"text": text, "page_number": page_num})
-            return pages_data
-
-    def _extract_docx_text(self, file_path: str) -> str:
-        """Extract text from DOCX file."""
-        doc = DocxDocument(file_path)
-        text = ""
-        for paragraph in doc.paragraphs:
-            text += paragraph.text + "\n"
-        return text
-
-    async def search_documents(
-        self, query: str, conversation_id: Optional[str] = None, top_k: int = 5
-    ) -> List[Dict[str, Any]]:
-        """
-        Public method to search documents.
-
-        Args:
-            query: Search query
-            conversation_id: Optional conversation ID to filter results
-            top_k: Number of results to return
-
-        Returns:
-            List of search results
-        """
-
-        return await self._vector_search(query, top_k)
-
-    def get_status(self) -> Dict[str, Any]:
-        """Get current RAG agent status and configuration."""
-
-        return {
-            "qdrant_connected": self.qdrant_client is not None,
-            "embedding_model_loaded": self.embedding_model is not None,
-            "collection_name": self.collection_name,
-            "embedding_dimension": self.embedding_dimension,
-        }
+        logger.info(f"Stored {len(points)} chunks in vector database")
+        return len(points)

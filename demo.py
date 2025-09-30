@@ -1,12 +1,28 @@
 import streamlit as st
 import requests
 import json
+import html
+import re
 from typing import Dict, Optional, Any, List
 from upload_support import render_upload_section, render_document_list
 from datetime import datetime, timedelta
 from dateutil import parser
 
 API_BASE_URL = "http://localhost:8000"
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def sanitize_message_content(content: Any) -> str:
+    """Strip HTML tags and escape the remaining text for safe display."""
+    if not isinstance(content, str):
+        return ""
+
+    without_tags = _HTML_TAG_RE.sub("", content)
+    normalized = html.unescape(without_tags).replace("\r\n", "\n").replace("\r", "\n")
+    safe_text = html.escape(normalized.strip(), quote=False)
+    return safe_text.replace("\n", "<br>")
+
 
 st.set_page_config(
     page_title="ChatBot", layout="wide", initial_sidebar_state="expanded"
@@ -607,7 +623,7 @@ def render_chat_interface():
                 f"""
                 <div style="display: flex; justify-content: flex-end; margin: 10px 0; align-items: flex-start; gap: 10px;">
                     <div class="user-message">
-                        {msg["content"].replace('<', '&lt;').replace('>', '&gt;')}
+                        {sanitize_message_content(msg.get("content"))}
                         <div class="message-timestamp">You • {format_time(msg.get("createdAt", "now"))}</div>
                     </div>
                     <div style="border: 2px solid #007bff; color: #007bff; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">👤</div>
@@ -623,7 +639,7 @@ def render_chat_interface():
                     <div style="border: 2px solid #28a745; color: #28a745; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; flex-shrink: 0;">🤖</div>
                     <div style="display: flex; flex-direction: column;">
                         <div class="bot-message" style="margin: 0;">
-                            {msg["content"].replace('<', '&lt;').replace('>', '&gt;')}
+                            {sanitize_message_content(msg.get("content"))}
                         </div>
                         <div class="message-timestamp">Assistant • {format_time(msg.get("createdAt", "now"))}</div>
                     </div>

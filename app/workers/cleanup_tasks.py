@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from datetime import datetime
 
 from celery.schedules import crontab
@@ -6,6 +7,7 @@ from celery.schedules import crontab
 from app.services.document_processing_service import DocumentProcessingService
 from app.workers.celery_app import celery_app
 from app.workers.document_processor import cleanup_failed_documents
+from app.ai.agents.rag_agent import RAGAgent
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +28,6 @@ celery_app.conf.beat_schedule = {
 def cleanup_temp_files_task(older_than_hours: int = 24):
     try:
         processing_service = DocumentProcessingService()
-        import asyncio
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -52,9 +53,6 @@ def cleanup_temp_files_task(older_than_hours: int = 24):
 @celery_app.task(name="app.workers.cleanup_tasks.health_check_task")
 def health_check_task():
     try:
-        from app.ai.agents.rag_agent import RAGAgent
-        import asyncio
-
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 

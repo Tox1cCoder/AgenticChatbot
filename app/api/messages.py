@@ -23,7 +23,7 @@ async def create_message(
     message_service: IMessageService,
 ) -> ApiResponse[MessageRead]:
     """Create a new message"""
-    result = message_service.create_message(message_data)
+    result = await message_service.create_message(message_data)
     return ApiResponse(
         success=True, message="Message created successfully", data=result
     )
