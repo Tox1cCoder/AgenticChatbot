@@ -93,7 +93,7 @@ class MultiAgentWorkflow:
                 conv_id_uuid, user_id_uuid, force_refresh=True
             )
             conversation_history = conv_memory.get_recent_messages(
-                limit=10, exclude_last=1
+                limit=20, exclude_last=1
             )
             logger.info(
                 f"Loaded {len(conversation_history)} messages from memory for conversation {conversation_id}"

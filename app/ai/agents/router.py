@@ -1,65 +1,63 @@
 import logging
-import re
 from typing import List
 
+from google import genai
+
 from ..schemas import AgentMessage
+from ..prompts import ROUTER_SYSTEM_PROMPT
+from ...core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class Router:
+    """LLM-based router that intelligently selects the appropriate agent."""
 
-    RAG_KEYWORDS = [
-        "search",
-        "find",
-        "lookup",
-        "document",
-        "file",
-        "knowledge",
-        "explain",
-        "what is",
-        "how to",
-        "tell me about",
-    ]
+    def __init__(self):
+        self.model_name = "gemini-2.0-flash-exp"
+        self.gemini_client = None
+        self._init_gemini()
 
-    QUESTION_PATTERNS = [
-        r"what\s+is",
-        r"how\s+to",
-        r"where\s+is",
-        r"when\s+did",
-        r"why\s+does",
-        r"who\s+is",
-        r"tell\s+me\s+about",
-    ]
+    def _init_gemini(self):
+        api_key = settings.gemini_api_key
+        if not api_key:
+            logger.error("Gemini API key not configured")
+            return
+
+        if api_key.startswith("GEMINI_API_KEY="):
+            api_key = api_key.split("=", 1)[-1].strip()
+
+        self.gemini_client = genai.Client(api_key=api_key)
+        logger.info("Gemini client initialized for Router")
 
     async def route_message(
         self, message: AgentMessage, available_agents: List[str]
     ) -> str:
-        content = message.content.lower().strip()
+        """Route the message to the appropriate agent using LLM."""
+        content = message.content.strip()
 
-        if self._should_use_rag(content) and "rag_agent" in available_agents:
-            logger.info(f"Routing to RAG agent: {content[:50]}...")
-            return "rag_agent"
+        try:
+            # Build the routing prompt
+            prompt = f"{ROUTER_SYSTEM_PROMPT}\n\nUser message: {content}"
 
-        if "chat_agent" in available_agents:
-            logger.info(f"Routing to Chat agent: {content[:50]}...")
-            return "chat_agent"
-
-        return available_agents[0] if available_agents else "chat_agent"
-
-    def _should_use_rag(self, content: str) -> bool:
-        for keyword in self.RAG_KEYWORDS:
-            if keyword in content:
-                return True
-
-        for pattern in self.QUESTION_PATTERNS:
-            if re.search(pattern, content, re.IGNORECASE):
-                return True
-
-        if len(content.split()) > 15:
-            return any(
-                term in content
-                for term in ["explain", "details", "information", "document"]
+            # Get LLM decision using Gemini
+            response = self.gemini_client.models.generate_content(
+                model=self.model_name, contents=prompt
             )
+            response_text = (
+                response.text if hasattr(response, "text") else str(response)
+            )
+            selected_agent = response_text.strip().lower()
 
-        return False
+            # Validate the selected agent is available
+            if selected_agent in available_agents:
+                logger.info(f"LLM routed to {selected_agent}: {content[:50]}...")
+                return selected_agent
+
+        except Exception as e:
+            logger.error(f"Error in LLM routing: {e}, falling back to chat_agent")
+            return (
+                "chat_agent"
+                if "chat_agent" in available_agents
+                else available_agents[0]
+            )

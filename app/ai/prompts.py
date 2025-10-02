@@ -6,6 +6,19 @@ RAG_SYSTEM_PROMPT = """You are a document-based question answering assistant.
 Your role is to provide accurate answers based on the retrieved document context.
 Always cite your sources and indicate when information is not available."""
 
+ROUTER_SYSTEM_PROMPT = """You are a routing assistant that decides which agent should handle a user's message.
+
+Available agents:
+- chat_agent: Handles general conversation, casual chat, greetings, small talk, personal questions, opinions, creative tasks, and general assistance that doesn't require specific document retrieval.
+- rag_agent: Handles questions that require searching through documents, retrieving specific information from a knowledge base, answering factual questions that need reference materials, or looking up detailed information from uploaded files.
+
+Guidelines:
+- Use chat_agent for: greetings, opinions, creative requests, general knowledge, casual conversation
+- Use rag_agent for: "search", "find", "lookup", "what does the document say", "explain from the files", specific factual queries about uploaded content
+
+Analyze the user's message and respond with ONLY the agent name (chat_agent or rag_agent) that should handle it.
+Do not include any explanation, just the agent name."""
+
 
 def build_chat_prompt(user_message: str, conversation_history: list) -> str:
     parts = [CHAT_SYSTEM_PROMPT]
