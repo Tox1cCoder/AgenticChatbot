@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from redis import Redis
+from datetime import datetime
 
 from app.core.config import settings
 from app.core.container import get_container, setup_auto_injection
@@ -13,6 +15,8 @@ from app.api.documents import router as documents_router
 from app.database.session import get_engine
 from app.api.auth import router as auth_router
 from app.utils.exception_handler import register_exception_handlers
+from app.workers.celery_app import celery_app
+from app.ai.agents.rag_agent import RAGAgent
 
 from fastapi_radar import Radar
 
@@ -86,4 +90,126 @@ async def root():
         "version": settings.app_version,
         "docs_url": "/docs",
         "health_check": "/health",
+    }
+
+
+@app.get("/health/celery")
+async def health_check_celery():
+    """Check Celery worker health"""
+    try:
+        # Use Celery inspect API to check active workers
+        inspect = celery_app.control.inspect()
+        active_workers = inspect.active()
+
+        if active_workers:
+            worker_names = list(active_workers.keys())
+            return {
+                "status": "healthy",
+                "workers": worker_names,
+                "worker_count": len(worker_names),
+                "message": f"{len(worker_names)} Celery worker(s) active",
+            }
+        else:
+            return {
+                "status": "unhealthy",
+                "workers": [],
+                "worker_count": 0,
+                "message": "No active Celery workers found",
+            }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "message": "Failed to connect to Celery",
+        }
+
+
+@app.get("/health/redis")
+async def health_check_redis():
+    """Check Redis connection health"""
+    try:
+        redis_client = Redis.from_url(settings.celery_broker_url, decode_responses=True)
+
+        response = redis_client.ping()
+
+        if response:
+            redis_client.close()
+            return {"status": "healthy", "message": "Redis connection successful"}
+        else:
+            redis_client.close()
+            return {"status": "unhealthy", "message": "Redis ping failed"}
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "message": "Failed to connect to Redis",
+        }
+
+
+@app.get("/health/qdrant")
+async def health_check_qdrant():
+    """Check Qdrant connection health"""
+    rag_agent = None
+    try:
+        rag_agent = RAGAgent(
+            qdrant_url=settings.qdrant_url,
+            collection_name=settings.qdrant_collection_name,
+        )
+
+        await rag_agent.initialize()
+
+        status_info = await rag_agent.get_status()
+
+        return {
+            "status": status_info.get("status", "unknown"),
+            "collection": status_info.get("collection"),
+            "vectors_count": status_info.get("vectors_count", 0),
+            "message": (
+                "Qdrant connection successful"
+                if status_info.get("status") == "healthy"
+                else "Qdrant connection issues"
+            ),
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "message": "Failed to connect to Qdrant",
+        }
+    finally:
+        if rag_agent:
+            try:
+                await rag_agent.cleanup()
+            except:
+                pass
+
+
+@app.get("/health/all")
+async def health_check_all():
+    """Check health of all services"""
+    timestamp = datetime.utcnow().isoformat()
+
+    celery_health = await health_check_celery()
+
+    redis_health = await health_check_redis()
+
+    qdrant_health = await health_check_qdrant()
+
+    all_healthy = (
+        celery_health.get("status") == "healthy"
+        and redis_health.get("status") == "healthy"
+        and qdrant_health.get("status") == "healthy"
+    )
+
+    return {
+        "status": "healthy" if all_healthy else "degraded",
+        "timestamp": timestamp,
+        "services": {
+            "celery": celery_health,
+            "redis": redis_health,
+            "qdrant": qdrant_health,
+        },
+        "message": (
+            "All services healthy" if all_healthy else "One or more services unhealthy"
+        ),
     }

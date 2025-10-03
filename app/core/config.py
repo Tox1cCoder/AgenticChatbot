@@ -105,6 +105,28 @@ class Settings(BaseSettings):
         env="CELERY_RESULT_BACKEND",
     )
 
+    # Celery Worker Configuration
+    celery_task_time_limit: int = Field(
+        default=300,
+        description="Hard time limit for Celery tasks in seconds",
+        env="CELERY_TASK_TIME_LIMIT",
+    )
+    celery_task_soft_time_limit: int = Field(
+        default=240,
+        description="Soft time limit for Celery tasks in seconds",
+        env="CELERY_TASK_SOFT_TIME_LIMIT",
+    )
+    celery_worker_concurrency: int = Field(
+        default=2,
+        description="Number of concurrent Celery workers",
+        env="CELERY_WORKER_CONCURRENCY",
+    )
+    celery_worker_prefetch_multiplier: int = Field(
+        default=1,
+        description="Task prefetch multiplier for Celery workers",
+        env="CELERY_WORKER_PREFETCH_MULTIPLIER",
+    )
+
     # File Storage Configuration
     temp_storage_path: str = Field(
         default="app/temp",
@@ -115,6 +137,40 @@ class Settings(BaseSettings):
         default=50,
         description="Maximum file upload size in MB",
         env="MAX_FILE_SIZE_MB",
+    )
+
+    # Document Processing Configuration
+    allowed_file_extensions: List[str] = Field(
+        default=[".txt", ".pdf", ".docx"],
+        description="List of allowed file extensions for document upload",
+        env="ALLOWED_FILE_EXTENSIONS",
+    )
+    document_chunk_size: int = Field(
+        default=1000,
+        description="Chunk size for text splitting in characters",
+        env="DOCUMENT_CHUNK_SIZE",
+    )
+    document_chunk_overlap: int = Field(
+        default=200,
+        description="Overlap between chunks in characters",
+        env="DOCUMENT_CHUNK_OVERLAP",
+    )
+    document_processing_timeout: int = Field(
+        default=300,
+        description="Maximum processing time for documents in seconds",
+        env="DOCUMENT_PROCESSING_TIMEOUT",
+    )
+
+    # Health Check Configuration
+    health_check_timeout: int = Field(
+        default=5,
+        description="Timeout for health check requests in seconds",
+        env="HEALTH_CHECK_TIMEOUT",
+    )
+    enable_health_checks: bool = Field(
+        default=True,
+        description="Enable or disable health check endpoints",
+        env="ENABLE_HEALTH_CHECKS",
     )
 
     # Application metadata

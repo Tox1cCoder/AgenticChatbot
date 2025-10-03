@@ -15,6 +15,7 @@ from app.core.dependency_injection import AppAutoInjector
 from app.core.exceptions.validation import FileValidationError
 from app.core.exceptions.resource import ResourceNotFoundException
 from app.interfaces.document_service_interface import IDocumentService
+from app.interfaces.conversation_service_interface import IConversationService
 from app.schemas.document import (
     DocumentResponse,
     DocumentListResponse,
@@ -34,10 +35,13 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 @AppAutoInjector.auto_inject()
 async def upload_document(
     document_service: IDocumentService,
+    conversation_service: IConversationService,
+    current_user_id: UUID,
     file: UploadFile = File(...),
     conversation_id: UUID = Form(...),
 ) -> ApiResponse:
     """Upload a document and start background processing"""
+
     file_content = await file.read()
 
     document = await document_service.validate_and_create_document(
@@ -47,7 +51,6 @@ async def upload_document(
         conversation_id=conversation_id,
     )
 
-    # Start background processing
     processing_service = DocumentProcessingService()
     task_info = await processing_service.start_processing_task(
         str(document.id), file_content, file.filename or "unknown"
@@ -60,10 +63,27 @@ async def upload_document(
     )
 
 
+@router.get("/task/{task_id}", response_model=ApiResponse)
+@AppAutoInjector.auto_inject()
+async def get_task_status(task_id: str) -> ApiResponse:
+    """Get Celery task status by task ID"""
+    processing_service = DocumentProcessingService()
+    task_status = await processing_service.get_task_status(task_id)
+
+    return ApiResponse(
+        success=True,
+        message="Task status retrieved successfully",
+        data=task_status,
+    )
+
+
 @router.get("/{document_id}", response_model=ApiResponse)
 @AppAutoInjector.auto_inject()
 async def get_document(
-    document_service: IDocumentService, current_user_id: UUID, document_id: UUID
+    document_service: IDocumentService,
+    conversation_service: IConversationService,
+    current_user_id: UUID,
+    document_id: UUID,
 ) -> ApiResponse:
     """Get document by ID"""
 
@@ -83,11 +103,13 @@ async def get_document(
 @AppAutoInjector.auto_inject()
 async def get_conversation_documents(
     document_service: IDocumentService,
+    conversation_service: IConversationService,
     current_user_id: UUID,
     conversation_id: UUID,
     page: int = 1,
     page_size: int = 20,
 ) -> ApiResponse:
+    """Get documents for a conversation with pagination"""
     document_list = await document_service.get_documents_by_conversation(
         conversation_id, page, page_size
     )
@@ -103,20 +125,15 @@ async def get_conversation_documents(
 @AppAutoInjector.auto_inject()
 async def update_document(
     document_service: IDocumentService,
+    conversation_service: IConversationService,
     current_user_id: UUID,
     document_id: UUID,
     update_data: DocumentUpdate,
 ) -> ApiResponse:
     """Update document"""
-    logger.info(f"Update document request: {document_id} by user: {current_user_id}")
 
     document = await document_service.update_document(document_id, update_data)
 
-    if not document:
-        logger.warning(f"Document not found for update: {document_id}")
-        raise ResourceNotFoundException(detail="Document not found")
-
-    logger.info(f"Document updated successfully: {document_id}")
     return ApiResponse(
         success=True,
         message="Document updated successfully",
@@ -127,23 +144,16 @@ async def update_document(
 @router.delete("/{document_id}", response_model=ApiResponse)
 @AppAutoInjector.auto_inject()
 async def delete_document(
-    document_service: IDocumentService, current_user_id: UUID, document_id: UUID
+    document_service: IDocumentService,
+    conversation_service: IConversationService,
+    current_user_id: UUID,
+    document_id: UUID,
 ) -> ApiResponse:
     """Delete document"""
-    logger.info(f"Delete document request: {document_id} by user: {current_user_id}")
-
     success = await document_service.delete_document(document_id)
 
     if not success:
-        logger.warning(f"Document not found for deletion: {document_id}")
         raise ResourceNotFoundException(detail="Document not found or access denied")
-
-    logger.info(f"Document deleted successfully: {document_id}")
-    return ApiResponse(
-        success=True,
-        message="Document deleted successfully",
-        data={"deleted_document_id": document_id},
-    )
 
     return ApiResponse(
         success=True,

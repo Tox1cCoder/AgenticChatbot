@@ -121,6 +121,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 #### Qdrant Vector Database
 
 **Option 1: Docker (Recommended)**
+
 ```bash
 docker pull qdrant/qdrant
 docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
@@ -132,10 +133,12 @@ Sign up at [cloud.qdrant.io](https://cloud.qdrant.io) and update `QDRANT_URL` an
 #### Redis Server
 
 **On Windows:**
+
 - Download from [redis.io](https://redis.io/download) or use [Memurai](https://www.memurai.com/)
 - Or use Docker: `docker run -d -p 6379:6379 redis`
 
 **On Linux:**
+
 ```bash
 sudo apt-get install redis-server
 sudo service redis-server start
@@ -149,23 +152,61 @@ alembic upgrade head
 
 ### 5. Start Services
 
+#### Using Docker Compose (Recommended)
+
+The easiest way to start all services at once:
+
+```bash
+docker-compose up -d
+```
+
+This will start:
+
+- PostgreSQL database
+- Redis server
+- Qdrant vector database
+- Celery worker
+- FastAPI application
+
+View logs:
+
+```bash
+docker-compose logs -f
+```
+
+Stop all services:
+
+```bash
+docker-compose down
+```
+
+#### Manual Setup (Without Docker)
+
 #### Terminal 1: Start API Server
+
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 #### Terminal 2: Start Celery Worker (for document processing)
+
+```bash
+python -m app.workers.start_worker
+```
+
+Or directly with Celery:
+
 ```bash
 celery -A app.workers.celery_app worker --loglevel=info --pool=solo
 ```
 
-Note: Use `--pool=solo` on Windows. On Linux/Mac, you can omit this flag.
+Note: The worker script automatically detects your platform and uses `--pool=solo` on Windows. On Linux/Mac, it uses the default prefork pool.
 
 #### Terminal 3: Start Streamlit Demo (Optional)
+
 ```bash
 streamlit run demo.py
 ```
-
 
 ### 🔗 Access Points
 
@@ -182,6 +223,16 @@ streamlit run demo.py
 
 - `GET /health/` — Health check
 - `GET /health/db` — Database health check
+- `GET /health/celery` — Check Celery worker status
+- `GET /health/redis` — Check Redis connection
+- `GET /health/qdrant` — Check Qdrant connection
+- `GET /health/all` — Check all services at once
+
+Example health check:
+
+```bash
+curl http://localhost:8000/health/all
+```
 
 ### Authentication
 
@@ -210,14 +261,16 @@ streamlit run demo.py
 - `GET /messages/conversation/{conversation_id}` — Get messages for a conversation (requires user_id, paginated)
 - `GET /messages/conversation/{conversation_id}/thread` — Get conversation thread (requires user_id)
 
-### Documents (RAG Knowledge Base)
+### Documents (RAG Knowledge Base - all require authentication)
 
-- `POST /documents/upload` — Upload document for processing (PDF, DOCX, etc.)
-- `GET /documents/` — List all documents (paginated)
-- `GET /documents/{document_id}` — Get document details
-- `GET /documents/{document_id}/status` — Check processing status
-- `PUT /documents/{document_id}` — Update document metadata
-- `DELETE /documents/{document_id}` — Delete document and embeddings
+- `POST /documents/upload` — Upload document for processing (PDF, DOCX, TXT) - requires conversation ownership
+- `GET /documents/task/{task_id}` — Get Celery task status by task ID
+- `GET /documents/{document_id}` — Get document details - requires conversation ownership
+- `GET /documents/conversation/{conversation_id}` — Get documents for a conversation - requires conversation ownership
+- `PUT /documents/{document_id}` — Update document metadata - requires conversation ownership
+- `DELETE /documents/{document_id}` — Delete document and embeddings - requires conversation ownership
+
+**Note**: All document endpoints verify that the user owns the conversation associated with the document.
 
 ### Feedbacks
 
@@ -260,6 +313,7 @@ Content-Type: application/json
 ```
 
 **Response:**
+
 ```json
 {
   "accessToken": "eyJ0eXAiOiJKV1QiLCJhbGc...",
@@ -269,9 +323,93 @@ Content-Type: application/json
 }
 ```
 
-### Document Upload & RAG
+### Document Upload & RAG Workflow
 
-#### Upload Document
+#### 1. Upload Document
+
+```http
+POST /documents/upload
+Authorization: Bearer <access_token>
+Content-Type: multipart/form-data
+
+file: <your-pdf-or-docx-file>
+conversation_id: <conversation-id>
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "message": "Document 'example.pdf' uploaded successfully and is being processed in the background.",
+  "data": {
+    "document": {
+      "id": "doc-uuid",
+      "filename": "example.pdf",
+      "status": 1,
+      "conversation_id": "conv-uuid",
+      "upload_time": "2024-10-02T12:00:00"
+    },
+    "processing": {
+      "task_id": "celery-task-uuid"
+    }
+  }
+}
+```
+
+**Status codes:**
+
+- `1` = Processing (document is being embedded)
+- `2` = Ready (document is indexed and searchable)
+- `3` = Failed (processing encountered an error)
+
+#### 2. Check Document Status
+
+The Streamlit UI automatically polls for status updates. You can also check manually:
+
+```http
+GET /documents/{document_id}
+Authorization: Bearer <access_token>
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "doc-uuid",
+    "filename": "example.pdf",
+    "status": 2,
+    "conversation_id": "conv-uuid",
+    "upload_time": "2024-10-02T12:00:00"
+  }
+}
+```
+
+#### 3. Query Document (RAG)
+
+Once status is `2` (Ready), you can ask questions about the document:
+
+```http
+POST /messages/
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{
+  "conversationId": "conv-uuid",
+  "role": "user",
+  "content": "What is the main topic of the document?"
+}
+```
+
+The AI will automatically retrieve relevant content from the document to answer your question.
+
+---
+
+### Original Document Upload Example
+
+#### Upload Document (Legacy Format)
 
 ```http
 POST /documents/upload
@@ -283,6 +421,7 @@ userId: <user-id>
 ```
 
 **Response:**
+
 ```json
 {
   "id": "doc-uuid",
@@ -293,6 +432,7 @@ userId: <user-id>
 ```
 
 The document will be processed asynchronously by Celery workers:
+
 1. Extract text content
 2. Split into chunks
 3. Generate embeddings
@@ -320,6 +460,7 @@ Content-Type: application/json
 ```
 
 The AI will automatically:
+
 - Retrieve relevant document chunks from Qdrant
 - Use LangGraph agent to generate context-aware responses
 - Return answer based on uploaded documents
@@ -751,16 +892,151 @@ This comprehensive testing workflow ensures all chatbot functionality works corr
 
 ---
 
-## 🛠️ Development
+## � Troubleshooting
+
+### Document Upload Issues
+
+#### Document Upload Fails
+
+**Symptoms**: Upload returns 400 or 500 error
+
+**Solutions**:
+
+- Check file size is under `MAX_FILE_SIZE_MB` (default 50MB)
+- Verify file type is supported (`.txt`, `.pdf`, `.docx`)
+- Ensure you have a valid authentication token
+- Verify the conversation exists and you own it
+
+```bash
+# Check file size
+ls -lh your-document.pdf
+
+# Test with curl
+curl -X POST http://localhost:8000/documents/upload \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "file=@document.pdf" \
+  -F "conversation_id=YOUR_CONVERSATION_ID"
+```
+
+#### Status Stuck on "Processing"
+
+**Symptoms**: Document shows status `1` (Processing) indefinitely
+
+**Solutions**:
+
+- Check Celery worker logs: `docker-compose logs celery_worker`
+- Verify Qdrant is running: `curl http://localhost:6333/health`
+- Check Redis connection: `redis-cli ping`
+- Restart Celery worker
+
+```bash
+# Check Celery worker status
+curl http://localhost:8000/health/celery
+
+# Manual cleanup of stuck documents (runs every hour automatically)
+# Documents stuck for >1 hour are marked as failed
+```
+
+#### No Status Updates in Streamlit UI
+
+**Symptoms**: Upload succeeds but status doesn't auto-update
+
+**Solutions**:
+
+- Click the "🔄 Refresh Status" button manually
+- Check browser console for errors
+- Verify API is accessible: `curl http://localhost:8000/health`
+- Ensure `API_BASE_URL` in `demo.py` matches your API server
+
+#### Qdrant Connection Error
+
+**Symptoms**: `ConnectionError: Qdrant connection unhealthy`
+
+**Solutions**:
+
+- Check Qdrant is running: `docker ps | grep qdrant`
+- Verify port 6333 is accessible: `curl http://localhost:6333`
+- Check Qdrant health: `curl http://localhost:6333/health`
+- Restart Qdrant: `docker-compose restart qdrant`
+
+```bash
+# Start Qdrant if not running
+docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+```
+
+#### Temp File Errors
+
+**Symptoms**: "Permission denied" or "No space left on device"
+
+**Solutions**:
+
+- Check temp folder exists: `ls app/temp/`
+- Verify write permissions: `chmod 755 app/temp/`
+- Check disk space: `df -h`
+- Clean old temp files: `rm app/temp/*`
+
+```bash
+# Create temp directory if missing
+mkdir -p app/temp
+chmod 755 app/temp
+```
+
+### General Troubleshooting
+
+#### Celery Worker Not Starting
+
+**Symptoms**: `GET /health/celery` returns unhealthy
+
+**Solutions**:
+
+- On Windows, ensure using `--pool=solo` flag
+- Check Redis is running: `redis-cli ping`
+- Verify Python environment is activated
+- Check for port conflicts
+
+```bash
+# Start worker with platform detection
+python -m app.workers.start_worker
+
+# Or manually
+celery -A app.workers.celery_app worker --loglevel=info --pool=solo  # Windows
+celery -A app.workers.celery_app worker --loglevel=info  # Linux/Mac
+```
+
+#### Database Connection Errors
+
+**Symptoms**: "Could not connect to database"
+
+**Solutions**:
+
+- Check PostgreSQL is running
+- Verify `DATABASE_URL` in `.env`
+- Run migrations: `alembic upgrade head`
+
+#### Redis Connection Errors
+
+**Symptoms**: Celery can't connect to broker
+
+**Solutions**:
+
+- Start Redis: `redis-server` or `docker-compose up redis`
+- Check `CELERY_BROKER_URL` in `.env`
+- Test connection: `redis-cli ping`
+
+---
+
+## �🛠️ Development
 
 ### Project Dependencies
 
 Install all dependencies:
+
 ```bash
 pip install -e .
 ```
 
 Install development dependencies:
+
 ```bash
 pip install -e ".[dev]"
 ```
@@ -777,16 +1053,19 @@ pip install -e ".[dev]"
 ### Database Migrations
 
 Create a new migration:
+
 ```bash
 alembic revision --autogenerate -m "Description of changes"
 ```
 
 Apply migrations:
+
 ```bash
 alembic upgrade head
 ```
 
 Rollback migration:
+
 ```bash
 alembic downgrade -1
 ```
@@ -806,31 +1085,37 @@ pytest --cov=app  # With coverage
 ### Common Issues
 
 **Celery Worker Not Starting**
+
 - Ensure Redis is running: `redis-cli ping` should return `PONG`
 - On Windows, use `--pool=solo` flag
 - Check `CELERY_BROKER_URL` in `.env`
 
 **Qdrant Connection Failed**
+
 - Verify Qdrant is running: Visit `http://localhost:6333/dashboard`
 - Check `QDRANT_URL` in `.env`
 - Docker: `docker ps` should show qdrant container
 
 **Database Connection Error**
+
 - Verify PostgreSQL is running
 - Check `DATABASE_URL` format: `postgresql://user:pass@host:port/dbname`
 - Ensure database exists and UUID extension is enabled
 
 **Document Processing Stuck**
+
 - Check Celery worker logs
 - Verify document format is supported (PDF, DOCX, TXT)
 - Check file size limits
 - Inspect document status: `GET /documents/{id}/status`
 
 **JWT Token Expired**
+
 - Use refresh token: `POST /auth/refresh`
 - Check token expiration settings in `.env`
 
 **Import Errors**
+
 - Reinstall package: `pip install -e .`
 - Check Python version: `python --version` (should be >=3.10)
 

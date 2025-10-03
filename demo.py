@@ -107,6 +107,8 @@ if "conversation_messages_page" not in st.session_state:
     st.session_state.conversation_messages_page = 0
 if "has_more_messages" not in st.session_state:
     st.session_state.has_more_messages = True
+if "API_BASE_URL" not in st.session_state:
+    st.session_state.API_BASE_URL = API_BASE_URL
 
 
 def reset_conversation_state() -> None:

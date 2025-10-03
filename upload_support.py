@@ -6,7 +6,10 @@ This module provides file upload functionality that was present in the original 
 
 import streamlit as st
 import requests
+import time
 from typing import Dict, Any, Optional
+
+API_BASE_URL = "http://localhost:8000"
 
 
 def render_upload_section():
@@ -76,20 +79,112 @@ def upload_document(uploaded_file) -> Optional[Dict[str, Any]]:
 
         # Make upload request
         response = requests.post(
-            f"{st.session_state.get('API_BASE_URL', 'http://localhost:8000')}/documents/upload",
+            f"{API_BASE_URL}/documents/upload",
             files=files,
             data=data,
             headers=headers,
         )
 
         if response.status_code == 201:
-            return response.json()
+            result = response.json()
+            # Start polling for status updates
+            if result and result.get("id"):
+                poll_document_status(result["id"])
+            return result
         else:
             st.error(f"Upload failed: {response.status_code} - {response.text}")
             return None
 
     except Exception as e:
         st.error(f"Upload error: {str(e)}")
+        return None
+
+
+def poll_document_status(document_id: str):
+    """
+    Poll document status and display real-time updates
+
+    Args:
+        document_id: ID of the document to monitor
+    """
+    status_placeholder = st.empty()
+    start_time = time.time()
+    max_wait_time = 300
+    poll_interval = 3
+
+    try:
+        while True:
+            elapsed_time = time.time() - start_time
+
+            # Check timeout
+            if elapsed_time > max_wait_time:
+                status_placeholder.warning(
+                    "Processing timeout - please refresh manually"
+                )
+                break
+
+            # Get current status
+            doc_status = get_document_status(document_id)
+
+            if doc_status:
+                status_code = doc_status.get("status")
+                filename = doc_status.get("filename", "Unknown")
+
+                # Status: 1=Processing, 2=Ready, 3=Failed
+                if status_code == 1:
+                    status_placeholder.info(
+                        f"⏳ Processing '{filename}'... ({int(elapsed_time)}s elapsed)"
+                    )
+                elif status_code == 2:
+                    status_placeholder.success(
+                        f"✅ '{filename}' is ready! Processing completed in {int(elapsed_time)}s"
+                    )
+                    time.sleep(2)  # Show success message briefly
+                    status_placeholder.empty()
+                    break
+                elif status_code == 3:
+                    status_placeholder.error(f"❌ '{filename}' processing failed")
+                    break
+                else:
+                    status_placeholder.warning(f"❓ Unknown status for '{filename}'")
+                    break
+            else:
+                status_placeholder.warning("⚠️ Unable to fetch document status")
+                break
+
+            # Wait before next poll
+            time.sleep(poll_interval)
+
+    except Exception as e:
+        status_placeholder.error(f"Error monitoring status: {str(e)}")
+
+
+def get_document_status(document_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Get status of a single document
+
+    Args:
+        document_id: ID of the document
+
+    Returns:
+        Dict containing document info or None if failed
+    """
+    try:
+        headers = {}
+        if st.session_state.get("auth_token"):
+            headers["Authorization"] = f"Bearer {st.session_state.auth_token}"
+
+        response = requests.get(
+            f"{API_BASE_URL}/documents/{document_id}",
+            headers=headers,
+        )
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return None
+
+    except Exception as e:
         return None
 
 
@@ -106,7 +201,7 @@ def get_uploaded_documents() -> Dict[str, Any]:
             and st.session_state.current_conversation_id != "pending_new"
         ):
             response = requests.get(
-                f"{st.session_state.get('API_BASE_URL', 'http://localhost:8000')}/documents/conversation/{st.session_state.current_conversation_id}",
+                f"{API_BASE_URL}/documents/conversation/{st.session_state.current_conversation_id}",
                 headers=headers,
             )
         else:
@@ -130,6 +225,11 @@ def render_document_list():
         and st.session_state.current_conversation_id != "pending_new"
     ):
         with st.expander("📚 Conversation Documents", expanded=False):
+            # Add refresh button
+            if st.button("🔄 Refresh Status", key="refresh_docs"):
+                st.cache_data.clear()
+                st.rerun()
+
             docs_response = get_uploaded_documents()
 
             if docs_response and docs_response.get("data"):
@@ -189,7 +289,7 @@ def delete_document(document_id: str) -> bool:
             headers["Authorization"] = f"Bearer {st.session_state.auth_token}"
 
         response = requests.delete(
-            f"{st.session_state.get('API_BASE_URL', 'http://localhost:8000')}/documents/{document_id}",
+            f"{API_BASE_URL}/documents/{document_id}",
             headers=headers,
         )
 

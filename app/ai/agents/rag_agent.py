@@ -1,6 +1,7 @@
 import logging
 from typing import Optional, List, Dict, Any
 import time
+import hashlib
 from datetime import datetime
 
 from google import genai
@@ -258,12 +259,16 @@ class RAGAgent:
 
             embedding = self.embedding_model.encode(chunk_text).tolist()
 
+            # Create Unicode-safe point ID using MD5 hash of filename
+            filename_hash = hashlib.md5(filename.encode("utf-8")).hexdigest()[:8]
+            safe_point_id = f"{document_id}_{filename_hash}_{i}_{int(time.time())}"
+
             point = PointStruct(
-                id=f"{document_id}_{filename}_{i}_{int(time.time())}",
+                id=safe_point_id,
                 vector=embedding,
                 payload={
                     "content": chunk_text,
-                    "source": filename,
+                    "source": filename,  # Original filename preserved in payload
                     "document_id": document_id,
                     "conversation_id": conversation_id,
                     "chunk_index": i,

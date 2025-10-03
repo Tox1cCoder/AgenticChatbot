@@ -47,6 +47,7 @@ def process_document_task(
 
     db = SessionLocal()
     document_repo = DocumentRepository(db)
+    temp_file_path = None
 
     try:
         # Get document record to retrieve conversation_id
@@ -86,6 +87,13 @@ def process_document_task(
             try:
                 loop.run_until_complete(rag_agent.initialize())
 
+                rag_status = rag_agent.get_status()
+                if rag_status.get("status") != "healthy":
+                    raise ConnectionError(
+                        f"Qdrant connection unhealthy: {rag_status.get('error', 'Unknown error')}"
+                    )
+                logger.info(f"Qdrant connection verified for document {document_id}")
+
                 processing_result = loop.run_until_complete(
                     rag_agent.process_document(
                         file_path=temp_file_path,
@@ -114,8 +122,15 @@ def process_document_task(
             }
 
         finally:
-            if os.path.exists(temp_file_path):
-                os.unlink(temp_file_path)
+            if temp_file_path is not None:
+                try:
+                    if os.path.exists(temp_file_path):
+                        os.unlink(temp_file_path)
+                        logger.info(f"Cleaned up temp file: {temp_file_path}")
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        f"Failed to cleanup temp file {temp_file_path}: {cleanup_exc}"
+                    )
 
             if "rag_agent" in locals():
 
@@ -127,8 +142,11 @@ def process_document_task(
                     loop.close()
 
     except Exception as exc:
-        logger.error(f"Error processing document {document_id}: {exc}")
-        logger.error(traceback.format_exc())
+        logger.error(
+            f"Error processing document {document_id} ('{filename}'): {exc}",
+            exc_info=True,
+        )
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
 
         try:
             update_data = DocumentUpdate(status=DocumentStatus.FAILED.value)
@@ -139,10 +157,14 @@ def process_document_task(
         if self.request.retries < self.max_retries:
             retry_delay = min(300, 60 * (2**self.request.retries))
             logger.info(
-                f"Retrying task {task_id} (attempt {self.request.retries + 1}/{self.max_retries}) in {retry_delay}s"
+                f"Retrying task {task_id} for document {document_id} "
+                f"(attempt {self.request.retries + 1}/{self.max_retries}) in {retry_delay}s"
             )
             raise self.retry(exc=exc, countdown=retry_delay)
 
+        logger.error(
+            f"Document {document_id} ('{filename}') failed after {self.max_retries} attempts"
+        )
         return {
             "success": False,
             "document_id": document_id,

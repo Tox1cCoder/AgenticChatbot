@@ -1,23 +1,13 @@
 """
 Celery Worker Startup Script
-
-This script is used to start the Celery worker for background document processing.
-
 Usage:
     python -m app.workers.start_worker
-
-Or using Celery directly:
-    celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
-
-Requirements:
-    - Redis server must be running on localhost:6379
-    - Database must be accessible
-    - Qdrant server should be running for vector operations
 """
 
 import os
 import sys
 import subprocess
+import platform
 from pathlib import Path
 
 
@@ -49,6 +39,14 @@ def start_worker():
         "--time-limit=300",
         "--soft-time-limit=240",
     ]
+
+    # Detect platform and add appropriate pool configuration
+    system = platform.system()
+    if system == "Windows":
+        cmd.append("--pool=solo")
+        print(f"Detected platform: {system} - Using 'solo' pool")
+    else:
+        print(f"Detected platform: {system} - Using default 'prefork' pool")
 
     print("Starting Celery worker...")
     print("Command:", " ".join(cmd))
