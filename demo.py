@@ -14,13 +14,26 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def sanitize_message_content(content: Any) -> str:
-    """Strip HTML tags and escape the remaining text for safe display."""
+    """Strip HTML tags, apply markdown formatting, and escape text for safe display."""
     if not isinstance(content, str):
         return ""
 
     without_tags = _HTML_TAG_RE.sub("", content)
     normalized = html.unescape(without_tags).replace("\r\n", "\n").replace("\r", "\n")
-    safe_text = html.escape(normalized.strip(), quote=False)
+    
+    # Convert markdown bold syntax to HTML
+    markdown_processed = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', normalized)
+    # Convert markdown italic syntax to HTML  
+    markdown_processed = re.sub(r'\*(.*?)\*', r'<em>\1</em>', markdown_processed)
+    # Convert markdown code syntax to HTML
+    markdown_processed = re.sub(r'`(.*?)`', r'<code>\1</code>', markdown_processed)
+    
+    safe_text = html.escape(markdown_processed.strip(), quote=False)
+    # Re-apply HTML formatting that was escaped
+    safe_text = safe_text.replace("&lt;strong&gt;", "<strong>").replace("&lt;/strong&gt;", "</strong>")
+    safe_text = safe_text.replace("&lt;em&gt;", "<em>").replace("&lt;/em&gt;", "</em>")
+    safe_text = safe_text.replace("&lt;code&gt;", "<code>").replace("&lt;/code&gt;", "</code>")
+    
     return safe_text.replace("\n", "<br>")
 
 
@@ -643,8 +656,8 @@ def render_chat_interface():
                     <div style="display: flex; flex-direction: column;">
                         <div class="bot-message" style="margin: 0;">
                             {sanitize_message_content(msg.get("content"))}
+                            <div class="message-timestamp">Assistant • {format_time(msg.get("createdAt", "now"))}</div>
                         </div>
-                        <div class="message-timestamp">Assistant • {format_time(msg.get("createdAt", "now"))}</div>
                     </div>
                 </div>
                 """,

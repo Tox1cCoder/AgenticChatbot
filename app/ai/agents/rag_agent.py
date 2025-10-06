@@ -2,6 +2,7 @@ import logging
 from typing import Optional, List, Dict, Any
 import time
 import hashlib
+import uuid
 from datetime import datetime
 
 from google import genai
@@ -109,8 +110,9 @@ class RAGAgent:
     ) -> List[Dict[str, Any]]:
         query_embedding = self.embedding_model.encode(query).tolist()
 
-        # Build filter for conversation_id if provided
         search_filter = None
+        try_global_search = False
+        
         if conversation_id:
             from qdrant_client.models import Filter, FieldCondition, MatchValue
 
@@ -126,9 +128,18 @@ class RAGAgent:
             collection_name=self.collection_name,
             query_vector=query_embedding,
             limit=top_k,
-            score_threshold=0.7,
+            score_threshold=0.3,
             query_filter=search_filter,
         )
+
+        if not search_results and conversation_id:
+            logger.info(f"No results found for conversation {conversation_id}, trying global search")
+            search_results = self.qdrant_client.search(
+                collection_name=self.collection_name,
+                query_vector=query_embedding,
+                limit=top_k,
+                score_threshold=0.3,
+            )
 
         results = []
         for result in search_results:
@@ -259,9 +270,7 @@ class RAGAgent:
 
             embedding = self.embedding_model.encode(chunk_text).tolist()
 
-            # Create Unicode-safe point ID using MD5 hash of filename
-            filename_hash = hashlib.md5(filename.encode("utf-8")).hexdigest()[:8]
-            safe_point_id = f"{document_id}_{filename_hash}_{i}_{int(time.time())}"
+            safe_point_id = str(uuid.uuid4())
 
             point = PointStruct(
                 id=safe_point_id,

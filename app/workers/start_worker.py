@@ -12,13 +12,11 @@ from pathlib import Path
 
 
 def start_worker():
-    """Start the Celery worker with appropriate settings."""
+    """Start the Celery worker"""
 
-    # Ensure we're in the correct directory
     project_root = Path(__file__).parent.parent.parent
     os.chdir(project_root)
 
-    # Set environment variables if not already set
     if not os.getenv("CELERY_BROKER_URL"):
         os.environ["CELERY_BROKER_URL"] = "redis://localhost:6379/0"
 
