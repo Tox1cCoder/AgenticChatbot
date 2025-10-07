@@ -32,8 +32,20 @@ class RAGAgent:
         self.embedding_dimension = 384
         self.model_name = "gemini-2.5-flash"
         self.gemini_client = None
+        
+        # Store settings reference and retrieval parameters
+        self.settings = settings
+        self.top_k = settings.rag_top_k
+        self.score_threshold = settings.rag_score_threshold
+        self.enable_reranking = settings.enable_reranking
+        self.reranker = None
+        
         self._init_gemini()
         self._init_collection()
+        
+        # Initialize re-ranker if enabled
+        if self.enable_reranking:
+            self._init_reranker()
 
     def _init_gemini(self):
         api_key = settings.gemini_api_key
@@ -62,6 +74,17 @@ class RAGAgent:
                 logger.info(f"Qdrant collection exists: {self.collection_name}")
         except Exception as e:
             logger.error(f"Failed to initialize Qdrant collection: {e}")
+    
+    def _init_reranker(self):
+        """Initialize the re-ranker model"""
+        try:
+            from sentence_transformers import CrossEncoder
+            self.reranker = CrossEncoder(self.settings.reranker_model)
+            logger.info(f"Re-ranker initialized: {self.settings.reranker_model}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize re-ranker, disabling re-ranking: {e}")
+            self.enable_reranking = False
+            self.reranker = None
 
     async def process_message(
         self,
@@ -83,14 +106,22 @@ class RAGAgent:
             role=MessageRole.ASSISTANT, content=response_text
         )
 
+        # Expand citations to include all used chunks with more metadata
         citations = [
             {
                 "source": doc.get("source", "unknown"),
                 "page_number": doc.get("page_number"),
+                "page_start": doc.get("page_start"),
+                "page_end": doc.get("page_end"),
                 "score": doc.get("score", 0.0),
+                "chunk_index": doc.get("chunk_index", 0),
+                "character_count": len(doc.get("content", "")),
             }
-            for doc in retrieved_docs[:3]
+            for doc in retrieved_docs
         ]
+        
+        # Calculate retrieval statistics
+        avg_score = sum(doc.get("score", 0.0) for doc in retrieved_docs) / len(retrieved_docs) if retrieved_docs else 0.0
 
         return AgentResponse(
             agent_type=AgentType.RAG,
@@ -102,12 +133,20 @@ class RAGAgent:
                 "documents_found": len(retrieved_docs),
                 "citations": citations,
                 "context_messages": len(conversation_history),
+                "retrieval_stats": {
+                    "total_retrieved": len(retrieved_docs),
+                    "avg_score": avg_score,
+                },
             },
         )
 
     async def _search(
-        self, query: str, top_k: int = 5, conversation_id: Optional[str] = None
+        self, query: str, top_k: int = None, conversation_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
+        # Use configured top_k if not specified
+        if top_k is None:
+            top_k = self.top_k
+            
         query_embedding = self.embedding_model.encode(query).tolist()
 
         search_filter = None
@@ -128,7 +167,7 @@ class RAGAgent:
             collection_name=self.collection_name,
             query_vector=query_embedding,
             limit=top_k,
-            score_threshold=0.3,
+            score_threshold=self.score_threshold,
             query_filter=search_filter,
         )
 
@@ -138,8 +177,11 @@ class RAGAgent:
                 collection_name=self.collection_name,
                 query_vector=query_embedding,
                 limit=top_k,
-                score_threshold=0.3,
+                score_threshold=self.score_threshold,
             )
+
+        # Log retrieval results
+        logger.info(f"Retrieved {len(search_results)} chunks with scores: {[r.score for r in search_results]}")
 
         results = []
         for result in search_results:
@@ -149,13 +191,48 @@ class RAGAgent:
                     "source": result.payload.get("source", "unknown"),
                     "score": result.score,
                     "page_number": result.payload.get("page_number"),
+                    "page_start": result.payload.get("page_start"),
+                    "page_end": result.payload.get("page_end"),
                     "document_id": result.payload.get("document_id", ""),
                     "conversation_id": result.payload.get("conversation_id", ""),
                     "chunk_index": result.payload.get("chunk_index", 0),
                 }
             )
+        
+        # Apply re-ranking if enabled and we have enough results
+        if self.enable_reranking and len(results) > 3:
+            results = await self._rerank_results(query, results)
 
         return results
+    
+    async def _rerank_results(self, query: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Re-rank search results using cross-encoder"""
+        if not self.reranker or not results:
+            return results
+        
+        try:
+            # Prepare pairs for re-ranking
+            pairs = [[query, doc["content"]] for doc in results]
+            
+            # Get re-ranking scores
+            rerank_scores = self.reranker.predict(pairs)
+            
+            # Add rerank scores to results
+            for i, score in enumerate(rerank_scores):
+                results[i]["rerank_score"] = float(score)
+            
+            # Sort by rerank score
+            results = sorted(results, key=lambda x: x.get("rerank_score", 0), reverse=True)
+            
+            # Keep only top K after re-ranking
+            results = results[:self.settings.rerank_top_k]
+            
+            logger.info(f"Re-ranked results, kept top {len(results)} chunks")
+            
+            return results
+        except Exception as e:
+            logger.warning(f"Re-ranking failed, using original results: {e}")
+            return results
 
     async def _generate(self, prompt: str) -> str:
         response = self.gemini_client.models.generate_content(
@@ -186,14 +263,41 @@ class RAGAgent:
         elif filename.lower().endswith(".pdf"):
             with open(file_path, "rb") as f:
                 reader = PyPDF2.PdfReader(f)
-                for page_num, page in enumerate(reader.pages, start=1):
-                    text = page.extract_text()
-                    if text.strip():
-                        chunks = self._create_chunks(text)
-                        for chunk in chunks:
-                            chunks_with_metadata.append(
-                                {"text": chunk, "page_number": page_num}
-                            )
+                
+                if self.settings.preserve_cross_page_context:
+                    # Extract all pages first with page markers
+                    from ...utils.text_processing import extract_page_range
+                    
+                    pages_text = []
+                    for page_num, page in enumerate(reader.pages, start=1):
+                        text = page.extract_text()
+                        if text.strip():
+                            pages_text.append((page_num, text))
+                    
+                    # Concatenate with page markers
+                    full_text = ''.join([f'\n[PAGE {num}]\n{text}' for num, text in pages_text])
+                    
+                    # Chunk the full document
+                    chunks = self._create_chunks(full_text)
+                    
+                    # Extract page range for each chunk
+                    for chunk in chunks:
+                        page_start, page_end = extract_page_range(chunk)
+                        chunks_with_metadata.append({
+                            "text": chunk,
+                            "page_start": page_start,
+                            "page_end": page_end
+                        })
+                else:
+                    # Legacy per-page chunking
+                    for page_num, page in enumerate(reader.pages, start=1):
+                        text = page.extract_text()
+                        if text.strip():
+                            chunks = self._create_chunks(text)
+                            for chunk in chunks:
+                                chunks_with_metadata.append(
+                                    {"text": chunk, "page_number": page_num}
+                                )
 
         elif filename.lower().endswith(".docx"):
             doc = DocxDocument(file_path)
@@ -224,29 +328,23 @@ class RAGAgent:
         }
 
     def _create_chunks(
-        self, text: str, max_chunk_size: int = 1000, overlap: int = 200
+        self, text: str, max_chunk_size: int = None, overlap: int = None
     ) -> List[str]:
-        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-
-        chunks = []
-        current_chunk = ""
-
-        for paragraph in paragraphs:
-            if len(current_chunk) + len(paragraph) > max_chunk_size and current_chunk:
-                chunks.append(current_chunk.strip())
-                words = current_chunk.split()
-                if len(words) > overlap:
-                    overlap_text = " ".join(words[-overlap:])
-                    current_chunk = overlap_text + " " + paragraph
-                else:
-                    current_chunk = paragraph
-            else:
-                current_chunk += "\n\n" + paragraph if current_chunk else paragraph
-
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-
-        return chunks
+        """Create text chunks using smart chunking utility"""
+        from ...utils.text_processing import create_smart_chunks
+        
+        # Use configured parameters if not specified
+        if max_chunk_size is None:
+            max_chunk_size = self.settings.document_chunk_size
+        if overlap is None:
+            overlap = self.settings.document_chunk_overlap
+        
+        return create_smart_chunks(
+            text,
+            max_chunk_size,
+            overlap,
+            self.settings.chunk_by_sentences
+        )
 
     async def _store_chunks(
         self,
@@ -264,29 +362,39 @@ class RAGAgent:
                 if isinstance(chunk_data, dict)
                 else chunk_data
             )
-            page_number = (
-                chunk_data.get("page_number") if isinstance(chunk_data, dict) else None
-            )
+            
+            # Handle both single page and page ranges
+            page_number = chunk_data.get("page_number") if isinstance(chunk_data, dict) else None
+            page_start = chunk_data.get("page_start") if isinstance(chunk_data, dict) else None
+            page_end = chunk_data.get("page_end") if isinstance(chunk_data, dict) else None
 
             embedding = self.embedding_model.encode(chunk_text).tolist()
 
             safe_point_id = str(uuid.uuid4())
+            
+            payload = {
+                "content": chunk_text,
+                "source": filename,  # Original filename preserved in payload
+                "document_id": document_id,
+                "conversation_id": conversation_id,
+                "chunk_index": i,
+                "timestamp": datetime.now().isoformat(),
+                "file_type": (
+                    filename.split(".")[-1] if "." in filename else "unknown"
+                ),
+            }
+            
+            # Add page information (support both formats)
+            if page_start is not None and page_end is not None:
+                payload["page_start"] = page_start
+                payload["page_end"] = page_end
+            elif page_number is not None:
+                payload["page_number"] = page_number
 
             point = PointStruct(
                 id=safe_point_id,
                 vector=embedding,
-                payload={
-                    "content": chunk_text,
-                    "source": filename,  # Original filename preserved in payload
-                    "document_id": document_id,
-                    "conversation_id": conversation_id,
-                    "chunk_index": i,
-                    "page_number": page_number,
-                    "timestamp": datetime.now().isoformat(),
-                    "file_type": (
-                        filename.split(".")[-1] if "." in filename else "unknown"
-                    ),
-                },
+                payload=payload,
             )
             points.append(point)
 

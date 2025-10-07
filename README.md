@@ -1114,6 +1114,277 @@ pytest --cov=app  # With coverage
 - Use refresh token: `POST /auth/refresh`
 - Check token expiration settings in `.env`
 
+---
+
+## 🔍 RAG Pipeline Configuration
+
+### Overview
+
+The RAG (Retrieval-Augmented Generation) pipeline has been enhanced with advanced retrieval, re-ranking, and intelligent context management to provide more detailed and accurate responses.
+
+### Environment Variables
+
+Configure the RAG pipeline behavior using these environment variables in your `.env` file:
+
+#### Retrieval Settings
+
+```env
+# Number of chunks to retrieve from vector database (default: 15)
+# Higher values retrieve more context but increase processing time
+RAG_TOP_K=15
+
+# Minimum similarity score for retrieval (0.0-1.0, default: 0.2)
+# Lower values are more permissive, higher values are more strict
+RAG_SCORE_THRESHOLD=0.2
+
+# Maximum tokens to include in RAG context (default: 30000)
+# Gemini 2.5 Flash supports up to ~1M tokens, but 30k is a practical limit
+RAG_MAX_CONTEXT_TOKENS=30000
+```
+
+#### Re-ranking Settings
+
+Re-ranking improves relevance by scoring chunks using a cross-encoder model after initial retrieval.
+
+```env
+# Enable re-ranking of retrieved chunks (default: true)
+ENABLE_RERANKING=true
+
+# Re-ranker model name (default: cross-encoder/ms-marco-MiniLM-L-6-v2)
+# Available models: cross-encoder/ms-marco-MiniLM-L-6-v2 (fast), 
+#                   cross-encoder/ms-marco-MiniLM-L-12-v2 (better quality)
+RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+
+# Number of chunks to keep after re-ranking (default: 10)
+RERANK_TOP_K=10
+```
+
+#### Chunking Settings
+
+```env
+# Size of each chunk in characters (default: 1000)
+DOCUMENT_CHUNK_SIZE=1000
+
+# Overlap between chunks in characters (default: 200)
+DOCUMENT_CHUNK_OVERLAP=200
+
+# Chunk by complete sentences instead of arbitrary splits (default: true)
+CHUNK_BY_SENTENCES=true
+
+# Preserve context across PDF pages (default: true)
+# When enabled, PDFs are chunked as a whole document instead of page-by-page
+PRESERVE_CROSS_PAGE_CONTEXT=true
+```
+
+#### Prompt Settings
+
+```env
+# Maximum number of chunks to include in prompt (default: 10, 0 = all)
+RAG_CHUNKS_IN_PROMPT=10
+
+# Maximum characters per chunk in prompt (default: 2000, 0 = no limit)
+MAX_CHUNK_CHARS_IN_PROMPT=2000
+```
+
+### Performance Tuning
+
+#### For Speed (Faster Responses)
+
+```env
+RAG_TOP_K=5
+ENABLE_RERANKING=false
+RAG_CHUNKS_IN_PROMPT=5
+MAX_CHUNK_CHARS_IN_PROMPT=1000
+```
+
+#### For Accuracy (More Detailed Answers)
+
+```env
+RAG_TOP_K=20
+ENABLE_RERANKING=true
+RERANK_TOP_K=15
+RAG_CHUNKS_IN_PROMPT=0  # Use all retrieved chunks
+MAX_CHUNK_CHARS_IN_PROMPT=0  # No truncation
+RAG_MAX_CONTEXT_TOKENS=50000
+```
+
+#### Balanced (Recommended)
+
+```env
+RAG_TOP_K=15
+ENABLE_RERANKING=true
+RERANK_TOP_K=10
+RAG_CHUNKS_IN_PROMPT=10
+MAX_CHUNK_CHARS_IN_PROMPT=2000
+RAG_MAX_CONTEXT_TOKENS=30000
+```
+
+---
+
+## 🧪 RAG Diagnostics API
+
+Diagnostic endpoints are available in **development mode** (`ENVIRONMENT=development` or `API_DEBUG=true`) for testing and debugging the RAG pipeline.
+
+### Test Retrieval
+
+Test document retrieval without LLM generation:
+
+```bash
+POST /api/rag/test-retrieval
+Content-Type: application/json
+Authorization: Bearer <your-token>
+
+{
+  "query": "What are the main features?",
+  "conversation_id": "optional-conversation-id",
+  "top_k": 10
+}
+```
+
+**Response:**
+```json
+{
+  "query": "What are the main features?",
+  "total_retrieved": 10,
+  "chunks": [
+    {
+      "chunk_index": 0,
+      "content": "Full chunk content...",
+      "source": "document.pdf",
+      "page_number": 1,
+      "page_start": 1,
+      "page_end": 2,
+      "score": 0.85,
+      "rerank_score": 0.92,
+      "document_id": "doc-uuid",
+      "character_count": 1234
+    }
+  ],
+  "avg_score": 0.78,
+  "retrieval_params": {
+    "top_k": 10,
+    "score_threshold": 0.2,
+    "reranking_enabled": true
+  }
+}
+```
+
+### Inspect Document Chunks
+
+View all chunks for a specific document:
+
+```bash
+GET /api/rag/chunks/{document_id}
+Authorization: Bearer <your-token>
+```
+
+### Collection Statistics
+
+Get vector database statistics:
+
+```bash
+GET /api/rag/stats
+Authorization: Bearer <your-token>
+```
+
+**Response:**
+```json
+{
+  "collection_name": "documents",
+  "total_vectors": 1523,
+  "vectors_by_conversation": {
+    "conv-uuid-1": 342,
+    "conv-uuid-2": 187
+  },
+  "vectors_by_document": {
+    "doc-uuid-1": 45,
+    "doc-uuid-2": 67
+  },
+  "collection_status": "healthy"
+}
+```
+
+### Test Re-ranking
+
+Test the re-ranker on custom chunks:
+
+```bash
+POST /api/rag/test-rerank
+Authorization: Bearer <your-token>
+
+{
+  "query": "What is machine learning?",
+  "chunks": [
+    "Machine learning is a subset of AI...",
+    "Python is a programming language...",
+    "Deep learning uses neural networks..."
+  ]
+}
+```
+
+---
+
+## 🔧 Troubleshooting RAG Issues
+
+### "Bot only provides summaries instead of detailed answers"
+
+**Possible Causes:**
+- Context chunks are being truncated too aggressively
+- Not enough chunks are being retrieved
+- Token limit is too low
+
+**Solutions:**
+1. Increase `RAG_MAX_CONTEXT_TOKENS` (e.g., 50000)
+2. Set `MAX_CHUNK_CHARS_IN_PROMPT=0` to disable per-chunk truncation
+3. Increase `RAG_CHUNKS_IN_PROMPT` or set to 0 to use all retrieved chunks
+4. Use the test-retrieval endpoint to verify chunks contain full content
+
+### "Can't answer questions about later pages in documents"
+
+**Possible Causes:**
+- Too few chunks being retrieved
+- Per-page chunking breaks cross-page context
+- Score threshold too high
+
+**Solutions:**
+1. Increase `RAG_TOP_K` (e.g., 20)
+2. Enable `PRESERVE_CROSS_PAGE_CONTEXT=true`
+3. Lower `RAG_SCORE_THRESHOLD` (e.g., 0.15)
+4. Enable re-ranking: `ENABLE_RERANKING=true`
+5. Inspect chunks with `/api/rag/chunks/{document_id}` to verify all pages are indexed
+
+### "Says no additional information exists when it should"
+
+**Possible Causes:**
+- Relevant chunks not being retrieved
+- Score threshold filtering out relevant results
+- Document wasn't processed correctly
+
+**Solutions:**
+1. Lower `RAG_SCORE_THRESHOLD` (e.g., 0.1)
+2. Use `/api/rag/test-retrieval` to see what's actually being retrieved
+3. Check document status: `GET /api/documents/{id}/status`
+4. Verify chunks exist: `GET /api/rag/chunks/{document_id}`
+5. Re-upload the document if chunks are missing
+
+### "Re-ranking is slow"
+
+**Solutions:**
+1. Use a lighter re-ranker model: `RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2`
+2. Reduce chunks before re-ranking: Lower `RAG_TOP_K`
+3. Reduce final chunk count: Lower `RERANK_TOP_K`
+4. Disable re-ranking for speed: `ENABLE_RERANKING=false`
+
+### "Out of memory errors"
+
+**Solutions:**
+1. Reduce `RAG_MAX_CONTEXT_TOKENS`
+2. Reduce `RAG_TOP_K`
+3. Enable chunk truncation: Set `MAX_CHUNK_CHARS_IN_PROMPT=1500`
+4. Use smaller documents or split large documents
+
+---
+
 **Import Errors**
 
 - Reinstall package: `pip install -e .`

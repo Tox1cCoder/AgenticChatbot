@@ -161,6 +161,64 @@ class Settings(BaseSettings):
         env="DOCUMENT_PROCESSING_TIMEOUT",
     )
 
+    # RAG Retrieval Configuration
+    rag_top_k: int = Field(
+        default=15,
+        description="Number of chunks to retrieve from vector database",
+        env="RAG_TOP_K",
+    )
+    rag_score_threshold: float = Field(
+        default=0.2,
+        description="Minimum similarity score for retrieval",
+        env="RAG_SCORE_THRESHOLD",
+    )
+    rag_max_context_tokens: int = Field(
+        default=30000,
+        description="Maximum tokens to include in RAG context",
+        env="RAG_MAX_CONTEXT_TOKENS",
+    )
+
+    # Re-ranking Configuration
+    enable_reranking: bool = Field(
+        default=True,
+        description="Enable re-ranking of retrieved chunks",
+        env="ENABLE_RERANKING",
+    )
+    reranker_model: str = Field(
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        description="Re-ranker model name",
+        env="RERANKER_MODEL",
+    )
+    rerank_top_k: int = Field(
+        default=10,
+        description="Number of chunks to keep after re-ranking",
+        env="RERANK_TOP_K",
+    )
+
+    # Advanced Chunking Configuration
+    chunk_by_sentences: bool = Field(
+        default=True,
+        description="Chunk by complete sentences instead of arbitrary splits",
+        env="CHUNK_BY_SENTENCES",
+    )
+    preserve_cross_page_context: bool = Field(
+        default=True,
+        description="Preserve context across PDF pages",
+        env="PRESERVE_CROSS_PAGE_CONTEXT",
+    )
+
+    # Prompt Configuration
+    rag_chunks_in_prompt: int = Field(
+        default=10,
+        description="Maximum number of chunks to include in prompt (0 = all)",
+        env="RAG_CHUNKS_IN_PROMPT",
+    )
+    max_chunk_chars_in_prompt: int = Field(
+        default=2000,
+        description="Maximum characters per chunk in prompt (0 = no limit)",
+        env="MAX_CHUNK_CHARS_IN_PROMPT",
+    )
+
     # Health Check Configuration
     health_check_timeout: int = Field(
         default=5,
