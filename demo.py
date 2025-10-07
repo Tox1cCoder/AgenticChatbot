@@ -36,7 +36,6 @@ def sanitize_message_content(content: Any) -> str:
     
     return safe_text.replace("\n", "<br>")
 
-
 st.set_page_config(
     page_title="ChatBot", layout="wide", initial_sidebar_state="expanded"
 )

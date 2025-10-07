@@ -14,7 +14,7 @@ class Router:
     """LLM-based router that intelligently selects the appropriate agent."""
 
     def __init__(self):
-        self.model_name = "gemini-2.0-flash-exp"
+        self.model_name = "gemini-2.5-flash"
         self.gemini_client = None
         self._init_gemini()
 
