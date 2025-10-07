@@ -49,3 +49,14 @@ class IDocumentService(ABC):
     ) -> Optional[DocumentResponse]:
         """Update document status"""
         pass
+
+    @abstractmethod
+    async def validate_and_create_document(
+        self,
+        filename: str,
+        file_content: bytes,
+        content_type: str,
+        conversation_id: UUID,
+    ) -> DocumentResponse:
+        """Validate file and create document record"""
+        pass

@@ -4,7 +4,7 @@ from datetime import datetime
 
 from celery.schedules import crontab
 
-from app.services.document_processing_service import DocumentProcessingService
+from app.core.container import get_container
 from app.workers.celery_app import celery_app
 from app.workers.document_processor import cleanup_failed_documents
 from app.ai.agents.rag_agent import RAGAgent
@@ -27,7 +27,8 @@ celery_app.conf.beat_schedule = {
 @celery_app.task(name="app.workers.cleanup_tasks.cleanup_temp_files_task")
 def cleanup_temp_files_task(older_than_hours: int = 24):
     try:
-        processing_service = DocumentProcessingService()
+        container = get_container()
+        processing_service = container.document_processing_service()
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -53,11 +54,18 @@ def cleanup_temp_files_task(older_than_hours: int = 24):
 @celery_app.task(name="app.workers.cleanup_tasks.health_check_task")
 def health_check_task():
     try:
+        container = get_container()
+        settings = container.config()
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
         try:
-            rag_agent = RAGAgent()
+            rag_agent = RAGAgent(
+                settings=settings,
+                qdrant_url=settings.qdrant_url,
+                collection_name=settings.qdrant_collection_name,
+            )
             loop.run_until_complete(rag_agent.initialize())
             status = rag_agent.get_status()
             loop.run_until_complete(rag_agent.cleanup())

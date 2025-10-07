@@ -151,9 +151,13 @@ async def health_check_qdrant():
     """Check Qdrant connection health"""
     rag_agent = None
     try:
+        container = get_container()
+        app_settings = container.config()
+
         rag_agent = RAGAgent(
-            qdrant_url=settings.qdrant_url,
-            collection_name=settings.qdrant_collection_name,
+            settings=app_settings,
+            qdrant_url=app_settings.qdrant_url,
+            collection_name=app_settings.qdrant_collection_name,
         )
 
         await rag_agent.initialize()

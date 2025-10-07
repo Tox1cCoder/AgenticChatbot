@@ -10,8 +10,8 @@ from uuid import UUID
 from celery import Task
 from sqlalchemy.orm import Session
 
-from app.ai.agents.rag_agent import RAGAgent
 from app.core.config import get_settings
+from app.core.container import get_container
 from app.database.session import SessionLocal
 from app.models.document import Document
 from app.repositories.document import DocumentRepository
@@ -75,27 +75,16 @@ def process_document_task(
             temp_file.write(file_content)
 
         try:
+            # Get DocumentProcessingService from container
+            container = get_container()
+            processing_service = container.document_processing_service()
 
-            settings = get_settings()
-            rag_agent = RAGAgent(
-                qdrant_url=settings.qdrant_url,
-                collection_name=settings.qdrant_collection_name,
-            )
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
             try:
-                loop.run_until_complete(rag_agent.initialize())
-
-                rag_status = rag_agent.get_status()
-                if rag_status.get("status") != "healthy":
-                    raise ConnectionError(
-                        f"Qdrant connection unhealthy: {rag_status.get('error', 'Unknown error')}"
-                    )
-                logger.info(f"Qdrant connection verified for document {document_id}")
-
                 processing_result = loop.run_until_complete(
-                    rag_agent.process_document(
+                    processing_service.process_document(
                         file_path=temp_file_path,
                         filename=filename,
                         document_id=str(document_id),
@@ -131,15 +120,6 @@ def process_document_task(
                     logger.warning(
                         f"Failed to cleanup temp file {temp_file_path}: {cleanup_exc}"
                     )
-
-            if "rag_agent" in locals():
-
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(rag_agent.cleanup())
-                finally:
-                    loop.close()
 
     except Exception as exc:
         logger.error(

@@ -19,6 +19,11 @@ from app.services.message_service import MessageService
 from app.services.feedback_service import FeedbackService
 from app.services.ai_service import AIService
 from app.services.document_service import DocumentService
+from app.services.document_processing_service import DocumentProcessingService
+
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
+from app.workers.celery_app import celery_app
 
 from app.utils.validation.user_validation import UserValidationUtils
 from app.utils.validation.conversation_validation import ConversationValidationUtils
@@ -56,6 +61,18 @@ class Container(containers.DeclarativeContainer):
     db = providers.Singleton(
         Database,
         db_url=settings.database_url,
+    )
+
+    # Qdrant client
+    qdrant_client = providers.Singleton(
+        QdrantClient,
+        url=settings.qdrant_url,
+    )
+
+    # Embedding model
+    embedding_model = providers.Singleton(
+        SentenceTransformer,
+        "all-MiniLM-L6-v2",
     )
 
     # Repositories - use session factory from database
@@ -142,8 +159,18 @@ class Container(containers.DeclarativeContainer):
         AIService,
     )
 
+    document_processing_service = providers.Factory(
+        DocumentProcessingService,
+        settings=providers.Object(settings),
+        celery_app=providers.Object(celery_app),
+        qdrant_client=qdrant_client,
+        embedding_model=embedding_model,
+    )
+
     document_service: providers.Provider[IDocumentService] = providers.Factory(
         DocumentService,
+        document_repository=document_repository,
+        document_processing_service=document_processing_service,
     )
 
 

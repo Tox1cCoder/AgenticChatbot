@@ -36,6 +36,7 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 async def upload_document(
     document_service: IDocumentService,
     conversation_service: IConversationService,
+    document_processing_service: DocumentProcessingService,
     current_user_id: UUID,
     file: UploadFile = File(...),
     conversation_id: UUID = Form(...),
@@ -51,8 +52,7 @@ async def upload_document(
         conversation_id=conversation_id,
     )
 
-    processing_service = DocumentProcessingService()
-    task_info = await processing_service.start_processing_task(
+    task_info = await document_processing_service.start_processing_task(
         str(document.id), file_content, file.filename or "unknown"
     )
 
@@ -65,10 +65,12 @@ async def upload_document(
 
 @router.get("/task/{task_id}", response_model=ApiResponse)
 @AppAutoInjector.auto_inject()
-async def get_task_status(task_id: str) -> ApiResponse:
+async def get_task_status(
+    document_processing_service: DocumentProcessingService,
+    task_id: str,
+) -> ApiResponse:
     """Get Celery task status by task ID"""
-    processing_service = DocumentProcessingService()
-    task_status = await processing_service.get_task_status(task_id)
+    task_status = await document_processing_service.get_task_status(task_id)
 
     return ApiResponse(
         success=True,

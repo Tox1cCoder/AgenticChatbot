@@ -22,6 +22,7 @@ from app.repositories.conversation import ConversationRepository
 from app.repositories.message import MessageRepository
 from app.repositories.feedback import FeedbackRepository
 from app.repositories.document import DocumentRepository
+from app.services.document_processing_service import DocumentProcessingService
 from app.utils.validation.user_validation import UserValidationUtils
 from app.utils.validation.conversation_validation import (
     ConversationValidationUtils,
@@ -115,6 +116,9 @@ class AppAutoInjector(AutoInjector):
             IFeedbackService: getattr(container_ref, "feedback_service"),
             IAuthService: getattr(container_ref, "auth_service"),
             IDocumentService: getattr(container_ref, "document_service"),
+            DocumentProcessingService: getattr(
+                container_ref, "document_processing_service"
+            ),
         }
 
     @classmethod
@@ -214,6 +218,9 @@ class AppContainerInjector(ContainerInjector):
             IFeedbackService: getattr(container_ref, "feedback_service"),
             IAuthService: getattr(container_ref, "auth_service"),
             IDocumentService: getattr(container_ref, "document_service"),
+            DocumentProcessingService: getattr(
+                container_ref, "document_processing_service"
+            ),
             # Repositories
             UserRepository: getattr(container_ref, "user_repository"),
             ConversationRepository: getattr(container_ref, "conversation_repository"),

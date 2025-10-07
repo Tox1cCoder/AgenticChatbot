@@ -10,6 +10,7 @@ from .agents.router import Router
 from .agents.chat_agent import ChatAgent
 from .agents.rag_agent import RAGAgent
 from .memory import get_memory_manager
+from ..core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,11 @@ class MultiAgentWorkflow:
     def __init__(self):
         self.router = Router()
         self.chat_agent = ChatAgent()
-        self.rag_agent = RAGAgent()
+        self.rag_agent = RAGAgent(
+            settings=settings,
+            qdrant_url=settings.qdrant_url,
+            collection_name=settings.qdrant_collection_name,
+        )
         self.agents = {"chat_agent": self.chat_agent, "rag_agent": self.rag_agent}
 
         self.graph = self._build_graph()
