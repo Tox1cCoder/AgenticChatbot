@@ -10,9 +10,11 @@ from qdrant_client.models import (
     Filter,
     FieldCondition,
     MatchValue,
+    FilterSelector
 )
 from sentence_transformers import SentenceTransformer
 
+from app.database.qdrant import ensure_collection
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_rag_prompt
 from ...core.config import Settings
@@ -25,13 +27,17 @@ class RAGAgent:
     def __init__(
         self,
         settings: Settings,
-        qdrant_url: str = "http://localhost:6333",
+        qdrant_client: Optional[QdrantClient] = None,
+        embedding_model: Optional[SentenceTransformer] = None,
         collection_name: str = "documents",
     ):
         self.settings = settings
-        self.qdrant_client = QdrantClient(url=qdrant_url)
+        
+        # Use provided instances or create new ones
+        self.qdrant_client = qdrant_client or QdrantClient(url=settings.qdrant_url)
+        self.embedding_model = embedding_model or SentenceTransformer("all-MiniLM-L6-v2")
+        
         self.collection_name = collection_name
-        self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
         self.embedding_dimension = 384
         self.model_name = "gemini-2.5-flash"
         self.gemini_client = None
@@ -62,20 +68,13 @@ class RAGAgent:
         logger.info("Gemini client initialized for RAG Agent")
 
     def _init_collection(self):
-        try:
-            collections = self.qdrant_client.get_collections()
-            if not any(c.name == self.collection_name for c in collections.collections):
-                self.qdrant_client.create_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=VectorParams(
-                        size=self.embedding_dimension, distance=Distance.COSINE
-                    ),
-                )
-                logger.info(f"Created Qdrant collection: {self.collection_name}")
-            else:
-                logger.info(f"Qdrant collection exists: {self.collection_name}")
-        except Exception as e:
-            logger.error(f"Failed to initialize Qdrant collection: {e}")
+        """Ensure collection exists"""
+        
+        ensure_collection(
+            qdrant_client=self.qdrant_client,
+            collection_name=self.collection_name,
+            vector_size=self.embedding_dimension,
+        )
 
     def _init_reranker(self):
         """Initialize the re-ranker model"""
@@ -299,7 +298,9 @@ class RAGAgent:
             }
 
     async def delete_document_vectors(self, document_id: str) -> dict:
-        """Delete all vectors associated with a document ID"""
+        """
+        Delete all vectors associated with a document ID.
+        """
         try:
             delete_filter = Filter(
                 must=[
@@ -309,16 +310,17 @@ class RAGAgent:
                 ]
             )
 
-            self.qdrant_client.delete(
-                collection_name=self.collection_name, points_selector=delete_filter
+            result = self.qdrant_client.delete(
+                collection_name=self.collection_name,
+                points_selector=FilterSelector(filter=delete_filter)
             )
 
-            logger.info(f"Deleted vectors for document {document_id}")
             return {
                 "success": True,
                 "document_id": document_id,
                 "message": f"Vectors deleted for document {document_id}",
+                "operation_result": str(result),
             }
         except Exception as e:
-            logger.error(f"Error deleting vectors for document {document_id}: {e}")
+            logger.error(f"Error deleting vectors for document {document_id}: {e}", exc_info=True)
             return {"success": False, "document_id": document_id, "error": str(e)}

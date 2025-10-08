@@ -4,6 +4,8 @@ from uuid import UUID
 
 from langgraph.graph import StateGraph, END, START
 from langchain_core.messages import HumanMessage, AIMessage
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
 
 from .schemas import GraphState, AgentMessage, AgentResponse, MessageRole, AgentType
 from .agents.router import Router
@@ -17,12 +19,17 @@ logger = logging.getLogger(__name__)
 
 class MultiAgentWorkflow:
 
-    def __init__(self):
+    def __init__(
+        self,
+        qdrant_client: Optional[QdrantClient] = None,
+        embedding_model: Optional[SentenceTransformer] = None,
+    ):
         self.router = Router()
         self.chat_agent = ChatAgent()
         self.rag_agent = RAGAgent(
             settings=settings,
-            qdrant_url=settings.qdrant_url,
+            qdrant_client=qdrant_client,
+            embedding_model=embedding_model,
             collection_name=settings.qdrant_collection_name,
         )
         self.agents = {"chat_agent": self.chat_agent, "rag_agent": self.rag_agent}
@@ -199,5 +206,14 @@ class MultiAgentWorkflow:
         return result.get("response")
 
 
-def create_workflow() -> MultiAgentWorkflow:
-    return MultiAgentWorkflow()
+def create_workflow(
+    qdrant_client: Optional[QdrantClient] = None,
+    embedding_model: Optional[SentenceTransformer] = None,
+) -> MultiAgentWorkflow:
+    """
+    Create multi-agent workflow with optional shared dependencies.
+    """
+    return MultiAgentWorkflow(
+        qdrant_client=qdrant_client,
+        embedding_model=embedding_model,
+    )

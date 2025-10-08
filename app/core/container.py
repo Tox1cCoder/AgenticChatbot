@@ -157,6 +157,8 @@ class Container(containers.DeclarativeContainer):
 
     ai_service = providers.Factory(
         AIService,
+        qdrant_client=qdrant_client,
+        embedding_model=embedding_model,
     )
 
     document_processing_service = providers.Factory(
@@ -194,3 +196,15 @@ container = Container()
 def get_container() -> Container:
     """Get the global container instance."""
     return container
+
+
+def init_qdrant_collection():
+    """Initialize Qdrant collection at application startup."""
+    from app.database.qdrant import ensure_collection
+    
+    client = container.qdrant_client()
+    ensure_collection(
+        qdrant_client=client,
+        collection_name=settings.qdrant_collection_name,
+        vector_size=384,
+    )

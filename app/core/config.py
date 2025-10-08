@@ -195,6 +195,13 @@ class Settings(BaseSettings):
         env="RERANK_TOP_K",
     )
 
+    # Vector Database Batch Processing
+    qdrant_upsert_batch_size: int = Field(
+        default=1000,
+        description="Batch size for Qdrant upsert operations (points per batch)",
+        env="QDRANT_UPSERT_BATCH_SIZE",
+    )
+
     # Advanced Chunking Configuration
     chunk_by_sentences: bool = Field(
         default=True,

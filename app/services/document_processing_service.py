@@ -15,6 +15,7 @@ from sentence_transformers import SentenceTransformer
 from app.core.config import Settings
 from app.schemas.document import DocumentCreate, DocumentStatus
 from app.utils.text_processing import create_chunks, extract_page_range
+from app.database.qdrant import ensure_collection
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +73,8 @@ class DocumentProcessingService:
                 retry_policy={
                     "max_retries": 3,
                     "interval_start": 0,
-                    "interval_step": 60,
-                    "interval_max": 300,
+                    "interval_step": 30,
+                    "interval_max": 180,
                 },
             )
 
@@ -234,7 +235,13 @@ class DocumentProcessingService:
         document_id: str,
         conversation_id: Optional[str] = None,
     ) -> int:
-        """Store document chunks in the vector database"""
+        """Store document chunks in the vector database"""        
+        ensure_collection(
+            qdrant_client=self.qdrant_client,
+            collection_name=self.collection_name,
+            vector_size=self.embedding_dimension,
+        )
+        
         points = []
 
         for i, chunk_data in enumerate(chunks_with_metadata):
@@ -285,10 +292,20 @@ class DocumentProcessingService:
             )
             points.append(point)
 
-        self.qdrant_client.upsert(collection_name=self.collection_name, points=points)
+        # Batch upsert operations
+        batch_size = self.settings.qdrant_upsert_batch_size
+        total_points = len(points)
+        
+        for i in range(0, total_points, batch_size):
+            batch = points[i:i + batch_size]
+            self.qdrant_client.upsert(
+                collection_name=self.collection_name,
+                points=batch
+            )
+            logger.debug(f"Upserted batch {i//batch_size + 1}: {len(batch)} points")
 
-        logger.info(f"Stored {len(points)} chunks in vector database")
-        return len(points)
+        logger.info(f"Stored {total_points} chunks in vector database using {(total_points + batch_size - 1) // batch_size} batches")
+        return total_points
 
     async def cleanup_temp_files(self, older_than_hours: int = 24) -> Dict[str, Any]:
         try:

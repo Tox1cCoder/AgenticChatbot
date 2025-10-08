@@ -4,7 +4,7 @@ from redis import Redis
 from datetime import datetime
 
 from app.core.config import settings
-from app.core.container import get_container, setup_auto_injection
+from app.core.container import get_container, setup_auto_injection, init_qdrant_collection
 from app.api import (
     users_router,
     conversations_router,
@@ -24,11 +24,11 @@ from fastapi_radar import Radar
 def create_app() -> FastAPI:
     """Create and configure FastAPI application"""
 
-    # Initialize the dependency injection container
     container = get_container()
 
-    # Setup auto-injection wiring maps (idempotent)
     setup_auto_injection(container)
+    
+    init_qdrant_collection()
 
     container.wire(
         modules=[

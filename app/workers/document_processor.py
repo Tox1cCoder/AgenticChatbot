@@ -46,7 +46,7 @@ def process_document_task(
     )
 
     db = SessionLocal()
-    document_repo = DocumentRepository(db)
+    document_repo = DocumentRepository(SessionLocal)
     temp_file_path = None
 
     try:
@@ -159,7 +159,7 @@ def process_document_task(
 @celery_app.task(name="app.workers.document_processor.cleanup_failed_documents")
 def cleanup_failed_documents() -> Dict[str, Any]:
     db = SessionLocal()
-    document_repo = DocumentRepository(db)
+    document_repo = DocumentRepository(SessionLocal)
 
     try:
 

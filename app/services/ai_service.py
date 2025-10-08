@@ -4,14 +4,23 @@ from typing import Optional
 from uuid import UUID
 
 from ..ai.graph import create_workflow
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
 
 class AIService:
 
-    def __init__(self):
-        self.workflow = create_workflow()
+    def __init__(
+        self,
+        qdrant_client: Optional[QdrantClient] = None,
+        embedding_model: Optional[SentenceTransformer] = None,
+    ):
+        self.workflow = create_workflow(
+            qdrant_client=qdrant_client,
+            embedding_model=embedding_model,
+        )
         logger.info("AIService initialized with multi-agent workflow")
 
     async def process_message(
