@@ -14,7 +14,7 @@ from sentence_transformers import SentenceTransformer
 
 from app.core.config import Settings
 from app.schemas.document import DocumentCreate, DocumentStatus
-from app.utils.text_processing import create_smart_chunks, extract_page_range
+from app.utils.text_processing import create_chunks, extract_page_range
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +223,7 @@ class DocumentProcessingService:
         if overlap is None:
             overlap = self.settings.document_chunk_overlap
 
-        return create_smart_chunks(
+        return create_chunks(
             text, max_chunk_size, overlap, self.settings.chunk_by_sentences
         )
 

@@ -116,7 +116,6 @@ def build_rag_prompt(
                     content, settings.max_chunk_chars_in_prompt, add_ellipsis=True
                 )
 
-            # Add document with improved formatting
             parts.append(
                 f"\nDocument {i} of {len(retrieved_docs)} ({source}, {page_info}, chunk {chunk_index}, score: {score:.2f}):"
             )
