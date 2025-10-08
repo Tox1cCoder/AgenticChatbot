@@ -20,21 +20,26 @@ def sanitize_message_content(content: Any) -> str:
 
     without_tags = _HTML_TAG_RE.sub("", content)
     normalized = html.unescape(without_tags).replace("\r\n", "\n").replace("\r", "\n")
-    
+
     # Convert markdown bold syntax to HTML
-    markdown_processed = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', normalized)
-    # Convert markdown italic syntax to HTML  
-    markdown_processed = re.sub(r'\*(.*?)\*', r'<em>\1</em>', markdown_processed)
+    markdown_processed = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", normalized)
+    # Convert markdown italic syntax to HTML
+    markdown_processed = re.sub(r"\*(.*?)\*", r"<em>\1</em>", markdown_processed)
     # Convert markdown code syntax to HTML
-    markdown_processed = re.sub(r'`(.*?)`', r'<code>\1</code>', markdown_processed)
-    
+    markdown_processed = re.sub(r"`(.*?)`", r"<code>\1</code>", markdown_processed)
+
     safe_text = html.escape(markdown_processed.strip(), quote=False)
     # Re-apply HTML formatting that was escaped
-    safe_text = safe_text.replace("&lt;strong&gt;", "<strong>").replace("&lt;/strong&gt;", "</strong>")
+    safe_text = safe_text.replace("&lt;strong&gt;", "<strong>").replace(
+        "&lt;/strong&gt;", "</strong>"
+    )
     safe_text = safe_text.replace("&lt;em&gt;", "<em>").replace("&lt;/em&gt;", "</em>")
-    safe_text = safe_text.replace("&lt;code&gt;", "<code>").replace("&lt;/code&gt;", "</code>")
-    
+    safe_text = safe_text.replace("&lt;code&gt;", "<code>").replace(
+        "&lt;/code&gt;", "</code>"
+    )
+
     return safe_text.replace("\n", "<br>")
+
 
 st.set_page_config(
     page_title="ChatBot", layout="wide", initial_sidebar_state="expanded"
@@ -75,7 +80,7 @@ st.markdown(
     .bot-message {
         background: #ffffff; color: #1f2937; border: 1px solid #86efac;
         padding: 12px 16px; border-radius: 18px 18px 18px 4px; margin: 8px auto 8px 0;
-        max-width: 60%; white-space: normal; line-height: 1.5;
+        max-width: 60%; white-space: normal; line-height: 1.5; word-wrap: break-word; overflow-wrap: anywhere;
         box-shadow: 0 8px 20px rgba(34, 197, 94, 0.16);
     }
     .sidebar-conversation {
@@ -90,7 +95,7 @@ st.markdown(
         max-width: 400px; margin: 0 auto; padding: 40px 20px; background: white;
         border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.1);
     }
-    .message-timestamp { font-size: 0.8em; color: #64748b; margin-top: 5px; white-space: nowrap; }
+    .message-timestamp { font-size: 0.8em; color: #64748b; margin-top: 5px; white-space: normal; display: block; max-width: 100%; overflow-wrap: anywhere; }
     div:empty { display: none !important; }
 </style>
 """,
