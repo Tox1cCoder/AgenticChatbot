@@ -60,7 +60,6 @@ class DocumentService(IDocumentService):
             settings = get_settings()
             rag_agent = RAGAgent(
                 settings=settings,
-                qdrant_url=settings.qdrant_url,
                 collection_name=settings.qdrant_collection_name,
             )
             await rag_agent.initialize()

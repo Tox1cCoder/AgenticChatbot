@@ -14,8 +14,8 @@ class AIService:
 
     def __init__(
         self,
-        qdrant_client: Optional[QdrantClient] = None,
-        embedding_model: Optional[SentenceTransformer] = None,
+        qdrant_client: QdrantClient,
+        embedding_model: SentenceTransformer,
     ):
         self.workflow = create_workflow(
             qdrant_client=qdrant_client,

@@ -63,7 +63,6 @@ def health_check_task():
         try:
             rag_agent = RAGAgent(
                 settings=settings,
-                qdrant_url=settings.qdrant_url,
                 collection_name=settings.qdrant_collection_name,
             )
             loop.run_until_complete(rag_agent.initialize())

@@ -30,6 +30,10 @@ from app.utils.validation.conversation_validation import ConversationValidationU
 from app.utils.validation.feedback_validation import FeedbackValidationUtils
 from app.utils.validation.message_validation import MessageValidationUtils
 
+from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
+from app.database.qdrant import ensure_collection
+
+
 from app.interfaces import (
     IUserService,
     IConversationService,
@@ -72,7 +76,7 @@ class Container(containers.DeclarativeContainer):
     # Embedding model
     embedding_model = providers.Singleton(
         SentenceTransformer,
-        "all-MiniLM-L6-v2",
+        "google/embeddinggemma-300m",
     )
 
     # Repositories - use session factory from database
@@ -133,11 +137,18 @@ class Container(containers.DeclarativeContainer):
         conversation_validation_utils=conversation_validation_utils,
     )
 
+    ai_service = providers.Factory(
+        AIService,
+        qdrant_client=qdrant_client,
+        embedding_model=embedding_model,
+    )
+
     message_service: providers.Provider[IMessageService] = providers.Factory(
         MessageService,
         message_repository=message_repository,
         conversation_validation_utils=conversation_validation_utils,
         message_validation_utils=message_validation_utils,
+        ai_service=ai_service,
     )
 
     feedback_service: providers.Provider[IFeedbackService] = providers.Factory(
@@ -153,12 +164,6 @@ class Container(containers.DeclarativeContainer):
     auth_service: providers.Provider[IAuthService] = providers.Factory(
         AuthService,
         user_service=user_service,
-    )
-
-    ai_service = providers.Factory(
-        AIService,
-        qdrant_client=qdrant_client,
-        embedding_model=embedding_model,
     )
 
     document_processing_service = providers.Factory(
@@ -179,7 +184,6 @@ class Container(containers.DeclarativeContainer):
 # Initialize auto-injection wiring map before container instantiation
 def setup_auto_injection(container_ref: Container | type[Container] | None = None):
     """Setup auto-injection wiring maps."""
-    from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
 
     target = container_ref or Container
     AppAutoInjector.setup_wiring_map(target)
@@ -200,11 +204,9 @@ def get_container() -> Container:
 
 def init_qdrant_collection():
     """Initialize Qdrant collection at application startup."""
-    from app.database.qdrant import ensure_collection
-    
     client = container.qdrant_client()
     ensure_collection(
         qdrant_client=client,
         collection_name=settings.qdrant_collection_name,
-        vector_size=384,
+        vector_size=settings.embedding_dimension,
     )

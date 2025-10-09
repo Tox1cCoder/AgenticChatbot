@@ -4,7 +4,11 @@ from redis import Redis
 from datetime import datetime
 
 from app.core.config import settings
-from app.core.container import get_container, setup_auto_injection, init_qdrant_collection
+from app.core.container import (
+    get_container,
+    setup_auto_injection,
+    init_qdrant_collection,
+)
 from app.api import (
     users_router,
     conversations_router,
@@ -27,7 +31,7 @@ def create_app() -> FastAPI:
     container = get_container()
 
     setup_auto_injection(container)
-    
+
     init_qdrant_collection()
 
     container.wire(
@@ -156,7 +160,6 @@ async def health_check_qdrant():
 
         rag_agent = RAGAgent(
             settings=app_settings,
-            qdrant_url=app_settings.qdrant_url,
             collection_name=app_settings.qdrant_collection_name,
         )
 

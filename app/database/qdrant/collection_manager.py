@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 def ensure_collection(
     qdrant_client: QdrantClient,
     collection_name: str,
-    vector_size: int = 384,
+    vector_size: int,
     distance: Distance = Distance.COSINE,
 ) -> bool:
     """

@@ -26,12 +26,12 @@ class MessageService(IMessageService):
         message_repository: MessageRepository,
         conversation_validation_utils: ConversationValidationUtils,
         message_validation_utils: MessageValidationUtils,
-        ai_service: Optional[AIService] = None,
+        ai_service: AIService,
     ):
         self.repository = message_repository
         self.conversation_validation_utils = conversation_validation_utils
         self.message_validation_utils = message_validation_utils
-        self.ai_service = ai_service or AIService()
+        self.ai_service = ai_service
 
     async def create_message(self, message_create_data: MessageCreate) -> MessageRead:
         self.conversation_validation_utils.validate_conversation_exists(

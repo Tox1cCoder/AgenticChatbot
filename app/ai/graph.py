@@ -21,8 +21,8 @@ class MultiAgentWorkflow:
 
     def __init__(
         self,
-        qdrant_client: Optional[QdrantClient] = None,
-        embedding_model: Optional[SentenceTransformer] = None,
+        qdrant_client: QdrantClient,
+        embedding_model: SentenceTransformer,
     ):
         self.router = Router()
         self.chat_agent = ChatAgent()
@@ -207,11 +207,11 @@ class MultiAgentWorkflow:
 
 
 def create_workflow(
-    qdrant_client: Optional[QdrantClient] = None,
-    embedding_model: Optional[SentenceTransformer] = None,
+    qdrant_client: QdrantClient,
+    embedding_model: SentenceTransformer,
 ) -> MultiAgentWorkflow:
     """
-    Create multi-agent workflow with optional shared dependencies.
+    Create multi-agent workflow with required shared dependencies.
     """
     return MultiAgentWorkflow(
         qdrant_client=qdrant_client,

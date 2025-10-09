@@ -10,7 +10,7 @@ from qdrant_client.models import (
     Filter,
     FieldCondition,
     MatchValue,
-    FilterSelector
+    FilterSelector,
 )
 from sentence_transformers import SentenceTransformer
 
@@ -27,18 +27,16 @@ class RAGAgent:
     def __init__(
         self,
         settings: Settings,
-        qdrant_client: Optional[QdrantClient] = None,
-        embedding_model: Optional[SentenceTransformer] = None,
-        collection_name: str = "documents",
+        qdrant_client: QdrantClient,
+        embedding_model: SentenceTransformer,
+        collection_name: str = "documents_gemma",
     ):
         self.settings = settings
-        
-        # Use provided instances or create new ones
-        self.qdrant_client = qdrant_client or QdrantClient(url=settings.qdrant_url)
-        self.embedding_model = embedding_model or SentenceTransformer("all-MiniLM-L6-v2")
-        
+        self.qdrant_client = qdrant_client
+        self.embedding_model = embedding_model
+
         self.collection_name = collection_name
-        self.embedding_dimension = 384
+        self.embedding_dimension = settings.embedding_dimension
         self.model_name = "gemini-2.5-flash"
         self.gemini_client = None
 
@@ -69,7 +67,7 @@ class RAGAgent:
 
     def _init_collection(self):
         """Ensure collection exists"""
-        
+
         ensure_collection(
             qdrant_client=self.qdrant_client,
             collection_name=self.collection_name,
@@ -287,7 +285,7 @@ class RAGAgent:
                 "vectors_count": (
                     collection_info.vectors_count if collection_info else 0
                 ),
-                "embedding_model": "all-MiniLM-L6-v2",
+                "embedding_model": self.embedding_model,
                 "embedding_dimension": self.embedding_dimension,
             }
         except Exception as e:
@@ -312,7 +310,7 @@ class RAGAgent:
 
             result = self.qdrant_client.delete(
                 collection_name=self.collection_name,
-                points_selector=FilterSelector(filter=delete_filter)
+                points_selector=FilterSelector(filter=delete_filter),
             )
 
             return {
@@ -322,5 +320,7 @@ class RAGAgent:
                 "operation_result": str(result),
             }
         except Exception as e:
-            logger.error(f"Error deleting vectors for document {document_id}: {e}", exc_info=True)
+            logger.error(
+                f"Error deleting vectors for document {document_id}: {e}", exc_info=True
+            )
             return {"success": False, "document_id": document_id, "error": str(e)}

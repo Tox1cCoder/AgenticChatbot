@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import TypeVar, Generic, List, Optional
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field
 from app.utils.case_conversion import to_camel_case as to_camel
 
 
@@ -41,9 +41,7 @@ class PaginationParams(BaseModel):
     order_direction: OrderDirection = Field(
         default=OrderDirection.DESC, alias="orderDirection"
     )
-
-    class Config:
-        populate_by_name = True
+    model_config = {"populate_by_name": True}
 
 
 class ConversationPaginationParams(PaginationParams):
