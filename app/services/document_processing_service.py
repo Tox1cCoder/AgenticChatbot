@@ -6,15 +6,15 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 
-import PyPDF2
-from docx import Document as DocxDocument
+from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, Distance, VectorParams
 from sentence_transformers import SentenceTransformer
 
 from app.core.config import Settings
 from app.schemas.document import DocumentCreate, DocumentStatus
-from app.utils.text_processing import create_chunks, extract_page_range
+from app.utils.text_processing import extract_page_range
 from app.database.qdrant import ensure_collection
 
 logger = logging.getLogger(__name__)
@@ -137,59 +137,68 @@ class DocumentProcessingService:
 
         chunks_with_metadata = []
 
+        # Load documents using LangChain loaders
         if filename.lower().endswith(".txt"):
-            with open(file_path, "r", encoding="utf-8") as f:
-                text_content = f.read()
-            chunks = self._create_chunks(text_content)
+            loader = TextLoader(file_path, encoding="utf-8")
+            documents = loader.load()
+            chunks = self._create_chunks_with_langchain(documents)
             chunks_with_metadata = [
                 {"text": chunk, "page_number": None} for chunk in chunks
             ]
 
         elif filename.lower().endswith(".pdf"):
-            with open(file_path, "rb") as f:
-                reader = PyPDF2.PdfReader(f)
+            loader = PyPDFLoader(file_path)
+            documents = loader.load()
 
-                if self.settings.preserve_cross_page_context:
-                    # Extract all pages first with page markers
-                    pages_text = []
-                    for page_num, page in enumerate(reader.pages, start=1):
-                        text = page.extract_text()
-                        if text.strip():
-                            pages_text.append((page_num, text))
+            if self.settings.preserve_cross_page_context:
+                # Concatenate pages with page markers
+                pages_text = []
+                for doc in documents:
+                    page_num = doc.metadata.get("page", 0) + 1
+                    text = doc.page_content
+                    if text.strip():
+                        pages_text.append((page_num, text))
 
-                    # Concatenate with page markers
-                    full_text = "".join(
-                        [f"\n[PAGE {num}]\n{text}" for num, text in pages_text]
+                # Concatenate with page markers
+                full_text = "".join(
+                    [f"\n[PAGE {num}]\n{text}" for num, text in pages_text]
+                )
+
+                # Chunk the full document using LangChain splitter
+                chunks = self._create_chunks_with_langchain(
+                    [
+                        type(
+                            "Document", (), {"page_content": full_text, "metadata": {}}
+                        )()
+                    ]
+                )
+
+                # Extract page range for each chunk
+                for chunk in chunks:
+                    page_start, page_end = extract_page_range(chunk)
+                    chunks_with_metadata.append(
+                        {
+                            "text": chunk,
+                            "page_start": page_start,
+                            "page_end": page_end,
+                        }
                     )
-
-                    # Chunk the full document
-                    chunks = self._create_chunks(full_text)
-
-                    # Extract page range for each chunk
-                    for chunk in chunks:
-                        page_start, page_end = extract_page_range(chunk)
-                        chunks_with_metadata.append(
-                            {
-                                "text": chunk,
-                                "page_start": page_start,
-                                "page_end": page_end,
-                            }
-                        )
-                else:
-                    # Legacy per-page chunking
-                    for page_num, page in enumerate(reader.pages, start=1):
-                        text = page.extract_text()
-                        if text.strip():
-                            chunks = self._create_chunks(text)
-                            for chunk in chunks:
-                                chunks_with_metadata.append(
-                                    {"text": chunk, "page_number": page_num}
-                                )
+            else:
+                # Per-page chunking with LangChain
+                for doc in documents:
+                    page_num = doc.metadata.get("page", 0) + 1
+                    text = doc.page_content
+                    if text.strip():
+                        page_chunks = self._create_chunks_with_langchain([doc])
+                        for chunk in page_chunks:
+                            chunks_with_metadata.append(
+                                {"text": chunk, "page_number": page_num}
+                            )
 
         elif filename.lower().endswith(".docx"):
-            doc = DocxDocument(file_path)
-            text_content = "\n".join([p.text for p in doc.paragraphs])
-            chunks = self._create_chunks(text_content)
+            loader = Docx2txtLoader(file_path)
+            documents = loader.load()
+            chunks = self._create_chunks_with_langchain(documents)
             chunks_with_metadata = [
                 {"text": chunk, "page_number": None} for chunk in chunks
             ]
@@ -214,19 +223,27 @@ class DocumentProcessingService:
             "filename": filename,
         }
 
-    def _create_chunks(
-        self, text: str, max_chunk_size: int = None, overlap: int = None
+    def _create_chunks_with_langchain(
+        self, documents: List, max_chunk_size: int = None, overlap: int = None
     ) -> List[str]:
-        """Create text chunks using smart chunking utility"""
+        """Create text chunks using LangChain RecursiveCharacterTextSplitter"""
         # Use configured parameters if not specified
         if max_chunk_size is None:
             max_chunk_size = self.settings.document_chunk_size
         if overlap is None:
             overlap = self.settings.document_chunk_overlap
 
-        return create_chunks(
-            text, max_chunk_size, overlap, self.settings.chunk_by_sentences
+        # Initialize LangChain text splitter
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=max_chunk_size,
+            chunk_overlap=overlap,
+            length_function=len,
+            separators=["\n\n", "\n", " ", ""],
         )
+
+        # Split documents and extract text content
+        split_docs = text_splitter.split_documents(documents)
+        return [doc.page_content for doc in split_docs]
 
     async def _store_chunks(
         self,

@@ -1,9 +1,3 @@
-"""
-Document Upload Support for Chatbot Demo
-
-This module provides file upload functionality that was present in the original demo.
-"""
-
 import streamlit as st
 import requests
 import time
