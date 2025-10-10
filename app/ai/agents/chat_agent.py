@@ -16,7 +16,7 @@ class ChatAgent:
         self.model_name = "gemini-2.5-flash"
         self.gemini_client = None
         self._init_gemini()
-
+        
     def _init_gemini(self):
         api_key = settings.gemini_api_key
         if not api_key:

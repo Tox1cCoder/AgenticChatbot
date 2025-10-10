@@ -1,0 +1,13 @@
+{
+  "mcp_servers": {
+    "calculator": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "app/ai/mcp_servers/calculator_server.py"
+      ],
+      "description": "Basic calculator operations (add, subtract, multiply, divide, power)"
+    }
+  }
+}
