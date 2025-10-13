@@ -141,7 +141,7 @@ class DocumentProcessingService:
         if filename.lower().endswith(".txt"):
             loader = TextLoader(file_path, encoding="utf-8")
             documents = loader.load()
-            chunks = self._create_chunks_with_langchain(documents)
+            chunks = self._create_chunks(documents)
             chunks_with_metadata = [
                 {"text": chunk, "page_number": None} for chunk in chunks
             ]
@@ -164,8 +164,8 @@ class DocumentProcessingService:
                     [f"\n[PAGE {num}]\n{text}" for num, text in pages_text]
                 )
 
-                # Chunk the full document using LangChain splitter
-                chunks = self._create_chunks_with_langchain(
+                # Chunk the full document
+                chunks = self._create_chunks(
                     [
                         type(
                             "Document", (), {"page_content": full_text, "metadata": {}}
@@ -189,7 +189,7 @@ class DocumentProcessingService:
                     page_num = doc.metadata.get("page", 0) + 1
                     text = doc.page_content
                     if text.strip():
-                        page_chunks = self._create_chunks_with_langchain([doc])
+                        page_chunks = self._create_chunks([doc])
                         for chunk in page_chunks:
                             chunks_with_metadata.append(
                                 {"text": chunk, "page_number": page_num}
@@ -198,7 +198,7 @@ class DocumentProcessingService:
         elif filename.lower().endswith(".docx"):
             loader = Docx2txtLoader(file_path)
             documents = loader.load()
-            chunks = self._create_chunks_with_langchain(documents)
+            chunks = self._create_chunks(documents)
             chunks_with_metadata = [
                 {"text": chunk, "page_number": None} for chunk in chunks
             ]
@@ -223,17 +223,16 @@ class DocumentProcessingService:
             "filename": filename,
         }
 
-    def _create_chunks_with_langchain(
+    def _create_chunks(
         self, documents: List, max_chunk_size: int = None, overlap: int = None
     ) -> List[str]:
-        """Create text chunks using LangChain RecursiveCharacterTextSplitter"""
         # Use configured parameters if not specified
         if max_chunk_size is None:
             max_chunk_size = self.settings.document_chunk_size
         if overlap is None:
             overlap = self.settings.document_chunk_overlap
 
-        # Initialize LangChain text splitter
+        # Initialize text splitter
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=max_chunk_size,
             chunk_overlap=overlap,
@@ -285,7 +284,7 @@ class DocumentProcessingService:
 
             payload = {
                 "content": chunk_text,
-                "source": filename,  # Original filename preserved in payload
+                "source": filename,
                 "document_id": document_id,
                 "conversation_id": conversation_id,
                 "chunk_index": i,
@@ -295,7 +294,7 @@ class DocumentProcessingService:
                 ),
             }
 
-            # Add page information (support both formats)
+            # Add page information
             if page_start is not None and page_end is not None:
                 payload["page_start"] = page_start
                 payload["page_end"] = page_end
