@@ -51,7 +51,6 @@ def build_rag_prompt(
     if retrieved_docs:
         parts.append("\n\nRelevant documents:")
 
-        # Determine how many chunks to include
         max_chunks = (
             settings.rag_chunks_in_prompt
             if settings.rag_chunks_in_prompt > 0
@@ -68,7 +67,6 @@ def build_rag_prompt(
             chunk_index = doc.get("chunk_index", "unknown")
             score = doc.get("score", 0.0)
 
-            # Handle page information - support both single page and page ranges
             if doc.get("page_start") and doc.get("page_end"):
                 if doc["page_start"] != doc["page_end"]:
                     page_info = f"pages {doc['page_start']}-{doc['page_end']}"
@@ -82,24 +80,18 @@ def build_rag_prompt(
             # Estimate tokens for this chunk
             chunk_tokens = estimate_tokens(content)
 
-            # Check if adding this chunk would exceed the limit
             if (
                 total_tokens + chunk_tokens > settings.rag_max_context_tokens
                 and chunks_used >= 3
             ):
-                # We have at least 3 chunks and would exceed limit, stop here
-                logger.debug(
-                    f"Stopping at {chunks_used} chunks to stay within token limit"
-                )
                 break
 
-            # If we have fewer than 3 chunks but would exceed limit, truncate this chunk to fit
             if (
                 total_tokens + chunk_tokens > settings.rag_max_context_tokens
                 and chunks_used < 3
             ):
                 remaining_tokens = settings.rag_max_context_tokens - total_tokens
-                max_chars = remaining_tokens * 4  # Rough conversion back to characters
+                max_chars = remaining_tokens * 4
                 original_length = len(content)
                 content = truncate_text(content, max_chars, add_ellipsis=True)
                 chunk_tokens = estimate_tokens(content)
@@ -107,7 +99,6 @@ def build_rag_prompt(
                     f"Truncated chunk {i} from {original_length} to {len(content)} chars to fit token limit"
                 )
 
-            # Apply per-chunk character limit if configured
             if (
                 settings.max_chunk_chars_in_prompt > 0
                 and len(content) > settings.max_chunk_chars_in_prompt
@@ -120,7 +111,7 @@ def build_rag_prompt(
                 f"\nDocument {i} of {len(retrieved_docs)} ({source}, {page_info}, chunk {chunk_index}, score: {score:.2f}):"
             )
             parts.append(f"{content}")
-            parts.append("---")  # Separator between chunks
+            parts.append("---")
 
             total_tokens += chunk_tokens
             chunks_used += 1

@@ -90,39 +90,44 @@ def process_document_task(
                         conversation_id=str(document.conversation_id),
                     )
                 )
-            finally:
-                loop.close()
 
-            update_data = DocumentUpdate(status=DocumentStatus.READY.value)
-            document = document_repo.update(UUID(document_id), update_data)
+                update_data = DocumentUpdate(status=DocumentStatus.READY.value)
+                document = document_repo.update(UUID(document_id), update_data)
 
-            logger.info(
-                f"Document {document_id} processed successfully: {processing_result}"
-            )
-
-            # Emit PROCESSING_COMPLETED event
-            event_bus = get_event_bus()
-            loop.run_until_complete(
-                event_bus.emit(
-                    DocumentEvent.PROCESSING_COMPLETED,
-                    DocumentEventData(
-                        document_id=UUID(document_id),
-                        conversation_id=document.conversation_id if document else None,
-                        filename=filename,
-                        status="READY",
-                        metadata={
-                            "chunks_created": processing_result.get(
-                                "chunks_created", 0
-                            ),
-                            "chunks_stored": processing_result.get("chunks_stored", 0),
-                            "processing_time": processing_result.get(
-                                "processing_time", 0
-                            ),
-                            "task_id": task_id,
-                        },
-                    ),
+                logger.info(
+                    f"Document {document_id} processed successfully: {processing_result}"
                 )
-            )
+
+                # Emit PROCESSING_COMPLETED event using the same loop before closing it
+                event_bus = get_event_bus()
+                loop.run_until_complete(
+                    event_bus.emit(
+                        DocumentEvent.PROCESSING_COMPLETED,
+                        DocumentEventData(
+                            document_id=UUID(document_id),
+                            conversation_id=(
+                                document.conversation_id if document else None
+                            ),
+                            filename=filename,
+                            status="READY",
+                            metadata={
+                                "chunks_created": processing_result.get(
+                                    "chunks_created", 0
+                                ),
+                                "chunks_stored": processing_result.get(
+                                    "chunks_stored", 0
+                                ),
+                                "processing_time": processing_result.get(
+                                    "processing_time", 0
+                                ),
+                                "task_id": task_id,
+                            },
+                        ),
+                    )
+                )
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
 
             return {
                 "success": True,
@@ -150,7 +155,7 @@ def process_document_task(
             exc_info=True,
         )
         logger.error(f"Full traceback:\n{traceback.format_exc()}")
-
+        
         try:
             update_data = DocumentUpdate(status=DocumentStatus.FAILED.value)
             document_repo.update(UUID(document_id), update_data)
@@ -176,6 +181,7 @@ def process_document_task(
                     )
                 )
             finally:
+                asyncio.set_event_loop(None)
                 loop.close()
         except Exception as e:
             logger.debug(

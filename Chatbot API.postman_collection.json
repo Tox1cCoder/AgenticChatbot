@@ -131,7 +131,11 @@
               "mode": "formdata",
               "formdata": [
                 { "key": "file", "type": "file", "src": [] },
-                { "key": "conversation_id", "type": "text", "value": "{{conversation_id}}" }
+                {
+                  "key": "conversation_id",
+                  "type": "text",
+                  "value": "{{conversation_id}}"
+                }
               ]
             },
             "url": {

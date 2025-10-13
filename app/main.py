@@ -23,6 +23,8 @@ from app.workers.celery_app import celery_app
 from app.ai.agents.rag_agent import RAGAgent
 
 from fastapi_radar import Radar
+from app.core.events import get_event_bus, DocumentEvent
+from app.services.document_event_listener import DocumentEventLogger
 
 
 def create_app() -> FastAPI:
@@ -41,6 +43,7 @@ def create_app() -> FastAPI:
             "app.api.conversations",
             "app.api.messages",
             "app.api.feedback",
+            "app.api.documents",
         ]
     )
 
@@ -73,6 +76,18 @@ def create_app() -> FastAPI:
     app.include_router(messages_router)
     app.include_router(feedback_router)
     app.include_router(documents_router)
+
+    # Initialize and register event listeners
+    event_bus = get_event_bus()
+    doc_logger = DocumentEventLogger()
+    for evt in [
+        DocumentEvent.UPLOAD_STARTED,
+        DocumentEvent.PROCESSING_STARTED,
+        DocumentEvent.PROCESSING_COMPLETED,
+        DocumentEvent.PROCESSING_FAILED,
+        DocumentEvent.DELETED,
+    ]:
+        event_bus.register_listener(evt, doc_logger)
 
     return app
 

@@ -29,6 +29,7 @@ from app.utils.validation.user_validation import UserValidationUtils
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 from app.utils.validation.feedback_validation import FeedbackValidationUtils
 from app.utils.validation.message_validation import MessageValidationUtils
+from app.utils.validation.document_validation import DocumentValidationUtils
 
 from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
 from app.database.qdrant import ensure_collection
@@ -122,6 +123,10 @@ class Container(containers.DeclarativeContainer):
         FeedbackValidationUtils,
         session_factory=db.provided.session,
     )
+    document_validation_utils = providers.Factory(
+        DocumentValidationUtils,
+        session_factory=db.provided.session,
+    )
 
     # Business services
     user_service: providers.Provider[IUserService] = providers.Factory(
@@ -178,6 +183,7 @@ class Container(containers.DeclarativeContainer):
         DocumentService,
         document_repository=document_repository,
         document_processing_service=document_processing_service,
+        document_validation_utils=document_validation_utils,
     )
 
 
