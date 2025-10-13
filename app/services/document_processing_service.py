@@ -137,7 +137,7 @@ class DocumentProcessingService:
 
         chunks_with_metadata = []
 
-        # Load documents using LangChain loaders
+        # Load documents
         if filename.lower().endswith(".txt"):
             loader = TextLoader(file_path, encoding="utf-8")
             documents = loader.load()
@@ -184,7 +184,7 @@ class DocumentProcessingService:
                         }
                     )
             else:
-                # Per-page chunking with LangChain
+                # Per-page chunking
                 for doc in documents:
                     page_num = doc.metadata.get("page", 0) + 1
                     text = doc.page_content
