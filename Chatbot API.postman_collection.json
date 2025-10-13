@@ -100,6 +100,171 @@
       ]
     },
     {
+      "name": "Document Management",
+      "item": [
+        {
+          "name": "Upload Document",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const res = pm.response.json();",
+                  "  if (res.data && res.data.document && res.data.processing) {",
+                  "    pm.collectionVariables.set('document_id', res.data.document.id);",
+                  "    pm.collectionVariables.set('task_id', res.data.processing.task_id);",
+                  "  }",
+                  "}"
+                ],
+                "type": "text/javascript",
+                "packages": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": [] },
+                { "key": "conversation_id", "type": "text", "value": "{{conversation_id}}" }
+              ]
+            },
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/documents/upload",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["documents", "upload"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Task Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "pm.test('Has task status', function(){ pm.expect(res.data.status).to.be.a('string'); });"
+                ],
+                "type": "text/javascript",
+                "packages": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/documents/task/{{task_id}}",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["documents", "task", "{{task_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Document by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/documents/{{document_id}}",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["documents", "{{document_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Conversation Documents",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "pm.test('Pagination structure', function(){",
+                  "  pm.expect(res.data.total).to.be.a('number');",
+                  "  pm.expect(res.data.page).to.be.a('number');",
+                  "  pm.expect(res.data.page_size).to.be.a('number');",
+                  "});"
+                ],
+                "type": "text/javascript",
+                "packages": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/documents/conversation/{{conversation_id}}?page=1&page_size=10",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["documents", "conversation", "{{conversation_id}}"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "page_size", "value": "10" }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Document",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filename\": \"new-name.pdf\"\n}"
+            },
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/documents/{{document_id}}",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["documents", "{{document_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Document",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/documents/{{document_id}}",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["documents", "{{document_id}}"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
       "name": "User Management",
       "item": [
         {
@@ -644,6 +809,16 @@
     },
     {
       "key": "feedback_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "document_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "task_id",
       "value": "",
       "type": "string"
     }

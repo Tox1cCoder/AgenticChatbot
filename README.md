@@ -175,14 +175,63 @@ streamlit run demo.py
 
 ### Documents (RAG Knowledge Base - all require authentication)
 
-- `POST /documents/upload` — Upload document for processing (PDF, DOCX, TXT) - requires conversation ownership
-- `GET /documents/task/{task_id}` — Get Celery task status by task ID
-- `GET /documents/{document_id}` — Get document details - requires conversation ownership
-- `GET /documents/conversation/{conversation_id}` — Get documents for a conversation - requires conversation ownership
-- `PUT /documents/{document_id}` — Update document metadata - requires conversation ownership
-- `DELETE /documents/{document_id}` — Delete document and embeddings - requires conversation ownership
+### Documents (RAG Knowledge Base - all require authentication)
 
-**Note**: All document endpoints verify that the user owns the conversation associated with the document.
+Upload Document
+- `POST /documents/upload` — Upload document for processing
+	- Supported formats: PDF, DOCX, TXT
+	- Max size: 50MB (configurable)
+	- Requires: conversation ownership
+	- Returns: document metadata + task_id for status tracking
+	- Events: Emits UPLOAD_STARTED event
+
+Get Task Status
+- `GET /documents/task/{task_id}` — Get Celery task status
+	- Returns: task state (PENDING, STARTED, SUCCESS, FAILURE)
+	- Use for polling upload progress
+
+Get Document
+- `GET /documents/{document_id}` — Get document details
+	- Requires: conversation ownership
+	- Returns: document metadata with processing status
+
+List Documents
+- `GET /documents/conversation/{conversation_id}` — Get documents for conversation
+	- Requires: conversation ownership
+	- Supports pagination: `page`, `page_size`
+
+Update Document
+- `PUT /documents/{document_id}` — Update document metadata
+	- Requires: conversation ownership
+
+Delete Document
+- `DELETE /documents/{document_id}` — Delete document and embeddings
+	- Requires: conversation ownership
+	- Removes from both database and Qdrant vector store
+	- Events: Emits DELETED event
+
+Authorization: All document endpoints verify that the user owns the conversation associated with the document.
+
+Task Status Polling: Use the returned task_id from upload to query `/documents/task/{task_id}` until it reaches SUCCESS or FAILURE.
+
+Supported File Types and Size: PDF, DOCX, TXT up to 50MB (adjust `MAX_FILE_SIZE_MB` in settings).
+
+---
+
+## Event System
+
+The application uses a lightweight observer pattern for document lifecycle events.
+
+Event Types
+- UPLOAD_STARTED — emitted after a document record is created and queued
+- PROCESSING_STARTED — emitted when processing task is dispatched
+- PROCESSING_COMPLETED — emitted when processing finishes successfully
+- PROCESSING_FAILED — emitted if processing fails
+- DELETED — emitted after a document is removed
+
+Extendability: Implement `EventListener` with `handle_event(event_type, data)` and register it with the `EventBus` at startup. Useful for WebSocket notifications, analytics, or audit logs.
+
+Architecture: The event system is decoupled from business logic. Producers emit events; listeners subscribe and react without affecting core flows.
 
 ### Feedbacks
 
