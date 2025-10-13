@@ -9,6 +9,8 @@ from app.core.exceptions.resource import ResourceNotFoundException
 from app.interfaces.document_service_interface import IDocumentService
 from app.repositories.document import DocumentRepository
 from app.services.document_processing_service import DocumentProcessingService
+from app.utils.validation.document_validation import DocumentValidationUtils
+from app.core.events import get_event_bus, DocumentEvent, DocumentEventData
 from app.schemas.document import (
     DocumentCreate,
     DocumentResponse,
@@ -27,10 +29,13 @@ class DocumentService(IDocumentService):
         self,
         document_repository: DocumentRepository,
         document_processing_service: DocumentProcessingService,
+        document_validation_utils: DocumentValidationUtils,
     ):
         """Initialize document service with injected dependencies."""
         self.repository = document_repository
         self.processing_service = document_processing_service
+        self.document_validation_utils = document_validation_utils
+        self._event_bus = get_event_bus()
 
     async def create_document(self, document_data: DocumentCreate) -> DocumentResponse:
         """Create a new document record."""
@@ -55,7 +60,11 @@ class DocumentService(IDocumentService):
 
     async def delete_document(self, document_id: UUID) -> bool:
         """Delete document and its vectors from Qdrant."""
-        # Delete vectors from Qdrant first
+        # Fetch document to include details and validate existence
+        existing = self.repository.get_by_id(document_id)
+        if not existing:
+            return False
+
         try:
             settings = get_settings()
             rag_agent = RAGAgent(
@@ -76,7 +85,21 @@ class DocumentService(IDocumentService):
             logger.error(f"Error deleting vectors for document {document_id}: {e}")
 
         # Delete from database
-        return self.repository.delete(document_id)
+        deleted = self.repository.delete(document_id)
+
+        if deleted:
+            # Emit DELETED event
+            await self._event_bus.emit(
+                DocumentEvent.DELETED,
+                DocumentEventData(
+                    document_id=document_id,
+                    conversation_id=existing.conversation_id,
+                    filename=existing.filename,
+                    status="DELETED",
+                ),
+            )
+
+        return deleted
 
     async def get_documents_by_conversation(
         self, conversation_id: UUID, page: int = 1, page_size: int = 20

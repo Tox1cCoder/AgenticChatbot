@@ -17,6 +17,7 @@ from app.models.document import Document
 from app.repositories.document import DocumentRepository
 from app.schemas.document import DocumentUpdate, DocumentStatus
 from app.workers.celery_app import celery_app
+from app.core.events import get_event_bus, DocumentEvent, DocumentEventData
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +65,6 @@ def process_document_task(
             raise ValueError(
                 f"File size exceeds maximum allowed size of {settings.max_file_size_mb}MB"
             )
-
-        settings = get_settings()
         temp_dir = os.path.join(os.getcwd(), settings.temp_storage_path)
         os.makedirs(temp_dir, exist_ok=True)
 
@@ -101,6 +100,30 @@ def process_document_task(
                 f"Document {document_id} processed successfully: {processing_result}"
             )
 
+            # Emit PROCESSING_COMPLETED event
+            event_bus = get_event_bus()
+            loop.run_until_complete(
+                event_bus.emit(
+                    DocumentEvent.PROCESSING_COMPLETED,
+                    DocumentEventData(
+                        document_id=UUID(document_id),
+                        conversation_id=document.conversation_id if document else None,
+                        filename=filename,
+                        status="READY",
+                        metadata={
+                            "chunks_created": processing_result.get(
+                                "chunks_created", 0
+                            ),
+                            "chunks_stored": processing_result.get("chunks_stored", 0),
+                            "processing_time": processing_result.get(
+                                "processing_time", 0
+                            ),
+                            "task_id": task_id,
+                        },
+                    ),
+                )
+            )
+
             return {
                 "success": True,
                 "document_id": document_id,
@@ -133,6 +156,31 @@ def process_document_task(
             document_repo.update(UUID(document_id), update_data)
         except Exception as db_exc:
             logger.error(f"Failed to update document status: {db_exc}")
+
+        # Emit PROCESSING_FAILED event
+        try:
+            # Create a minimal event loop for emission
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(
+                    get_event_bus().emit(
+                        DocumentEvent.PROCESSING_FAILED,
+                        DocumentEventData(
+                            document_id=UUID(document_id),
+                            filename=filename,
+                            status="FAILED",
+                            error=str(exc),
+                            metadata={"task_id": task_id},
+                        ),
+                    )
+                )
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.debug(
+                f"Failed to emit PROCESSING_FAILED for document {document_id}: {e}"
+            )
 
         if self.request.retries < self.max_retries:
             retry_delay = min(300, 60 * (2**self.request.retries))

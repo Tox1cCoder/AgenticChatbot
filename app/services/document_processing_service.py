@@ -16,6 +16,7 @@ from app.core.config import Settings
 from app.schemas.document import DocumentCreate, DocumentStatus
 from app.utils.text_processing import extract_page_range
 from app.database.qdrant import ensure_collection
+from app.core.events import get_event_bus, DocumentEvent, DocumentEventData
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class DocumentProcessingService:
         self.embedding_model = embedding_model
         self.collection_name = settings.qdrant_collection_name
         self.embedding_dimension = settings.embedding_dimension
+        self._event_bus = get_event_bus()
 
     async def validate_upload_file(
         self, filename: str, file_size: int
@@ -79,6 +81,17 @@ class DocumentProcessingService:
             )
 
             logger.info(f"Started processing task {task.id} for document {document_id}")
+
+            # Emit PROCESSING_STARTED event
+            await self._event_bus.emit(
+                DocumentEvent.PROCESSING_STARTED,
+                DocumentEventData(
+                    document_id=UUID(document_id),
+                    filename=filename,
+                    status="PROCESSING",
+                    metadata={"task_id": task.id},
+                ),
+            )
 
             return {
                 "success": True,

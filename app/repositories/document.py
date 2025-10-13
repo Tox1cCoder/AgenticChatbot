@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
 from app.models.document import Document
+from app.models.conversation import Conversation
 from app.schemas.document import DocumentCreate, DocumentUpdate
 
 
@@ -115,3 +116,22 @@ class DocumentRepository:
                 .filter(Document.conversation_id == conversation_id)
                 .count()
             )
+
+    # Authorization helpers
+    def exists(self, document_id: UUID) -> bool:
+        """Check if a document exists by ID."""
+        with self.session_factory() as db:
+            return (
+                db.query(Document).filter(Document.id == document_id).first()
+                is not None
+            )
+
+    def user_owns_document(self, user_id: UUID, document_id: UUID) -> bool:
+        """Check if a user owns the document via its conversation ownership."""
+        with self.session_factory() as db:
+            q = (
+                db.query(Document)
+                .join(Conversation, Conversation.id == Document.conversation_id)
+                .filter(Document.id == document_id, Conversation.owner_id == user_id)
+            )
+            return db.query(q.exists()).scalar()

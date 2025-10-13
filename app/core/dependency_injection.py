@@ -29,6 +29,7 @@ from app.utils.validation.conversation_validation import (
 )
 from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.feedback_validation import FeedbackValidationUtils
+from app.utils.validation.document_validation import DocumentValidationUtils
 
 
 class AutoInjector:
@@ -235,5 +236,8 @@ class AppContainerInjector(ContainerInjector):
             MessageValidationUtils: getattr(container_ref, "message_validation_utils"),
             FeedbackValidationUtils: getattr(
                 container_ref, "feedback_validation_utils"
+            ),
+            DocumentValidationUtils: getattr(
+                container_ref, "document_validation_utils"
             ),
         }
