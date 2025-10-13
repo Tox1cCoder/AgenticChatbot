@@ -89,6 +89,32 @@ class Settings(BaseSettings):
         description="Dimension of the embedding vectors",
     )
 
+    # Conversation Memory Configuration
+    memory_max_messages: int = Field(
+        default=0,
+        description="Maximum number of messages cached in memory per conversation (0 = no limit)",
+    )
+    memory_load_batch_size: int = Field(
+        default=100,
+        description="Number of messages to load per batch when hydrating memory from the database",
+    )
+    chat_history_max_messages: int = Field(
+        default=0,
+        description="Maximum prior messages to include when building chat prompts (0 = no limit)",
+    )
+    chat_history_max_tokens: int = Field(
+        default=0,
+        description="Approximate maximum tokens of chat history to include in prompts (0 = no limit)",
+    )
+    rag_history_max_messages: int = Field(
+        default=0,
+        description="Maximum prior messages to include when building RAG prompts (0 = no limit)",
+    )
+    rag_history_max_tokens: int = Field(
+        default=0,
+        description="Approximate maximum tokens of RAG history to include in prompts (0 = no limit)",
+    )
+
     # Redis Configuration
     celery_broker_url: str = Field(
         default="redis://localhost:6379/0",

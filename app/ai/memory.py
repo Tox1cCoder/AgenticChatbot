@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 from collections import deque
 
@@ -9,17 +9,27 @@ from ..database.session import get_db
 from ..repositories.message import MessageCRUDStrategy
 from ..models.message import Message
 from .schemas import AgentMessage, MessageRole
+from ..core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class ConversationMemory:
 
-    def __init__(self, conversation_id: UUID, user_id: UUID, max_messages: int = 20):
+    def __init__(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        max_messages: Optional[int] = None,
+        batch_size: int = 100,
+    ):
         self.conversation_id = conversation_id
         self.user_id = user_id
-        self.max_messages = max_messages
-        self._messages: deque[AgentMessage] = deque(maxlen=max_messages)
+        self.max_messages = max_messages if max_messages and max_messages > 0 else None
+        self.batch_size = max(1, batch_size)
+        self._messages: deque[AgentMessage] = (
+            deque(maxlen=self.max_messages) if self.max_messages else deque()
+        )
         self._message_repo = MessageCRUDStrategy(Message)
         self._initialized = False
 
@@ -30,25 +40,16 @@ class ConversationMemory:
         try:
             db = next(get_db())
             try:
-                messages = self._message_repo.get_by_conversation_id(
-                    db,
-                    self.conversation_id,
-                    page=1,
-                    limit=self.max_messages,
-                    order_by="created_at",
-                    order_direction="desc",
-                )
+                loaded_messages, total_available = self._load_messages_from_db(db)
 
-                if force_refresh:
-                    self._messages.clear()
-
-                for msg in reversed(messages.items):
-                    agent_msg = self._db_to_agent_message(msg)
-                    if agent_msg:
-                        self._messages.append(agent_msg)
+                self._messages.clear()
+                self._messages.extend(loaded_messages)
 
                 logger.info(
-                    f"Loaded {len(messages.items)} messages from database for conversation {self.conversation_id}"
+                    "Hydrated %s/%s messages into memory for conversation %s",
+                    len(loaded_messages),
+                    total_available,
+                    self.conversation_id,
                 )
             finally:
                 db.close()
@@ -57,6 +58,47 @@ class ConversationMemory:
         except Exception as e:
             logger.error(f"Failed to initialize memory: {e}")
             self._initialized = True
+
+    def _load_messages_from_db(self, db: Session) -> Tuple[List[AgentMessage], int]:
+        collected: List[AgentMessage] = []
+        total_available = 0
+        page = 1
+        limit = self.batch_size
+
+        while True:
+            paginator = self._message_repo.get_by_conversation_id(
+                db,
+                self.conversation_id,
+                page=page,
+                limit=limit,
+                order_by="created_at",
+                order_direction="desc",
+            )
+
+            if page == 1:
+                total_available = paginator.meta.total if paginator.meta else 0
+
+            if not paginator.items:
+                break
+
+            for msg in paginator.items:
+                agent_msg = self._db_to_agent_message(msg)
+                if agent_msg:
+                    collected.append(agent_msg)
+
+            if self.max_messages and len(collected) >= self.max_messages:
+                break
+
+            if paginator.meta.last_page <= page:
+                break
+
+            page += 1
+
+        if self.max_messages:
+            collected = collected[: self.max_messages]
+
+        collected.reverse()
+        return collected, total_available
 
     def add_message(self, message: AgentMessage):
         self._messages.append(message)
@@ -116,8 +158,13 @@ class ConversationMemory:
 
 class MemoryManager:
 
-    def __init__(self, max_messages: int = 20):
-        self.max_messages = max_messages
+    def __init__(
+        self,
+        max_messages: Optional[int] = None,
+        batch_size: int = 100,
+    ):
+        self.max_messages = max_messages if max_messages and max_messages > 0 else None
+        self.batch_size = max(1, batch_size)
         self._memories: Dict[str, ConversationMemory] = {}
         logger.info("MemoryManager initialized")
 
@@ -127,7 +174,12 @@ class MemoryManager:
         key = str(conversation_id)
 
         if key not in self._memories:
-            memory = ConversationMemory(conversation_id, user_id, self.max_messages)
+            memory = ConversationMemory(
+                conversation_id,
+                user_id,
+                self.max_messages,
+                self.batch_size,
+            )
             self._memories[key] = memory
             await memory.initialize()
         elif force_refresh:
@@ -155,5 +207,8 @@ _memory_manager: Optional[MemoryManager] = None
 def get_memory_manager() -> MemoryManager:
     global _memory_manager
     if _memory_manager is None:
-        _memory_manager = MemoryManager()
+        _memory_manager = MemoryManager(
+            max_messages=settings.memory_max_messages,
+            batch_size=settings.memory_load_batch_size,
+        )
     return _memory_manager

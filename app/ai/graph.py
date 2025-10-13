@@ -104,8 +104,13 @@ class MultiAgentWorkflow:
             conv_memory = await memory_manager.get_memory(
                 conv_id_uuid, user_id_uuid, force_refresh=True
             )
+            history_limit = (
+                settings.chat_history_max_messages
+                if settings.chat_history_max_messages > 0
+                else None
+            )
             conversation_history = conv_memory.get_recent_messages(
-                limit=20, exclude_last=1
+                limit=history_limit, exclude_last=1
             )
             logger.info(
                 f"Loaded {len(conversation_history)} messages from memory for conversation {conversation_id}"
@@ -153,8 +158,13 @@ class MultiAgentWorkflow:
             conv_memory = await memory_manager.get_memory(
                 conv_id_uuid, user_id_uuid, force_refresh=True
             )
+            history_limit = (
+                settings.rag_history_max_messages
+                if settings.rag_history_max_messages > 0
+                else None
+            )
             conversation_history = conv_memory.get_recent_messages(
-                limit=10, exclude_last=1
+                limit=history_limit, exclude_last=1
             )
             logger.info(
                 f"Loaded {len(conversation_history)} messages from memory for conversation {conversation_id}"

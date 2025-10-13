@@ -1,4 +1,6 @@
 import logging
+from typing import Optional
+
 from app.core.config import settings
 from app.utils.text_processing import estimate_tokens, truncate_text
 
@@ -28,14 +30,58 @@ Analyze the user's message and respond with ONLY the agent name (chat_agent or r
 Do not include any explanation, just the agent name."""
 
 
+def _select_history_for_prompt(
+    conversation_history: list,
+    max_messages: Optional[int],
+    max_tokens: Optional[int],
+) -> list:
+    if not conversation_history:
+        return []
+
+    selected = []
+    total_tokens = 0
+
+    for message in reversed(conversation_history):
+        if max_messages and len(selected) >= max_messages:
+            break
+
+        message_tokens = estimate_tokens(message.content) + 4
+
+        if max_tokens and total_tokens + message_tokens > max_tokens:
+            if not selected:
+                selected.append(message)
+            break
+
+        selected.append(message)
+        total_tokens += message_tokens
+
+    selected.reverse()
+    return selected
+
+
 def build_chat_prompt(user_message: str, conversation_history: list) -> str:
     parts = [CHAT_SYSTEM_PROMPT]
 
     if conversation_history:
-        parts.append("\n\nPrevious conversation:")
-        for msg in conversation_history[-5:]:
-            role = "User" if msg.role.value == "user" else "Assistant"
-            parts.append(f"{role}: {msg.content}")
+        max_messages = (
+            settings.chat_history_max_messages
+            if settings.chat_history_max_messages > 0
+            else None
+        )
+        max_tokens = (
+            settings.chat_history_max_tokens
+            if settings.chat_history_max_tokens > 0
+            else None
+        )
+        selected_history = _select_history_for_prompt(
+            conversation_history, max_messages, max_tokens
+        )
+
+        if selected_history:
+            parts.append("\n\nPrevious conversation:")
+            for msg in selected_history:
+                role = "User" if msg.role.value == "user" else "Assistant"
+                parts.append(f"{role}: {msg.content}")
 
     parts.append(f"\n\nUser: {user_message}")
     parts.append("Assistant:")
@@ -122,10 +168,25 @@ def build_rag_prompt(
         )
 
     if conversation_history:
-        parts.append("\n\nConversation context:")
-        for msg in conversation_history[-3:]:
-            role = "User" if msg.role.value == "user" else "Assistant"
-            parts.append(f"{role}: {msg.content}")
+        max_messages = (
+            settings.rag_history_max_messages
+            if settings.rag_history_max_messages > 0
+            else None
+        )
+        max_tokens = (
+            settings.rag_history_max_tokens
+            if settings.rag_history_max_tokens > 0
+            else None
+        )
+        selected_history = _select_history_for_prompt(
+            conversation_history, max_messages, max_tokens
+        )
+
+        if selected_history:
+            parts.append("\n\nConversation context:")
+            for msg in selected_history:
+                role = "User" if msg.role.value == "user" else "Assistant"
+                parts.append(f"{role}: {msg.content}")
 
     parts.append(f"\n\nQuestion: {query}")
     parts.append("Answer based on the documents above:")
