@@ -73,81 +73,57 @@ def process_document_task(
         with open(temp_file_path, "wb") as temp_file:
             temp_file.write(file_content)
 
-        try:
-            # Get DocumentProcessingService from container
-            container = get_container()
-            processing_service = container.document_processing_service()
+        # Get DocumentProcessingService from container
+        container = get_container()
+        processing_service = container.document_processing_service()
 
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-            try:
-                processing_result = loop.run_until_complete(
-                    processing_service.process_document(
-                        file_path=temp_file_path,
-                        filename=filename,
-                        document_id=str(document_id),
-                        conversation_id=str(document.conversation_id),
-                    )
-                )
+        processing_result = loop.run_until_complete(
+            processing_service.process_document(
+                file_path=temp_file_path,
+                filename=filename,
+                document_id=str(document_id),
+                conversation_id=str(document.conversation_id),
+            )
+        )
 
-                update_data = DocumentUpdate(status=DocumentStatus.READY.value)
-                document = document_repo.update(UUID(document_id), update_data)
+        update_data = DocumentUpdate(status=DocumentStatus.READY.value)
+        document = document_repo.update(UUID(document_id), update_data)
 
-                logger.info(
-                    f"Document {document_id} processed successfully: {processing_result}"
-                )
+        logger.info(
+            f"Document {document_id} processed successfully: {processing_result}"
+        )
 
-                # Emit PROCESSING_COMPLETED event using the same loop before closing it
-                event_bus = get_event_bus()
-                loop.run_until_complete(
-                    event_bus.emit(
-                        DocumentEvent.PROCESSING_COMPLETED,
-                        DocumentEventData(
-                            document_id=UUID(document_id),
-                            conversation_id=(
-                                document.conversation_id if document else None
-                            ),
-                            filename=filename,
-                            status="READY",
-                            metadata={
-                                "chunks_created": processing_result.get(
-                                    "chunks_created", 0
-                                ),
-                                "chunks_stored": processing_result.get(
-                                    "chunks_stored", 0
-                                ),
-                                "processing_time": processing_result.get(
-                                    "processing_time", 0
-                                ),
-                                "task_id": task_id,
-                            },
-                        ),
-                    )
-                )
-            finally:
-                asyncio.set_event_loop(None)
-                loop.close()
+        # Emit PROCESSING_COMPLETED event
+        event_bus = get_event_bus()
+        loop.run_until_complete(
+            event_bus.emit(
+                DocumentEvent.PROCESSING_COMPLETED,
+                DocumentEventData(
+                    document_id=UUID(document_id),
+                    conversation_id=(document.conversation_id if document else None),
+                    filename=filename,
+                    status="READY",
+                    metadata={
+                        "chunks_created": processing_result.get("chunks_created", 0),
+                        "chunks_stored": processing_result.get("chunks_stored", 0),
+                        "processing_time": processing_result.get("processing_time", 0),
+                        "task_id": task_id,
+                    },
+                ),
+            )
+        )
 
-            return {
-                "success": True,
-                "document_id": document_id,
-                "chunks_created": processing_result.get("chunks_created", 0),
-                "chunks_stored": processing_result.get("chunks_stored", 0),
-                "processing_time": processing_result.get("processing_time", 0),
-                "message": f"Document '{filename}' processed successfully",
-            }
-
-        finally:
-            if temp_file_path is not None:
-                try:
-                    if os.path.exists(temp_file_path):
-                        os.unlink(temp_file_path)
-                        logger.info(f"Cleaned up temp file: {temp_file_path}")
-                except Exception as cleanup_exc:
-                    logger.warning(
-                        f"Failed to cleanup temp file {temp_file_path}: {cleanup_exc}"
-                    )
+        return {
+            "success": True,
+            "document_id": document_id,
+            "chunks_created": processing_result.get("chunks_created", 0),
+            "chunks_stored": processing_result.get("chunks_stored", 0),
+            "processing_time": processing_result.get("processing_time", 0),
+            "message": f"Document '{filename}' processed successfully",
+        }
 
     except Exception as exc:
         logger.error(
@@ -155,7 +131,7 @@ def process_document_task(
             exc_info=True,
         )
         logger.error(f"Full traceback:\n{traceback.format_exc()}")
-        
+
         try:
             update_data = DocumentUpdate(status=DocumentStatus.FAILED.value)
             document_repo.update(UUID(document_id), update_data)
@@ -164,7 +140,6 @@ def process_document_task(
 
         # Emit PROCESSING_FAILED event
         try:
-            # Create a minimal event loop for emission
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
@@ -207,6 +182,13 @@ def process_document_task(
         }
 
     finally:
+        try:
+            if "loop" in locals() and loop is not None and not loop.is_closed():
+                asyncio.set_event_loop(None)
+                loop.close()
+        except Exception as e:
+            logger.debug(f"Error during event loop cleanup check: {e}")
+
         db.close()
 
 
