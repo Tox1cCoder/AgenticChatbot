@@ -1,4 +1,3 @@
-# Import all schemas for easy access
 from app.schemas.user import (
     UserCreate,
     UserUpdate,

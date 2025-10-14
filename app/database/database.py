@@ -1,7 +1,7 @@
 """Database module for dependency-injector integration."""
 
-from contextlib import contextmanager, AbstractContextManager
-from typing import Callable
+from contextlib import contextmanager
+from typing import Iterator
 import logging
 
 from sqlalchemy import create_engine, orm
@@ -34,7 +34,7 @@ class Database:
         Base.metadata.create_all(self._engine)
 
     @contextmanager
-    def session(self) -> Callable[..., AbstractContextManager[Session]]:
+    def session(self) -> Iterator[Session]:
         """
         Provide a database session as a context manager.
 

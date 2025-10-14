@@ -5,7 +5,6 @@ User factory for creating User entities
 from typing import Dict, Any
 from uuid import uuid4
 
-from app.models.user import User
 from app.schemas.user import UserCreate
 from app.core.security import hash_password
 from app.utils.timestamp_utils import TimestampUtils

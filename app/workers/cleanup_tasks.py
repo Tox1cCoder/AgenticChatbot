@@ -6,7 +6,6 @@ from celery.schedules import crontab
 
 from app.core.container import get_container
 from app.workers.celery_app import celery_app
-from app.workers.document_processor import cleanup_failed_documents
 from app.ai.agents.rag_agent import RAGAgent
 
 logger = logging.getLogger(__name__)

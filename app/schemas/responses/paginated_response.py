@@ -2,7 +2,7 @@
 Paginated API response schemas
 """
 
-from typing import Generic, TypeVar, Dict, Any
+from typing import Generic, TypeVar
 from pydantic import BaseModel
 
 from app.repositories.utils.pagination import PaginationMeta

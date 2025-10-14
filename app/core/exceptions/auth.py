@@ -2,7 +2,7 @@
 Authentication-related exception classes
 """
 
-from fastapi import HTTPException, status
+from fastapi import status
 from .http import CustomHTTPException
 
 

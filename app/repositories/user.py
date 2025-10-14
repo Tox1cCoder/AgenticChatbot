@@ -1,6 +1,5 @@
 from typing import Optional
 from uuid import UUID
-from contextlib import AbstractContextManager
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 

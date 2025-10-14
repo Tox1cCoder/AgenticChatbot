@@ -1,9 +1,7 @@
-from typing import Annotated
 from uuid import UUID
 
 from fastapi import (
     APIRouter,
-    Depends,
     File,
     Form,
     UploadFile,
@@ -15,11 +13,7 @@ from app.core.exceptions.validation import FileValidationError
 from app.core.exceptions.resource import ResourceNotFoundException
 from app.interfaces.document_service_interface import IDocumentService
 from app.schemas.document import (
-    DocumentResponse,
-    DocumentListResponse,
     DocumentUpdate,
-    DocumentCreate,
-    DocumentStatus,
 )
 from app.schemas.responses.api_response import ApiResponse
 from app.services.document_processing_service import DocumentProcessingService

@@ -1,5 +1,3 @@
-from datetime import datetime
-from typing import Optional
 import uuid
 
 from sqlalchemy import Column, String, ForeignKey, DateTime, func

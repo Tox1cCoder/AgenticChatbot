@@ -5,7 +5,6 @@ Conversation factory for creating Conversation entities
 from typing import Dict, Any
 from uuid import uuid4, UUID
 
-from app.models.conversation import Conversation
 from app.schemas.conversation import ConversationCreate
 from app.utils.timestamp_utils import TimestampUtils
 

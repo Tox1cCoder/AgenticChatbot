@@ -1,5 +1,3 @@
-"""Lazy-loading exports for repository classes."""
-
 from importlib import import_module
 from typing import TYPE_CHECKING, Any
 

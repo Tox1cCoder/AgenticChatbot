@@ -5,7 +5,6 @@ Feedback factory for creating Feedback entities
 from typing import Dict, Any
 from uuid import uuid4, UUID
 
-from app.models.feedback import Feedback
 from app.schemas.feedback import FeedbackCreate
 from app.utils.timestamp_utils import TimestampUtils
 

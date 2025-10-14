@@ -3,7 +3,6 @@ from typing import List, Optional
 from uuid import UUID
 
 from app.core.exceptions import (
-    ValidationException,
     ResourceNotFoundException,
     AuthorizationException,
 )

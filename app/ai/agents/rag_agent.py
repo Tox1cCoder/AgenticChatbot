@@ -4,15 +4,13 @@ from typing import Optional, List, Dict, Any
 from google import genai
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
-    Distance,
-    VectorParams,
-    PointStruct,
     Filter,
     FieldCondition,
     MatchValue,
     FilterSelector,
 )
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
+
 
 from app.database.qdrant import ensure_collection
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
@@ -76,15 +74,8 @@ class RAGAgent:
 
     def _init_reranker(self):
         """Initialize the re-ranker model"""
-        try:
-            from sentence_transformers import CrossEncoder
-
-            self.reranker = CrossEncoder(self.settings.reranker_model)
-            logger.info(f"Re-ranker initialized: {self.settings.reranker_model}")
-        except Exception as e:
-            logger.warning(f"Failed to initialize re-ranker, disabling re-ranking: {e}")
-            self.enable_reranking = False
-            self.reranker = None
+        self.reranker = CrossEncoder(self.settings.reranker_model)
+        logger.info(f"Re-ranker initialized: {self.settings.reranker_model}")
 
     async def process_message(
         self,
@@ -205,7 +196,6 @@ class RAGAgent:
                 }
             )
 
-        # Apply re-ranking if enabled and we have enough results
         if self.enable_reranking and len(results) > 3:
             results = await self._rerank_results(query, results)
 
@@ -251,12 +241,12 @@ class RAGAgent:
         return response.text if hasattr(response, "text") else str(response)
 
     async def initialize(self):
-        """Initialize the RAG agent (already done in __init__, but provided for compatibility)"""
+        """Initialize the RAG agent"""
         logger.info("RAG Agent initialized")
         return True
 
     async def cleanup(self):
-        """Cleanup resources (close connections if needed)"""
+        """Cleanup resources"""
         try:
             if hasattr(self.qdrant_client, "close"):
                 self.qdrant_client.close()

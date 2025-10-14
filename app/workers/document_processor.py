@@ -1,5 +1,4 @@
 import os
-import tempfile
 import traceback
 import logging
 import asyncio
@@ -182,6 +181,14 @@ def process_document_task(
         }
 
     finally:
+        # Cleanup temp file after processing
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+                logger.info(f"Cleaned up temp file: {temp_file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temp file {temp_file_path}: {e}")
+        
         try:
             if "loop" in locals() and loop is not None and not loop.is_closed():
                 asyncio.set_event_loop(None)

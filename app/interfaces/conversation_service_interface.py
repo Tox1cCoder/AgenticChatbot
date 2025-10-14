@@ -3,7 +3,7 @@ Conversation service interface definition
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List
 from uuid import UUID
 
 from app.repositories.utils.pagination import Paginator

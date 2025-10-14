@@ -1,6 +1,6 @@
-from typing import List, Optional
+from typing import List
 from uuid import UUID
-from fastapi import APIRouter, status, HTTPException, Query
+from fastapi import APIRouter, status, Query
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.conversation_service_interface import IConversationService
@@ -13,7 +13,6 @@ from app.schemas.message import MessageRead
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.schemas.pagination import ConversationPaginationParams, MessagePaginationParams
-from app.utils.validation.pagination_validation import PaginationError
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 

@@ -1,9 +1,3 @@
-"""
-Celery Worker Startup Script
-Usage:
-    python -m app.workers.start_worker
-"""
-
 import os
 import sys
 import subprocess

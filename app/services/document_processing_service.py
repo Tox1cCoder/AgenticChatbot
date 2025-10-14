@@ -9,11 +9,10 @@ from uuid import UUID
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct, Distance, VectorParams
+from qdrant_client.models import PointStruct
 from sentence_transformers import SentenceTransformer
 
 from app.core.config import Settings
-from app.schemas.document import DocumentCreate, DocumentStatus
 from app.utils.text_processing import extract_page_range
 from app.database.qdrant import ensure_collection
 from app.core.events import get_event_bus, DocumentEvent, DocumentEventData

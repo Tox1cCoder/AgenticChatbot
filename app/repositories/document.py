@@ -1,6 +1,5 @@
 from typing import List, Optional, Tuple
 from uuid import UUID
-from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
 from app.models.document import Document

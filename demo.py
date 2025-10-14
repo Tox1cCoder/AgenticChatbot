@@ -1,6 +1,5 @@
 import streamlit as st
 import requests
-import json
 import html
 import re
 from typing import Dict, Optional, Any, List
@@ -457,9 +456,7 @@ def render_conversation_manager():
                 if filtered_convs:
                     for conv in filtered_convs:
                         with st.expander(f"💬 {conv['title']}", expanded=False):
-                            # Check if this conversation already has messages from include_messages
                             if conv.get("messages"):
-                                # Use the messages that were already included
                                 for msg in conv["messages"]:
                                     sender_value = msg.get("sender")
                                     sender_icon = (

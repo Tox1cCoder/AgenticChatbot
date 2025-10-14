@@ -34,8 +34,6 @@ from app.utils.validation.document_validation import DocumentValidationUtils
 
 class AutoInjector:
     """Base class for auto-injection with wiring_map configuration."""
-
-    # subclasses override this with their type → provider map
     wiring_map: Dict[Type, Any] = {}
 
     @classmethod
@@ -170,7 +168,6 @@ class AppAutoInjector(AutoInjector):
                 new_params.append(param)
 
             def wrapper_factory():
-                # Separate parameters with and without defaults to maintain proper ordering
                 params_without_default = []
                 params_with_default = []
 
@@ -180,7 +177,6 @@ class AppAutoInjector(AutoInjector):
                     else:
                         params_with_default.append(param)
 
-                # Combine them in the correct order: non-default first, then default
                 ordered_params = params_without_default + params_with_default
 
                 if inspect.iscoroutinefunction(func):

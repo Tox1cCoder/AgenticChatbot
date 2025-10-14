@@ -1,11 +1,10 @@
-from typing import Optional, List
+from typing import Optional
 import logging
 from uuid import UUID
 
 from app.ai.agents.rag_agent import RAGAgent
 from app.core.config import get_settings
 from app.core.exceptions.validation import FileValidationError
-from app.core.exceptions.resource import ResourceNotFoundException
 from app.interfaces.document_service_interface import IDocumentService
 from app.repositories.document import DocumentRepository
 from app.services.document_processing_service import DocumentProcessingService

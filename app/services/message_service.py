@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Optional
+from typing import Optional
 from uuid import UUID
 
 from app.repositories.message import MessageRepository

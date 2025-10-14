@@ -2,10 +2,9 @@
 Message factory for creating Message entities
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from uuid import uuid4, UUID
 
-from app.models.message import Message
 from app.schemas.message import MessageCreate
 from app.models.enums import MessageRole
 from app.utils.timestamp_utils import TimestampUtils

@@ -1,7 +1,5 @@
-from typing import List
 from uuid import UUID
-from typing import Annotated
-from fastapi import APIRouter, status, HTTPException
+from fastapi import APIRouter, status
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.message_service_interface import IMessageService
@@ -9,7 +7,6 @@ from app.schemas.message import MessageCreate, MessageRead
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.schemas.pagination import MessagePaginationParams
-from app.utils.validation.pagination_validation import PaginationError
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
