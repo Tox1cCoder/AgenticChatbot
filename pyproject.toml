@@ -40,6 +40,10 @@ dependencies = [
     "langgraph>=0.0.20",
     "langsmith>=0.0.80",
     "google-generativeai>=0.3.0",
+    "langchain-google-genai>=2.0.0",
+    "tavily-python>=0.3.0",
+    "langchain-mcp-adapters>=0.1.0",
+    "langchain-tavily>=0.1.0",
     
     # Vector Database & Embeddings
     "qdrant-client>=1.7.0",

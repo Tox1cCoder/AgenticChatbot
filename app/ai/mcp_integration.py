@@ -84,6 +84,10 @@ class MCPManager:
                     "command": server_info.get("command", "python"),
                     "args": abs_args,
                 }
+
+                # Pass environment variables to subprocess if specified
+                if "env" in server_info:
+                    server_config[server_name]["env"] = server_info["env"]
             elif transport in ["streamable_http", "sse"]:
                 server_config[server_name] = {
                     "transport": transport,
@@ -101,6 +105,13 @@ class MCPManager:
 
     async def initialize(self) -> None:
         """Initialize MCP client and load configuration"""
+        # Set environment variables for MCP servers to use
+        from app.core.config import settings
+
+        if settings.tavily_api_key:
+            os.environ["TAVILY_API_KEY"] = settings.tavily_api_key
+            logger.info("Set TAVILY_API_KEY environment variable for MCP servers")
+
         self.config = self._load_config()
         server_config = self._build_server_config()
 

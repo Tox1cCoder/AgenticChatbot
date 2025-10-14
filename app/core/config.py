@@ -3,7 +3,6 @@ from typing import List
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
-import os
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -72,6 +71,10 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(
         default="",
         description="Gemini API Key",
+    )
+    tavily_api_key: str = Field(
+        default="",
+        description="Tavily API Key for web search",
     )
 
     # Qdrant Configuration
@@ -223,6 +226,20 @@ class Settings(BaseSettings):
     max_chunk_chars_in_prompt: int = Field(
         default=2000,
         description="Maximum characters per chunk in prompt (0 = no limit)",
+    )
+
+    # Search Agent Configuration
+    search_max_results: int = Field(
+        default=5,
+        description="Maximum number of search results to return",
+    )
+    search_history_max_messages: int = Field(
+        default=0,
+        description="Maximum prior messages to include when building search prompts (0 = no limit)",
+    )
+    search_history_max_tokens: int = Field(
+        default=0,
+        description="Approximate maximum tokens of search history to include in prompts (0 = no limit)",
     )
 
     # Health Check Configuration

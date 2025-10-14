@@ -11,6 +11,7 @@ from .schemas import GraphState, AgentMessage, AgentResponse, MessageRole, Agent
 from .agents.router import Router
 from .agents.chat_agent import ChatAgent
 from .agents.rag_agent import RAGAgent
+from .agents.search_agent import SearchAgent
 from .memory import get_memory_manager
 from ..core.config import settings
 
@@ -32,7 +33,12 @@ class MultiAgentWorkflow:
             embedding_model=embedding_model,
             collection_name=settings.qdrant_collection_name,
         )
-        self.agents = {"chat_agent": self.chat_agent, "rag_agent": self.rag_agent}
+        self.search_agent = SearchAgent()
+        self.agents = {
+            "chat_agent": self.chat_agent,
+            "rag_agent": self.rag_agent,
+            "search_agent": self.search_agent,
+        }
 
         self.graph = self._build_graph()
         logger.info("Multi-agent workflow initialized")
@@ -43,17 +49,24 @@ class MultiAgentWorkflow:
         workflow.add_node("route", self._route_node)
         workflow.add_node("chat_agent", self._chat_node)
         workflow.add_node("rag_agent", self._rag_node)
+        workflow.add_node("search_agent", self._search_node)
 
         workflow.add_edge(START, "route")
 
         workflow.add_conditional_edges(
             "route",
             self._should_continue,
-            {"chat_agent": "chat_agent", "rag_agent": "rag_agent", "end": END},
+            {
+                "chat_agent": "chat_agent",
+                "rag_agent": "rag_agent",
+                "search_agent": "search_agent",
+                "end": END,
+            },
         )
 
         workflow.add_edge("chat_agent", END)
         workflow.add_edge("rag_agent", END)
+        workflow.add_edge("search_agent", END)
 
         return workflow.compile()
 
@@ -177,6 +190,61 @@ class MultiAgentWorkflow:
         )
 
         response = await self.rag_agent.process_message(
+            agent_msg, conversation_id, user_id
+        )
+
+        state["response"] = response
+        state.setdefault("messages", []).append(
+            AIMessage(content=response.message.content)
+        )
+
+        return state
+
+    async def _search_node(self, state: GraphState) -> GraphState:
+        messages = state.get("messages", [])
+        if not messages:
+            logger.error("No messages in state for search agent")
+            return state
+
+        last_message = messages[-1]
+        content = (
+            last_message.content
+            if hasattr(last_message, "content")
+            else str(last_message)
+        )
+
+        conversation_history = []
+        memory_manager = get_memory_manager()
+
+        conversation_id = state.get("conversation_id")
+        user_id = state.get("user_id")
+
+        if conversation_id and user_id:
+            conv_id_uuid = UUID(conversation_id)
+            user_id_uuid = UUID(user_id)
+
+            conv_memory = await memory_manager.get_memory(
+                conv_id_uuid, user_id_uuid, force_refresh=True
+            )
+            history_limit = (
+                settings.search_history_max_messages
+                if settings.search_history_max_messages > 0
+                else None
+            )
+            conversation_history = conv_memory.get_recent_messages(
+                limit=history_limit, exclude_last=1
+            )
+            logger.info(
+                f"Loaded {len(conversation_history)} messages from memory for conversation {conversation_id}"
+            )
+
+        agent_msg = AgentMessage(
+            role=MessageRole.USER,
+            content=content,
+            metadata={"history": conversation_history},
+        )
+
+        response = await self.search_agent.process_message(
             agent_msg, conversation_id, user_id
         )
 

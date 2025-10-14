@@ -8,6 +8,7 @@ from langchain_core.messages import BaseMessage
 class AgentType(str, Enum):
     CHAT = "chat"
     RAG = "rag"
+    SEARCH = "search"
 
 
 class MessageRole(str, Enum):
@@ -21,12 +22,14 @@ class AgentMessage(BaseModel):
     content: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
+
 class AgentConfig(BaseModel):
     model: str
     temperature: float = 0.7
     max_tokens: Optional[int] = None
     top_p: float = 1.0
     frequency_penalty: float = 0.0
+
 
 class AgentResponse(BaseModel):
     agent_type: AgentType

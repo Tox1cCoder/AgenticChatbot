@@ -16,17 +16,26 @@ Use the full context provided. When answering, provide detailed information from
 If the user asks for more details, reference specific sections from the documents.
 Always cite your sources and indicate when information is not available."""
 
+SEARCH_SYSTEM_PROMPT = """You are a web search assistant that provides accurate, up-to-date information from the internet.
+Your role is to search for real-time information and current events using web search tools.
+Always cite your sources with URLs when available.
+Provide concise but comprehensive answers based on the search results.
+If the information cannot be found or is uncertain, clearly indicate this to the user.
+Focus on the most recent and relevant information from credible sources."""
+
 ROUTER_SYSTEM_PROMPT = """You are a routing assistant that decides which agent should handle a user's message.
 
 Available agents:
-- chat_agent: Handles general conversation, casual chat, greetings, small talk, personal questions, opinions, creative tasks, and general assistance that doesn't require specific document retrieval.
-- rag_agent: Handles questions that require searching through documents, retrieving specific information from a knowledge base, answering factual questions that need reference materials, or looking up detailed information from uploaded files.
+- chat_agent: Handles general conversation, casual chat, greetings, small talk, personal questions, opinions, creative tasks, and general assistance that doesn't require specific document retrieval or web search.
+- rag_agent: Handles questions that require searching through internal documents, retrieving specific information from a knowledge base, answering factual questions that need reference materials from uploaded files, or looking up detailed information from the document collection.
+- search_agent: Handles queries requiring real-time web information, current events, recent news, latest data, fact-checking, or information not available in the internal knowledge base. Use for queries with keywords like "latest", "current", "recent", "today", "news", "what's happening", or when asking about events after the model's knowledge cutoff.
 
 Guidelines:
-- Use chat_agent for: greetings, opinions, creative requests, general knowledge, casual conversation
-- Use rag_agent for: "search", "find", "lookup", "what does the document say", "explain from the files", specific factual queries about uploaded content
+- Use chat_agent for: greetings, opinions, creative requests, general knowledge within model training, casual conversation
+- Use rag_agent for: "search documents", "find in files", "lookup in knowledge base", "what does the document say", "explain from the files", specific factual queries about uploaded content
+- Use search_agent for: "latest news", "current events", "recent", "today", "what's happening now", real-time information, fact-checking recent claims, information beyond model's knowledge cutoff
 
-Analyze the user's message and respond with ONLY the agent name (chat_agent or rag_agent) that should handle it.
+Analyze the user's message and respond with ONLY the agent name (chat_agent, rag_agent, or search_agent) that should handle it.
 Do not include any explanation, just the agent name."""
 
 
@@ -190,5 +199,36 @@ def build_rag_prompt(
 
     parts.append(f"\n\nQuestion: {query}")
     parts.append("Answer based on the documents above:")
+
+    return "\n".join(parts)
+
+
+def build_search_prompt(user_message: str, conversation_history: list) -> str:
+    """Build a prompt for the search agent including conversation history."""
+    parts = [SEARCH_SYSTEM_PROMPT]
+
+    # Add conversation history if available
+    if conversation_history:
+        max_messages = (
+            settings.search_history_max_messages
+            if settings.search_history_max_messages > 0
+            else None
+        )
+        max_tokens = (
+            settings.search_history_max_tokens
+            if settings.search_history_max_tokens > 0
+            else None
+        )
+        selected_history = _select_history_for_prompt(
+            conversation_history, max_messages, max_tokens
+        )
+
+        if selected_history:
+            parts.append("\n\nConversation context:")
+            for msg in selected_history:
+                role = "User" if msg.role.value == "user" else "Assistant"
+                parts.append(f"{role}: {msg.content}")
+
+    parts.append(f"\n\nUser query: {user_message}")
 
     return "\n".join(parts)
