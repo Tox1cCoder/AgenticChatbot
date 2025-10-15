@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import Column, String, DateTime, ForeignKey, Integer
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -20,7 +20,7 @@ class Document(Base):
         Integer, nullable=False, default=1
     )  # 1=processing, 2=ready, 3=failed
     upload_time = Column(
-        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+        DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc)
     )
 
     # Relationships

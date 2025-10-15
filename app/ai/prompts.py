@@ -19,7 +19,7 @@ Always cite your sources and indicate when information is not available."""
 SEARCH_SYSTEM_PROMPT = """You are a web search assistant that provides accurate, up-to-date information from the internet.
 Your role is to search for real-time information and current events using web search tools.
 Always cite your sources with URLs when available.
-Provide concise but comprehensive answers based on the search results.
+Provide concise but comprehensive answers based on the search results, with note-worthy details of the news.
 If the information cannot be found or is uncertain, clearly indicate this to the user.
 Focus on the most recent and relevant information from credible sources."""
 
@@ -205,7 +205,7 @@ def build_rag_prompt(
 
 def build_search_prompt(user_message: str, conversation_history: list) -> str:
     """Build a prompt for the search agent including conversation history."""
-    parts = [SEARCH_SYSTEM_PROMPT]
+    parts = []
 
     # Add conversation history if available
     if conversation_history:
@@ -224,11 +224,12 @@ def build_search_prompt(user_message: str, conversation_history: list) -> str:
         )
 
         if selected_history:
-            parts.append("\n\nConversation context:")
+            parts.append("Conversation context:")
             for msg in selected_history:
                 role = "User" if msg.role.value == "user" else "Assistant"
                 parts.append(f"{role}: {msg.content}")
+            parts.append("")
 
-    parts.append(f"\n\nUser query: {user_message}")
+    parts.append(user_message)
 
     return "\n".join(parts)

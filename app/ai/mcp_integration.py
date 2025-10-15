@@ -29,6 +29,7 @@ class MCPManager:
         self.config: Dict[str, Any] = {}
         self.client: Optional[MultiServerMCPClient] = None
         self._tools: List[BaseTool] = []
+        self._sessions: Dict[str, Any] = {}
 
     def _get_default_config_path(self) -> str:
         """Get default config path relative to this file"""
@@ -165,19 +166,47 @@ class MCPManager:
             return []
 
         try:
-            async with self.client.session(server_name) as session:
-                from langchain_mcp_adapters.tools import load_mcp_tools
+            if server_name in self._sessions:
+                logger.debug(f"Reusing existing session for {server_name}")
+                return self._sessions[server_name]["tools"]
 
-                tools = await load_mcp_tools(session)
-                logger.info(f"Loaded {len(tools)} tools from {server_name}")
-                return tools
+            # Create and enter a new session context
+            session_context = self.client.session(server_name)
+            session = await session_context.__aenter__()
+
+            # Load tools from the session
+            from langchain_mcp_adapters.tools import load_mcp_tools
+
+            tools = await load_mcp_tools(session)
+
+            self._sessions[server_name] = {
+                "context": session_context,
+                "session": session,
+                "tools": tools,
+            }
+
+            logger.info(
+                f"Loaded {len(tools)} tools from {server_name} (session kept open)"
+            )
+            return tools
         except Exception as e:
-            logger.error(f"Failed to load tools from {server_name}: {e}")
+            logger.error(f"Failed to load tools from {server_name}: {e}", exc_info=True)
             return []
 
     async def cleanup(self) -> None:
-        """Cleanup MCP client resources"""
+        """Cleanup MCP client resources and close all active sessions"""
+        # Close all active sessions
+        for server_name, session_info in self._sessions.items():
+            try:
+                context = session_info["context"]
+                await context.__aexit__(None, None, None)
+                logger.debug(f"Closed session for {server_name}")
+            except Exception as e:
+                logger.error(f"Error closing session for {server_name}: {e}")
+
+        self._sessions.clear()
+        self._tools = []
+
         if self.client:
-            self._tools = []
             self.client = None
             logger.info("MCP client cleaned up")

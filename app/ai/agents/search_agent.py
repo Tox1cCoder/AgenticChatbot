@@ -3,11 +3,11 @@ from typing import Optional
 
 from google import genai
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.prebuilt import create_react_agent
-from langchain_core.prompts import ChatPromptTemplate
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import build_search_prompt
+from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT
 from ...core.config import settings
 from ..mcp_integration import MCPManager
 
@@ -21,7 +21,7 @@ class SearchAgent:
         self.gemini_client = None
         self.langchain_model = None
         self.mcp_manager = None
-        self.react_agent = None
+        self.agent_executor = None
         self.tools = []
         self._init_gemini()
 
@@ -38,7 +38,6 @@ class SearchAgent:
         self.langchain_model = ChatGoogleGenerativeAI(
             model=self.model_name, google_api_key=api_key, temperature=0.7
         )
-        logger.info("Gemini client and LangChain model initialized for Search Agent")
 
     async def _init_mcp(self):
         """Initialize MCP manager and load Tavily tools"""
@@ -49,33 +48,35 @@ class SearchAgent:
 
                 # Get tools from Tavily server
                 self.tools = await self.mcp_manager.get_server_tools("tavily")
-                logger.info(f"Loaded {len(self.tools)} tools from Tavily MCP server")
-                if len(self.tools) == 0:
-                    logger.warning(
-                        "No tools loaded from Tavily server. Check MCP server configuration and API key."
-                    )
+
             except Exception as e:
                 logger.error(f"Failed to initialize MCP manager: {e}", exc_info=True)
                 self.tools = []
 
-    async def _init_react_agent(self):
-        """Initialize ReAct agent with tools"""
-        # Create prompt template for ReAct agent
+    async def _init_agent(self):
+        """Initialize tool calling agent with AgentExecutor"""
+        # Create prompt template
         prompt = ChatPromptTemplate.from_messages(
             [
-                (
-                    "system",
-                    "You are a helpful assistant that can search the web for information.",
-                ),
-                ("placeholder", "{messages}"),
+                ("system", SEARCH_SYSTEM_PROMPT),
+                MessagesPlaceholder(variable_name="chat_history", optional=True),
+                ("user", "{input}"),
+                MessagesPlaceholder(variable_name="agent_scratchpad"),
             ]
         )
 
-        # Create ReAct agent with LangChain model
-        self.react_agent = create_react_agent(
-            model=self.langchain_model, tools=self.tools, prompt=prompt
+        # Bind tools to the model with function calling config
+        llm_with_tools = self.langchain_model.bind_tools(
+            self.tools, tool_config={"function_calling_config": {"mode": "AUTO"}}
         )
-        logger.info("ReAct agent initialized for Search Agent")
+
+        # Create tool calling agent
+        agent = create_tool_calling_agent(llm_with_tools, self.tools, prompt)
+
+        # Wrap in AgentExecutor
+        self.agent_executor = AgentExecutor(
+            agent=agent, tools=self.tools, verbose=False
+        )
 
     async def process_message(
         self,
@@ -83,13 +84,13 @@ class SearchAgent:
         conversation_id: Optional[str] = None,
         user_id: Optional[str] = None,
     ) -> AgentResponse:
-        """Process a search query using ReAct agent with Tavily tools"""
+        """Process a search query using tool calling agent"""
 
         if self.mcp_manager is None:
             await self._init_mcp()
 
-        if self.react_agent is None:
-            await self._init_react_agent()
+        if self.agent_executor is None:
+            await self._init_agent()
 
         # Extract conversation history
         conversation_history = message.metadata.get("history", [])
@@ -97,33 +98,24 @@ class SearchAgent:
         # Build prompt
         prompt = build_search_prompt(message.content, conversation_history)
 
-        # Invoke ReAct agent
-        result = await self.react_agent.ainvoke(
-            {"messages": [{"role": "user", "content": prompt}]}
-        )
+        try:
+            # Invoke agent executor
+            result = await self.agent_executor.ainvoke({"input": prompt})
 
-        # Extract final AI message from result
-        if "messages" in result and len(result["messages"]) > 0:
-            # Get the last AI message
-            ai_messages = [
-                msg
-                for msg in result["messages"]
-                if hasattr(msg, "type") and msg.type == "ai"
-            ]
-            if ai_messages:
-                response_text = ai_messages[-1].content
-            else:
-                response_text = str(result["messages"][-1].content)
-        else:
-            response_text = "No response from search agent"
+            # Extract response from result
+            response_text = result.get("output", "No response from search agent")
+
+        except Exception as e:
+            logger.error(f"Error invoking search agent: {e}", exc_info=True)
+            response_text = "An error occurred while processing your search request."
 
         # Create response metadata
         search_metadata = {
             "model": self.model_name,
             "conversation_id": conversation_id,
             "context_messages": len(conversation_history),
-            "tools_used": len(self.tools),
-            "agent_type": "react",
+            "tools_available": len(self.tools),
+            "agent_type": "tool_calling",
         }
 
         # Create response message

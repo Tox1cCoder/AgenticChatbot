@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis import Redis
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.core.config import settings
 from app.core.container import (
@@ -209,7 +209,7 @@ async def health_check_qdrant():
 @app.get("/health/all")
 async def health_check_all():
     """Check health of all services"""
-    timestamp = datetime.utcnow().isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
 
     celery_health = await health_check_celery()
 
