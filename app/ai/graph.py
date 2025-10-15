@@ -28,9 +28,7 @@ class MultiAgentWorkflow:
         checkpointer: Optional[BaseCheckpointSaver] = None,
     ):
         self.qdrant_client = qdrant_client
-        self.router = Router(
-            qdrant_client=qdrant_client, collection_name=settings.qdrant_collection_name
-        )
+        self.router = Router()
         self.chat_agent = ChatAgent()
         self.rag_agent = RAGAgent(
             settings=settings,
@@ -96,12 +94,10 @@ class MultiAgentWorkflow:
             else str(last_message)
         )
 
-        # Get conversation_id from state for context-aware routing
-        conversation_id = state.get("conversation_id")
 
         agent_msg = AgentMessage(role=MessageRole.USER, content=content)
         selected_agent = await self.router.route_message(
-            agent_msg, list(self.agents.keys()), conversation_id=conversation_id
+            agent_msg, list(self.agents.keys())
         )
 
         state["selected_agent"] = selected_agent
