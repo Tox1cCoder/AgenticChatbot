@@ -1,3 +1,4 @@
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis import Redis
@@ -25,6 +26,20 @@ from app.ai.agents.rag_agent import RAGAgent
 from fastapi_radar import Radar
 from app.core.events import get_event_bus, DocumentEvent
 from app.services.document_event_listener import DocumentEventLogger
+
+logger = logging.getLogger(__name__)
+
+
+async def init_checkpoint_tables():
+    """Initialize LangGraph checkpoint tables at application startup."""
+    if not settings.enable_langgraph_checkpoints:
+        logger.info("LangGraph checkpoints disabled in settings")
+        return
+
+    container = get_container()
+    checkpoint_manager = container.checkpoint_manager()
+
+    await checkpoint_manager.setup()
 
 
 def create_app() -> FastAPI:
@@ -88,6 +103,12 @@ def create_app() -> FastAPI:
         DocumentEvent.DELETED,
     ]:
         event_bus.register_listener(evt, doc_logger)
+
+    # Register startup event for checkpoint initialization
+    @app.on_event("startup")
+    async def startup_event():
+        """Initialize checkpoint tables on application startup."""
+        await init_checkpoint_tables()
 
     return app
 

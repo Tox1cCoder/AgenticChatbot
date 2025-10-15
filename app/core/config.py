@@ -252,6 +252,20 @@ class Settings(BaseSettings):
         description="Enable or disable health check endpoints",
     )
 
+    # LangGraph Checkpoint Configuration
+    enable_langgraph_checkpoints: bool = Field(
+        default=True,
+        description="Enable or disable LangGraph checkpoint persistence",
+    )
+    checkpoint_schema: str = Field(
+        default="public",
+        description="PostgreSQL schema for checkpoint tables",
+    )
+    checkpoint_cleanup_days: int = Field(
+        default=30,
+        description="Days to retain old checkpoints before cleanup",
+    )
+
     # Application metadata
     app_name: str = Field(
         default="Sample Chatbot",

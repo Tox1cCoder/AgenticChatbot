@@ -14,7 +14,7 @@ engine = create_engine(
 )
 
 # Create SessionLocal class
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(autoflush=False, bind=engine)
 
 
 def get_db() -> Generator[Session, None, None]:

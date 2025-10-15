@@ -21,6 +21,8 @@ from app.services.ai_service import AIService
 from app.services.document_service import DocumentService
 from app.services.document_processing_service import DocumentProcessingService
 
+from app.ai.checkpoint import CheckpointManager
+
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 from app.workers.celery_app import celery_app
@@ -78,6 +80,13 @@ class Container(containers.DeclarativeContainer):
     embedding_model = providers.Singleton(
         SentenceTransformer,
         "google/embeddinggemma-300m",
+    )
+
+    # Checkpoint manager
+    checkpoint_manager = providers.Singleton(
+        CheckpointManager,
+        db_url=settings.database_url,
+        settings=providers.Object(settings),
     )
 
     # Repositories - use session factory from database
@@ -142,11 +151,26 @@ class Container(containers.DeclarativeContainer):
         conversation_validation_utils=conversation_validation_utils,
     )
 
-    ai_service = providers.Factory(
-        AIService,
-        qdrant_client=qdrant_client,
-        embedding_model=embedding_model,
-    )
+    # AI service with conditional checkpoint injection
+    def _create_ai_service():
+        """Factory function to create AIService with conditional checkpointer."""
+        qdrant = container.qdrant_client()
+        embeddings = container.embedding_model()
+
+        # Conditionally get checkpointer based on settings
+        checkpointer = None
+        if settings.enable_langgraph_checkpoints:
+            checkpoint_mgr = container.checkpoint_manager()
+            # Get the checkpointer (now synchronous)
+            checkpointer = checkpoint_mgr.get_checkpointer()
+
+        return AIService(
+            qdrant_client=qdrant,
+            embedding_model=embeddings,
+            checkpointer=checkpointer,
+        )
+
+    ai_service = providers.Factory(_create_ai_service)
 
     message_service: providers.Provider[IMessageService] = providers.Factory(
         MessageService,

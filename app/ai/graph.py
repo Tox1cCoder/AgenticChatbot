@@ -3,6 +3,7 @@ from typing import Optional
 from uuid import UUID
 
 from langgraph.graph import StateGraph, END, START
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langchain_core.messages import HumanMessage, AIMessage
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
@@ -24,8 +25,12 @@ class MultiAgentWorkflow:
         self,
         qdrant_client: QdrantClient,
         embedding_model: SentenceTransformer,
+        checkpointer: Optional[BaseCheckpointSaver] = None,
     ):
-        self.router = Router()
+        self.qdrant_client = qdrant_client
+        self.router = Router(
+            qdrant_client=qdrant_client, collection_name=settings.qdrant_collection_name
+        )
         self.chat_agent = ChatAgent()
         self.rag_agent = RAGAgent(
             settings=settings,
@@ -40,8 +45,12 @@ class MultiAgentWorkflow:
             "search_agent": self.search_agent,
         }
 
+        self.checkpointer = checkpointer
+
         self.graph = self._build_graph()
-        logger.info("Multi-agent workflow initialized")
+        logger.info(
+            f"Multi-agent workflow initialized (checkpointing: {'enabled' if checkpointer else 'disabled'})"
+        )
 
     def _build_graph(self) -> StateGraph:
         workflow = StateGraph(GraphState)
@@ -68,7 +77,11 @@ class MultiAgentWorkflow:
         workflow.add_edge("rag_agent", END)
         workflow.add_edge("search_agent", END)
 
-        return workflow.compile()
+        # Compile with checkpointer if provided
+        if self.checkpointer:
+            return workflow.compile(checkpointer=self.checkpointer)
+        else:
+            return workflow.compile()
 
     async def _route_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
@@ -83,9 +96,12 @@ class MultiAgentWorkflow:
             else str(last_message)
         )
 
+        # Get conversation_id from state for context-aware routing
+        conversation_id = state.get("conversation_id")
+
         agent_msg = AgentMessage(role=MessageRole.USER, content=content)
         selected_agent = await self.router.route_message(
-            agent_msg, list(self.agents.keys())
+            agent_msg, list(self.agents.keys()), conversation_id=conversation_id
         )
 
         state["selected_agent"] = selected_agent
@@ -266,6 +282,7 @@ class MultiAgentWorkflow:
         message: str,
         conversation_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> Optional[AgentResponse]:
 
         initial_state: GraphState = {
@@ -280,13 +297,18 @@ class MultiAgentWorkflow:
         initial_state["selected_agent"] = None
         initial_state["response"] = None
 
-        result = await self.graph.ainvoke(initial_state)
+        config = None
+        if self.checkpointer and thread_id:
+            config = {"configurable": {"thread_id": thread_id}}
+
+        result = await self.graph.ainvoke(initial_state, config=config)
         return result.get("response")
 
 
 def create_workflow(
     qdrant_client: QdrantClient,
     embedding_model: SentenceTransformer,
+    checkpointer: Optional[BaseCheckpointSaver] = None,
 ) -> MultiAgentWorkflow:
     """
     Create multi-agent workflow with required shared dependencies.
@@ -294,4 +316,5 @@ def create_workflow(
     return MultiAgentWorkflow(
         qdrant_client=qdrant_client,
         embedding_model=embedding_model,
+        checkpointer=checkpointer,
     )

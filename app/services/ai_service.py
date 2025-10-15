@@ -4,6 +4,7 @@ from typing import Optional
 from uuid import UUID
 
 from ..ai.graph import create_workflow
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 
@@ -16,21 +17,28 @@ class AIService:
         self,
         qdrant_client: QdrantClient,
         embedding_model: SentenceTransformer,
+        checkpointer: Optional[BaseCheckpointSaver] = None,
     ):
+        self.checkpointer = checkpointer
         self.workflow = create_workflow(
             qdrant_client=qdrant_client,
             embedding_model=embedding_model,
+            checkpointer=checkpointer,
         )
-        logger.info("AIService initialized with multi-agent workflow")
 
     async def process_message(
         self, conversation_id: UUID, user_id: UUID, message: str
     ) -> str:
 
+        thread_id = (
+            str(conversation_id) if conversation_id and self.checkpointer else None
+        )
+
         response = await self.workflow.execute(
             message=message,
             conversation_id=str(conversation_id) if conversation_id else None,
             user_id=str(user_id) if user_id else None,
+            thread_id=thread_id,
         )
 
         if response and response.message:

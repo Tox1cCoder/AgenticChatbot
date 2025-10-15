@@ -23,7 +23,6 @@ class Database:
         )
         self._session_factory = orm.scoped_session(
             orm.sessionmaker(
-                autocommit=False,
                 autoflush=False,
                 bind=self._engine,
             ),
