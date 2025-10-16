@@ -81,15 +81,18 @@ class DocumentProcessingService:
             logger.info(f"Started processing task {task.id} for document {document_id}")
 
             # Emit PROCESSING_STARTED event
-            await self._event_bus.emit(
-                DocumentEvent.PROCESSING_STARTED,
-                DocumentEventData(
-                    document_id=UUID(document_id),
-                    filename=filename,
-                    status="PROCESSING",
-                    metadata={"task_id": task.id},
-                ),
-            )
+            try:
+                await self._event_bus.emit(
+                    DocumentEvent.PROCESSING_STARTED,
+                    DocumentEventData(
+                        document_id=UUID(document_id),
+                        filename=filename,
+                        status="PROCESSING",
+                        metadata={"task_id": task.id},
+                    ),
+                )
+            except Exception as e:
+                logger.debug(f"Event emission failed for PROCESSING_STARTED: {e}")
 
             return {
                 "success": True,

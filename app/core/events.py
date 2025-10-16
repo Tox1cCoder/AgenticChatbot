@@ -60,7 +60,6 @@ class EventBus:
 
 _event_bus: Optional[EventBus] = None
 
-
 def get_event_bus() -> EventBus:
     global _event_bus
     if _event_bus is None:

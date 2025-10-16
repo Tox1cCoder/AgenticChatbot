@@ -148,7 +148,7 @@ class MultiAgentWorkflow:
         )
 
         response = await self.chat_agent.process_message(
-            agent_msg, conversation_id, user_id
+            agent_msg, conversation_id
         )
 
         state["response"] = response
@@ -202,7 +202,7 @@ class MultiAgentWorkflow:
         )
 
         response = await self.rag_agent.process_message(
-            agent_msg, conversation_id, user_id
+            agent_msg, conversation_id
         )
 
         state["response"] = response
@@ -257,7 +257,7 @@ class MultiAgentWorkflow:
         )
 
         response = await self.search_agent.process_message(
-            agent_msg, conversation_id, user_id
+            agent_msg, conversation_id
         )
 
         state["response"] = response

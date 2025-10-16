@@ -21,3 +21,40 @@ class DocumentEventLogger(EventListener):
             "status": data.status,
             "metadata": data.metadata or {},
         }
+        try:
+            if event_type == DocumentEvent.UPLOAD_STARTED:
+                self.logger.info(
+                    "Document upload started",
+                    extra={"event": str(event_type), **msg_ctx},
+                )
+            elif event_type == DocumentEvent.PROCESSING_STARTED:
+                self.logger.info(
+                    "Document processing started",
+                    extra={"event": str(event_type), **msg_ctx},
+                )
+            elif event_type == DocumentEvent.PROCESSING_COMPLETED:
+                self.logger.info(
+                    "Document processing completed",
+                    extra={"event": str(event_type), **msg_ctx},
+                )
+            elif event_type == DocumentEvent.PROCESSING_FAILED:
+                # Include error details when available
+                err = getattr(data, "error", None)
+                self.logger.error(
+                    "Document processing failed",
+                    extra={"event": str(event_type), "error": err, **msg_ctx},
+                )
+            elif event_type == DocumentEvent.DELETED:
+                self.logger.info(
+                    "Document deleted", extra={"event": str(event_type), **msg_ctx}
+                )
+            else:
+                self.logger.debug(
+                    "Unhandled document event",
+                    extra={"event": str(event_type), **msg_ctx},
+                )
+        except Exception:
+            try:
+                self.logger.exception("Failed while logging document event")
+            except Exception:
+                pass

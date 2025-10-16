@@ -1,15 +1,13 @@
-"""
-MCP Integration Module
-Provides MCP server client management and tool loading
-"""
-
 import json
 import logging
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+from app.core.config import settings
+
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_core.tools import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -106,12 +104,9 @@ class MCPManager:
 
     async def initialize(self) -> None:
         """Initialize MCP client and load configuration"""
-        # Set environment variables for MCP servers to use
-        from app.core.config import settings
 
         if settings.tavily_api_key:
             os.environ["TAVILY_API_KEY"] = settings.tavily_api_key
-            logger.info("Set TAVILY_API_KEY environment variable for MCP servers")
 
         self.config = self._load_config()
         server_config = self._build_server_config()
@@ -132,9 +127,6 @@ class MCPManager:
     async def get_tools(self) -> List[BaseTool]:
         """
         Get all tools from configured MCP servers
-
-        Returns:
-            List of LangChain BaseTool instances
         """
         if not self.client:
             logger.warning("MCP client not initialized. Returning empty tool list.")
@@ -154,12 +146,6 @@ class MCPManager:
     async def get_server_tools(self, server_name: str) -> List[BaseTool]:
         """
         Get tools from a specific MCP server
-
-        Args:
-            server_name: Name of the MCP server
-
-        Returns:
-            List of LangChain BaseTool instances from that server
         """
         if not self.client:
             logger.warning("MCP client not initialized")
@@ -175,8 +161,6 @@ class MCPManager:
             session = await session_context.__aenter__()
 
             # Load tools from the session
-            from langchain_mcp_adapters.tools import load_mcp_tools
-
             tools = await load_mcp_tools(session)
 
             self._sessions[server_name] = {
