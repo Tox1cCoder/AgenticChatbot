@@ -12,7 +12,6 @@ from qdrant_client.models import (
 from sentence_transformers import SentenceTransformer, CrossEncoder
 
 
-from app.database.qdrant import ensure_collection
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_rag_prompt
 from ...core.config import Settings
@@ -45,7 +44,6 @@ class RAGAgent:
         self.reranker = None
 
         self._init_gemini()
-        self._init_collection()
 
         # Initialize re-ranker if enabled
         if self.enable_reranking:
@@ -61,16 +59,6 @@ class RAGAgent:
             api_key = api_key.split("=", 1)[-1].strip()
 
         self.gemini_client = genai.Client(api_key=api_key)
-        logger.info("Gemini client initialized for RAG Agent")
-
-    def _init_collection(self):
-        """Ensure collection exists"""
-
-        ensure_collection(
-            qdrant_client=self.qdrant_client,
-            collection_name=self.collection_name,
-            vector_size=self.embedding_dimension,
-        )
 
     def _init_reranker(self):
         """Initialize the re-ranker model"""
@@ -81,7 +69,6 @@ class RAGAgent:
         self,
         message: AgentMessage,
         conversation_id: Optional[str] = None,
-        user_id: Optional[str] = None,
     ) -> AgentResponse:
 
         query = message.content
@@ -145,7 +132,6 @@ class RAGAgent:
         query_embedding = self.embedding_model.encode(query).tolist()
 
         search_filter = None
-        try_global_search = False
 
         if conversation_id:
             search_filter = Filter(

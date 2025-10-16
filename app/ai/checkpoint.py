@@ -31,7 +31,6 @@ class CheckpointManager:
         Initialize the checkpoint database tables.
         """
         if self._initialized:
-            logger.info("Checkpoint tables already initialized")
             return
 
         try:
@@ -60,7 +59,6 @@ class CheckpointManager:
         Get the initialized checkpointer instance.
         """
         if not self._initialized:
-            logger.warning("Checkpointer requested before setup() was called")
             return None
 
         return self.checkpointer

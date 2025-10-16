@@ -27,13 +27,11 @@ class ChatAgent:
             api_key = api_key.split("=", 1)[-1].strip()
 
         self.gemini_client = genai.Client(api_key=api_key)
-        logger.info("Gemini client initialized for Chat Agent")
 
     async def process_message(
         self,
         message: AgentMessage,
         conversation_id: Optional[str] = None,
-        user_id: Optional[str] = None,
     ) -> AgentResponse:
 
         conversation_history = message.metadata.get("history", [])

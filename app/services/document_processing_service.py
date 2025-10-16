@@ -14,7 +14,6 @@ from sentence_transformers import SentenceTransformer
 
 from app.core.config import Settings
 from app.utils.text_processing import extract_page_range
-from app.database.qdrant import ensure_collection
 from app.core.events import get_event_bus, DocumentEvent, DocumentEventData
 
 logger = logging.getLogger(__name__)
@@ -264,11 +263,6 @@ class DocumentProcessingService:
         conversation_id: Optional[str] = None,
     ) -> int:
         """Store document chunks in the vector database"""
-        ensure_collection(
-            qdrant_client=self.qdrant_client,
-            collection_name=self.collection_name,
-            vector_size=self.embedding_dimension,
-        )
 
         points = []
 

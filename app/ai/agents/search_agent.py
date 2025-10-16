@@ -82,7 +82,6 @@ class SearchAgent:
         self,
         message: AgentMessage,
         conversation_id: Optional[str] = None,
-        user_id: Optional[str] = None,
     ) -> AgentResponse:
         """Process a search query using tool calling agent"""
 

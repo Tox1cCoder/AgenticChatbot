@@ -8,7 +8,6 @@ from app.core.config import settings
 from app.core.container import (
     get_container,
     setup_auto_injection,
-    init_qdrant_collection,
 )
 from app.api import (
     users_router,
@@ -48,8 +47,6 @@ def create_app() -> FastAPI:
     container = get_container()
 
     setup_auto_injection(container)
-
-    init_qdrant_collection()
 
     container.wire(
         modules=[

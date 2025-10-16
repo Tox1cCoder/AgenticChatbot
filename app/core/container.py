@@ -34,7 +34,6 @@ from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.document_validation import DocumentValidationUtils
 
 from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
-from app.database.qdrant import ensure_collection
 
 
 from app.interfaces import (
@@ -230,13 +229,3 @@ container = Container()
 def get_container() -> Container:
     """Get the global container instance."""
     return container
-
-
-def init_qdrant_collection():
-    """Initialize Qdrant collection at application startup."""
-    client = container.qdrant_client()
-    ensure_collection(
-        qdrant_client=client,
-        collection_name=settings.qdrant_collection_name,
-        vector_size=settings.embedding_dimension,
-    )

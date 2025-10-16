@@ -1,4 +1,3 @@
-# Import all models to ensure they are registered with SQLAlchemy
 from app.models.enums import (
     MessageRole,
     MessageRoleType,

@@ -1,8 +1,3 @@
-"""
-MCP Calculator Server
-Provides basic mathematical operations via MCP protocol
-"""
-
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("Calculator")
