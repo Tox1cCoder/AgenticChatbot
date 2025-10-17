@@ -58,6 +58,7 @@ class DefaultCommandStrategy(
         db.add(db_obj)
         db.commit()
         db.refresh(db_obj)
+        db.expunge(db_obj)
         return db_obj
 
     def update(

@@ -1,5 +1,6 @@
+from typing import List
 from uuid import UUID
-from fastapi import APIRouter, status
+from fastapi import APIRouter, status, Query
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.message_service_interface import IMessageService
@@ -46,14 +47,19 @@ async def get_user_messages(
     message_service: IMessageService,
     user_id: UUID,
     pagination: MessagePaginationParams,
+    include: List[str] = Query(
+        default=[], description="Array of includes e.g. ['feedback']"
+    ),
 ) -> PaginatedApiResponse[MessageRead]:
     """Get all messages for authenticated user with pagination"""
+    include_feedback = "feedback" in include
     paginated_result = message_service.get_user_messages(
         user_id,
         page=pagination.page,
         limit=pagination.limit,
         order_by=pagination.order_by.to_snake_case(),
         order_direction=pagination.order_direction.value,
+        include_feedback=include_feedback,
     )
     return PaginatedApiResponse.from_paginator(
         paginated_result, "User messages retrieved successfully"

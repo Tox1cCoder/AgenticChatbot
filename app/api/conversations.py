@@ -88,8 +88,12 @@ async def get_conversation_messages(
     message_service: IMessageService,
     user_id: UUID,
     pagination: MessagePaginationParams,
+    include: List[str] = Query(
+        default=[], description="Array of includes e.g. ['feedback']"
+    ),
 ) -> PaginatedApiResponse[MessageRead]:
     """Get conversation's messages (requires user ownership)"""
+    include_feedback = "feedback" in include
     paginated_result = message_service.get_conversation_messages(
         conversation_id,
         user_id,
@@ -97,6 +101,7 @@ async def get_conversation_messages(
         limit=pagination.limit,
         order_by=pagination.order_by.to_snake_case(),
         order_direction=pagination.order_direction.value,
+        include_feedback=include_feedback,
     )
     return PaginatedApiResponse.from_paginator(
         paginated_result, "Conversation messages retrieved successfully"

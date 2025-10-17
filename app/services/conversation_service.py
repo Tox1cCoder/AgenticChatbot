@@ -46,9 +46,7 @@ class ConversationService(IConversationService):
 
         if "messages" in include:
             try:
-                messages = getattr(conversation_entity, "messages", None)
-                if messages is None:
-                    messages = conversation_entity.__dict__.get("messages")
+                messages = conversation_entity.__dict__.get("messages")
 
                 if messages is not None:
                     from app.schemas.message import MessageRead

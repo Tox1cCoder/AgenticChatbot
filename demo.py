@@ -202,7 +202,7 @@ def get_messages(
     """Get paginated conversation messages"""
     endpoint = (
         f"/conversations/{conversation_id}/messages"
-        f"?page={page}&limit={limit}&orderBy={order_by}&orderDirection={order_direction}"
+        f"?page={page}&limit={limit}&orderBy={order_by}&orderDirection={order_direction}&include=feedback"
     )
     response = make_api_request("GET", endpoint)
     return response  # Returns full response with meta and items
@@ -223,7 +223,6 @@ def get_user_messages_paginated(
     return response  # Returns full response with meta and items
 
 
-@st.cache_data(show_spinner=False)
 def get_feedback(message_id: str) -> Optional[Dict[str, Any]]:
     """Get feedback for a specific message (1-1 relationship)"""
     response = make_api_request("GET", f"/messages/{message_id}/feedbacks")
@@ -305,7 +304,6 @@ def render_login_page():
                         }
                         result = make_api_request("POST", "/auth/signup", user_data)
                         if result:
-                            st.cache_data.clear()
                             auth_response = make_api_request(
                                 "POST",
                                 "/auth/login",
@@ -502,7 +500,8 @@ def render_conversation_manager():
                                                 None
                                             )
                                             reset_conversation_state()
-                                        st.cache_data.clear()
+                                        get_messages.clear()
+                                        get_conversations.clear()
                                         st.success(f"✅ Deleted '{conv['title']}'")
                                         st.rerun()
                 else:
@@ -693,11 +692,12 @@ def render_chat_interface():
                             )
                             if response:
                                 st.success("✅ Feedback submitted!")
-                                st.cache_data.clear()
+                                get_messages.clear()
+                                st.session_state.conversation_messages_page = 0
                                 st.rerun()
 
                 # Show existing feedback directly beneath the bot message
-                feedback = get_feedback(msg["id"])
+                feedback = msg.get("feedback")
                 if isinstance(feedback, dict) and feedback:
                     rating = feedback.get("rating")
                     comment_text = feedback.get("comment")
@@ -751,7 +751,7 @@ def render_chat_interface():
                             st.session_state.current_conversation_id = conv_response[
                                 "data"
                             ]["id"]
-                            st.cache_data.clear()
+                            get_conversations.clear()
                             reset_conversation_state()
                         else:
                             st.error("Failed to create conversation")
@@ -766,7 +766,8 @@ def render_chat_interface():
                         response = make_api_request("POST", "/messages/", message_data)
 
                     if response and response.get("data"):
-                        st.cache_data.clear()
+                        get_messages.clear()
+                        get_conversations.clear()
                         reset_conversation_state()
                         load_messages_page(1)
                         st.rerun()

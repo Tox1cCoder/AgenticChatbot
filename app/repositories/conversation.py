@@ -1,7 +1,7 @@
 from typing import List, Optional
 from uuid import UUID
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import select, asc, desc, func
+from sqlalchemy import select, asc, desc
 
 from app.models.conversation import Conversation
 from app.models.message import Message
@@ -89,7 +89,6 @@ class ConversationCRUDStrategy(
         order_direction: str = "desc",
     ) -> List[Conversation]:
         """Get conversations with limited recent messages"""
-
         # Get all conversations for the user
         statement = select(Conversation).where(
             Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
@@ -118,9 +117,30 @@ class ConversationCRUDStrategy(
                 .limit(latest_messages)
             )
             recent_messages = list(db.execute(message_statement).scalars().all())
-            # Reverse to get the oldest first and set as attribute for access in service layer
-            conversation.messages = recent_messages[::-1]
-            conversation.__dict__["messages"] = recent_messages[::-1]
+            # Reverse to get oldest first
+            recent_messages_reversed = recent_messages[::-1]
+
+            # Create detached copies of messages for the conversation
+            messages_for_attribute = []
+            for msg in recent_messages_reversed:
+                # Create a simple dict to hold message data
+                msg_data = {
+                    "id": msg.id,
+                    "created_at": msg.created_at,
+                    "updated_at": msg.updated_at,
+                    "deleted_at": msg.deleted_at,
+                    "conversation_id": msg.conversation_id,
+                    "sender": msg.sender,
+                    "content": msg.content,
+                    "feedback": msg.feedback,
+                }
+                messages_for_attribute.append(msg)
+
+            # Expunge conversation from session first
+            db.expunge(conversation)
+
+            # Set messages directly in __dict__ to bypass SQLAlchemy descriptors entirely
+            conversation.__dict__["messages"] = messages_for_attribute
 
         return conversations
 

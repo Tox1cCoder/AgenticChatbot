@@ -27,7 +27,9 @@ class Message(Base):
 
     # Relationships
     conversation = relationship("Conversation", back_populates="messages")
-    feedback = relationship("Feedback", back_populates="message")
+    feedback = relationship(
+        "Feedback", back_populates="message", uselist=False, lazy="joined"
+    )
 
     # Index for efficient querying by conversation and timestamp
     __table_args__ = (

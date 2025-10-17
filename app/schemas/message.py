@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
@@ -5,6 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, ConfigDict
 from app.models.enums import MessageRole
 from app.utils.case_conversion import to_camel_case as to_camel
+from app.schemas.feedback import FeedbackRead
 
 
 class MessageCreate(BaseModel):
@@ -37,6 +40,9 @@ class MessageRead(BaseModel):
     conversation_id: UUID
     sender: int = Field(..., description="Message sender: 1=user, 2=assistant")
     content: str = Field(..., min_length=1, description="Message content")
+    feedback: Optional[FeedbackRead] = Field(
+        default=None, description="Feedback for this message (when requested)"
+    )
 
 
 class MessageInDB(BaseModel):

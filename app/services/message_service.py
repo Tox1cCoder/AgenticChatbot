@@ -80,6 +80,7 @@ class MessageService(IMessageService):
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "asc",
+        include_feedback: bool = False,
     ) -> Paginator[MessageRead]:
         # Validate pagination parameters
         validate_pagination_params(page, limit)
@@ -93,6 +94,7 @@ class MessageService(IMessageService):
             limit=limit,
             order_by=order_by,
             order_direction=order_direction,
+            include_feedback=include_feedback,
         )
         # Convert items to MessageRead schemas
         message_reads = [
@@ -110,6 +112,7 @@ class MessageService(IMessageService):
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "desc",
+        include_feedback: bool = False,
     ) -> Paginator[MessageRead]:
         # Validate pagination parameters
         validate_pagination_params(page, limit)
@@ -120,6 +123,7 @@ class MessageService(IMessageService):
             limit=limit,
             order_by=order_by,
             order_direction=order_direction,
+            include_feedback=include_feedback,
         )
         # Convert items to MessageRead schemas
         message_reads = [

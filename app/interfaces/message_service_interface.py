@@ -32,6 +32,7 @@ class IMessageService(ABC):
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "asc",
+        include_feedback: bool = False,
     ) -> Paginator[MessageRead]:
         """Get all messages in a conversation with pagination"""
         pass
@@ -44,6 +45,7 @@ class IMessageService(ABC):
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "desc",
+        include_feedback: bool = False,
     ) -> Paginator[MessageRead]:
         """Get all messages by a user with pagination"""
         pass

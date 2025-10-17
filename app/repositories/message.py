@@ -1,6 +1,6 @@
 from typing import List, Optional
 from uuid import UUID
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select, asc, desc, or_
 
 from app.models.message import Message
@@ -31,6 +31,7 @@ class MessageCRUDStrategy(
         limit: int = 10,
         order_by: str = "created_at",
         order_direction: str = "asc",
+        include_feedback: bool = False,
     ) -> Paginator[Message]:
         """Get messages by conversation ID with page-based pagination and ordering"""
 
@@ -42,6 +43,10 @@ class MessageCRUDStrategy(
         # Get paginated items
         offset = (page - 1) * limit
         statement = select(Message).where(Message.conversation_id == conversation_id)
+
+        # Apply eager loading if requested
+        if include_feedback:
+            statement = statement.options(joinedload(Message.feedback))
 
         # Apply ordering if specified
         if hasattr(Message, order_by):
@@ -56,7 +61,12 @@ class MessageCRUDStrategy(
             statement = statement.order_by(Message.created_at.asc())
 
         statement = statement.offset(offset).limit(limit)
-        items = list(db.execute(statement).scalars().all())
+
+        # Use unique() when eager loading to handle joined loads
+        if include_feedback:
+            items = list(db.execute(statement).scalars().unique().all())
+        else:
+            items = list(db.execute(statement).scalars().all())
 
         return Paginator.create(items, total, page, limit)
 
@@ -73,6 +83,7 @@ class MessageCRUDStrategy(
         limit: int = 10,
         order_by: str = "created_at",
         order_direction: str = "desc",
+        include_feedback: bool = False,
     ) -> Paginator[Message]:
         """Get messages by conversation owner (user_id) with page-based pagination and ordering"""
 
@@ -90,6 +101,10 @@ class MessageCRUDStrategy(
             .where(Message.conversation.has(owner_id=user_id))
         )
 
+        # Apply eager loading if requested
+        if include_feedback:
+            statement = statement.options(joinedload(Message.feedback))
+
         # Apply ordering if specified
         if hasattr(Message, order_by):
             order_column = getattr(Message, order_by)
@@ -103,7 +118,12 @@ class MessageCRUDStrategy(
             statement = statement.order_by(Message.created_at.asc())
 
         statement = statement.offset(offset).limit(limit)
-        items = list(db.execute(statement).scalars().all())
+
+        # Use unique() when eager loading to handle joined loads
+        if include_feedback:
+            items = list(db.execute(statement).scalars().unique().all())
+        else:
+            items = list(db.execute(statement).scalars().all())
 
         return Paginator.create(items, total, page, limit)
 
@@ -166,11 +186,18 @@ class MessageRepository:
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "asc",
+        include_feedback: bool = False,
     ) -> Paginator[Message]:
         """Get messages by conversation ID with page-based pagination and ordering"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_conversation_id(
-                session, conversation_id, page, limit, order_by, order_direction
+                session,
+                conversation_id,
+                page,
+                limit,
+                order_by,
+                order_direction,
+                include_feedback,
             )
 
     def count_by_conversation_id(self, conversation_id: UUID) -> int:
@@ -187,11 +214,18 @@ class MessageRepository:
         limit: int = 10,
         order_by: Optional[str] = None,
         order_direction: str = "desc",
+        include_feedback: bool = False,
     ) -> Paginator[Message]:
         """Get messages by user ID with page-based pagination and ordering"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_user_id(
-                session, user_id, page, limit, order_by, order_direction
+                session,
+                user_id,
+                page,
+                limit,
+                order_by,
+                order_direction,
+                include_feedback,
             )
 
     def count_by_user_id(self, user_id: UUID) -> int:
@@ -200,9 +234,10 @@ class MessageRepository:
             return self._crud_strategy.count_by_user_id(session, user_id)
 
     def create(self, input_schema: MessageCreate) -> Message:
-        """Create a new message"""
+        """Create a new message with eager loading of feedback"""
         with self.session_factory() as session:
-            return self._crud_strategy.create(session, input_schema)
+            created_message = self._crud_strategy.create(session, input_schema)
+            return created_message
 
     def get_by_id(self, id: UUID) -> Optional[Message]:
         """Get message by ID"""
