@@ -42,6 +42,7 @@ class ConversationService(IConversationService):
             "deleted_at": conversation_entity.deleted_at,
             "owner_id": conversation_entity.owner_id,
             "title": conversation_entity.title,
+            "persona_prompt": conversation_entity.persona_prompt,
         }
 
         if "messages" in include:

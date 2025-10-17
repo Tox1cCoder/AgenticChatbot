@@ -16,7 +16,7 @@ class ChatAgent:
         self.model_name = "gemini-2.5-flash"
         self.gemini_client = None
         self._init_gemini()
-        
+
     def _init_gemini(self):
         api_key = settings.gemini_api_key
         if not api_key:
@@ -35,8 +35,11 @@ class ChatAgent:
     ) -> AgentResponse:
 
         conversation_history = message.metadata.get("history", [])
+        persona = message.metadata.get("persona")
 
-        prompt = build_chat_prompt(message.content, conversation_history)
+        prompt = build_chat_prompt(
+            message.content, conversation_history, persona=persona
+        )
 
         response_text = await self._generate(prompt)
 
@@ -52,6 +55,7 @@ class ChatAgent:
                 "model": self.model_name,
                 "conversation_id": conversation_id,
                 "context_messages": len(conversation_history),
+                "persona_used": persona,
             },
         )
 

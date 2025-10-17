@@ -6,6 +6,7 @@ from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.conversation_service_interface import IConversationService
 from app.schemas.conversation import (
     ConversationCreate,
+    ConversationUpdate,
     ConversationRead,
 )
 from app.interfaces.message_service_interface import IMessageService
@@ -105,6 +106,23 @@ async def get_conversation_messages(
     )
     return PaginatedApiResponse.from_paginator(
         paginated_result, "Conversation messages retrieved successfully"
+    )
+
+
+@router.patch("/{conversation_id}", response_model=ApiResponse[ConversationRead])
+@AppAutoInjector.auto_inject()
+async def update_conversation(
+    conversation_id: UUID,
+    conversation_data: ConversationUpdate,
+    conversation_service: IConversationService,
+    user_id: UUID,
+) -> ApiResponse[ConversationRead]:
+    """Update conversation (requires user ownership)"""
+    result = conversation_service.update_conversation(
+        conversation_id, user_id, conversation_data
+    )
+    return ApiResponse(
+        success=True, message="Conversation updated successfully", data=result
     )
 
 

@@ -26,7 +26,9 @@ class MessageFactory:
 
     @staticmethod
     def create_from_schema_with_role(
-        message_data: MessageCreate, role: MessageRole
+        message_data: MessageCreate,
+        role: MessageRole,
+        message_metadata: Dict[str, Any] = {},
     ) -> Dict[str, Any]:
         """Create Message data dictionary from MessageCreate schema with specified role"""
         return {
@@ -34,6 +36,7 @@ class MessageFactory:
             "conversation_id": message_data.conversation_id,
             "sender": role.value,
             "content": message_data.content,
+            "message_metadata": message_metadata,
             "created_at": TimestampUtils.now(),
         }
 
@@ -49,12 +52,15 @@ class MessageFactory:
         }
 
     @staticmethod
-    def create_bot_response(conversation_id: UUID, content: str) -> Dict[str, Any]:
+    def create_bot_response(
+        conversation_id: UUID, content: str, message_metadata: Dict[str, Any] = {}
+    ) -> Dict[str, Any]:
         """Create bot response message data dictionary"""
         return {
             "id": uuid4(),
             "conversation_id": conversation_id,
             "sender": MessageRole.assistant.value,
             "content": content,
+            "message_metadata": message_metadata,
             "created_at": TimestampUtils.now(),
         }

@@ -68,8 +68,13 @@ def _select_history_for_prompt(
     return selected
 
 
-def build_chat_prompt(user_message: str, conversation_history: list) -> str:
+def build_chat_prompt(
+    user_message: str, conversation_history: list, persona: Optional[str] = None
+) -> str:
     parts = [CHAT_SYSTEM_PROMPT]
+
+    if persona is not None and persona.strip():
+        parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
     if conversation_history:
         max_messages = (
@@ -99,9 +104,15 @@ def build_chat_prompt(user_message: str, conversation_history: list) -> str:
 
 
 def build_rag_prompt(
-    query: str, retrieved_docs: list, conversation_history: list
+    query: str,
+    retrieved_docs: list,
+    conversation_history: list,
+    persona: Optional[str] = None,
 ) -> str:
     parts = [RAG_SYSTEM_PROMPT]
+
+    if persona is not None and persona.strip():
+        parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
     if retrieved_docs:
         parts.append("\n\nRelevant documents:")
@@ -203,9 +214,14 @@ def build_rag_prompt(
     return "\n".join(parts)
 
 
-def build_search_prompt(user_message: str, conversation_history: list) -> str:
+def build_search_prompt(
+    user_message: str, conversation_history: list, persona: Optional[str] = None
+) -> str:
     """Build a prompt for the search agent including conversation history."""
     parts = []
+
+    if persona is not None and persona.strip():
+        parts.append(f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
     # Add conversation history if available
     if conversation_history:

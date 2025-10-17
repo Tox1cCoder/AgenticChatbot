@@ -22,6 +22,7 @@ class ConversationFactory:
             "id": uuid4(),
             "owner_id": owner_id,
             "title": conversation_data.title,
+            "persona_prompt": conversation_data.persona_prompt,
             **timestamps,
         }
 
@@ -37,5 +38,6 @@ class ConversationFactory:
             "id": conversation_data.get("id", uuid4()),
             "owner_id": conversation_data["owner_id"],
             "title": conversation_data["title"],
+            "persona_prompt": conversation_data.get("persona_prompt"),
             **timestamps,
         }

@@ -93,9 +93,12 @@ class SearchAgent:
 
         # Extract conversation history
         conversation_history = message.metadata.get("history", [])
+        persona = message.metadata.get("persona")
 
         # Build prompt
-        prompt = build_search_prompt(message.content, conversation_history)
+        prompt = build_search_prompt(
+            message.content, conversation_history, persona=persona
+        )
 
         try:
             # Invoke agent executor
@@ -115,6 +118,7 @@ class SearchAgent:
             "context_messages": len(conversation_history),
             "tools_available": len(self.tools),
             "agent_type": "tool_calling",
+            "persona_used": persona,
         }
 
         # Create response message

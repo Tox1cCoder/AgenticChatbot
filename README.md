@@ -163,7 +163,7 @@ streamlit run demo.py
 - `POST /conversations/` — Create conversation for current user
 - `GET /conversations/{conversation_id}` — Get conversation by ID
 - `GET /conversations/` — List current user's conversations (paginated: `page`, `limit`)
-- `PUT /conversations/{conversation_id}` — Update conversation (user must own conversation)
+- `PATCH /conversations/{conversation_id}` — Update conversation (user must own conversation)
 - `DELETE /conversations/{conversation_id}` — Delete conversation (user must own conversation)
 
 ### Messages
@@ -223,3 +223,131 @@ Delete Document
 - `GET /messages/{message_id}/feedbacks/user/{user_id}` — Get user's feedback for a message
 - `GET /messages/{message_id}/feedbacks/stats` — Get rating stats for a message
 - `PUT /messages/{message_id}/feedbacks/{feedback_id}` — Update feedback (requires user ownership)
+
+---
+
+## Custom Persona Feature
+
+The chatbot supports custom persona/system instructions per conversation, allowing you to customize how the AI assistant behaves.
+
+### Database Migration
+
+Before using the persona feature, run the migration to add the required database columns:
+
+```bash
+alembic upgrade head
+```
+
+This adds:
+
+- `persona_prompt` column to the `conversations` table
+- `message_metadata` column to the `messages` table (for tracking persona usage)
+
+### API Usage
+
+#### Setting a Persona
+
+Update a conversation with a custom persona using the PATCH endpoint:
+
+```bash
+PATCH /conversations/{conversation_id}
+Content-Type: application/json
+
+{
+  "personaPrompt": "You are a friendly pirate who speaks in pirate slang. Always use phrases like 'ahoy', 'matey', and 'arr'."
+}
+```
+
+Or with camelCase:
+
+```json
+{
+  "personaPrompt": "You are a helpful coding tutor specializing in Python. Use simple explanations and provide code examples."
+}
+```
+
+#### Creating a Conversation with Persona
+
+You can also set the persona when creating a new conversation:
+
+```bash
+POST /conversations/
+Content-Type: application/json
+
+{
+  "title": "Python Help Session",
+  "personaPrompt": "You are an expert Python developer who explains concepts clearly and provides best practices."
+}
+```
+
+### How Personas Work
+
+1. **Prompt Integration**: The persona is prepended to the agent's system prompt with clear boundaries:
+
+   ```
+   Custom Persona:
+   [Your persona text here]
+
+   ---
+
+   [Original system prompt]
+   ```
+
+2. **Agent Behavior**: All agents (Chat, RAG, Search) respect the persona:
+
+   - **Chat Agent**: Applies persona to general conversations
+   - **RAG Agent**: Applies persona when answering questions from documents
+   - **Search Agent**: Applies persona when providing web search results
+
+3. **Router Awareness**: The router can consider the persona when deciding which agent to use (optional, enabled by default)
+
+4. **Persistence**: Each message stores which persona was active in its metadata field for debugging and replay purposes
+
+### Persona Constraints
+
+- **Maximum Length**: 2000 characters
+- **Sanitization**: Personas are automatically cleaned and truncated if needed
+- **Validation**: Invalid personas (too long) return a 422 validation error
+- **Optional**: Personas are optional - conversations work normally without them
+
+### Message Metadata
+
+Bot responses include persona information in their metadata:
+
+```json
+{
+  "id": "...",
+  "content": "Ahoy matey! Let me help ye with that...",
+  "messageMetadata": {
+    "persona_used": "You are a friendly pirate..."
+  }
+}
+```
+
+### Frontend Integration
+
+To integrate persona support in your frontend:
+
+1. Add a `personaPrompt` field to conversation create/update forms
+2. Use a textarea input with a 2000 character limit
+3. Send the value in camelCase format (`personaPrompt`) to match the API schema
+4. Display active persona in the conversation view
+5. Allow users to clear/edit persona using the PATCH endpoint
+
+Example React/Vue form field:
+
+```jsx
+<textarea
+  name="personaPrompt"
+  maxLength={2000}
+  placeholder="Describe how the AI should behave (optional)"
+/>
+```
+
+### Use Cases
+
+- **Role-playing**: Make the AI act as a specific character or professional
+- **Tone Control**: Adjust formality, friendliness, or technical depth
+- **Domain Expertise**: Focus responses on specific fields (legal, medical, technical)
+- **Language Style**: Control writing style, humor level, or communication approach
+- **Teaching**: Create personas for different learning styles or age groups

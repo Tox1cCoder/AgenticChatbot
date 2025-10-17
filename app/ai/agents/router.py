@@ -32,17 +32,19 @@ class Router:
     ) -> str:
         """Route the message to the appropriate agent"""
         content = message.content.strip()
+        persona = message.metadata.get("persona")
 
         # Build the routing prompt
-        prompt = f"{ROUTER_SYSTEM_PROMPT}\n\nUser message: {content}"
+        if persona is not None and persona.strip():
+            prompt = f"Custom Persona: {persona}\n\n{ROUTER_SYSTEM_PROMPT}\n\nUser message: {content}"
+        else:
+            prompt = f"{ROUTER_SYSTEM_PROMPT}\n\nUser message: {content}"
 
         # Get LLM decision using Gemini
         response = self.gemini_client.models.generate_content(
             model=self.model_name, contents=prompt
         )
-        response_text = (
-            response.text if hasattr(response, "text") else str(response)
-        )
+        response_text = response.text if hasattr(response, "text") else str(response)
         selected_agent = response_text.strip().lower()
 
         # Validate the selected agent is available

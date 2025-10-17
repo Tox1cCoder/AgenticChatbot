@@ -45,13 +45,14 @@ class MessageService(IMessageService):
         created_message = self.repository.create(message_entity)
 
         if message_create_data.role == MessageRole.user:
-            # Get the user_id from the conversation
+            # Get the user_id and persona from the conversation
             conversation = (
                 self.conversation_validation_utils.conversation_repository.get_by_id(
                     message_create_data.conversation_id
                 )
             )
             user_id = conversation.owner_id if conversation else None
+            persona = conversation.persona_prompt if conversation else None
 
             bot_response_content = await self.ai_service.generate_bot_response(
                 user_message=message_create_data.content,
@@ -59,9 +60,15 @@ class MessageService(IMessageService):
                 user_id=user_id,
             )
 
+            # Create metadata for bot response
+            bot_metadata = {}
+            if persona:
+                bot_metadata["persona_used"] = persona
+
             bot_response_entity = MessageFactory.create_bot_response(
                 conversation_id=message_create_data.conversation_id,
                 content=bot_response_content,
+                message_metadata=bot_metadata,
             )
             self.repository.create(bot_response_entity)
 

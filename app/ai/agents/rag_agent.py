@@ -73,10 +73,13 @@ class RAGAgent:
 
         query = message.content
         conversation_history = message.metadata.get("history", [])
+        persona = message.metadata.get("persona")
 
         retrieved_docs = await self._search(query, conversation_id=conversation_id)
 
-        prompt = build_rag_prompt(query, retrieved_docs, conversation_history)
+        prompt = build_rag_prompt(
+            query, retrieved_docs, conversation_history, persona=persona
+        )
 
         response_text = await self._generate(prompt)
 
@@ -119,6 +122,7 @@ class RAGAgent:
                     "total_retrieved": len(retrieved_docs),
                     "avg_score": avg_score,
                 },
+                "persona_used": persona,
             },
         )
 

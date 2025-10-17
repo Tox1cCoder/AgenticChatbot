@@ -115,6 +115,8 @@ if "show_login" not in st.session_state:
     )
 if "show_conversation_manager" not in st.session_state:
     st.session_state.show_conversation_manager = False
+if "show_instructions" not in st.session_state:
+    st.session_state.show_instructions = False
 if "auth_token" not in st.session_state:
     st.session_state.auth_token = None
 if "conversation_messages_meta" not in st.session_state:
@@ -341,6 +343,10 @@ def render_conversation_sidebar():
             st.session_state.show_conversation_manager = True
             st.rerun()
 
+        if st.button("Instructions", use_container_width=True):
+            st.session_state.show_instructions = True
+            st.rerun()
+
         st.divider()
 
         if (
@@ -396,6 +402,17 @@ def render_conversation_sidebar():
                     st.session_state.auth_token = None
                     st.session_state.show_login = True
                     st.rerun()
+
+
+def render_instructions_modal():
+    """Render instructions modal with usage information"""
+    if st.session_state.show_instructions:
+        col1, col2, col3 = st.columns([1, 3, 1])
+        with col2:
+
+            if st.button("Close", use_container_width=True):
+                st.session_state.show_instructions = False
+                st.rerun()
 
 
 def render_conversation_manager():
@@ -789,6 +806,10 @@ def main():
         return
 
     render_conversation_sidebar()
+
+    if st.session_state.show_instructions:
+        render_instructions_modal()
+        return
 
     if st.session_state.show_conversation_manager:
         render_conversation_manager()

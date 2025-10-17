@@ -11,6 +11,11 @@ class ConversationCreate(BaseModel):
     title: str = Field(
         ..., min_length=1, max_length=255, description="Conversation title"
     )
+    persona_prompt: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description="Custom persona/system instruction for this conversation",
+    )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -18,6 +23,11 @@ class ConversationCreate(BaseModel):
 class ConversationUpdate(BaseModel):
     title: Optional[str] = Field(
         None, min_length=1, max_length=255, description="Conversation title"
+    )
+    persona_prompt: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description="Custom persona/system instruction for this conversation",
     )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
@@ -36,6 +46,11 @@ class ConversationRead(BaseModel):
     title: str = Field(
         ..., min_length=1, max_length=255, description="Conversation title"
     )
+    persona_prompt: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description="Custom persona/system instruction for this conversation",
+    )
     messages: Optional[List["MessageRead"]] = Field(
         default=None, description="Recent messages in the conversation (when requested)"
     )
@@ -53,6 +68,11 @@ class ConversationInDB(BaseModel):
     owner_id: UUID
     title: str = Field(
         ..., min_length=1, max_length=255, description="Conversation title"
+    )
+    persona_prompt: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description="Custom persona/system instruction for this conversation",
     )
 
 

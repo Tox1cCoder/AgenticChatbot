@@ -166,6 +166,7 @@ class Container(containers.DeclarativeContainer):
         return AIService(
             qdrant_client=qdrant,
             embedding_model=embeddings,
+            conversation_repository=container.conversation_repository(),
             checkpointer=checkpointer,
         )
 

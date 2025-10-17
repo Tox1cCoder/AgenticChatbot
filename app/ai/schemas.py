@@ -46,3 +46,4 @@ class GraphState(TypedDict):
     selected_agent: NotRequired[Optional[str]]
     response: NotRequired[Optional[AgentResponse]]
     context: NotRequired[Dict[str, Any]]
+    persona: NotRequired[Optional[str]]

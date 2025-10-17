@@ -119,3 +119,49 @@ def clean_text(text: str) -> str:
     text = text.strip()
 
     return text
+
+
+def validate_persona(persona: str | None, max_length: int = 2000) -> str | None:
+    """
+    Validate persona text.
+
+    Args:
+        persona: The persona text to validate
+        max_length: Maximum allowed length
+
+    Returns:
+        The validated persona or None if empty
+
+    Raises:
+        ValueError: If persona exceeds max_length
+    """
+    if persona is None or not persona.strip():
+        return None
+
+    if len(persona) > max_length:
+        raise ValueError(f"Persona exceeds maximum length of {max_length} characters")
+
+    return persona
+
+
+def sanitize_persona(persona: str | None) -> str | None:
+    """
+    Sanitize and truncate persona text.
+
+    Args:
+        persona: The persona text to sanitize
+
+    Returns:
+        Cleaned and truncated persona or None if empty
+    """
+    if persona is None or not persona.strip():
+        return None
+
+    # Clean the persona text
+    cleaned = clean_text(persona)
+
+    # Truncate to max 2000 characters
+    if len(cleaned) > 2000:
+        cleaned = truncate_text(cleaned, 2000, add_ellipsis=False)
+
+    return cleaned if cleaned else None

@@ -1,7 +1,7 @@
 import uuid
 
 from sqlalchemy import Column, ForeignKey, Text, Index, DateTime, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 
 from app.models.enums import MessageRoleType
@@ -24,6 +24,7 @@ class Message(Base):
     )
     sender = Column(MessageRoleType, nullable=False)
     content = Column(Text, nullable=False)
+    message_metadata = Column(JSONB, nullable=True, default={})
 
     # Relationships
     conversation = relationship("Conversation", back_populates="messages")

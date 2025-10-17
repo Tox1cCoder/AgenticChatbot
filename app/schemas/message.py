@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, ConfigDict
@@ -40,6 +40,9 @@ class MessageRead(BaseModel):
     conversation_id: UUID
     sender: int = Field(..., description="Message sender: 1=user, 2=assistant")
     content: str = Field(..., min_length=1, description="Message content")
+    message_metadata: Optional[Dict[str, Any]] = Field(
+        default_factory=dict, description="Message metadata including persona used"
+    )
     feedback: Optional[FeedbackRead] = Field(
         default=None, description="Feedback for this message (when requested)"
     )
@@ -59,3 +62,6 @@ class MessageInDB(BaseModel):
         ..., description="Message sender: 1=user, 2=assistant, 3=system"
     )
     content: str = Field(..., min_length=1, description="Message content")
+    message_metadata: Optional[Dict[str, Any]] = Field(
+        default_factory=dict, description="Message metadata including persona used"
+    )

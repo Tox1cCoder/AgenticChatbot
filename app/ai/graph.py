@@ -94,8 +94,10 @@ class MultiAgentWorkflow:
             else str(last_message)
         )
 
-
-        agent_msg = AgentMessage(role=MessageRole.USER, content=content)
+        persona = state.get("persona")
+        agent_msg = AgentMessage(
+            role=MessageRole.USER, content=content, metadata={"persona": persona}
+        )
         selected_agent = await self.router.route_message(
             agent_msg, list(self.agents.keys())
         )
@@ -141,15 +143,14 @@ class MultiAgentWorkflow:
                 f"Loaded {len(conversation_history)} messages from memory for conversation {conversation_id}"
             )
 
+        persona = state.get("persona")
         agent_msg = AgentMessage(
             role=MessageRole.USER,
             content=content,
-            metadata={"history": conversation_history},
+            metadata={"history": conversation_history, "persona": persona},
         )
 
-        response = await self.chat_agent.process_message(
-            agent_msg, conversation_id
-        )
+        response = await self.chat_agent.process_message(agent_msg, conversation_id)
 
         state["response"] = response
         state.setdefault("messages", []).append(
@@ -195,15 +196,14 @@ class MultiAgentWorkflow:
                 f"Loaded {len(conversation_history)} messages from memory for conversation {conversation_id}"
             )
 
+        persona = state.get("persona")
         agent_msg = AgentMessage(
             role=MessageRole.USER,
             content=content,
-            metadata={"history": conversation_history},
+            metadata={"history": conversation_history, "persona": persona},
         )
 
-        response = await self.rag_agent.process_message(
-            agent_msg, conversation_id
-        )
+        response = await self.rag_agent.process_message(agent_msg, conversation_id)
 
         state["response"] = response
         state.setdefault("messages", []).append(
@@ -250,15 +250,14 @@ class MultiAgentWorkflow:
                 f"Loaded {len(conversation_history)} messages from memory for conversation {conversation_id}"
             )
 
+        persona = state.get("persona")
         agent_msg = AgentMessage(
             role=MessageRole.USER,
             content=content,
-            metadata={"history": conversation_history},
+            metadata={"history": conversation_history, "persona": persona},
         )
 
-        response = await self.search_agent.process_message(
-            agent_msg, conversation_id
-        )
+        response = await self.search_agent.process_message(agent_msg, conversation_id)
 
         state["response"] = response
         state.setdefault("messages", []).append(
@@ -279,6 +278,7 @@ class MultiAgentWorkflow:
         conversation_id: Optional[str] = None,
         user_id: Optional[str] = None,
         thread_id: Optional[str] = None,
+        persona: Optional[str] = None,
     ) -> Optional[AgentResponse]:
 
         initial_state: GraphState = {
@@ -292,6 +292,7 @@ class MultiAgentWorkflow:
             initial_state["user_id"] = user_id
         initial_state["selected_agent"] = None
         initial_state["response"] = None
+        initial_state["persona"] = persona
 
         config = None
         if self.checkpointer and thread_id:
