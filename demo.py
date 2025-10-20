@@ -1,16 +1,26 @@
+import base64
+import mimetypes
+import uuid
+
 import streamlit as st
 import requests
 import html
 import re
+from html.parser import HTMLParser
 from typing import Dict, Optional, Any, List
 from upload_support import render_upload_section, render_document_list
 from datetime import datetime, timedelta
 from dateutil import parser
 
+try:
+    import markdown as _markdown  # type: ignore
+except ImportError:
+    _markdown = None
+
 API_BASE_URL = "http://localhost:8000"
 
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
 _MAX_PERSONA_LENGTH = 2000
+_MAX_IMAGE_ATTACHMENTS = 4
 
 PERSONA_TEMPLATES: Dict[str, str] = {
     "Friendly Tutor": (
@@ -26,6 +36,201 @@ PERSONA_TEMPLATES: Dict[str, str] = {
         "and end each reply with one clear, actionable suggestion."
     ),
 }
+
+
+_SELF_CLOSING_TAGS = {"br", "hr"}
+_ALLOWED_TAGS = {
+    "p",
+    "ul",
+    "ol",
+    "li",
+    "strong",
+    "em",
+    "code",
+    "pre",
+    "blockquote",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "th",
+    "td",
+}.union(_SELF_CLOSING_TAGS)
+
+
+class _SafeHTMLRenderer(HTMLParser):
+    """Allow-list HTML sanitizer for rendered message content."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.result: List[str] = []
+        self._tag_stack: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs):
+        tag = tag.lower()
+        if tag not in _ALLOWED_TAGS:
+            return
+
+        if tag in _SELF_CLOSING_TAGS:
+            self.result.append(f"<{tag}>")
+            return
+
+        self.result.append(f"<{tag}>")
+        self._tag_stack.append(tag)
+
+    def handle_endtag(self, tag: str):
+        tag = tag.lower()
+        if not self._tag_stack:
+            return
+
+        if self._tag_stack and self._tag_stack[-1] == tag:
+            self.result.append(f"</{tag}>")
+            self._tag_stack.pop()
+
+    def handle_startendtag(self, tag: str, attrs):
+        tag = tag.lower()
+        if tag in _SELF_CLOSING_TAGS:
+            self.result.append(f"<{tag}>")
+        elif tag in _ALLOWED_TAGS:
+            self.result.append(f"<{tag}></{tag}>")
+
+    def _inside_block(self, tag: str) -> bool:
+        return tag in self._tag_stack
+
+    def handle_data(self, data: str):
+        if not data:
+            return
+
+        escaped = html.escape(data, quote=False)
+        self.result.append(escaped)
+
+    def handle_entityref(self, name: str):
+        self.result.append(f"&{name};")
+
+    def handle_charref(self, name: str):
+        self.result.append(f"&#{name};")
+
+
+def _sanitize_rendered_html(html_fragment: str) -> str:
+    parser = _SafeHTMLRenderer()
+    parser.feed(html_fragment)
+    parser.close()
+    return "".join(parser.result)
+
+
+def _attachment_from_upload(uploaded_file) -> Optional[Dict[str, str]]:
+    try:
+        raw_bytes = uploaded_file.read()
+        uploaded_file.seek(0)
+    except Exception:
+        return None
+
+    if not raw_bytes:
+        return None
+
+    data_b64 = base64.b64encode(raw_bytes).decode("utf-8")
+    mime = (
+        uploaded_file.type
+        or mimetypes.guess_type(uploaded_file.name or "")[0]
+        or "application/octet-stream"
+    )
+
+    return {
+        "token": str(uuid.uuid4()),
+        "name": uploaded_file.name or "image",
+        "mime": mime,
+        "data": data_b64,
+    }
+
+
+def _handle_new_image_attachments(uploaded_files: List) -> None:
+    if not uploaded_files:
+        return
+
+    pending = st.session_state.get("pending_image_attachments", [])
+    existing_data = {item["data"] for item in pending}
+
+    new_items: List[Dict[str, str]] = []
+    for file_obj in uploaded_files:
+        attachment = _attachment_from_upload(file_obj)
+        if not attachment:
+            continue
+
+        if attachment["data"] in existing_data or any(
+            item["data"] == attachment["data"] for item in new_items
+        ):
+            continue
+
+        new_items.append(attachment)
+        existing_data.add(attachment["data"])
+
+    if not new_items:
+        return
+
+    remaining = _MAX_IMAGE_ATTACHMENTS - len(pending)
+    if remaining <= 0:
+        st.warning(f"Maximum of {_MAX_IMAGE_ATTACHMENTS} images per message reached.")
+        return
+
+    if len(new_items) > remaining:
+        st.info("Some images were ignored because the limit was reached.")
+
+    pending.extend(new_items[:remaining])
+    st.session_state.pending_image_attachments = pending
+
+
+def render_pending_attachment_preview(allow_remove: bool = True):
+    attachments = st.session_state.get("pending_image_attachments", [])
+    if not attachments:
+        return
+
+    st.caption(f"Attachments ready to send ({len(attachments)}/{_MAX_IMAGE_ATTACHMENTS}):")
+    columns = st.columns(min(len(attachments), 4))
+    remove_token: Optional[str] = None
+
+    for idx, attachment in enumerate(attachments):
+        column = columns[idx % len(columns)]
+        with column:
+            image_bytes = base64.b64decode(attachment["data"])
+            st.image(image_bytes, caption=attachment["name"], width=96, clamp=True)
+            if allow_remove:
+                if st.button(
+                    "Remove",
+                    key=f"remove_pending_{attachment['token']}",
+                    use_container_width=True,
+                ):
+                    remove_token = attachment["token"]
+
+    if remove_token:
+        st.session_state.pending_image_attachments = [
+            item for item in attachments if item["token"] != remove_token
+        ]
+        st.rerun()
+
+
+def render_message_attachments(message_id: str):
+    attachments = st.session_state.get("message_image_thumbnails", {}).get(message_id)
+    if not attachments:
+        return
+
+    thumbnails = "".join(
+        f'<div class="attachment-thumb">'
+        f'<img src="data:{att["mime"]};base64,{att["data"]}" '
+        f'alt="{html.escape(att["name"])}" loading="lazy" /></div>'
+        for att in attachments
+    )
+
+    if thumbnails:
+        st.markdown(
+            f'<div class="message-attachments">{thumbnails}</div>',
+            unsafe_allow_html=True,
+        )
 
 
 def normalize_persona_input(raw: str) -> str:
@@ -57,31 +262,49 @@ def persona_preview(text: Optional[str], limit: int = 160) -> str:
 
 
 def sanitize_message_content(content: Any) -> str:
-    """Strip HTML tags, apply markdown formatting, and escape text for safe display."""
+    """Render limited markdown to HTML while preventing unsafe tags."""
     if not isinstance(content, str):
         return ""
 
-    without_tags = _HTML_TAG_RE.sub("", content)
-    normalized = html.unescape(without_tags).replace("\r\n", "\n").replace("\r", "\n")
-
-    # Convert markdown bold syntax to HTML
-    markdown_processed = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", normalized)
-    # Convert markdown italic syntax to HTML
-    markdown_processed = re.sub(r"\*(.*?)\*", r"<em>\1</em>", markdown_processed)
-    # Convert markdown code syntax to HTML
-    markdown_processed = re.sub(r"`(.*?)`", r"<code>\1</code>", markdown_processed)
-
-    safe_text = html.escape(markdown_processed.strip(), quote=False)
-    # Re-apply HTML formatting that was escaped
-    safe_text = safe_text.replace("&lt;strong&gt;", "<strong>").replace(
-        "&lt;/strong&gt;", "</strong>"
+    normalized = (
+        html.unescape(content).replace("\r\n", "\n").replace("\r", "\n").strip()
     )
-    safe_text = safe_text.replace("&lt;em&gt;", "<em>").replace("&lt;/em&gt;", "</em>")
-    safe_text = safe_text.replace("&lt;code&gt;", "<code>").replace(
-        "&lt;/code&gt;", "</code>"
+    if not normalized:
+        return ""
+
+    # Replace inline images with accessible text fallback
+    normalized = re.sub(
+        r"!\[([^\]]*)\]\(([^)]+)\)", r"\1 (\2)", normalized, flags=re.MULTILINE
     )
 
-    return safe_text.replace("\n", "<br>")
+    if _markdown is not None:
+        rendered = _markdown.markdown(
+            normalized,
+            extensions=["extra", "sane_lists"],
+            output_format="html5",
+        )
+    else:
+        rendered = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", normalized)
+        rendered = re.sub(
+            r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<em>\1</em>", rendered
+        )
+        rendered = re.sub(r"`([^`]+)`", r"<code>\1</code>", rendered)
+        paragraphs = [
+            segment.strip() for segment in rendered.split("\n\n") if segment.strip()
+        ]
+        if paragraphs:
+            rendered = "".join(f"<p>{segment}</p>" for segment in paragraphs)
+        else:
+            rendered = "<p></p>"
+
+    safe_html = _sanitize_rendered_html(rendered)
+    safe_html = re.sub(r"(?:<br>\s*){3,}", "<br><br>", safe_html)
+    safe_html = safe_html.replace("<p></p>", "")
+    safe_html = safe_html.replace("<p><br></p>", "<br>")
+    safe_html = re.sub(r"\s*(</?p>)\s*", r"\1", safe_html)
+    safe_html = safe_html.strip()
+
+    return safe_html
 
 
 st.set_page_config(
@@ -93,50 +316,152 @@ st.markdown(
 <style>
     .main-container { max-width: 1200px; margin: 0 auto; }
     .chat-wrapper {
-        display: flex; flex-direction: column; gap: 20px;
-        height: calc(100vh - 220px); min-height: 460px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        height: calc(100vh - 220px);
+        min-height: 460px;
+        position: relative;
     }
     .chat-messages-container {
-        border: 1px solid #e2e8f0; border-radius: 18px; background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 18px;
+        background: #ffffff;
         box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
-        flex: 1 1 auto; overflow-y: auto; padding: 20px; margin-bottom: 0;
+        flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
     }
-    .chat-messages-container::-webkit-scrollbar {
+    .chat-messages-scroll {
+        padding: 20px;
+        flex: 1 1 auto;
+        overflow-y: auto;
+    }
+    .chat-messages-scroll::-webkit-scrollbar {
         width: 8px;
     }
-    .chat-messages-container::-webkit-scrollbar-thumb {
-        background: #cbd5f5; border-radius: 4px;
+    .chat-messages-scroll::-webkit-scrollbar-thumb {
+        background: #cbd5f5;
+        border-radius: 4px;
     }
     .chat-input-container {
-        background: #ffffff; border: 1px solid #e2e8f0; border-radius: 18px;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 18px;
         box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
         padding: 25px;
+        margin-top: 4px;
+        position: sticky;
+        bottom: 0;
+        z-index: 5;
+        flex-shrink: 0;
     }
-    .chat-input-sticky {
-        position: sticky; bottom: 0; z-index: 5;
+    .chat-input-container form {
+        margin: 0;
     }
     .user-message {
-        background: #ffffff; color: #1f2937; border: 1px solid #93c5fd;
-        padding: 12px 16px; border-radius: 18px 18px 4px 18px; margin: 8px 0 8px auto;
-        max-width: 72%; word-wrap: break-word; box-shadow: 0 8px 20px rgba(59, 130, 246, 0.16);
+        background: #ffffff;
+        color: #1f2937;
+        border: 1px solid #93c5fd;
+        padding: 12px 16px;
+        border-radius: 18px 18px 4px 18px;
+        margin: 8px 0 8px auto;
+        max-width: 72%;
+        word-wrap: break-word;
+        box-shadow: 0 8px 20px rgba(59, 130, 246, 0.16);
     }
     .bot-message {
-        background: #ffffff; color: #1f2937; border: 1px solid #86efac;
-        padding: 12px 16px; border-radius: 18px 18px 18px 4px; margin: 8px auto 8px 0;
-        max-width: 60%; white-space: normal; line-height: 1.5; word-wrap: break-word; overflow-wrap: anywhere;
+        background: #ffffff;
+        color: #1f2937;
+        border: 1px solid #86efac;
+        padding: 12px 16px;
+        border-radius: 18px 18px 18px 4px;
+        margin: 8px auto 8px 0;
+        max-width: 60%;
+        white-space: normal;
+        line-height: 1.5;
+        word-wrap: break-word;
+        overflow-wrap: anywhere;
         box-shadow: 0 8px 20px rgba(34, 197, 94, 0.16);
     }
+    .message-attachments {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin: 6px 0 0;
+    }
+    .message-attachments .attachment-thumb {
+        width: 72px;
+        height: 72px;
+        border-radius: 12px;
+        overflow: hidden;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15);
+        background: #f8fafc;
+    }
+    .pending-attachments .attachment-thumb img,
+    .message-attachments .attachment-thumb img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+    }
+    .user-message p,
+    .bot-message p {
+        margin: 0 0 0.75rem 0;
+    }
+    .user-message p:last-child,
+    .bot-message p:last-child {
+        margin-bottom: 0;
+    }
+    .user-message ul,
+    .user-message ol,
+    .bot-message ul,
+    .bot-message ol {
+        margin: 0.5rem 0 0.5rem 1.25rem;
+        padding-left: 1.25rem;
+    }
+    .user-message code,
+    .bot-message code {
+        background: #f9fafb;
+        padding: 0.15rem 0.35rem;
+        border-radius: 4px;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+        font-size: 0.85rem;
+    }
+    .user-message pre,
+    .bot-message pre {
+        background: #f9fafb;
+        padding: 0.75rem;
+        border-radius: 8px;
+        overflow-x: auto;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+        font-size: 0.85rem;
+        margin: 0.5rem 0;
+    }
     .sidebar-conversation {
-        background: #f8f9fa; border-radius: 8px; padding: 10px; margin: 5px 0;
-        cursor: pointer; border: 1px solid #dee2e6; transition: all 0.3s ease;
+        background: #f8f9fa;
+        border-radius: 8px;
+        padding: 10px;
+        margin: 5px 0;
+        cursor: pointer;
+        border: 1px solid #dee2e6;
+        transition: all 0.3s ease;
     }
     .sidebar-conversation:hover { background: #e9ecef; transform: translateX(5px); }
     .sidebar-conversation.active {
-        background: linear-gradient(135deg, #28a745, #1e7e34); color: white; border-color: #1e7e34;
+        background: linear-gradient(135deg, #28a745, #1e7e34);
+        color: white;
+        border-color: #1e7e34;
     }
     .login-container {
-        max-width: 400px; margin: 0 auto; padding: 40px 20px; background: white;
-        border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        max-width: 400px;
+        margin: 0 auto;
+        padding: 40px 20px;
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
     }
     .message-timestamp { font-size: 0.8em; color: #64748b; margin-top: 5px; white-space: normal; display: block; max-width: 100%; overflow-wrap: anywhere; }
     div:empty { display: none !important; }
@@ -181,6 +506,12 @@ if "persona_editor_pending_value" not in st.session_state:
     st.session_state.persona_editor_pending_value = ""
 if "persona_editor_pending" not in st.session_state:
     st.session_state.persona_editor_pending = False
+if "pending_image_attachments" not in st.session_state:
+    st.session_state.pending_image_attachments = []
+if "message_image_thumbnails" not in st.session_state:
+    st.session_state.message_image_thumbnails = {}
+if "show_attachment_uploader" not in st.session_state:
+    st.session_state.show_attachment_uploader = False
 if "API_BASE_URL" not in st.session_state:
     st.session_state.API_BASE_URL = API_BASE_URL
 
@@ -195,6 +526,8 @@ def reset_conversation_state() -> None:
     st.session_state.persona_editor_value = ""
     st.session_state.persona_editor_pending_value = ""
     st.session_state.persona_editor_pending = False
+    st.session_state.pending_image_attachments = []
+    st.session_state.show_attachment_uploader = False
 
 
 def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
@@ -462,6 +795,8 @@ def render_conversation_sidebar():
                     st.session_state.conversations_list = []
                     st.session_state.auth_token = None
                     st.session_state.show_login = True
+                    st.session_state.pending_image_attachments = []
+                    st.session_state.message_image_thumbnails = {}
                     st.rerun()
 
 
@@ -874,7 +1209,10 @@ def render_chat_interface():
             st.caption("All caught up — showing the entire thread.")
 
     st.markdown('<div class="chat-wrapper">', unsafe_allow_html=True)
-    st.markdown('<div class="chat-messages-container">', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="chat-messages-container"><div class="chat-messages-scroll">',
+        unsafe_allow_html=True,
+    )
 
     def format_time(iso_string: str) -> str:
         try:
@@ -918,6 +1256,7 @@ def render_chat_interface():
                 """,
                 unsafe_allow_html=True,
             )
+            render_message_attachments(str(msg.get("id", "")))
         else:
             # Assistant message with feedback option
             st.markdown(
@@ -983,31 +1322,61 @@ def render_chat_interface():
 
                 st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
     if conversation_id:
         st.markdown(
-            '<div class="chat-input-container chat-input-sticky">',
+            '<div class="chat-input-container">',
             unsafe_allow_html=True,
+        )
+
+        if st.session_state.pending_image_attachments:
+            render_pending_attachment_preview()
+
+        file_uploader_key = (
+            f"chat_image_uploader_{conversation_id}" if conversation_id else None
         )
 
         with st.form("message_form", clear_on_submit=True):
 
-            col1, col2 = st.columns([4, 1])
-            with col1:
+            message_col, button_col = st.columns([5, 1])
+            with message_col:
+                if st.session_state.show_attachment_uploader and file_uploader_key:
+                    uploaded_files = st.file_uploader(
+                        "Attach images",
+                        type=["png", "jpg", "jpeg", "gif", "webp"],
+                        accept_multiple_files=True,
+                        key=file_uploader_key,
+                        help=f"You can attach up to {_MAX_IMAGE_ATTACHMENTS} images.",
+                    )
+                    if uploaded_files:
+                        _handle_new_image_attachments(uploaded_files)
                 message_content = st.text_area(
                     "Message",
                     placeholder="Type your message here...",
                     height=80,
                     label_visibility="collapsed",
                 )
-            with col2:
-                st.markdown("<br>", unsafe_allow_html=True)
-                send_button = st.form_submit_button("Send", use_container_width=True)
+            with button_col:
+                attach_button = st.form_submit_button(
+                    "Attach Images", use_container_width=True
+                )
+                send_button = st.form_submit_button(
+                    "Send", use_container_width=True
+                )
+
+            if attach_button:
+                st.session_state.show_attachment_uploader = not st.session_state.get(
+                    "show_attachment_uploader", False
+                )
+                st.rerun()
 
             if send_button:
                 if message_content.strip():
                     if conversation_id == "pending_new":
+                        saved_attachments = list(
+                            st.session_state.get("pending_image_attachments", [])
+                        )
                         conversation_data = {
                             "title": (
                                 message_content[:50] + "..."
@@ -1045,6 +1414,10 @@ def render_chat_interface():
                                     ),
                                 ]
                             reset_conversation_state()
+                            st.session_state.pending_image_attachments = (
+                                saved_attachments
+                            )
+                            conversation_id = st.session_state.current_conversation_id
                         else:
                             st.error("Failed to create conversation")
                             return
@@ -1058,9 +1431,18 @@ def render_chat_interface():
                         response = make_api_request("POST", "/messages/", message_data)
 
                     if response and response.get("data"):
+                        created_message = response["data"]
+                        if st.session_state.pending_image_attachments:
+                            message_id = created_message.get("id")
+                            if message_id:
+                                st.session_state.message_image_thumbnails.setdefault(
+                                    str(message_id), []
+                                ).extend(st.session_state.pending_image_attachments)
+                            st.session_state.pending_image_attachments = []
                         get_messages.clear()
                         get_conversations.clear()
                         reset_conversation_state()
+                        st.session_state.show_attachment_uploader = False
                         load_messages_page(1)
                         st.rerun()
                     else:

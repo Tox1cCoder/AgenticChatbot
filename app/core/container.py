@@ -167,6 +167,7 @@ class Container(containers.DeclarativeContainer):
             qdrant_client=qdrant,
             embedding_model=embeddings,
             conversation_repository=container.conversation_repository(),
+            document_repository=container.document_repository(),
             checkpointer=checkpointer,
         )
 

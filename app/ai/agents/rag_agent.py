@@ -34,7 +34,7 @@ class RAGAgent:
 
         self.collection_name = collection_name
         self.embedding_dimension = settings.embedding_dimension
-        self.model_name = "gemini-2.5-flash"
+        self.model_name = "gemini-2.5-pro"
         self.gemini_client = None
 
         # Store retrieval parameters

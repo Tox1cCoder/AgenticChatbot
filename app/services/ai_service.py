@@ -8,6 +8,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 from ..repositories.conversation import ConversationRepository
+from ..repositories.document import DocumentRepository
 from ..utils.text_processing import sanitize_persona
 
 logger = logging.getLogger(__name__)
@@ -20,14 +21,17 @@ class AIService:
         qdrant_client: QdrantClient,
         embedding_model: SentenceTransformer,
         conversation_repository: ConversationRepository,
+        document_repository: Optional[DocumentRepository] = None,
         checkpointer: Optional[BaseCheckpointSaver] = None,
     ):
         self.checkpointer = checkpointer
         self.conversation_repository = conversation_repository
+        self.document_repository = document_repository
         self.workflow = create_workflow(
             qdrant_client=qdrant_client,
             embedding_model=embedding_model,
             checkpointer=checkpointer,
+            document_repository=document_repository,
         )
 
     def _load_persona(self, conversation_id: UUID) -> Optional[str]:

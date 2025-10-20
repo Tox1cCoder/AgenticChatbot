@@ -41,7 +41,9 @@ def tavily_search(query: str, max_results: int = 5) -> str:
         tavily_client = TavilyClient(api_key=api_key)
 
         # Perform search
-        response = tavily_client.search(query=query, max_results=max_results)
+        response = tavily_client.search(
+            query=query, max_results=max_results, search_depth="advanced"
+        )
 
         # Format results
         if "results" in response:

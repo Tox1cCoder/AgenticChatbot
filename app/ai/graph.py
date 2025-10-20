@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from uuid import UUID
 
 from langgraph.graph import StateGraph, END, START
@@ -8,13 +8,16 @@ from langchain_core.messages import HumanMessage, AIMessage
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 
-from .schemas import GraphState, AgentMessage, AgentResponse, MessageRole, AgentType
+from .schemas import GraphState, AgentMessage, AgentResponse, MessageRole
 from .agents.router import Router
 from .agents.chat_agent import ChatAgent
 from .agents.rag_agent import RAGAgent
 from .agents.search_agent import SearchAgent
 from .memory import get_memory_manager
 from ..core.config import settings
+
+if TYPE_CHECKING:
+    from ..repositories.document import DocumentRepository
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,7 @@ class MultiAgentWorkflow:
         qdrant_client: QdrantClient,
         embedding_model: SentenceTransformer,
         checkpointer: Optional[BaseCheckpointSaver] = None,
+        document_repository: Optional["DocumentRepository"] = None,
     ):
         self.qdrant_client = qdrant_client
         self.router = Router()
@@ -44,6 +48,7 @@ class MultiAgentWorkflow:
         }
 
         self.checkpointer = checkpointer
+        self.document_repository = document_repository
 
         self.graph = self._build_graph()
         logger.info(
@@ -102,9 +107,43 @@ class MultiAgentWorkflow:
             agent_msg, list(self.agents.keys())
         )
 
+        if selected_agent == "rag_agent":
+            conversation_id = state.get("conversation_id")
+            if not self._conversation_has_documents(conversation_id):
+                logger.info(
+                    "No documents available for conversation %s; defaulting to chat_agent",
+                    conversation_id,
+                )
+                selected_agent = "chat_agent"
+
         state["selected_agent"] = selected_agent
         logger.info(f"Routed to: {selected_agent}")
         return state
+
+    def _conversation_has_documents(self, conversation_id: Optional[str]) -> bool:
+        if not conversation_id or not self.document_repository:
+            return False
+
+        try:
+            conversation_uuid = UUID(conversation_id)
+        except ValueError:
+            logger.warning(
+                "Invalid conversation_id '%s' encountered while checking documents",
+                conversation_id,
+            )
+            return False
+
+        try:
+            return (
+                self.document_repository.count_by_conversation(conversation_uuid) > 0
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to determine document availability for conversation %s: %s",
+                conversation_id,
+                exc,
+            )
+            return False
 
     async def _chat_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
@@ -306,6 +345,7 @@ def create_workflow(
     qdrant_client: QdrantClient,
     embedding_model: SentenceTransformer,
     checkpointer: Optional[BaseCheckpointSaver] = None,
+    document_repository: Optional["DocumentRepository"] = None,
 ) -> MultiAgentWorkflow:
     """
     Create multi-agent workflow with required shared dependencies.
@@ -314,4 +354,5 @@ def create_workflow(
         qdrant_client=qdrant_client,
         embedding_model=embedding_model,
         checkpointer=checkpointer,
+        document_repository=document_repository,
     )

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class SearchAgent:
 
     def __init__(self):
-        self.model_name = "gemini-2.5-flash"
+        self.model_name = "gemini-2.5-pro"
         self.gemini_client = None
         self.langchain_model = None
         self.mcp_manager = None
