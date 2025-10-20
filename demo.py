@@ -10,6 +10,50 @@ from dateutil import parser
 API_BASE_URL = "http://localhost:8000"
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+_MAX_PERSONA_LENGTH = 2000
+
+PERSONA_TEMPLATES: Dict[str, str] = {
+    "Friendly Tutor": (
+        "You are a patient programming tutor. Explain topics with simple analogies, "
+        "show step-by-step examples, and confirm the learner's understanding before moving on."
+    ),
+    "Domain Expert": (
+        "You are a senior data analyst who answers with evidence. Highlight key metrics, "
+        "call out assumptions, and recommend the next investigative steps."
+    ),
+    "Motivational Coach": (
+        "You are a supportive productivity coach. Celebrate wins, emphasize progress, "
+        "and end each reply with one clear, actionable suggestion."
+    ),
+}
+
+
+def normalize_persona_input(raw: str) -> str:
+    """Normalize persona text similarly to backend sanitization."""
+    if not isinstance(raw, str):
+        return ""
+
+    normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r" +", " ", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    normalized = normalized.strip()
+
+    if len(normalized) > _MAX_PERSONA_LENGTH:
+        normalized = normalized[:_MAX_PERSONA_LENGTH]
+
+    return normalized
+
+
+def persona_preview(text: Optional[str], limit: int = 160) -> str:
+    """Return a compact preview of persona text for UI surfaces."""
+    if not text:
+        return ""
+
+    cleaned = text.strip()
+    if len(cleaned) <= limit:
+        return cleaned
+
+    return cleaned[:limit].rstrip() + "..."
 
 
 def sanitize_message_content(content: Any) -> str:
@@ -125,6 +169,18 @@ if "conversation_messages_page" not in st.session_state:
     st.session_state.conversation_messages_page = 0
 if "has_more_messages" not in st.session_state:
     st.session_state.has_more_messages = True
+if "pending_persona_prompt" not in st.session_state:
+    st.session_state.pending_persona_prompt = ""
+if "persona_editor_origin" not in st.session_state:
+    st.session_state.persona_editor_origin = None
+if "persona_editor_value" not in st.session_state:
+    st.session_state.persona_editor_value = ""
+if "persona_feedback" not in st.session_state:
+    st.session_state.persona_feedback = None
+if "persona_editor_pending_value" not in st.session_state:
+    st.session_state.persona_editor_pending_value = ""
+if "persona_editor_pending" not in st.session_state:
+    st.session_state.persona_editor_pending = False
 if "API_BASE_URL" not in st.session_state:
     st.session_state.API_BASE_URL = API_BASE_URL
 
@@ -134,6 +190,11 @@ def reset_conversation_state() -> None:
     st.session_state.conversation_messages_meta = None
     st.session_state.conversation_messages_page = 0
     st.session_state.has_more_messages = True
+    st.session_state.pending_persona_prompt = ""
+    st.session_state.persona_editor_origin = None
+    st.session_state.persona_editor_value = ""
+    st.session_state.persona_editor_pending_value = ""
+    st.session_state.persona_editor_pending = False
 
 
 def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
@@ -405,13 +466,192 @@ def render_conversation_sidebar():
 
 
 def render_instructions_modal():
-    """Render instructions modal with usage information"""
-    if st.session_state.show_instructions:
-        col1, col2, col3 = st.columns([1, 3, 1])
-        with col2:
+    """Render instructions modal with persona editing support."""
+    if not st.session_state.show_instructions:
+        return
 
+    conversation_id = st.session_state.get("current_conversation_id")
+    is_new_conversation = conversation_id == "pending_new"
+    has_conversation = conversation_id not in (None, "pending_new")
+
+    if st.session_state.persona_editor_pending:
+        st.session_state.persona_editor_value = (
+            st.session_state.persona_editor_pending_value or ""
+        )
+        st.session_state.persona_editor_pending = False
+
+    current_conv: Optional[Dict[str, Any]] = None
+    if has_conversation:
+        current_conv = next(
+            (
+                conv
+                for conv in st.session_state.conversations_list
+                if conv.get("id") == conversation_id
+            ),
+            None,
+        )
+        if current_conv is None:
+            response = make_api_request("GET", f"/conversations/{conversation_id}")
+            if response and response.get("data"):
+                current_conv = response["data"]
+
+    if st.session_state.persona_editor_origin != conversation_id:
+        if has_conversation and current_conv:
+            initial_value = current_conv.get("personaPrompt") or ""
+        elif is_new_conversation:
+            initial_value = st.session_state.get("pending_persona_prompt", "")
+        else:
+            initial_value = ""
+        st.session_state.persona_editor_origin = conversation_id
+        st.session_state.persona_editor_value = initial_value or ""
+
+    col1, col2, col3 = st.columns([1, 3, 1])
+    with col2:
+        st.markdown("### Conversation Instructions")
+
+        if conversation_id is None:
+            st.info(
+                "Select a conversation or click **New Chat** to configure instructions."
+            )
             if st.button("Close", use_container_width=True):
                 st.session_state.show_instructions = False
+                st.session_state.persona_editor_origin = None
+                st.rerun()
+            return
+
+        if has_conversation:
+            title = current_conv.get("title") if current_conv else "Conversation"
+            st.caption(
+                f"Assistant responses in **{title}** will follow these instructions."
+            )
+            if current_conv is None:
+                st.warning(
+                    "Conversation details are unavailable. The instructions shown may be out of date."
+                )
+        else:
+            st.caption(
+                "These instructions will be applied when you send the first message in this chat."
+            )
+
+        st.write(
+            "Describe how the assistant should behave. This field is optional and limited to "
+            f"{_MAX_PERSONA_LENGTH} characters."
+        )
+
+        if PERSONA_TEMPLATES:
+            with st.expander("Need inspiration?", expanded=False):
+                template_cols = st.columns(len(PERSONA_TEMPLATES))
+                for idx, (label, template) in enumerate(PERSONA_TEMPLATES.items()):
+                    if template_cols[idx].button(label, key=f"persona_template_{idx}"):
+                        st.session_state.persona_editor_value = template[
+                            :_MAX_PERSONA_LENGTH
+                        ]
+
+        st.text_area(
+            "Custom persona",
+            key="persona_editor_value",
+            height=200,
+            placeholder="Describe how the AI should behave (optional)",
+        )
+
+        current_value = st.session_state.get("persona_editor_value", "")
+        char_count = len(current_value)
+        exceeds_limit = char_count > _MAX_PERSONA_LENGTH
+        st.caption(f"{char_count}/{_MAX_PERSONA_LENGTH} characters")
+        if exceeds_limit:
+            st.error(
+                "Persona exceeds the 2000 character limit. Please shorten it before saving."
+            )
+
+        action_cols = st.columns([2, 2, 1])
+
+        with action_cols[0]:
+            if is_new_conversation:
+                if st.button(
+                    "Apply to New Chat",
+                    use_container_width=True,
+                    disabled=exceeds_limit,
+                ):
+                    sanitized = normalize_persona_input(current_value)
+                    st.session_state.pending_persona_prompt = sanitized
+                    st.session_state.persona_editor_pending_value = sanitized
+                    st.session_state.persona_editor_pending = True
+                    st.session_state.persona_feedback = (
+                        "Persona saved for the next new conversation."
+                        if sanitized
+                        else "Persona cleared for the next new conversation."
+                    )
+                    st.session_state.show_instructions = False
+                    st.session_state.persona_editor_origin = None
+                    st.rerun()
+            else:
+                if st.button(
+                    "Save Persona",
+                    use_container_width=True,
+                    disabled=exceeds_limit,
+                ):
+                    sanitized = normalize_persona_input(current_value)
+                    payload = {"personaPrompt": sanitized or None}
+                    response = make_api_request(
+                        "PATCH", f"/conversations/{conversation_id}", payload
+                    )
+                    if response and response.get("data"):
+                        updated = response["data"]
+                        st.session_state.persona_editor_pending_value = (
+                            updated.get("personaPrompt") or ""
+                        )
+                        st.session_state.persona_editor_pending = True
+                        st.session_state.persona_feedback = (
+                            "Persona updated for this conversation."
+                        )
+                        get_conversations.clear()
+                        refreshed = get_conversations(include_messages=False)
+                        if refreshed and refreshed.get("data"):
+                            st.session_state.conversations_list = refreshed["data"][
+                                "items"
+                            ]
+                        st.session_state.show_instructions = False
+                        st.session_state.persona_editor_origin = None
+                        st.rerun()
+                    else:
+                        st.error("Unable to update persona. Please try again.")
+
+        with action_cols[1]:
+            if is_new_conversation:
+                if st.button("Clear", use_container_width=True):
+                    st.session_state.persona_editor_pending_value = ""
+                    st.session_state.persona_editor_pending = True
+                    st.session_state.pending_persona_prompt = ""
+                    st.rerun()
+            else:
+                if st.button("Clear Persona", use_container_width=True):
+                    response = make_api_request(
+                        "PATCH",
+                        f"/conversations/{conversation_id}",
+                        {"personaPrompt": None},
+                    )
+                    if response and response.get("data"):
+                        get_conversations.clear()
+                        refreshed = get_conversations(include_messages=False)
+                        if refreshed and refreshed.get("data"):
+                            st.session_state.conversations_list = refreshed["data"][
+                                "items"
+                            ]
+                        st.session_state.persona_editor_pending_value = ""
+                        st.session_state.persona_editor_pending = True
+                        st.session_state.persona_feedback = (
+                            "Persona removed for this conversation."
+                        )
+                        st.session_state.show_instructions = False
+                        st.session_state.persona_editor_origin = None
+                        st.rerun()
+                    else:
+                        st.error("Unable to clear persona. Please try again.")
+
+        with action_cols[2]:
+            if st.button("Close", use_container_width=True):
+                st.session_state.show_instructions = False
+                st.session_state.persona_editor_origin = None
                 st.rerun()
 
 
@@ -420,6 +660,10 @@ def render_conversation_manager():
         col1, col2, col3 = st.columns([1, 3, 1])
         with col2:
             st.markdown("### Conversation Manager")
+
+            if st.session_state.persona_feedback:
+                st.success(st.session_state.persona_feedback)
+                st.session_state.persona_feedback = None
 
             # Load conversations with messages for the manager
             if st.session_state.current_user_id:
@@ -543,6 +787,10 @@ def render_chat_interface():
                 "items"
             ]
 
+    if st.session_state.persona_feedback:
+        st.success(st.session_state.persona_feedback)
+        st.session_state.persona_feedback = None
+
     def load_messages_page(page: int, *, show_spinner: bool = False) -> None:
         conv_id = st.session_state.get("current_conversation_id")
         if not conv_id or conv_id == "pending_new":
@@ -606,8 +854,14 @@ def render_chat_interface():
 
     if current_conv:
         st.markdown(f"# {current_conv['title']}")
+        active_persona = current_conv.get("personaPrompt")
+        if active_persona:
+            st.caption(f"Instructions active: {persona_preview(active_persona)}")
     elif conversation_id == "pending_new":
         st.markdown("# New Chat - Start typing to begin!")
+        queued_persona = st.session_state.get("pending_persona_prompt", "")
+        if queued_persona:
+            st.caption(f"Instructions queued: {persona_preview(queued_persona)}")
     else:
         st.markdown("# Welcome! Select a conversation to view messages")
 
@@ -761,14 +1015,35 @@ def render_chat_interface():
                                 else message_content
                             )
                         }
+                        pending_persona = st.session_state.get(
+                            "pending_persona_prompt", ""
+                        )
+                        persona_payload = normalize_persona_input(pending_persona)
+                        if persona_payload:
+                            conversation_data["personaPrompt"] = persona_payload
                         conv_response = make_api_request(
                             "POST", "/conversations/", conversation_data
                         )
                         if conv_response and conv_response.get("data"):
-                            st.session_state.current_conversation_id = conv_response[
-                                "data"
-                            ]["id"]
+                            new_conversation = conv_response["data"]
+                            st.session_state.current_conversation_id = new_conversation[
+                                "id"
+                            ]
                             get_conversations.clear()
+                            refreshed = get_conversations(include_messages=False)
+                            if refreshed and refreshed.get("data"):
+                                st.session_state.conversations_list = refreshed["data"][
+                                    "items"
+                                ]
+                            else:
+                                st.session_state.conversations_list = [
+                                    new_conversation,
+                                    *(
+                                        conv
+                                        for conv in st.session_state.conversations_list
+                                        if conv.get("id") != new_conversation["id"]
+                                    ),
+                                ]
                             reset_conversation_state()
                         else:
                             st.error("Failed to create conversation")

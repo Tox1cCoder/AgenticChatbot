@@ -51,3 +51,12 @@ class Router:
         if selected_agent in available_agents:
             logger.info(f"LLM routed to {selected_agent}: {content[:50]}...")
             return selected_agent
+
+        fallback_agent = "chat_agent" if "chat_agent" in available_agents else available_agents[0]
+        logger.warning(
+            "Router received unrecognized agent '%s'. Falling back to '%s'. Response was: %s",
+            selected_agent,
+            fallback_agent,
+            response_text.strip(),
+        )
+        return fallback_agent

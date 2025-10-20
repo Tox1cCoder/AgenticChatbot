@@ -2,6 +2,8 @@
 Message factory for creating Message entities
 """
 
+from __future__ import annotations
+
 from typing import Dict, Any
 from uuid import uuid4, UUID
 
@@ -28,15 +30,16 @@ class MessageFactory:
     def create_from_schema_with_role(
         message_data: MessageCreate,
         role: MessageRole,
-        message_metadata: Dict[str, Any] = {},
+        message_metadata: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Create Message data dictionary from MessageCreate schema with specified role"""
+        metadata = dict(message_metadata) if message_metadata else {}
         return {
             "id": uuid4(),
             "conversation_id": message_data.conversation_id,
             "sender": role.value,
             "content": message_data.content,
-            "message_metadata": message_metadata,
+            "message_metadata": metadata,
             "created_at": TimestampUtils.now(),
         }
 
@@ -53,14 +56,17 @@ class MessageFactory:
 
     @staticmethod
     def create_bot_response(
-        conversation_id: UUID, content: str, message_metadata: Dict[str, Any] = {}
+        conversation_id: UUID,
+        content: str,
+        message_metadata: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Create bot response message data dictionary"""
+        metadata = dict(message_metadata) if message_metadata else {}
         return {
             "id": uuid4(),
             "conversation_id": conversation_id,
             "sender": MessageRole.assistant.value,
             "content": content,
-            "message_metadata": message_metadata,
+            "message_metadata": metadata,
             "created_at": TimestampUtils.now(),
         }

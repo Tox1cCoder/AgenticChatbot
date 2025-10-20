@@ -24,7 +24,7 @@ class Message(Base):
     )
     sender = Column(MessageRoleType, nullable=False)
     content = Column(Text, nullable=False)
-    message_metadata = Column(JSONB, nullable=True, default={})
+    message_metadata = Column(JSONB, nullable=True, default=dict)
 
     # Relationships
     conversation = relationship("Conversation", back_populates="messages")

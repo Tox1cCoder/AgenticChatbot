@@ -12,6 +12,7 @@ from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.pagination_validation import validate_pagination_params
 from app.interfaces.message_service_interface import IMessageService
 from app.services.ai_service import AIService
+from app.utils.text_processing import sanitize_persona
 import logging
 
 
@@ -53,6 +54,7 @@ class MessageService(IMessageService):
             )
             user_id = conversation.owner_id if conversation else None
             persona = conversation.persona_prompt if conversation else None
+            sanitized_persona = sanitize_persona(persona)
 
             bot_response_content = await self.ai_service.generate_bot_response(
                 user_message=message_create_data.content,
@@ -62,8 +64,8 @@ class MessageService(IMessageService):
 
             # Create metadata for bot response
             bot_metadata = {}
-            if persona:
-                bot_metadata["persona_used"] = persona
+            if sanitized_persona:
+                bot_metadata["persona_used"] = sanitized_persona
 
             bot_response_entity = MessageFactory.create_bot_response(
                 conversation_id=message_create_data.conversation_id,
