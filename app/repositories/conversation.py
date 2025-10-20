@@ -123,7 +123,6 @@ class ConversationCRUDStrategy(
             # Create detached copies of messages for the conversation
             messages_for_attribute = []
             for msg in recent_messages_reversed:
-                # Create a simple dict to hold message data
                 msg_data = {
                     "id": msg.id,
                     "created_at": msg.created_at,
