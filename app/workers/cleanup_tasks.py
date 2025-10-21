@@ -55,6 +55,8 @@ def health_check_task():
     try:
         container = get_container()
         settings = container.config()
+        qdrant_client = container.qdrant_client()
+        embedding_model = container.embedding_model()
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -62,6 +64,8 @@ def health_check_task():
         try:
             rag_agent = RAGAgent(
                 settings=settings,
+                qdrant_client=qdrant_client,
+                embedding_model=embedding_model,
                 collection_name=settings.qdrant_collection_name,
             )
             loop.run_until_complete(rag_agent.initialize())

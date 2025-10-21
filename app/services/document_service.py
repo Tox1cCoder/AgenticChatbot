@@ -2,6 +2,9 @@ from typing import Optional
 import logging
 from uuid import UUID
 
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
+
 from app.ai.agents.rag_agent import RAGAgent
 from app.core.config import get_settings
 from app.core.exceptions.validation import FileValidationError
@@ -29,11 +32,15 @@ class DocumentService(IDocumentService):
         document_repository: DocumentRepository,
         document_processing_service: DocumentProcessingService,
         document_validation_utils: DocumentValidationUtils,
+        qdrant_client: QdrantClient,
+        embedding_model: SentenceTransformer,
     ):
         """Initialize document service with injected dependencies."""
         self.repository = document_repository
         self.processing_service = document_processing_service
         self.document_validation_utils = document_validation_utils
+        self.qdrant_client = qdrant_client
+        self.embedding_model = embedding_model
         self._event_bus = get_event_bus()
 
     async def create_document(self, document_data: DocumentCreate) -> DocumentResponse:
@@ -68,6 +75,8 @@ class DocumentService(IDocumentService):
             settings = get_settings()
             rag_agent = RAGAgent(
                 settings=settings,
+                qdrant_client=self.qdrant_client,
+                embedding_model=self.embedding_model,
                 collection_name=settings.qdrant_collection_name,
             )
             await rag_agent.initialize()

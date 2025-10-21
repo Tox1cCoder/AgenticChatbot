@@ -42,7 +42,11 @@ def tavily_search(query: str, max_results: int = 5) -> str:
 
         # Perform search
         response = tavily_client.search(
-            query=query, max_results=max_results, search_depth="advanced"
+            query=query,
+            max_results=max_results,
+            search_depth="advanced",
+            include_images=True,
+            include_image_descriptions=True,
         )
 
         # Format results

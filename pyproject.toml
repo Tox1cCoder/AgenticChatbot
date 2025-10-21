@@ -59,6 +59,7 @@ dependencies = [
     "pypdf>=3.17.0",
     "python-docx>=1.1.0",
     "openpyxl>=3.1.2",
+    "Pillow>=10.0.0",
     
     # Utilities
     "fastapi-radar>=0.0.2",

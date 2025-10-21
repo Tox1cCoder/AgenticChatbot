@@ -13,6 +13,7 @@ from .agents.router import Router
 from .agents.chat_agent import ChatAgent
 from .agents.rag_agent import RAGAgent
 from .agents.search_agent import SearchAgent
+from .agents.image_generator_agent import ImageGeneratorAgent
 from .memory import get_memory_manager
 from ..core.config import settings
 
@@ -41,10 +42,12 @@ class MultiAgentWorkflow:
             collection_name=settings.qdrant_collection_name,
         )
         self.search_agent = SearchAgent()
+        self.image_generator_agent = ImageGeneratorAgent()
         self.agents = {
             "chat_agent": self.chat_agent,
             "rag_agent": self.rag_agent,
             "search_agent": self.search_agent,
+            "image_generator_agent": self.image_generator_agent,
         }
 
         self.checkpointer = checkpointer
@@ -62,6 +65,7 @@ class MultiAgentWorkflow:
         workflow.add_node("chat_agent", self._chat_node)
         workflow.add_node("rag_agent", self._rag_node)
         workflow.add_node("search_agent", self._search_node)
+        workflow.add_node("image_generator_agent", self._image_generator_node)
 
         workflow.add_edge(START, "route")
 
@@ -72,6 +76,7 @@ class MultiAgentWorkflow:
                 "chat_agent": "chat_agent",
                 "rag_agent": "rag_agent",
                 "search_agent": "search_agent",
+                "image_generator_agent": "image_generator_agent",
                 "end": END,
             },
         )
@@ -79,6 +84,7 @@ class MultiAgentWorkflow:
         workflow.add_edge("chat_agent", END)
         workflow.add_edge("rag_agent", END)
         workflow.add_edge("search_agent", END)
+        workflow.add_edge("image_generator_agent", END)
 
         # Compile with checkpointer if provided
         if self.checkpointer:
@@ -297,6 +303,69 @@ class MultiAgentWorkflow:
         )
 
         response = await self.search_agent.process_message(agent_msg, conversation_id)
+
+        state["response"] = response
+        state.setdefault("messages", []).append(
+            AIMessage(content=response.message.content)
+        )
+
+        return state
+
+    async def _image_generator_node(self, state: GraphState) -> GraphState:
+        messages = state.get("messages", [])
+        if not messages:
+            logger.error("No messages in state for image generator agent")
+            return state
+
+        last_message = messages[-1]
+        content = (
+            last_message.content
+            if hasattr(last_message, "content")
+            else str(last_message)
+        )
+
+        conversation_history = []
+        memory_manager = get_memory_manager()
+
+        conversation_id = state.get("conversation_id")
+        user_id = state.get("user_id")
+
+        if conversation_id and user_id:
+            try:
+                conv_id_uuid = UUID(conversation_id)
+                user_id_uuid = UUID(user_id)
+
+                conv_memory = await memory_manager.get_memory(
+                    conv_id_uuid, user_id_uuid, force_refresh=True
+                )
+                history_limit = (
+                    settings.chat_history_max_messages
+                    if settings.chat_history_max_messages > 0
+                    else None
+                )
+                conversation_history = conv_memory.get_recent_messages(
+                    limit=history_limit, exclude_last=1
+                )
+                logger.info(
+                    "Loaded %s messages from memory for conversation %s (image agent)",
+                    len(conversation_history),
+                    conversation_id,
+                )
+            except Exception as err:
+                logger.warning(
+                    "Failed to load conversation history for image agent: %s", err
+                )
+
+        persona = state.get("persona")
+        agent_msg = AgentMessage(
+            role=MessageRole.USER,
+            content=content,
+            metadata={"history": conversation_history, "persona": persona},
+        )
+
+        response = await self.image_generator_agent.process_message(
+            agent_msg, conversation_id
+        )
 
         state["response"] = response
         state.setdefault("messages", []).append(

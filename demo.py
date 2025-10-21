@@ -7,7 +7,7 @@ import requests
 import html
 import re
 from html.parser import HTMLParser
-from typing import Dict, Optional, Any, List
+from typing import Any, Callable, Dict, List, Optional
 from upload_support import render_upload_section, render_document_list
 from datetime import datetime, timedelta
 from dateutil import parser
@@ -62,257 +62,7 @@ _ALLOWED_TAGS = {
     "th",
     "td",
 }.union(_SELF_CLOSING_TAGS)
-
-
-class _SafeHTMLRenderer(HTMLParser):
-    """Allow-list HTML sanitizer for rendered message content."""
-
-    def __init__(self):
-        super().__init__(convert_charrefs=False)
-        self.result: List[str] = []
-        self._tag_stack: List[str] = []
-
-    def handle_starttag(self, tag: str, attrs):
-        tag = tag.lower()
-        if tag not in _ALLOWED_TAGS:
-            return
-
-        if tag in _SELF_CLOSING_TAGS:
-            self.result.append(f"<{tag}>")
-            return
-
-        self.result.append(f"<{tag}>")
-        self._tag_stack.append(tag)
-
-    def handle_endtag(self, tag: str):
-        tag = tag.lower()
-        if not self._tag_stack:
-            return
-
-        if self._tag_stack and self._tag_stack[-1] == tag:
-            self.result.append(f"</{tag}>")
-            self._tag_stack.pop()
-
-    def handle_startendtag(self, tag: str, attrs):
-        tag = tag.lower()
-        if tag in _SELF_CLOSING_TAGS:
-            self.result.append(f"<{tag}>")
-        elif tag in _ALLOWED_TAGS:
-            self.result.append(f"<{tag}></{tag}>")
-
-    def _inside_block(self, tag: str) -> bool:
-        return tag in self._tag_stack
-
-    def handle_data(self, data: str):
-        if not data:
-            return
-
-        escaped = html.escape(data, quote=False)
-        self.result.append(escaped)
-
-    def handle_entityref(self, name: str):
-        self.result.append(f"&{name};")
-
-    def handle_charref(self, name: str):
-        self.result.append(f"&#{name};")
-
-
-def _sanitize_rendered_html(html_fragment: str) -> str:
-    parser = _SafeHTMLRenderer()
-    parser.feed(html_fragment)
-    parser.close()
-    return "".join(parser.result)
-
-
-def _attachment_from_upload(uploaded_file) -> Optional[Dict[str, str]]:
-    try:
-        raw_bytes = uploaded_file.read()
-        uploaded_file.seek(0)
-    except Exception:
-        return None
-
-    if not raw_bytes:
-        return None
-
-    data_b64 = base64.b64encode(raw_bytes).decode("utf-8")
-    mime = (
-        uploaded_file.type
-        or mimetypes.guess_type(uploaded_file.name or "")[0]
-        or "application/octet-stream"
-    )
-
-    return {
-        "token": str(uuid.uuid4()),
-        "name": uploaded_file.name or "image",
-        "mime": mime,
-        "data": data_b64,
-    }
-
-
-def _handle_new_image_attachments(uploaded_files: List) -> None:
-    if not uploaded_files:
-        return
-
-    pending = st.session_state.get("pending_image_attachments", [])
-    existing_data = {item["data"] for item in pending}
-
-    new_items: List[Dict[str, str]] = []
-    for file_obj in uploaded_files:
-        attachment = _attachment_from_upload(file_obj)
-        if not attachment:
-            continue
-
-        if attachment["data"] in existing_data or any(
-            item["data"] == attachment["data"] for item in new_items
-        ):
-            continue
-
-        new_items.append(attachment)
-        existing_data.add(attachment["data"])
-
-    if not new_items:
-        return
-
-    remaining = _MAX_IMAGE_ATTACHMENTS - len(pending)
-    if remaining <= 0:
-        st.warning(f"Maximum of {_MAX_IMAGE_ATTACHMENTS} images per message reached.")
-        return
-
-    if len(new_items) > remaining:
-        st.info("Some images were ignored because the limit was reached.")
-
-    pending.extend(new_items[:remaining])
-    st.session_state.pending_image_attachments = pending
-
-
-def render_pending_attachment_preview(allow_remove: bool = True):
-    attachments = st.session_state.get("pending_image_attachments", [])
-    if not attachments:
-        return
-
-    st.caption(f"Attachments ready to send ({len(attachments)}/{_MAX_IMAGE_ATTACHMENTS}):")
-    columns = st.columns(min(len(attachments), 4))
-    remove_token: Optional[str] = None
-
-    for idx, attachment in enumerate(attachments):
-        column = columns[idx % len(columns)]
-        with column:
-            image_bytes = base64.b64decode(attachment["data"])
-            st.image(image_bytes, caption=attachment["name"], width=96, clamp=True)
-            if allow_remove:
-                if st.button(
-                    "Remove",
-                    key=f"remove_pending_{attachment['token']}",
-                    use_container_width=True,
-                ):
-                    remove_token = attachment["token"]
-
-    if remove_token:
-        st.session_state.pending_image_attachments = [
-            item for item in attachments if item["token"] != remove_token
-        ]
-        st.rerun()
-
-
-def render_message_attachments(message_id: str):
-    attachments = st.session_state.get("message_image_thumbnails", {}).get(message_id)
-    if not attachments:
-        return
-
-    thumbnails = "".join(
-        f'<div class="attachment-thumb">'
-        f'<img src="data:{att["mime"]};base64,{att["data"]}" '
-        f'alt="{html.escape(att["name"])}" loading="lazy" /></div>'
-        for att in attachments
-    )
-
-    if thumbnails:
-        st.markdown(
-            f'<div class="message-attachments">{thumbnails}</div>',
-            unsafe_allow_html=True,
-        )
-
-
-def normalize_persona_input(raw: str) -> str:
-    """Normalize persona text similarly to backend sanitization."""
-    if not isinstance(raw, str):
-        return ""
-
-    normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
-    normalized = re.sub(r" +", " ", normalized)
-    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-    normalized = normalized.strip()
-
-    if len(normalized) > _MAX_PERSONA_LENGTH:
-        normalized = normalized[:_MAX_PERSONA_LENGTH]
-
-    return normalized
-
-
-def persona_preview(text: Optional[str], limit: int = 160) -> str:
-    """Return a compact preview of persona text for UI surfaces."""
-    if not text:
-        return ""
-
-    cleaned = text.strip()
-    if len(cleaned) <= limit:
-        return cleaned
-
-    return cleaned[:limit].rstrip() + "..."
-
-
-def sanitize_message_content(content: Any) -> str:
-    """Render limited markdown to HTML while preventing unsafe tags."""
-    if not isinstance(content, str):
-        return ""
-
-    normalized = (
-        html.unescape(content).replace("\r\n", "\n").replace("\r", "\n").strip()
-    )
-    if not normalized:
-        return ""
-
-    # Replace inline images with accessible text fallback
-    normalized = re.sub(
-        r"!\[([^\]]*)\]\(([^)]+)\)", r"\1 (\2)", normalized, flags=re.MULTILINE
-    )
-
-    if _markdown is not None:
-        rendered = _markdown.markdown(
-            normalized,
-            extensions=["extra", "sane_lists"],
-            output_format="html5",
-        )
-    else:
-        rendered = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", normalized)
-        rendered = re.sub(
-            r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<em>\1</em>", rendered
-        )
-        rendered = re.sub(r"`([^`]+)`", r"<code>\1</code>", rendered)
-        paragraphs = [
-            segment.strip() for segment in rendered.split("\n\n") if segment.strip()
-        ]
-        if paragraphs:
-            rendered = "".join(f"<p>{segment}</p>" for segment in paragraphs)
-        else:
-            rendered = "<p></p>"
-
-    safe_html = _sanitize_rendered_html(rendered)
-    safe_html = re.sub(r"(?:<br>\s*){3,}", "<br><br>", safe_html)
-    safe_html = safe_html.replace("<p></p>", "")
-    safe_html = safe_html.replace("<p><br></p>", "<br>")
-    safe_html = re.sub(r"\s*(</?p>)\s*", r"\1", safe_html)
-    safe_html = safe_html.strip()
-
-    return safe_html
-
-
-st.set_page_config(
-    page_title="ChatBot", layout="wide", initial_sidebar_state="expanded"
-)
-
-st.markdown(
-    """
+APP_STYLE = """
 <style>
     .main-container { max-width: 1200px; margin: 0 auto; }
     .chat-wrapper {
@@ -466,54 +216,370 @@ st.markdown(
     .message-timestamp { font-size: 0.8em; color: #64748b; margin-top: 5px; white-space: normal; display: block; max-width: 100%; overflow-wrap: anywhere; }
     div:empty { display: none !important; }
 </style>
-""",
-    unsafe_allow_html=True,
+"""
+
+SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
+    "current_user_id": lambda: None,
+    "current_conversation_id": lambda: None,
+    "messages": list,
+    "conversations_list": list,
+    "show_conversation_manager": lambda: False,
+    "show_instructions": lambda: False,
+    "auth_token": lambda: None,
+    "conversation_messages_meta": lambda: None,
+    "conversation_messages_page": lambda: 0,
+    "has_more_messages": lambda: True,
+    "pending_persona_prompt": str,
+    "persona_editor_origin": lambda: None,
+    "persona_editor_value": str,
+    "persona_feedback": lambda: None,
+    "persona_editor_pending_value": str,
+    "persona_editor_pending": lambda: False,
+    "pending_image_attachments": list,
+    "message_image_thumbnails": dict,
+    "show_attachment_uploader": lambda: False,
+    "API_BASE_URL": lambda: API_BASE_URL,
+}
+
+
+def initialize_session_state() -> None:
+    """Ensure all expected session-state keys exist with sensible defaults."""
+    for key, factory in SESSION_STATE_DEFAULTS.items():
+        if key not in st.session_state:
+            st.session_state[key] = factory() if callable(factory) else factory
+
+    if "show_login" not in st.session_state:
+        st.session_state.show_login = not bool(st.session_state.get("auth_token"))
+
+
+class _SafeHTMLRenderer(HTMLParser):
+    """Allow-list HTML sanitizer for rendered message content."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.result: List[str] = []
+        self._tag_stack: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs):
+        tag = tag.lower()
+        if tag not in _ALLOWED_TAGS:
+            return
+
+        if tag in _SELF_CLOSING_TAGS:
+            self.result.append(f"<{tag}>")
+            return
+
+        self.result.append(f"<{tag}>")
+        self._tag_stack.append(tag)
+
+    def handle_endtag(self, tag: str):
+        tag = tag.lower()
+        if not self._tag_stack:
+            return
+
+        if self._tag_stack and self._tag_stack[-1] == tag:
+            self.result.append(f"</{tag}>")
+            self._tag_stack.pop()
+
+    def handle_startendtag(self, tag: str, attrs):
+        tag = tag.lower()
+        if tag in _SELF_CLOSING_TAGS:
+            self.result.append(f"<{tag}>")
+        elif tag in _ALLOWED_TAGS:
+            self.result.append(f"<{tag}></{tag}>")
+
+    def _inside_block(self, tag: str) -> bool:
+        return tag in self._tag_stack
+
+    def handle_data(self, data: str):
+        if not data:
+            return
+
+        escaped = html.escape(data, quote=False)
+        self.result.append(escaped)
+
+    def handle_entityref(self, name: str):
+        self.result.append(f"&{name};")
+
+    def handle_charref(self, name: str):
+        self.result.append(f"&#{name};")
+
+
+def _sanitize_rendered_html(html_fragment: str) -> str:
+    parser = _SafeHTMLRenderer()
+    parser.feed(html_fragment)
+    parser.close()
+    return "".join(parser.result)
+
+
+def _attachment_from_upload(uploaded_file) -> Optional[Dict[str, str]]:
+    try:
+        raw_bytes = uploaded_file.read()
+        uploaded_file.seek(0)
+    except Exception:
+        return None
+
+    if not raw_bytes:
+        return None
+
+    data_b64 = base64.b64encode(raw_bytes).decode("utf-8")
+    mime = (
+        uploaded_file.type
+        or mimetypes.guess_type(uploaded_file.name or "")[0]
+        or "application/octet-stream"
+    )
+
+    return {
+        "token": str(uuid.uuid4()),
+        "name": uploaded_file.name or "image",
+        "mime": mime,
+        "data": data_b64,
+    }
+
+
+def _handle_new_image_attachments(uploaded_files: List) -> None:
+    if not uploaded_files:
+        return
+
+    pending = st.session_state.get("pending_image_attachments", [])
+    existing_data = {item["data"] for item in pending}
+
+    new_items: List[Dict[str, str]] = []
+    for file_obj in uploaded_files:
+        attachment = _attachment_from_upload(file_obj)
+        if not attachment:
+            continue
+
+        if attachment["data"] in existing_data or any(
+            item["data"] == attachment["data"] for item in new_items
+        ):
+            continue
+
+        new_items.append(attachment)
+        existing_data.add(attachment["data"])
+
+    if not new_items:
+        return
+
+    remaining = _MAX_IMAGE_ATTACHMENTS - len(pending)
+    if remaining <= 0:
+        st.warning(f"Maximum of {_MAX_IMAGE_ATTACHMENTS} images per message reached.")
+        return
+
+    if len(new_items) > remaining:
+        st.info("Some images were ignored because the limit was reached.")
+
+    pending.extend(new_items[:remaining])
+    st.session_state.pending_image_attachments = pending
+
+
+def render_pending_attachment_preview(allow_remove: bool = True):
+    attachments = st.session_state.get("pending_image_attachments", [])
+    if not attachments:
+        return
+
+    st.caption(
+        f"Attachments ready to send ({len(attachments)}/{_MAX_IMAGE_ATTACHMENTS}):"
+    )
+    columns = st.columns(min(len(attachments), 4))
+    remove_token: Optional[str] = None
+
+    for idx, attachment in enumerate(attachments):
+        column = columns[idx % len(columns)]
+        with column:
+            image_bytes = base64.b64decode(attachment["data"])
+            st.image(image_bytes, caption=attachment["name"], width=96, clamp=True)
+            if allow_remove:
+                if st.button(
+                    "Remove",
+                    key=f"remove_pending_{attachment['token']}",
+                    use_container_width=True,
+                ):
+                    remove_token = attachment["token"]
+
+    if remove_token:
+        st.session_state.pending_image_attachments = [
+            item for item in attachments if item["token"] != remove_token
+        ]
+        st.rerun()
+
+
+def render_message_attachments(message_id: str):
+    attachments = st.session_state.get("message_image_thumbnails", {}).get(message_id)
+    if not attachments:
+        return
+
+    thumbnails = "".join(
+        f'<div class="attachment-thumb">'
+        f'<img src="data:{att["mime"]};base64,{att["data"]}" '
+        f'alt="{html.escape(att["name"])}" loading="lazy" /></div>'
+        for att in attachments
+    )
+
+    if thumbnails:
+        st.markdown(
+            f'<div class="message-attachments">{thumbnails}</div>',
+            unsafe_allow_html=True,
+        )
+
+
+def normalize_persona_input(raw: str) -> str:
+    """Normalize persona text similarly to backend sanitization."""
+    if not isinstance(raw, str):
+        return ""
+
+    normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r" +", " ", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    normalized = normalized.strip()
+
+    if len(normalized) > _MAX_PERSONA_LENGTH:
+        normalized = normalized[:_MAX_PERSONA_LENGTH]
+
+    return normalized
+
+
+def persona_preview(text: Optional[str], limit: int = 160) -> str:
+    """Return a compact preview of persona text for UI surfaces."""
+    if not text:
+        return ""
+
+    cleaned = text.strip()
+    if len(cleaned) <= limit:
+        return cleaned
+
+    return cleaned[:limit].rstrip() + "..."
+
+
+def _render_basic_markdown(source: str) -> str:
+    """Lightweight markdown renderer used when python-markdown is unavailable."""
+    escaped = html.escape(source, quote=False)
+    lines = escaped.split("\n")
+
+    def _apply_inline_markup(text: str) -> str:
+        text = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", text)
+        text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<em>\1</em>", text)
+        text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+        return text
+
+    html_parts: List[str] = []
+    paragraph_buffer: List[str] = []
+    in_ul = False
+    in_ol = False
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph_buffer
+        if paragraph_buffer:
+            paragraph = "<br>".join(paragraph_buffer)
+            html_parts.append(f"<p>{_apply_inline_markup(paragraph)}</p>")
+            paragraph_buffer = []
+
+    def close_lists() -> None:
+        nonlocal in_ul, in_ol
+        if in_ul:
+            html_parts.append("</ul>")
+            in_ul = False
+        if in_ol:
+            html_parts.append("</ol>")
+            in_ol = False
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        stripped = line.strip()
+
+        if not stripped:
+            flush_paragraph()
+            close_lists()
+            continue
+
+        unordered = re.match(r"^[-*+]\s+", stripped)
+        ordered = re.match(r"^\d+\.\s+", stripped)
+        is_quote = stripped.startswith("&gt;")
+
+        if unordered or ordered:
+            flush_paragraph()
+            if unordered:
+                if in_ol:
+                    html_parts.append("</ol>")
+                    in_ol = False
+                if not in_ul:
+                    html_parts.append("<ul>")
+                    in_ul = True
+                item = re.sub(r"^[-*+]\s+", "", stripped)
+                html_parts.append(f"<li>{_apply_inline_markup(item)}</li>")
+            else:
+                if in_ul:
+                    html_parts.append("</ul>")
+                    in_ul = False
+                if not in_ol:
+                    html_parts.append("<ol>")
+                    in_ol = True
+                item = re.sub(r"^\d+\.\s+", "", stripped)
+                html_parts.append(f"<li>{_apply_inline_markup(item)}</li>")
+            continue
+
+        if is_quote:
+            flush_paragraph()
+            close_lists()
+            quote_content = stripped.lstrip("&gt; ").strip()
+            html_parts.append(
+                f"<blockquote>{_apply_inline_markup(quote_content)}</blockquote>"
+            )
+            continue
+
+        paragraph_buffer.append(_apply_inline_markup(stripped))
+
+    flush_paragraph()
+    close_lists()
+
+    if not html_parts:
+        return "<p></p>"
+
+    return "".join(html_parts)
+
+
+def sanitize_message_content(content: Any) -> str:
+    """Render limited markdown to HTML while preventing unsafe tags."""
+    if not isinstance(content, str):
+        return ""
+
+    normalized = (
+        html.unescape(content).replace("\r\n", "\n").replace("\r", "\n").strip()
+    )
+    if not normalized:
+        return ""
+
+    # Replace inline images with accessible text fallback
+    normalized = re.sub(
+        r"!\[([^\]]*)\]\(([^)]+)\)", r"\1 (\2)", normalized, flags=re.MULTILINE
+    )
+
+    if _markdown is not None:
+        rendered = _markdown.markdown(
+            normalized,
+            extensions=["extra", "sane_lists"],
+            output_format="html5",
+        )
+    else:
+        rendered = _render_basic_markdown(normalized)
+
+    safe_html = _sanitize_rendered_html(rendered)
+    safe_html = re.sub(r"(?:<br>\s*){3,}", "<br><br>", safe_html)
+    safe_html = safe_html.replace("<p></p>", "")
+    safe_html = safe_html.replace("<p><br></p>", "<br>")
+    safe_html = re.sub(r"\s*(</?p>)\s*", r"\1", safe_html)
+    safe_html = safe_html.strip()
+
+    return safe_html
+
+
+st.set_page_config(
+    page_title="ChatBot", layout="wide", initial_sidebar_state="expanded"
 )
 
-if "current_user_id" not in st.session_state:
-    st.session_state.current_user_id = None
-if "current_conversation_id" not in st.session_state:
-    st.session_state.current_conversation_id = None
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "conversations_list" not in st.session_state:
-    st.session_state.conversations_list = []
-if "show_login" not in st.session_state:
-    st.session_state.show_login = (
-        "auth_token" not in st.session_state or not st.session_state.get("auth_token")
-    )
-if "show_conversation_manager" not in st.session_state:
-    st.session_state.show_conversation_manager = False
-if "show_instructions" not in st.session_state:
-    st.session_state.show_instructions = False
-if "auth_token" not in st.session_state:
-    st.session_state.auth_token = None
-if "conversation_messages_meta" not in st.session_state:
-    st.session_state.conversation_messages_meta = None
-if "conversation_messages_page" not in st.session_state:
-    st.session_state.conversation_messages_page = 0
-if "has_more_messages" not in st.session_state:
-    st.session_state.has_more_messages = True
-if "pending_persona_prompt" not in st.session_state:
-    st.session_state.pending_persona_prompt = ""
-if "persona_editor_origin" not in st.session_state:
-    st.session_state.persona_editor_origin = None
-if "persona_editor_value" not in st.session_state:
-    st.session_state.persona_editor_value = ""
-if "persona_feedback" not in st.session_state:
-    st.session_state.persona_feedback = None
-if "persona_editor_pending_value" not in st.session_state:
-    st.session_state.persona_editor_pending_value = ""
-if "persona_editor_pending" not in st.session_state:
-    st.session_state.persona_editor_pending = False
-if "pending_image_attachments" not in st.session_state:
-    st.session_state.pending_image_attachments = []
-if "message_image_thumbnails" not in st.session_state:
-    st.session_state.message_image_thumbnails = {}
-if "show_attachment_uploader" not in st.session_state:
-    st.session_state.show_attachment_uploader = False
-if "API_BASE_URL" not in st.session_state:
-    st.session_state.API_BASE_URL = API_BASE_URL
+st.markdown(APP_STYLE, unsafe_allow_html=True)
+
+initialize_session_state()
 
 
 def reset_conversation_state() -> None:
@@ -530,6 +596,27 @@ def reset_conversation_state() -> None:
     st.session_state.show_attachment_uploader = False
 
 
+def refresh_conversations_list(
+    *, fallback_conversation: Optional[Dict[str, Any]] = None
+) -> None:
+    """Reload conversations list from the API, optionally seeding with a fallback."""
+    get_conversations.clear()
+    refreshed = get_conversations(include_messages=False)
+    if refreshed and refreshed.get("data"):
+        st.session_state.conversations_list = refreshed["data"]["items"]
+        return
+
+    if fallback_conversation:
+        st.session_state.conversations_list = [
+            fallback_conversation,
+            *(
+                conv
+                for conv in st.session_state.conversations_list
+                if conv.get("id") != fallback_conversation.get("id")
+            ),
+        ]
+
+
 def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
     url = f"{API_BASE_URL}{endpoint}"
     headers = {}
@@ -538,32 +625,39 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
 
     try:
         response = getattr(requests, method.lower())(url, json=data, headers=headers)
+        response.raise_for_status()
         response_data = response.json()
-
-        if not response_data.get("success"):
-            error_code = response_data.get("code", "unknown_error")
-            error_message = response_data.get("message", "An unknown error occurred.")
-
-            if error_code == "unauthenticated":
-                st.error(
-                    f"🔒 Authentication required. Please log in. (Error: {error_message})"
-                )
-                st.session_state.auth_token = None
-                st.session_state.current_user_id = None
-                st.session_state.show_login = True
-            else:
-                st.error(f"❌ API Error ({error_code}): {error_message}")
-            return {}
-
-        return response_data
+    except requests.exceptions.HTTPError as http_error:
+        st.error(f"HTTP error {http_error.response.status_code}: {http_error}")
+        return {}
     except requests.exceptions.ConnectionError:
         st.error(
-            "❌ Cannot connect to API. Make sure FastAPI server is running on localhost:8000"
+            "Cannot connect to the API. Make sure the FastAPI server is running on localhost:8000."
         )
         return {}
-    except Exception as e:
-        st.error(f"Error: {str(e)}")
+    except ValueError:
+        st.error("Received an unexpected response from the API.")
         return {}
+    except Exception as exc:
+        st.error(f"Unexpected error: {exc}")
+        return {}
+
+    if not response_data.get("success"):
+        error_code = response_data.get("code", "unknown_error")
+        error_message = response_data.get("message", "An unknown error occurred.")
+
+        if error_code == "unauthenticated":
+            st.error(
+                f"Authentication required. Please log in. (Error: {error_message})"
+            )
+            st.session_state.auth_token = None
+            st.session_state.current_user_id = None
+            st.session_state.show_login = True
+        else:
+            st.error(f"API Error ({error_code}): {error_message}")
+        return {}
+
+    return response_data
 
 
 @st.cache_data(show_spinner=False)
@@ -627,7 +721,7 @@ def get_feedback(message_id: str) -> Optional[Dict[str, Any]]:
 
     data = response.get("data")
 
-    # API may return a single feedback object or wrap it in a list – normalise to a dict.
+    # API may return a single feedback object or wrap it in a list - normalise to a dict.
     if isinstance(data, dict):
         return data
 
@@ -668,10 +762,10 @@ def render_login_page():
                             "userId"
                         ]
                         st.session_state.show_login = False
-                        st.success("✅ Signed in successfully!")
+                        st.success("Signed in successfully!")
                         st.rerun()
                     else:
-                        st.error("❌ Invalid credentials")
+                        st.error("Invalid credentials")
 
         with tab2:
             with st.form("signup_form"):
@@ -689,9 +783,9 @@ def render_login_page():
 
                 if st.form_submit_button("Create Account", use_container_width=True):
                     if not username or not email or not password:
-                        st.error("❌ Please fill out all fields")
+                        st.error("Please fill out all fields")
                     elif password != confirm_password:
-                        st.error("❌ Passwords do not match")
+                        st.error("Passwords do not match")
                     else:
                         user_data = {
                             "username": username,
@@ -714,11 +808,11 @@ def render_login_page():
                                 ]["userId"]
                                 st.session_state.show_login = False
                                 st.success(
-                                    "✅ Account created and signed in successfully!"
+                                    "Account created and signed in successfully!"
                                 )
                                 st.rerun()
                             else:
-                                st.success("✅ Account created! Please sign in.")
+                                st.success("Account created! Please sign in.")
                                 st.rerun()
 
         st.markdown("</div>", unsafe_allow_html=True)
@@ -787,7 +881,7 @@ def render_conversation_sidebar():
         if st.session_state.current_user_id:
             user = get_user(st.session_state.current_user_id)
             if user:
-                st.markdown(f"**👤 {user['username']}**")
+                st.markdown(f"**User: {user['username']}**")
                 if st.button("Sign Out", use_container_width=True):
                     st.session_state.current_user_id = None
                     st.session_state.current_conversation_id = None
@@ -939,12 +1033,7 @@ def render_instructions_modal():
                         st.session_state.persona_feedback = (
                             "Persona updated for this conversation."
                         )
-                        get_conversations.clear()
-                        refreshed = get_conversations(include_messages=False)
-                        if refreshed and refreshed.get("data"):
-                            st.session_state.conversations_list = refreshed["data"][
-                                "items"
-                            ]
+                        refresh_conversations_list()
                         st.session_state.show_instructions = False
                         st.session_state.persona_editor_origin = None
                         st.rerun()
@@ -966,12 +1055,7 @@ def render_instructions_modal():
                         {"personaPrompt": None},
                     )
                     if response and response.get("data"):
-                        get_conversations.clear()
-                        refreshed = get_conversations(include_messages=False)
-                        if refreshed and refreshed.get("data"):
-                            st.session_state.conversations_list = refreshed["data"][
-                                "items"
-                            ]
+                        refresh_conversations_list()
                         st.session_state.persona_editor_pending_value = ""
                         st.session_state.persona_editor_pending = True
                         st.session_state.persona_feedback = (
@@ -1019,7 +1103,7 @@ def render_conversation_manager():
                 manager_conversations = []
 
             search_term = st.text_input(
-                "🔍 Search conversations:", placeholder="Type to search..."
+                "Search conversations:", placeholder="Type to search..."
             )
 
             if manager_conversations:
@@ -1049,12 +1133,16 @@ def render_conversation_manager():
 
                 if filtered_convs:
                     for conv in filtered_convs:
-                        with st.expander(f"💬 {conv['title']}", expanded=False):
+                        with st.expander(
+                            f"Conversation - {conv['title']}", expanded=False
+                        ):
                             if conv.get("messages"):
                                 for msg in conv["messages"]:
                                     sender_value = msg.get("sender")
                                     sender_icon = (
-                                        "👤" if sender_value in (1, "user") else "🤖"
+                                        "[User]"
+                                        if sender_value in (1, "user")
+                                        else "[Assistant]"
                                     )
                                     sender_name = (
                                         "user"
@@ -1097,8 +1185,8 @@ def render_conversation_manager():
                                             )
                                             reset_conversation_state()
                                         get_messages.clear()
-                                        get_conversations.clear()
-                                        st.success(f"✅ Deleted '{conv['title']}'")
+                                        refresh_conversations_list()
+                                        st.success(f"Deleted '{conv['title']}'")
                                         st.rerun()
                 else:
                     st.info("No conversations found matching your search.")
@@ -1202,11 +1290,11 @@ def render_chat_interface():
 
     if conversation_id and conversation_id not in (None, "pending_new"):
         if st.session_state.has_more_messages:
-            if st.button("⬆️ Load older messages", key="load_more_messages"):
+            if st.button("Load older messages", key="load_more_messages"):
                 next_page = st.session_state.conversation_messages_page + 1
                 load_messages_page(next_page, show_spinner=True)
         elif st.session_state.conversation_messages_page > 0:
-            st.caption("All caught up — showing the entire thread.")
+            st.caption("All caught up - showing the entire thread.")
 
     st.markdown('<div class="chat-wrapper">', unsafe_allow_html=True)
     st.markdown(
@@ -1234,7 +1322,7 @@ def render_chat_interface():
 
     if not messages_to_display and conversation_id not in (None, "pending_new"):
         st.markdown(
-            "<div style='text-align:center; color:#94a3b8;'>No messages yet — send the first one!</div>",
+            "<div style='text-align:center; color:#94a3b8;'>No messages yet - send the first one!</div>",
             unsafe_allow_html=True,
         )
 
@@ -1249,9 +1337,9 @@ def render_chat_interface():
                 <div style="display: flex; justify-content: flex-end; margin: 10px 0; align-items: flex-start; gap: 10px;">
                     <div class="user-message">
                         {sanitize_message_content(msg.get("content"))}
-                        <div class="message-timestamp">You • {format_time(msg.get("createdAt", "now"))}</div>
+                        <div class="message-timestamp">You - {format_time(msg.get("createdAt", "now"))}</div>
                     </div>
-                    <div style="border: 2px solid #007bff; color: #007bff; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">👤</div>
+                    <div style="border: 2px solid #007bff; color: #007bff; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">U</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1262,11 +1350,11 @@ def render_chat_interface():
             st.markdown(
                 f"""
                 <div style="display: flex; justify-content: flex-start; margin: 10px 0; align-items: flex-start; gap: 10px;">
-                    <div style="border: 2px solid #28a745; color: #28a745; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; flex-shrink: 0;">🤖</div>
+                    <div style="border: 2px solid #28a745; color: #28a745; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; flex-shrink: 0;">AI</div>
                     <div style="display: flex; flex-direction: column;">
                         <div class="bot-message" style="margin: 0;">
                             {sanitize_message_content(msg.get("content"))}
-                            <div class="message-timestamp">Assistant • {format_time(msg.get("createdAt", "now"))}</div>
+                            <div class="message-timestamp">Assistant - {format_time(msg.get("createdAt", "now"))}</div>
                         </div>
                     </div>
                 </div>
@@ -1280,7 +1368,7 @@ def render_chat_interface():
                     '<div style="margin-left: 45px;">', unsafe_allow_html=True
                 )  # Align with message content
 
-                with st.popover("💭", help="Give feedback"):
+                with st.popover("Feedback", help="Give feedback"):
                     st.markdown("### Provide Feedback")
 
                     with st.form(f"feedback_form_{msg['id']}"):
@@ -1301,7 +1389,7 @@ def render_chat_interface():
                                 feedback_data,
                             )
                             if response:
-                                st.success("✅ Feedback submitted!")
+                                st.success("Feedback submitted!")
                                 get_messages.clear()
                                 st.session_state.conversation_messages_page = 0
                                 st.rerun()
@@ -1313,12 +1401,12 @@ def render_chat_interface():
                     comment_text = feedback.get("comment")
 
                     if rating is not None:
-                        st.markdown(f"⭐ {rating}/5")
+                        st.markdown(f"Rating: {rating}/5")
 
                     if comment_text:
                         preview = comment_text[:100]
                         suffix = "..." if len(comment_text) > 100 else ""
-                        st.markdown(f'💭 *"{preview}{suffix}"*')
+                        st.markdown(f'Comment: *"{preview}{suffix}"*')
 
                 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1358,11 +1446,9 @@ def render_chat_interface():
                     label_visibility="collapsed",
                 )
             with button_col:
+                send_button = st.form_submit_button("Send", use_container_width=True)
                 attach_button = st.form_submit_button(
                     "Attach Images", use_container_width=True
-                )
-                send_button = st.form_submit_button(
-                    "Send", use_container_width=True
                 )
 
             if attach_button:
@@ -1398,21 +1484,9 @@ def render_chat_interface():
                             st.session_state.current_conversation_id = new_conversation[
                                 "id"
                             ]
-                            get_conversations.clear()
-                            refreshed = get_conversations(include_messages=False)
-                            if refreshed and refreshed.get("data"):
-                                st.session_state.conversations_list = refreshed["data"][
-                                    "items"
-                                ]
-                            else:
-                                st.session_state.conversations_list = [
-                                    new_conversation,
-                                    *(
-                                        conv
-                                        for conv in st.session_state.conversations_list
-                                        if conv.get("id") != new_conversation["id"]
-                                    ),
-                                ]
+                            refresh_conversations_list(
+                                fallback_conversation=new_conversation
+                            )
                             reset_conversation_state()
                             st.session_state.pending_image_attachments = (
                                 saved_attachments
@@ -1440,7 +1514,7 @@ def render_chat_interface():
                                 ).extend(st.session_state.pending_image_attachments)
                             st.session_state.pending_image_attachments = []
                         get_messages.clear()
-                        get_conversations.clear()
+                        refresh_conversations_list()
                         reset_conversation_state()
                         st.session_state.show_attachment_uploader = False
                         load_messages_page(1)

@@ -209,6 +209,8 @@ class Container(containers.DeclarativeContainer):
         document_repository=document_repository,
         document_processing_service=document_processing_service,
         document_validation_utils=document_validation_utils,
+        qdrant_client=qdrant_client,
+        embedding_model=embedding_model,
     )
 
 

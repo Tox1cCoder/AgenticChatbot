@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any
 from uuid import UUID
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 from sentence_transformers import SentenceTransformer
@@ -302,6 +302,17 @@ class DocumentProcessingService:
                     filename.split(".")[-1] if "." in filename else "unknown"
                 ),
             }
+
+            if isinstance(chunk_data, dict):
+                if "has_images" in chunk_data:
+                    payload["has_images"] = bool(chunk_data.get("has_images", False))
+                if (
+                    "image_count" in chunk_data
+                    and chunk_data["image_count"] is not None
+                ):
+                    payload["image_count"] = int(chunk_data["image_count"])
+                if chunk_data.get("image_prompts"):
+                    payload["image_prompts"] = chunk_data["image_prompts"]
 
             # Add page information
             if page_start is not None and page_end is not None:

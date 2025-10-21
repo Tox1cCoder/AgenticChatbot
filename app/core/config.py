@@ -77,6 +77,24 @@ class Settings(BaseSettings):
         description="Tavily API Key for web search",
     )
 
+    # Image Generation Configuration
+    enable_image_generation: bool = Field(
+        default=True,
+        description="Toggle for enabling or disabling the image generator agent",
+    )
+    image_generator_model: str = Field(
+        default="gemini-2.5-flash-image",
+        description="Gemini model identifier used for image generation",
+    )
+    image_generator_default_aspect_ratio: str = Field(
+        default="1:1",
+        description="Default aspect ratio for generated images (e.g., 1:1, 16:9)",
+    )
+    image_generator_max_images: int = Field(
+        default=1,
+        description="Maximum number of images to request per generation",
+    )
+
     # Qdrant Configuration
     qdrant_url: str = Field(
         default="http://localhost:6333",
@@ -194,7 +212,7 @@ class Settings(BaseSettings):
         description="Enable re-ranking of retrieved chunks",
     )
     reranker_model: str = Field(
-        default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        default="zeroentropy/zerank-1-small",
         description="Re-ranker model name",
     )
     rerank_top_k: int = Field(

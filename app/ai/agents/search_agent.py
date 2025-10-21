@@ -1,13 +1,11 @@
 import logging
 from typing import Optional
 
-from google import genai
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.agents import create_tool_calling_agent, AgentExecutor
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT
+from ..prompts import build_search_prompt
 from ...core.config import settings
 from ..mcp_integration import MCPManager
 
@@ -17,11 +15,9 @@ logger = logging.getLogger(__name__)
 class SearchAgent:
 
     def __init__(self):
-        self.model_name = "gemini-2.5-pro"
-        self.gemini_client = None
+        self.model_name = "gemini-2.5-flash"
         self.langchain_model = None
         self.mcp_manager = None
-        self.agent_executor = None
         self.tools = []
         self._init_gemini()
 
@@ -34,7 +30,6 @@ class SearchAgent:
         if api_key.startswith("GEMINI_API_KEY="):
             api_key = api_key.split("=", 1)[-1].strip()
 
-        self.gemini_client = genai.Client(api_key=api_key)
         self.langchain_model = ChatGoogleGenerativeAI(
             model=self.model_name, google_api_key=api_key, temperature=0.7
         )
@@ -53,43 +48,15 @@ class SearchAgent:
                 logger.error(f"Failed to initialize MCP manager: {e}", exc_info=True)
                 self.tools = []
 
-    async def _init_agent(self):
-        """Initialize tool calling agent with AgentExecutor"""
-        # Create prompt template
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", SEARCH_SYSTEM_PROMPT),
-                MessagesPlaceholder(variable_name="chat_history", optional=True),
-                ("user", "{input}"),
-                MessagesPlaceholder(variable_name="agent_scratchpad"),
-            ]
-        )
-
-        # Bind tools to the model with function calling config
-        llm_with_tools = self.langchain_model.bind_tools(
-            self.tools, tool_config={"function_calling_config": {"mode": "AUTO"}}
-        )
-
-        # Create tool calling agent
-        agent = create_tool_calling_agent(llm_with_tools, self.tools, prompt)
-
-        # Wrap in AgentExecutor
-        self.agent_executor = AgentExecutor(
-            agent=agent, tools=self.tools, verbose=False
-        )
-
     async def process_message(
         self,
         message: AgentMessage,
         conversation_id: Optional[str] = None,
     ) -> AgentResponse:
-        """Process a search query using tool calling agent"""
+        """Process a search query using tool calling"""
 
         if self.mcp_manager is None:
             await self._init_mcp()
-
-        if self.agent_executor is None:
-            await self._init_agent()
 
         # Extract conversation history
         conversation_history = message.metadata.get("history", [])
@@ -101,11 +68,52 @@ class SearchAgent:
         )
 
         try:
-            # Invoke agent executor
-            result = await self.agent_executor.ainvoke({"input": prompt})
+            # Bind tools to model for this request
+            llm_with_tools = self.langchain_model.bind_tools(
+                self.tools, tool_config={"function_calling_config": {"mode": "AUTO"}}
+            )
 
-            # Extract response from result
-            response_text = result.get("output", "No response from search agent")
+            # Create initial message
+            messages = [HumanMessage(content=prompt)]
+
+            # Agent loop: model -> tool calls -> model -> response
+            max_iterations = 5
+            for iteration in range(max_iterations):
+                # Invoke model
+                ai_message = await llm_with_tools.ainvoke(messages)
+                messages.append(ai_message)
+
+                # Check if model wants to use tools
+                if not ai_message.tool_calls:
+                    response_text = ai_message.content
+                    break
+
+                # Execute tool calls
+                for tool_call in ai_message.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
+                    tool_id = tool_call["id"]
+
+                    # Find and execute the tool
+                    tool_result = None
+                    for tool in self.tools:
+                        if tool.name == tool_name:
+                            try:
+                                tool_result = await tool.ainvoke(tool_args)
+                            except Exception as e:
+                                tool_result = f"Error executing tool: {str(e)}"
+                            break
+
+                    # Add tool result to messages
+                    if tool_result is None:
+                        tool_result = f"Tool {tool_name} not found"
+
+                    messages.append(
+                        ToolMessage(content=str(tool_result), tool_call_id=tool_id)
+                    )
+            else:
+                # Max iterations reached
+                response_text = "Search completed but max iterations reached."
 
         except Exception as e:
             logger.error(f"Error invoking search agent: {e}", exc_info=True)

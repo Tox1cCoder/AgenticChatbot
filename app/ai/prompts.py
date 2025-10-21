@@ -23,19 +23,25 @@ Provide comprehensive answers based on the search results, with note-worthy deta
 If the information cannot be found or is uncertain, clearly indicate this to the user.
 Focus on the most recent and relevant information from credible sources."""
 
+IMAGE_GENERATOR_SYSTEM_PROMPT = """You are a creative visual artist assistant.
+Your role is to translate a user's description into a vivid, well-composed image prompt.
+Use precise, descriptive language that guides the model toward photorealistic or stylized art as requested."""
+
 ROUTER_SYSTEM_PROMPT = """You are a routing assistant that decides which agent should handle a user's message.
 
 Available agents:
 - chat_agent: Handles general conversation, casual chat, greetings, small talk, personal questions, opinions, creative tasks, and general assistance that doesn't require specific document retrieval or web search.
 - rag_agent: Handles questions that require searching through internal documents, retrieving specific information from a knowledge base, answering factual questions that need reference materials from uploaded files, or looking up detailed information from the document collection.
 - search_agent: Handles queries requiring up-to-date web information, current events, recent news, latest data, fact-checking, or information not available in the internal knowledge base. Use for queries with keywords like "latest", "current", "recent", "today", "news", "what's happening", or when asking about events after the model's knowledge cutoff.
+- image_generator_agent: Handles explicit image creation requests such as "generate an image", "create a picture", "draw", "illustrate", "visualize", or when the user asks the assistant to produce artwork or graphics.
 
 Guidelines:
 - Use chat_agent for: greetings, opinions, creative requests, general knowledge within model training, casual conversation
 - Use rag_agent for: "search documents", "find in files", "lookup in knowledge base", "what does the document say", "explain from the files", specific factual queries about uploaded content
 - Use search_agent for: "latest news", "current events", "recent", "today", "what's happening now", up-to-date information, fact-checking recent claims, information beyond model's knowledge cutoff
+- Use image_generator_agent for: explicit instructions to create or generate an image, requests mentioning drawing, illustration, visualization, photos, artwork, design mockups, or when the user expects a visual output.
 
-Analyze the user's message and respond with ONLY the agent name (chat_agent, rag_agent, or search_agent) that should handle it.
+Analyze the user's message and respond with ONLY the agent name (chat_agent, rag_agent, search_agent, or image_generator_agent) that should handle it.
 Do not include any explanation, just the agent name."""
 
 
@@ -247,5 +253,44 @@ def build_search_prompt(
             parts.append("")
 
     parts.append(user_message)
+
+    return "\n".join(parts)
+
+
+def build_image_generator_prompt(
+    user_message: str, conversation_history: list, persona: Optional[str] = None
+) -> str:
+    """Create an enriched prompt for the image generator agent."""
+    parts = [IMAGE_GENERATOR_SYSTEM_PROMPT]
+
+    if persona is not None and persona.strip():
+        parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
+
+    if conversation_history:
+        max_messages = (
+            settings.chat_history_max_messages
+            if settings.chat_history_max_messages > 0
+            else None
+        )
+        max_tokens = (
+            settings.chat_history_max_tokens
+            if settings.chat_history_max_tokens > 0
+            else None
+        )
+        selected_history = _select_history_for_prompt(
+            conversation_history, max_messages, max_tokens
+        )
+
+        if selected_history:
+            parts.append("\n\nRelevant prior requests:")
+            for msg in selected_history:
+                role = "User" if msg.role.value == "user" else "Assistant"
+                parts.append(f"{role}: {msg.content}")
+
+    parts.append("\n\nCreate a detailed image based on this request:")
+    parts.append(user_message)
+    parts.append(
+        "\nEnsure the description includes setting, subject appearance, lighting, camera angle, artistic style, and mood."
+    )
 
     return "\n".join(parts)

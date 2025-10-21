@@ -9,6 +9,7 @@ class AgentType(str, Enum):
     CHAT = "chat"
     RAG = "rag"
     SEARCH = "search"
+    IMAGE_GENERATOR = "image_generator"
 
 
 class MessageRole(str, Enum):

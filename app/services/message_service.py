@@ -56,16 +56,22 @@ class MessageService(IMessageService):
             persona = conversation.persona_prompt if conversation else None
             sanitized_persona = sanitize_persona(persona)
 
-            bot_response_content = await self.ai_service.generate_bot_response(
+            bot_response = await self.ai_service.generate_bot_response(
                 user_message=message_create_data.content,
                 conversation_id=message_create_data.conversation_id,
                 user_id=user_id,
             )
 
+            bot_response_content = (
+                bot_response.message.content
+                if bot_response and bot_response.message
+                else "Error: No response generated"
+            )
+
             # Create metadata for bot response
-            bot_metadata = {}
+            bot_metadata = dict(bot_response.metadata) if bot_response else {}
             if sanitized_persona:
-                bot_metadata["persona_used"] = sanitized_persona
+                bot_metadata.setdefault("persona_used", sanitized_persona)
 
             bot_response_entity = MessageFactory.create_bot_response(
                 conversation_id=message_create_data.conversation_id,
