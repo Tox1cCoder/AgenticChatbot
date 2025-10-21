@@ -11,11 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 from upload_support import render_upload_section, render_document_list
 from datetime import datetime, timedelta
 from dateutil import parser
-
-try:
-    import markdown as _markdown  # type: ignore
-except ImportError:
-    _markdown = None
+import markdown as _markdown
 
 API_BASE_URL = "http://localhost:8000"
 
@@ -450,94 +446,6 @@ def persona_preview(text: Optional[str], limit: int = 160) -> str:
 
     return cleaned[:limit].rstrip() + "..."
 
-
-def _render_basic_markdown(source: str) -> str:
-    """Lightweight markdown renderer used when python-markdown is unavailable."""
-    escaped = html.escape(source, quote=False)
-    lines = escaped.split("\n")
-
-    def _apply_inline_markup(text: str) -> str:
-        text = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", text)
-        text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<em>\1</em>", text)
-        text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
-        return text
-
-    html_parts: List[str] = []
-    paragraph_buffer: List[str] = []
-    in_ul = False
-    in_ol = False
-
-    def flush_paragraph() -> None:
-        nonlocal paragraph_buffer
-        if paragraph_buffer:
-            paragraph = "<br>".join(paragraph_buffer)
-            html_parts.append(f"<p>{_apply_inline_markup(paragraph)}</p>")
-            paragraph_buffer = []
-
-    def close_lists() -> None:
-        nonlocal in_ul, in_ol
-        if in_ul:
-            html_parts.append("</ul>")
-            in_ul = False
-        if in_ol:
-            html_parts.append("</ol>")
-            in_ol = False
-
-    for raw_line in lines:
-        line = raw_line.rstrip()
-        stripped = line.strip()
-
-        if not stripped:
-            flush_paragraph()
-            close_lists()
-            continue
-
-        unordered = re.match(r"^[-*+]\s+", stripped)
-        ordered = re.match(r"^\d+\.\s+", stripped)
-        is_quote = stripped.startswith("&gt;")
-
-        if unordered or ordered:
-            flush_paragraph()
-            if unordered:
-                if in_ol:
-                    html_parts.append("</ol>")
-                    in_ol = False
-                if not in_ul:
-                    html_parts.append("<ul>")
-                    in_ul = True
-                item = re.sub(r"^[-*+]\s+", "", stripped)
-                html_parts.append(f"<li>{_apply_inline_markup(item)}</li>")
-            else:
-                if in_ul:
-                    html_parts.append("</ul>")
-                    in_ul = False
-                if not in_ol:
-                    html_parts.append("<ol>")
-                    in_ol = True
-                item = re.sub(r"^\d+\.\s+", "", stripped)
-                html_parts.append(f"<li>{_apply_inline_markup(item)}</li>")
-            continue
-
-        if is_quote:
-            flush_paragraph()
-            close_lists()
-            quote_content = stripped.lstrip("&gt; ").strip()
-            html_parts.append(
-                f"<blockquote>{_apply_inline_markup(quote_content)}</blockquote>"
-            )
-            continue
-
-        paragraph_buffer.append(_apply_inline_markup(stripped))
-
-    flush_paragraph()
-    close_lists()
-
-    if not html_parts:
-        return "<p></p>"
-
-    return "".join(html_parts)
-
-
 def sanitize_message_content(content: Any) -> str:
     """Render limited markdown to HTML while preventing unsafe tags."""
     if not isinstance(content, str):
@@ -554,14 +462,11 @@ def sanitize_message_content(content: Any) -> str:
         r"!\[([^\]]*)\]\(([^)]+)\)", r"\1 (\2)", normalized, flags=re.MULTILINE
     )
 
-    if _markdown is not None:
-        rendered = _markdown.markdown(
-            normalized,
-            extensions=["extra", "sane_lists"],
-            output_format="html5",
-        )
-    else:
-        rendered = _render_basic_markdown(normalized)
+    rendered = _markdown.markdown(
+        normalized,
+        extensions=["extra", "sane_lists"],
+        output_format="html5",
+    )
 
     safe_html = _sanitize_rendered_html(rendered)
     safe_html = re.sub(r"(?:<br>\s*){3,}", "<br><br>", safe_html)
@@ -721,7 +626,6 @@ def get_feedback(message_id: str) -> Optional[Dict[str, Any]]:
 
     data = response.get("data")
 
-    # API may return a single feedback object or wrap it in a list - normalise to a dict.
     if isinstance(data, dict):
         return data
 
