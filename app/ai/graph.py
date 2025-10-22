@@ -140,9 +140,7 @@ class MultiAgentWorkflow:
             return False
 
         try:
-            return (
-                self.document_repository.count_by_conversation(conversation_uuid) > 0
-            )
+            return self.document_repository.count_by_conversation(conversation_uuid) > 0
         except Exception as exc:
             logger.error(
                 "Failed to determine document availability for conversation %s: %s",
@@ -189,10 +187,14 @@ class MultiAgentWorkflow:
             )
 
         persona = state.get("persona")
+        context = state.get("context", {})
+        attachments = context.get("attachments")
+
         agent_msg = AgentMessage(
             role=MessageRole.USER,
             content=content,
             metadata={"history": conversation_history, "persona": persona},
+            attachments=attachments,
         )
 
         response = await self.chat_agent.process_message(agent_msg, conversation_id)
@@ -242,10 +244,14 @@ class MultiAgentWorkflow:
             )
 
         persona = state.get("persona")
+        context = state.get("context", {})
+        attachments = context.get("attachments")
+
         agent_msg = AgentMessage(
             role=MessageRole.USER,
             content=content,
             metadata={"history": conversation_history, "persona": persona},
+            attachments=attachments,
         )
 
         response = await self.rag_agent.process_message(agent_msg, conversation_id)
@@ -296,10 +302,14 @@ class MultiAgentWorkflow:
             )
 
         persona = state.get("persona")
+        context = state.get("context", {})
+        attachments = context.get("attachments")
+
         agent_msg = AgentMessage(
             role=MessageRole.USER,
             content=content,
             metadata={"history": conversation_history, "persona": persona},
+            attachments=attachments,
         )
 
         response = await self.search_agent.process_message(agent_msg, conversation_id)
@@ -357,10 +367,14 @@ class MultiAgentWorkflow:
                 )
 
         persona = state.get("persona")
+        context = state.get("context", {})
+        attachments = context.get("attachments")
+
         agent_msg = AgentMessage(
             role=MessageRole.USER,
             content=content,
             metadata={"history": conversation_history, "persona": persona},
+            attachments=attachments,
         )
 
         response = await self.image_generator_agent.process_message(
@@ -387,6 +401,7 @@ class MultiAgentWorkflow:
         user_id: Optional[str] = None,
         thread_id: Optional[str] = None,
         persona: Optional[str] = None,
+        attachments: Optional[list] = None,
     ) -> Optional[AgentResponse]:
 
         initial_state: GraphState = {
@@ -401,6 +416,10 @@ class MultiAgentWorkflow:
         initial_state["selected_agent"] = None
         initial_state["response"] = None
         initial_state["persona"] = persona
+
+        # Store attachments in context for agent access
+        if attachments:
+            initial_state["context"]["attachments"] = attachments
 
         config = None
         if self.checkpointer and thread_id:

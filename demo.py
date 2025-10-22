@@ -419,6 +419,46 @@ def render_message_attachments(message_id: str):
         )
 
 
+def render_agent_images(message_metadata: dict):
+    """Render images from agent responses (Tavily/Image Generator)"""
+    if not message_metadata:
+        return
+
+    images = message_metadata.get("images", [])
+    if not images:
+        return
+
+    image_html = []
+    for img in images:
+        if isinstance(img, dict):
+            if "url" in img:
+                url = img.get("url", "")
+                description = img.get("description", "")
+                if url:
+                    image_html.append(
+                        f'<div class="attachment-thumb">'
+                        f'<img src="{html.escape(url)}" '
+                        f'alt="{html.escape(description)}" loading="lazy" '
+                        f'title="{html.escape(description)}" /></div>'
+                    )
+            elif "data" in img:
+                data = img.get("data", "")
+                mime = img.get("mime", "image/png")
+                name = img.get("name", "Generated image")
+                if data:
+                    image_html.append(
+                        f'<div class="attachment-thumb">'
+                        f'<img src="data:{mime};base64,{data}" '
+                        f'alt="{html.escape(name)}" loading="lazy" /></div>'
+                    )
+
+    if image_html:
+        st.markdown(
+            f'<div class="message-attachments">{"".join(image_html)}</div>',
+            unsafe_allow_html=True,
+        )
+
+
 def normalize_persona_input(raw: str) -> str:
     """Normalize persona text similarly to backend sanitization."""
     if not isinstance(raw, str):
@@ -445,6 +485,7 @@ def persona_preview(text: Optional[str], limit: int = 160) -> str:
         return cleaned
 
     return cleaned[:limit].rstrip() + "..."
+
 
 def sanitize_message_content(content: Any) -> str:
     """Render limited markdown to HTML while preventing unsafe tags."""
@@ -1266,6 +1307,9 @@ def render_chat_interface():
                 unsafe_allow_html=True,
             )
 
+            # Render agent-sent images (from Tavily or Image Generator)
+            render_agent_images(msg.get("messageMetadata", {}))
+
             # Add feedback section below the message
             with st.container():
                 st.markdown(
@@ -1404,6 +1448,12 @@ def render_chat_interface():
                         "content": message_content,
                         "conversationId": st.session_state.current_conversation_id,
                     }
+
+                    # Include attachments if present
+                    if st.session_state.pending_image_attachments:
+                        message_data["attachments"] = (
+                            st.session_state.pending_image_attachments
+                        )
 
                     with st.spinner("Thinking..."):
                         response = make_api_request("POST", "/messages/", message_data)

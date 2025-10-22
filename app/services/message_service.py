@@ -56,10 +56,18 @@ class MessageService(IMessageService):
             persona = conversation.persona_prompt if conversation else None
             sanitized_persona = sanitize_persona(persona)
 
+            # Extract attachments from message_create_data if present
+            attachments = (
+                message_create_data.attachments
+                if hasattr(message_create_data, "attachments")
+                else None
+            )
+
             bot_response = await self.ai_service.generate_bot_response(
                 user_message=message_create_data.content,
                 conversation_id=message_create_data.conversation_id,
                 user_id=user_id,
+                attachments=attachments,
             )
 
             bot_response_content = (
@@ -72,6 +80,14 @@ class MessageService(IMessageService):
             bot_metadata = dict(bot_response.metadata) if bot_response else {}
             if sanitized_persona:
                 bot_metadata.setdefault("persona_used", sanitized_persona)
+
+            # Extract images from bot response metadata (from Search or Image Generator agents)
+            if (
+                bot_response
+                and bot_response.metadata
+                and "images" in bot_response.metadata
+            ):
+                bot_metadata["images"] = bot_response.metadata["images"]
 
             bot_response_entity = MessageFactory.create_bot_response(
                 conversation_id=message_create_data.conversation_id,

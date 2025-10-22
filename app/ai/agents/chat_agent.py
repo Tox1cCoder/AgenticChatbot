@@ -1,7 +1,9 @@
 import logging
-from typing import Optional
+import base64
+from typing import Optional, List
 
 from google import genai
+from google.genai import types
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_chat_prompt
@@ -41,7 +43,16 @@ class ChatAgent:
             message.content, conversation_history, persona=persona
         )
 
-        response_text = await self._generate(prompt)
+        attachments = (
+            message.attachments
+            if hasattr(message, "attachments") and message.attachments
+            else None
+        )
+
+        if attachments:
+            response_text = await self._generate_with_vision(prompt, attachments)
+        else:
+            response_text = await self._generate(prompt)
 
         response_message = AgentMessage(
             role=MessageRole.ASSISTANT, content=response_text
@@ -56,6 +67,7 @@ class ChatAgent:
                 "conversation_id": conversation_id,
                 "context_messages": len(conversation_history),
                 "persona_used": persona,
+                "has_images": bool(attachments),
             },
         )
 
@@ -72,3 +84,32 @@ class ChatAgent:
         except Exception as e:
             logger.error(f"Gemini API error: {e}")
             return f"Error generating response: {str(e)}"
+
+    async def _generate_with_vision(self, prompt: str, attachments: List[dict]) -> str:
+        """Generate response with vision support using multimodal content"""
+        parts = []
+
+        parts.append(types.Part(text=prompt))
+
+        # Add images from attachments
+        for attachment in attachments:
+            try:
+                # Decode base64 image data
+                image_data = base64.b64decode(attachment.get("data", ""))
+                mime_type = attachment.get("mime", "image/jpeg")
+
+                # Create image part from bytes
+                parts.append(
+                    types.Part.from_bytes(data=image_data, mime_type=mime_type)
+                )
+                logger.info(
+                    f"Added image to vision request: {attachment.get('name', 'unknown')}"
+                )
+            except Exception as img_err:
+                logger.error(f"Failed to process image attachment: {img_err}")
+
+        # Generate response with multimodal content
+        response = self.gemini_client.models.generate_content(
+            model=self.model_name, contents=parts
+        )
+        return response.text if hasattr(response, "text") else str(response)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from uuid import UUID
 
 from pydantic import BaseModel, Field, ConfigDict
@@ -17,6 +17,10 @@ class MessageCreate(BaseModel):
     content: str = Field(..., min_length=1, description="Message content")
     role: MessageRole = Field(
         default=MessageRole.user, description="Message role: user=1, assistant=2"
+    )
+    attachments: Optional[List[Dict[str, str]]] = Field(
+        default=None,
+        description="Optional image attachments with structure {name: str, mime: str, data: str (base64)}",
     )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)

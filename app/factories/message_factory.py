@@ -34,6 +34,11 @@ class MessageFactory:
     ) -> Dict[str, Any]:
         """Create Message data dictionary from MessageCreate schema with specified role"""
         metadata = dict(message_metadata) if message_metadata else {}
+
+        # Store attachments in metadata if present
+        if hasattr(message_data, "attachments") and message_data.attachments:
+            metadata["attachments"] = message_data.attachments
+
         return {
             "id": uuid4(),
             "conversation_id": message_data.conversation_id,

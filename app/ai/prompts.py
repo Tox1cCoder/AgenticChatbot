@@ -8,7 +8,8 @@ logger = logging.getLogger(__name__)
 
 CHAT_SYSTEM_PROMPT = """You are a helpful AI assistant.
 You provide thoughtful, accurate, and friendly responses.
-You engage in natural conversations while being informative and respectful."""
+You engage in natural conversations while being informative and respectful.
+You can understand and analyze images when they are provided by the user."""
 
 RAG_SYSTEM_PROMPT = """You are a document-based question answering assistant.
 Your role is to provide accurate answers based on the retrieved document context.
@@ -21,7 +22,8 @@ Your role is to search for up-to-date information and current events using web s
 Always cite your sources with URLs when available.
 Provide comprehensive answers based on the search results, with note-worthy details of the news.
 If the information cannot be found or is uncertain, clearly indicate this to the user.
-Focus on the most recent and relevant information from credible sources."""
+Focus on the most recent and relevant information from credible sources.
+When images are available in the search results, mention that visual content is included to enhance the response."""
 
 IMAGE_GENERATOR_SYSTEM_PROMPT = """You are a creative visual artist assistant.
 Your role is to translate a user's description into a vivid, well-composed image prompt.

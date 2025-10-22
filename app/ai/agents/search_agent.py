@@ -1,5 +1,6 @@
 import logging
-from typing import Optional
+import json
+from typing import Optional, List, Dict, Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -78,6 +79,8 @@ class SearchAgent:
 
             # Agent loop: model -> tool calls -> model -> response
             max_iterations = 5
+            extracted_images = []
+
             for iteration in range(max_iterations):
                 # Invoke model
                 ai_message = await llm_with_tools.ainvoke(messages)
@@ -100,6 +103,15 @@ class SearchAgent:
                         if tool.name == tool_name:
                             try:
                                 tool_result = await tool.ainvoke(tool_args)
+
+                                # Extract images from Tavily response
+                                if tool_name == "tavily_search":
+                                    images = self._extract_images_from_tavily(
+                                        tool_result
+                                    )
+                                    if images:
+                                        extracted_images.extend(images)
+
                             except Exception as e:
                                 tool_result = f"Error executing tool: {str(e)}"
                             break
@@ -129,6 +141,10 @@ class SearchAgent:
             "persona_used": persona,
         }
 
+        # Add images to metadata if any were extracted
+        if extracted_images:
+            search_metadata["images"] = extracted_images
+
         # Create response message
         response_message = AgentMessage(
             role=MessageRole.ASSISTANT, content=response_text
@@ -140,6 +156,28 @@ class SearchAgent:
             message=response_message,
             metadata=search_metadata,
         )
+
+    def _extract_images_from_tavily(self, tool_result: Any) -> List[Dict[str, str]]:
+        """Extract images from Tavily search results"""
+        try:
+            # Parse tool result as JSON if it's a string
+            if isinstance(tool_result, str):
+                result_data = json.loads(tool_result)
+            else:
+                result_data = tool_result
+
+            # Extract images array from response
+            images = result_data.get("images", [])
+
+            # Return images with url and description
+            return [
+                {"url": img.get("url", ""), "description": img.get("description", "")}
+                for img in images
+                if img.get("url")
+            ]
+        except Exception as e:
+            logger.error(f"Failed to extract images from Tavily response: {e}")
+            return []
 
     async def cleanup(self):
         """Cleanup MCP resources"""

@@ -22,6 +22,10 @@ class AgentMessage(BaseModel):
     role: MessageRole
     content: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    attachments: Optional[List[Dict[str, str]]] = Field(
+        default=None,
+        description="Optional image attachments with structure {name: str, mime: str, data: str (base64)}",
+    )
 
 
 class AgentConfig(BaseModel):

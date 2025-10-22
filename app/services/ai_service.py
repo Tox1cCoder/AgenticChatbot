@@ -61,7 +61,11 @@ class AIService:
         )
 
     async def process_message(
-        self, conversation_id: UUID, user_id: UUID, message: str
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        message: str,
+        attachments: Optional[list] = None,
     ) -> AgentResponse:
 
         thread_id = (
@@ -78,6 +82,7 @@ class AIService:
             user_id=str(user_id) if user_id else None,
             thread_id=thread_id,
             persona=persona,
+            attachments=attachments,
         )
 
         if response:
@@ -90,12 +95,17 @@ class AIService:
         user_message: str,
         conversation_id: Optional[UUID] = None,
         user_id: Optional[UUID] = None,
+        attachments: Optional[list] = None,
     ) -> AgentResponse:
 
         if conversation_id is None or user_id is None:
             logger.warning("Conversation ID or User ID is None")
             response = await self.workflow.execute(
-                message=user_message, conversation_id=None, user_id=None, persona=None
+                message=user_message,
+                conversation_id=None,
+                user_id=None,
+                persona=None,
+                attachments=attachments,
             )
             if response:
                 return response
@@ -105,6 +115,7 @@ class AIService:
             conversation_id=conversation_id,
             user_id=user_id,
             message=user_message,
+            attachments=attachments,
         )
 
     def get_bot_response_sync(

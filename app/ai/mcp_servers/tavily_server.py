@@ -63,16 +63,37 @@ def tavily_search(query: str, max_results: int = 5) -> str:
                     }
                 )
 
+            # Extract images from response
+            images = []
+            if "images" in response:
+                for img in response["images"]:
+                    images.append(
+                        {
+                            "url": img.get("url", ""),
+                            "description": img.get("description", ""),
+                        }
+                    )
+
             return json.dumps(
                 {
                     "query": query,
+                    "answer": response.get("answer", ""),
+                    "images": images,
                     "results": formatted_results,
                     "total_results": len(formatted_results),
                 },
                 indent=2,
             )
         else:
-            return json.dumps({"query": query, "results": [], "total_results": 0})
+            return json.dumps(
+                {
+                    "query": query,
+                    "answer": "",
+                    "images": [],
+                    "results": [],
+                    "total_results": 0,
+                }
+            )
 
     except Exception as e:
         return json.dumps({"error": f"Search failed: {str(e)}"})
