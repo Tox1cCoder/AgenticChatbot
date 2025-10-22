@@ -83,7 +83,7 @@ class Settings(BaseSettings):
         description="Toggle for enabling or disabling the image generator agent",
     )
     image_generator_model: str = Field(
-        default="gemini-2.5-flash-image",
+        default="gemini-2.0-flash-preview-image-generation",
         description="Gemini model identifier used for image generation",
     )
     image_generator_default_aspect_ratio: str = Field(

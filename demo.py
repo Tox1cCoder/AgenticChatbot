@@ -1,6 +1,7 @@
 import base64
 import mimetypes
 import uuid
+from copy import deepcopy
 
 import streamlit as st
 import requests
@@ -249,6 +250,8 @@ SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
     "pending_image_attachments": list,
     "message_image_thumbnails": dict,
     "show_attachment_uploader": lambda: False,
+    "image_viewer_open": lambda: False,
+    "image_viewer_payload": lambda: None,
     "API_BASE_URL": lambda: API_BASE_URL,
 }
 
@@ -415,6 +418,17 @@ def render_pending_attachment_preview(allow_remove: bool = True):
         st.rerun()
 
 
+def _guess_extension(mime: Optional[str]) -> str:
+    if not mime:
+        return "png"
+    base_mime = mime.split(";")[0]
+    ext = mimetypes.guess_extension(base_mime)
+    if ext:
+        return ext.lstrip(".")
+    if base_mime.endswith("jpeg"):
+        return "jpg"
+    return "png"
+
 def _format_image_only_message(attachments: List[Dict[str, str]]) -> str:
     """Generate fallback message content for image-only submissions."""
     if not attachments:
@@ -445,7 +459,9 @@ def render_message_attachments(message_id: str, align: str = "left"):
     if not attachments:
         return
 
+    prepared: List[Dict[str, Any]] = []
     thumbnail_fragments: List[str] = []
+
     for idx, att in enumerate(attachments, start=1):
         if not isinstance(att, dict):
             continue
@@ -465,34 +481,71 @@ def render_message_attachments(message_id: str, align: str = "left"):
 
         name = att.get("name") or f"Attachment {idx}"
         escaped_name = html.escape(name, quote=True)
-        raw_href = f"data:{mime};base64,{data_str}" if has_data else url_str
-        escaped_href = html.escape(raw_href, quote=True)
+        display_src = f"data:{mime};base64,{data_str}" if has_data else url_str
+        escaped_src = html.escape(display_src, quote=True)
+        download_name = att.get("download_name") or name
+        if "." not in download_name:
+            download_name = f"{download_name}.{_guess_extension(mime)}"
 
-        download_attr = f' download="{escaped_name}"' if has_data else ""
+        rel_value = "noopener"
+        if has_url and not has_data:
+            rel_value = "noopener noreferrer"
+        rel_attr = f' rel="{rel_value}"' if rel_value else ""
+
+        download_attr = (
+            f' download="{html.escape(download_name, quote=True)}"' if has_data else ""
+        )
 
         thumbnail_fragments.append(
-            f'<a class="attachment-thumb-link" href="{escaped_href}" target="_blank" '
-            f'rel="noopener noreferrer" aria-label="Open {escaped_name}" '
-            f'title="{escaped_name}"{download_attr}>'
+            f'<a class="attachment-thumb-link" href="{escaped_src}" target="_blank"{rel_attr} '
+            f'aria-label="Open {escaped_name}" title="{escaped_name}"{download_attr}>'
             f'<div class="attachment-thumb">'
-            f'<img src="{escaped_href}" alt="{escaped_name}" loading="lazy" />'
+            f'<img src="{escaped_src}" alt="{escaped_name}" loading="lazy" />'
             f"</div></a>"
         )
 
-    if thumbnail_fragments:
-        justify = "flex-end" if align == "right" else "flex-start"
-        margin_css = "margin:6px 45px 0 0;" if align == "right" else "margin:6px 0 0 45px;"
-        st.markdown(
-            f'<div class="message-attachments-wrapper" '
-            f'style="display:flex; justify-content:{justify}; {margin_css}">'
-            f'<div class="message-attachments">{"".join(thumbnail_fragments)}</div>'
-            f"</div>",
-            unsafe_allow_html=True,
+        prepared.append(
+            {
+                "token": att.get("token") or f"{message_id}_{idx}",
+                "name": name,
+                "mime": mime,
+                "has_data": has_data,
+                "data": data_str if has_data else None,
+                "url": url_str if has_url else None,
+                "display_src": display_src,
+                "download_name": download_name,
+            }
         )
 
+    if not thumbnail_fragments:
+        return
 
-def render_agent_images(message_metadata: dict):
-    """Render images from agent responses (Tavily/Image Generator)"""
+    justify = "flex-end" if align == "right" else "flex-start"
+    margin_css = "margin:6px 45px 0 0;" if align == "right" else "margin:6px 0 0 45px;"
+    st.markdown(
+        f'<div class="message-attachments-wrapper" '
+        f'style="display:flex; justify-content:{justify}; {margin_css}">'
+        f'<div class="message-attachments">{"".join(thumbnail_fragments)}</div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    viewer_items = [
+        {
+            "name": item["name"],
+            "mime": item["mime"],
+            "has_data": item["has_data"],
+            "data": item["data"],
+            "url": item["url"],
+            "display_src": item["display_src"],
+            "download_name": item["download_name"],
+        }
+        for item in prepared
+    ]
+
+
+def render_agent_images(message_metadata: dict, message_id: str):
+    """Render images from agent responses"""
     if not message_metadata:
         return
 
@@ -500,7 +553,9 @@ def render_agent_images(message_metadata: dict):
     if not images:
         return
 
+    prepared: List[Dict[str, Any]] = []
     image_fragments: List[str] = []
+
     for idx, img in enumerate(images, start=1):
         if isinstance(img, dict):
             if "url" in img:
@@ -518,6 +573,22 @@ def render_agent_images(message_metadata: dict):
                         f'<img src="{escaped_url}" alt="{escaped_text}" loading="lazy" />'
                         f"</div></a>"
                     )
+                    prepared.append(
+                        {
+                            "token": img.get("token") or f"{message_id}_url_{idx}",
+                            "name": text,
+                            "mime": img.get("mime", "image/png"),
+                            "has_data": False,
+                            "data": None,
+                            "url": url,
+                            "display_src": url,
+                            "download_name": (
+                                text
+                                if "." in text
+                                else f"{text}.{_guess_extension(img.get('mime'))}"
+                            ),
+                        }
+                    )
             elif "data" in img:
                 data = img.get("data", "")
                 mime = img.get("mime", "image/png")
@@ -526,12 +597,27 @@ def render_agent_images(message_metadata: dict):
                     escaped_name = html.escape(name, quote=True)
                     data_url = f"data:{mime};base64,{data}"
                     image_fragments.append(
-                        f'<a class="attachment-thumb-link" href="{data_url}" target="_blank" '
-                        f'rel="noopener noreferrer" aria-label="Open {escaped_name}" '
-                        f'title="{escaped_name}">'
+                        f'<a class="attachment-thumb-link" href="{data_url}" target="_blank" rel="noopener" '
+                        f'aria-label="Open {escaped_name}" title="{escaped_name}" download="{escaped_name}">'
                         f'<div class="attachment-thumb">'
                         f'<img src="{data_url}" alt="{escaped_name}" loading="lazy" />'
                         f"</div></a>"
+                    )
+                    prepared.append(
+                        {
+                            "token": img.get("token") or f"{message_id}_data_{idx}",
+                            "name": name,
+                            "mime": mime,
+                            "has_data": True,
+                            "data": data,
+                            "url": None,
+                            "display_src": data_url,
+                            "download_name": (
+                                name
+                                if "." in name
+                                else f"{name}.{_guess_extension(mime)}"
+                            ),
+                        }
                     )
 
     if image_fragments:
@@ -542,6 +628,18 @@ def render_agent_images(message_metadata: dict):
             f"</div>",
             unsafe_allow_html=True,
         )
+        viewer_items = [
+            {
+                "name": item["name"],
+                "mime": item["mime"],
+                "has_data": item["has_data"],
+                "data": item["data"],
+                "url": item["url"],
+                "display_src": item["display_src"],
+                "download_name": item["download_name"],
+            }
+            for item in prepared
+        ]
 
 
 def normalize_persona_input(raw: str) -> str:
@@ -625,6 +723,8 @@ def reset_conversation_state() -> None:
     st.session_state.persona_editor_pending = False
     st.session_state.pending_image_attachments = []
     st.session_state.show_attachment_uploader = False
+    st.session_state.image_viewer_open = False
+    st.session_state.image_viewer_payload = None
     st.session_state.message_image_thumbnails = {}
 
 
@@ -1172,16 +1272,17 @@ def render_conversation_manager():
                                     sender_value = msg.get("sender")
                                     sender_icon = (
                                         "[User]"
-                                        if sender_value in (1, "user")
+                                        if sender_value in (1, "user", "USER", "User")
                                         else "[Assistant]"
                                     )
                                     sender_name = (
                                         "user"
-                                        if sender_value in (1, "user")
+                                        if sender_value in (1, "user", "USER", "User")
                                         else "assistant"
                                     )
+                                    preview = msg.get("content", "")
                                     st.markdown(
-                                        f"{sender_icon} **{sender_name}:** {msg['content'][:100]}..."
+                                        f"{sender_icon} **{sender_name}:** {preview[:100]}..."
                                     )
                             else:
                                 st.markdown("No messages available")
@@ -1439,7 +1540,10 @@ def render_chat_interface():
             )
 
             # Render agent-sent images (from Tavily or Image Generator)
-            render_agent_images(msg.get("messageMetadata", {}))
+            render_agent_images(
+                msg.get("messageMetadata", {}),
+                str(msg.get("id", "")),
+            )
 
             # Add feedback section below the message
             with st.container():
