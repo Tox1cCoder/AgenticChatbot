@@ -429,6 +429,7 @@ def _guess_extension(mime: Optional[str]) -> str:
         return "jpg"
     return "png"
 
+
 def _format_image_only_message(attachments: List[Dict[str, str]]) -> str:
     """Generate fallback message content for image-only submissions."""
     if not attachments:
@@ -442,7 +443,11 @@ def _format_image_only_message(attachments: List[Dict[str, str]]) -> str:
 
     if not names:
         count = len(attachments)
-        return "[Image attachment]" if count == 1 else f"[Image attachments: {count} files]"
+        return (
+            "[Image attachment]"
+            if count == 1
+            else f"[Image attachments: {count} files]"
+        )
 
     if len(names) == 1:
         return f"[Image attachment: {names[0]}]"
@@ -670,9 +675,10 @@ def persona_preview(text: Optional[str], limit: int = 160) -> str:
     return cleaned[:limit].rstrip() + "..."
 
 
-def sanitize_message_content(content: Any) -> str:
+@st.cache_data(show_spinner=False, max_entries=500)
+def sanitize_message_content(content: str) -> str:
     """Render limited markdown to HTML while preventing unsafe tags."""
-    if not isinstance(content, str):
+    if not content or not isinstance(content, str):
         return ""
 
     normalized = (
@@ -693,9 +699,9 @@ def sanitize_message_content(content: Any) -> str:
     )
 
     safe_html = _sanitize_rendered_html(rendered)
+    # Batch replace operations
+    safe_html = safe_html.replace("<p></p>", "").replace("<p><br></p>", "<br>")
     safe_html = re.sub(r"(?:<br>\s*){3,}", "<br><br>", safe_html)
-    safe_html = safe_html.replace("<p></p>", "")
-    safe_html = safe_html.replace("<p><br></p>", "<br>")
     safe_html = re.sub(r"\s*(</?p>)\s*", r"\1", safe_html)
     safe_html = safe_html.strip()
 
@@ -1330,17 +1336,85 @@ def render_conversation_manager():
                 st.rerun()
 
 
+def render_message_feedback(msg: Dict[str, Any]) -> None:
+    """Render feedback section for a message outside the main loop."""
+    feedback_key = f"feedback_msg_{msg['id']}"
+
+    # Show existing feedback directly beneath the bot message
+    feedback = msg.get("feedback")
+
+    with st.container():
+        st.markdown('<div style="margin-left: 45px;">', unsafe_allow_html=True)
+
+        if isinstance(feedback, dict) and feedback:
+            rating = feedback.get("rating")
+            comment_text = feedback.get("comment")
+
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                if rating is not None:
+                    st.markdown(f"⭐ Rating: {rating}/5")
+                if comment_text:
+                    preview = comment_text[:80]
+                    suffix = "..." if len(comment_text) > 80 else ""
+                    st.markdown(f'💬 *"{preview}{suffix}"*')
+            with col2:
+                if st.button(
+                    "Edit", key=f"edit_feedback_{msg['id']}", use_container_width=True
+                ):
+                    st.session_state[feedback_key] = True
+                    st.rerun()
+
+        # Show feedback form only if triggered
+        if st.session_state.get(feedback_key, False):
+            with st.form(f"feedback_form_{msg['id']}", clear_on_submit=True):
+                rating = st.selectbox(
+                    "Rating", [1, 2, 3, 4, 5], index=4, key=f"rating_{msg['id']}"
+                )
+                comment = st.text_area(
+                    "Comment (optional)", height=80, key=f"comment_{msg['id']}"
+                )
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.form_submit_button("Submit", use_container_width=True):
+                        feedback_data = {
+                            "messageId": msg["id"],
+                            "rating": rating,
+                            "comment": comment,
+                        }
+                        response = make_api_request(
+                            "POST",
+                            f"/messages/{msg['id']}/feedbacks",
+                            feedback_data,
+                        )
+                        if response:
+                            st.session_state[feedback_key] = False
+                            get_messages.clear()
+                            st.session_state.conversation_messages_page = 0
+                            st.success("✓ Feedback submitted!")
+                            st.rerun()
+                with col2:
+                    if st.form_submit_button("Cancel", use_container_width=True):
+                        st.session_state[feedback_key] = False
+                        st.rerun()
+        elif not feedback:
+            if st.button(
+                "💬 Feedback",
+                key=f"add_feedback_{msg['id']}",
+                type="secondary",
+            ):
+                st.session_state[feedback_key] = True
+                st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
 def render_chat_interface():
     conversation_id = st.session_state.get("current_conversation_id")
     user_id = st.session_state.get("current_user_id")
 
-    if not st.session_state.conversations_list and user_id:
-        # Load conversations without messages (messages only needed in conversation manager)
-        conversations_response = get_conversations(include_messages=False)
-        if conversations_response and conversations_response.get("data"):
-            st.session_state.conversations_list = conversations_response["data"][
-                "items"
-            ]
+    # Conversations list is already loaded in sidebar, no need to reload here
 
     if st.session_state.persona_feedback:
         st.success(st.session_state.persona_feedback)
@@ -1546,52 +1620,7 @@ def render_chat_interface():
             )
 
             # Add feedback section below the message
-            with st.container():
-                st.markdown(
-                    '<div style="margin-left: 45px;">', unsafe_allow_html=True
-                )  # Align with message content
-
-                with st.popover("Feedback", help="Give feedback"):
-                    st.markdown("### Provide Feedback")
-
-                    with st.form(f"feedback_form_{msg['id']}"):
-                        rating = st.selectbox("Rating", [1, 2, 3, 4, 5], index=4)
-                        comment = st.text_area("Comment (optional)", height=100)
-
-                        if st.form_submit_button(
-                            "Submit Feedback", use_container_width=True
-                        ):
-                            feedback_data = {
-                                "messageId": msg["id"],
-                                "rating": rating,
-                                "comment": comment,
-                            }
-                            response = make_api_request(
-                                "POST",
-                                f"/messages/{msg['id']}/feedbacks",
-                                feedback_data,
-                            )
-                            if response:
-                                st.success("Feedback submitted!")
-                                get_messages.clear()
-                                st.session_state.conversation_messages_page = 0
-                                st.rerun()
-
-                # Show existing feedback directly beneath the bot message
-                feedback = msg.get("feedback")
-                if isinstance(feedback, dict) and feedback:
-                    rating = feedback.get("rating")
-                    comment_text = feedback.get("comment")
-
-                    if rating is not None:
-                        st.markdown(f"Rating: {rating}/5")
-
-                    if comment_text:
-                        preview = comment_text[:100]
-                        suffix = "..." if len(comment_text) > 100 else ""
-                        st.markdown(f'Comment: *"{preview}{suffix}"*')
-
-                st.markdown("</div>", unsafe_allow_html=True)
+            render_message_feedback(msg)
 
     st.markdown("</div></div>", unsafe_allow_html=True)
 
@@ -1647,7 +1676,6 @@ def render_chat_interface():
                 st.session_state.show_attachment_uploader = not st.session_state.get(
                     "show_attachment_uploader", False
                 )
-                st.rerun()
 
             if send_button:
                 pending_attachments = list(
@@ -1656,7 +1684,9 @@ def render_chat_interface():
                 stripped_message = message_content.strip()
 
                 if not stripped_message and not pending_attachments:
-                    st.warning("Please enter a message or attach images before sending.")
+                    st.warning(
+                        "Please enter a message or attach images before sending."
+                    )
                 else:
                     message_to_send = stripped_message or _format_image_only_message(
                         pending_attachments
