@@ -1,7 +1,8 @@
 from typing import List, Optional
 from uuid import UUID
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import select, asc, desc
+from sqlalchemy import select, asc, desc, func
+
 
 from app.models.conversation import Conversation
 from app.models.message import Message
@@ -88,7 +89,7 @@ class ConversationCRUDStrategy(
         order_by: str = "updated_at",
         order_direction: str = "desc",
     ) -> List[Conversation]:
-        """Get conversations with limited recent messages"""
+        """Get conversations with limited recent messages and total message count"""        
         # Get all conversations for the user
         statement = select(Conversation).where(
             Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
@@ -108,8 +109,16 @@ class ConversationCRUDStrategy(
 
         conversations = list(db.execute(statement).scalars().all())
 
-        # Load recent messages for each conversation
+        # Load recent messages and count total messages for each conversation
         for conversation in conversations:
+            # Get total message count
+            count_statement = (
+                select(func.count(Message.id))
+                .where(Message.conversation_id == conversation.id)
+            )
+            total_message_count = db.execute(count_statement).scalar() or 0
+            
+            # Get recent messages
             message_statement = (
                 select(Message)
                 .where(Message.conversation_id == conversation.id)
@@ -138,8 +147,9 @@ class ConversationCRUDStrategy(
             # Expunge conversation from session first
             db.expunge(conversation)
 
-            # Set messages directly in __dict__ to bypass SQLAlchemy descriptors entirely
+            # Set messages and message count directly in __dict__
             conversation.__dict__["messages"] = messages_for_attribute
+            conversation.__dict__["message_count"] = total_message_count
 
         return conversations
 

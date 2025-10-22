@@ -51,6 +51,9 @@ class ConversationRead(BaseModel):
         max_length=2000,
         description="Custom persona/system instruction for this conversation",
     )
+    message_count: Optional[int] = Field(
+        default=None, description="Total number of messages in the conversation"
+    )
     messages: Optional[List["MessageRead"]] = Field(
         default=None, description="Recent messages in the conversation (when requested)"
     )

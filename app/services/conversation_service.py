@@ -45,6 +45,11 @@ class ConversationService(IConversationService):
             "persona_prompt": conversation_entity.persona_prompt,
         }
 
+        if hasattr(conversation_entity, "message_count"):
+            conv_dict["message_count"] = conversation_entity.message_count
+        else:
+            conv_dict["message_count"] = None
+
         if "messages" in include:
             try:
                 messages = conversation_entity.__dict__.get("messages")
