@@ -3,13 +3,14 @@ import sys
 import json
 from pathlib import Path
 
-# Add parent directories to path to import from app
 current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from mcp.server.fastmcp import FastMCP
 from tavily import TavilyClient
+from app.core.config import settings
+
 
 mcp = FastMCP("Tavily")
 
@@ -21,11 +22,8 @@ def tavily_search(query: str, max_results: int = 5) -> str:
         # Try to get API key from environment first
         api_key = os.getenv("TAVILY_API_KEY")
 
-        # If not in environment, try to load from settings
         if not api_key:
             try:
-                from app.core.config import settings
-
                 api_key = settings.tavily_api_key
             except Exception as e:
                 pass

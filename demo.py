@@ -145,6 +145,21 @@ APP_STYLE = """
         border: 1px solid #e2e8f0;
         box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15);
         background: #f8fafc;
+        cursor: pointer;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .message-attachments .attachment-thumb:hover {
+        transform: scale(1.05);
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.2);
+    }
+    .message-attachments .attachment-thumb-link {
+        display: inline-flex;
+        border-radius: 12px;
+        text-decoration: none;
+    }
+    .message-attachments .attachment-thumb-link:focus-visible {
+        outline: 2px solid #38bdf8;
+        outline-offset: 2px;
     }
     .pending-attachments .attachment-thumb img,
     .message-attachments .attachment-thumb img {
@@ -400,21 +415,78 @@ def render_pending_attachment_preview(allow_remove: bool = True):
         st.rerun()
 
 
-def render_message_attachments(message_id: str):
+def _format_image_only_message(attachments: List[Dict[str, str]]) -> str:
+    """Generate fallback message content for image-only submissions."""
+    if not attachments:
+        return "[Image attachments]"
+
+    names = [
+        att.get("name")
+        for att in attachments
+        if isinstance(att, dict) and att.get("name")
+    ]
+
+    if not names:
+        count = len(attachments)
+        return "[Image attachment]" if count == 1 else f"[Image attachments: {count} files]"
+
+    if len(names) == 1:
+        return f"[Image attachment: {names[0]}]"
+
+    displayed = ", ".join(names[:3])
+    if len(names) > 3:
+        displayed += ", ..."
+
+    return f"[Image attachments: {displayed}]"
+
+
+def render_message_attachments(message_id: str, align: str = "left"):
     attachments = st.session_state.get("message_image_thumbnails", {}).get(message_id)
     if not attachments:
         return
 
-    thumbnails = "".join(
-        f'<div class="attachment-thumb">'
-        f'<img src="data:{att["mime"]};base64,{att["data"]}" '
-        f'alt="{html.escape(att["name"])}" loading="lazy" /></div>'
-        for att in attachments
-    )
+    thumbnail_fragments: List[str] = []
+    for idx, att in enumerate(attachments, start=1):
+        if not isinstance(att, dict):
+            continue
 
-    if thumbnails:
+        mime = att.get("mime", "image/png")
+        data_str = att.get("data")
+        url_str = att.get("url")
+
+        data_str = data_str.strip() if isinstance(data_str, str) else ""
+        url_str = url_str.strip() if isinstance(url_str, str) else ""
+
+        has_data = bool(data_str)
+        has_url = bool(url_str)
+
+        if not has_data and not has_url:
+            continue
+
+        name = att.get("name") or f"Attachment {idx}"
+        escaped_name = html.escape(name, quote=True)
+        raw_href = f"data:{mime};base64,{data_str}" if has_data else url_str
+        escaped_href = html.escape(raw_href, quote=True)
+
+        download_attr = f' download="{escaped_name}"' if has_data else ""
+
+        thumbnail_fragments.append(
+            f'<a class="attachment-thumb-link" href="{escaped_href}" target="_blank" '
+            f'rel="noopener noreferrer" aria-label="Open {escaped_name}" '
+            f'title="{escaped_name}"{download_attr}>'
+            f'<div class="attachment-thumb">'
+            f'<img src="{escaped_href}" alt="{escaped_name}" loading="lazy" />'
+            f"</div></a>"
+        )
+
+    if thumbnail_fragments:
+        justify = "flex-end" if align == "right" else "flex-start"
+        margin_css = "margin:6px 45px 0 0;" if align == "right" else "margin:6px 0 0 45px;"
         st.markdown(
-            f'<div class="message-attachments">{thumbnails}</div>',
+            f'<div class="message-attachments-wrapper" '
+            f'style="display:flex; justify-content:{justify}; {margin_css}">'
+            f'<div class="message-attachments">{"".join(thumbnail_fragments)}</div>'
+            f"</div>",
             unsafe_allow_html=True,
         )
 
@@ -428,33 +500,46 @@ def render_agent_images(message_metadata: dict):
     if not images:
         return
 
-    image_html = []
-    for img in images:
+    image_fragments: List[str] = []
+    for idx, img in enumerate(images, start=1):
         if isinstance(img, dict):
             if "url" in img:
                 url = img.get("url", "")
                 description = img.get("description", "")
                 if url:
-                    image_html.append(
+                    escaped_url = html.escape(url, quote=True)
+                    text = description or f"Image {idx}"
+                    escaped_text = html.escape(text, quote=True)
+                    image_fragments.append(
+                        f'<a class="attachment-thumb-link" href="{escaped_url}" target="_blank" '
+                        f'rel="noopener noreferrer" aria-label="Open {escaped_text}" '
+                        f'title="{escaped_text}">'
                         f'<div class="attachment-thumb">'
-                        f'<img src="{html.escape(url)}" '
-                        f'alt="{html.escape(description)}" loading="lazy" '
-                        f'title="{html.escape(description)}" /></div>'
+                        f'<img src="{escaped_url}" alt="{escaped_text}" loading="lazy" />'
+                        f"</div></a>"
                     )
             elif "data" in img:
                 data = img.get("data", "")
                 mime = img.get("mime", "image/png")
                 name = img.get("name", "Generated image")
                 if data:
-                    image_html.append(
+                    escaped_name = html.escape(name, quote=True)
+                    data_url = f"data:{mime};base64,{data}"
+                    image_fragments.append(
+                        f'<a class="attachment-thumb-link" href="{data_url}" target="_blank" '
+                        f'rel="noopener noreferrer" aria-label="Open {escaped_name}" '
+                        f'title="{escaped_name}">'
                         f'<div class="attachment-thumb">'
-                        f'<img src="data:{mime};base64,{data}" '
-                        f'alt="{html.escape(name)}" loading="lazy" /></div>'
+                        f'<img src="{data_url}" alt="{escaped_name}" loading="lazy" />'
+                        f"</div></a>"
                     )
 
-    if image_html:
+    if image_fragments:
         st.markdown(
-            f'<div class="message-attachments">{"".join(image_html)}</div>',
+            f'<div class="message-attachments-wrapper" '
+            f'style="display:flex; justify-content:flex-start; margin:6px 0 0 45px;">'
+            f'<div class="message-attachments">{"".join(image_fragments)}</div>'
+            f"</div>",
             unsafe_allow_html=True,
         )
 
@@ -540,6 +625,7 @@ def reset_conversation_state() -> None:
     st.session_state.persona_editor_pending = False
     st.session_state.pending_image_attachments = []
     st.session_state.show_attachment_uploader = False
+    st.session_state.message_image_thumbnails = {}
 
 
 def refresh_conversations_list(
@@ -1182,9 +1268,54 @@ def render_chat_interface():
             items = data.get("items", [])
             meta = data.get("meta", {})
 
+            attachments_state = st.session_state.setdefault(
+                "message_image_thumbnails", {}
+            )
+
             existing_messages = {msg["id"]: msg for msg in st.session_state.messages}
             for item in items:
-                existing_messages[item["id"]] = item
+                msg_id = item.get("id")
+                if msg_id:
+                    metadata = item.get("messageMetadata") or {}
+                    attachments = metadata.get("attachments") or []
+                    normalized_attachments: List[Dict[str, str]] = []
+
+                    for att in attachments:
+                        if not isinstance(att, dict):
+                            continue
+                        data_b64 = att.get("data")
+                        if isinstance(data_b64, str):
+                            data_b64 = data_b64.strip()
+                        else:
+                            data_b64 = None
+
+                        url_value = att.get("url")
+                        if isinstance(url_value, str):
+                            url_value = url_value.strip()
+                        else:
+                            url_value = None
+
+                        if not data_b64 and not url_value:
+                            continue
+
+                        normalized_attachments.append(
+                            {
+                                "token": att.get("token", str(uuid.uuid4())),
+                                "name": att.get("name")
+                                or f"Attachment {len(normalized_attachments) + 1}",
+                                "mime": att.get("mime", "image/png"),
+                                "data": data_b64,
+                                "url": url_value,
+                            }
+                        )
+
+                    key = str(msg_id)
+                    if normalized_attachments:
+                        attachments_state[key] = normalized_attachments
+                    else:
+                        attachments_state.pop(key, None)
+
+                    existing_messages[msg_id] = item
 
             def sort_key(message: Dict[str, Any]):
                 timestamp = message.get("createdAt")
@@ -1289,7 +1420,7 @@ def render_chat_interface():
                 """,
                 unsafe_allow_html=True,
             )
-            render_message_attachments(str(msg.get("id", "")))
+            render_message_attachments(str(msg.get("id", "")), align="right")
         else:
             # Assistant message with feedback option
             st.markdown(
@@ -1373,7 +1504,15 @@ def render_chat_interface():
             f"chat_image_uploader_{conversation_id}" if conversation_id else None
         )
 
-        with st.form("message_form", clear_on_submit=True):
+        message_input_key = (
+            f"message_input_{conversation_id}" if conversation_id else "message_input"
+        )
+        message_clear_flag_key = f"{message_input_key}_clear_flag"
+
+        if st.session_state.pop(message_clear_flag_key, False):
+            st.session_state[message_input_key] = ""
+
+        with st.form("message_form", clear_on_submit=False):
 
             message_col, button_col = st.columns([5, 1])
             with message_col:
@@ -1392,11 +1531,12 @@ def render_chat_interface():
                     placeholder="Type your message here...",
                     height=80,
                     label_visibility="collapsed",
+                    key=message_input_key,
                 )
             with button_col:
                 send_button = st.form_submit_button("Send", use_container_width=True)
                 attach_button = st.form_submit_button(
-                    "Attach Images", use_container_width=True
+                    "Attach Images", use_container_width=True, type="secondary"
                 )
 
             if attach_button:
@@ -1406,16 +1546,26 @@ def render_chat_interface():
                 st.rerun()
 
             if send_button:
-                if message_content.strip():
+                pending_attachments = list(
+                    st.session_state.get("pending_image_attachments", [])
+                )
+                stripped_message = message_content.strip()
+
+                if not stripped_message and not pending_attachments:
+                    st.warning("Please enter a message or attach images before sending.")
+                else:
+                    message_to_send = stripped_message or _format_image_only_message(
+                        pending_attachments
+                    )
+
                     if conversation_id == "pending_new":
-                        saved_attachments = list(
-                            st.session_state.get("pending_image_attachments", [])
-                        )
+                        saved_attachments = list(pending_attachments)
+                        conversation_title_source = stripped_message or message_to_send
                         conversation_data = {
                             "title": (
-                                message_content[:50] + "..."
-                                if len(message_content) > 50
-                                else message_content
+                                conversation_title_source[:50] + "..."
+                                if len(conversation_title_source) > 50
+                                else conversation_title_source
                             )
                         }
                         pending_persona = st.session_state.get(
@@ -1440,33 +1590,26 @@ def render_chat_interface():
                                 saved_attachments
                             )
                             conversation_id = st.session_state.current_conversation_id
+                            pending_attachments = list(saved_attachments)
                         else:
                             st.error("Failed to create conversation")
                             return
 
                     message_data = {
-                        "content": message_content,
+                        "content": message_to_send,
                         "conversationId": st.session_state.current_conversation_id,
                     }
 
                     # Include attachments if present
-                    if st.session_state.pending_image_attachments:
-                        message_data["attachments"] = (
-                            st.session_state.pending_image_attachments
-                        )
+                    if pending_attachments:
+                        message_data["attachments"] = pending_attachments
 
                     with st.spinner("Thinking..."):
                         response = make_api_request("POST", "/messages/", message_data)
 
                     if response and response.get("data"):
-                        created_message = response["data"]
-                        if st.session_state.pending_image_attachments:
-                            message_id = created_message.get("id")
-                            if message_id:
-                                st.session_state.message_image_thumbnails.setdefault(
-                                    str(message_id), []
-                                ).extend(st.session_state.pending_image_attachments)
-                            st.session_state.pending_image_attachments = []
+                        st.session_state.pending_image_attachments = []
+                        st.session_state[message_clear_flag_key] = True
                         get_messages.clear()
                         refresh_conversations_list()
                         reset_conversation_state()

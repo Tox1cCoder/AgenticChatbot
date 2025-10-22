@@ -3,7 +3,8 @@ import json
 from typing import Optional, List, Dict, Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain.messages import HumanMessage, ToolMessage
+from langchain.tools import BaseTool
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_search_prompt
@@ -36,14 +37,27 @@ class SearchAgent:
         )
 
     async def _init_mcp(self):
-        """Initialize MCP manager and load Tavily tools"""
+        """Initialize MCP manager and load external tool suites"""
         if self.mcp_manager is None:
             try:
                 self.mcp_manager = MCPManager()
                 await self.mcp_manager.initialize()
 
-                # Get tools from Tavily server
-                self.tools = await self.mcp_manager.get_server_tools("tavily")
+                tavily_tools = await self.mcp_manager.get_server_tools("tavily") or []
+                time_tools = await self.mcp_manager.get_server_tools("time") or []
+
+                combined_tools: Dict[str, BaseTool] = {}
+                for tool in list(tavily_tools) + list(time_tools):
+                    combined_tools[tool.name] = tool
+
+                self.tools = list(combined_tools.values())
+
+                logger.info(
+                    "Loaded %d MCP tools for SearchAgent (tavily=%d, time=%d)",
+                    len(self.tools),
+                    len(tavily_tools),
+                    len(time_tools),
+                )
 
             except Exception as e:
                 logger.error(f"Failed to initialize MCP manager: {e}", exc_info=True)
