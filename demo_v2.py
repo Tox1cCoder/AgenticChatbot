@@ -1282,14 +1282,14 @@ def render_chat_view():
     )
 
     if current_conv:
-        st.markdown(f"#{current_conv['title']}")
+        st.markdown(f"# {current_conv['title']}")
         active_persona = current_conv.get("personaPrompt")
         if active_persona:
             st.info(
                 f"🎭 **Instructions active:** {persona_preview(active_persona, 100)}"
             )
     elif conversation_id == "pending_new":
-        st.markdown("#New Chat")
+        st.markdown("# New Chat")
         queued_persona = st.session_state.get("pending_persona_prompt", "")
         if queued_persona:
             st.info(
