@@ -20,8 +20,10 @@ from app.services.feedback_service import FeedbackService
 from app.services.ai_service import AIService
 from app.services.document_service import DocumentService
 from app.services.document_processing_service import DocumentProcessingService
+from app.services.mcp_service import MCPService
 
 from app.ai.checkpoint import CheckpointManager
+from app.ai.mcp_integration import MCPManager
 
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
@@ -57,6 +59,7 @@ class Container(containers.DeclarativeContainer):
             "app.api.messages",
             "app.api.feedback",
             "app.api.documents",
+            "app.api.mcp",
         ]
     )
 
@@ -86,6 +89,11 @@ class Container(containers.DeclarativeContainer):
         CheckpointManager,
         db_url=settings.database_url,
         settings=providers.Object(settings),
+    )
+
+    # MCP Manager
+    mcp_manager = providers.Singleton(
+        MCPManager,
     )
 
     # Repositories - use session factory from database
@@ -211,6 +219,11 @@ class Container(containers.DeclarativeContainer):
         document_validation_utils=document_validation_utils,
         qdrant_client=qdrant_client,
         embedding_model=embedding_model,
+    )
+
+    mcp_service = providers.Factory(
+        MCPService,
+        mcp_manager=mcp_manager,
     )
 
 

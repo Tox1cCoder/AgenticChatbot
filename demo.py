@@ -2392,7 +2392,7 @@ def main():
     render_manage_modal()
 
     # Tab-based navigation (Chat and Settings only)
-    tab1, tab2, tab3 = st.tabs(["💬 Chat", "⚙️ Instructions", "MCP Config"])
+    tab1, tab2, tab3 = st.tabs(["💬 Chat", "⚙️ Instructions", "🔧 MCP Config"])
 
     with tab1:
         render_chat_view()

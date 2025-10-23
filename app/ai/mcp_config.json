@@ -20,6 +20,21 @@
       "command": "python",
       "args": ["app/ai/mcp_servers/time_server.py"],
       "description": "Current time lookup utility with timezone support"
+    },
+    "desktop-commander": {
+      "transport": "stdio",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@smithery/cli@latest",
+        "run",
+        "@wonderwhy-er/desktop-commander",
+        "--key",
+        "83ba8c64-cf9d-4033-ab36-91366e89f9c8"
+      ],
+      "enabled": true
     }
   }
 }

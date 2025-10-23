@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Iterable
 
 from app.core.config import settings
-from app.core.exceptions.mcp import ServerNotFoundError, ToolNotFoundError
+from app.core.exceptions.mcp import (
+    ServerNotFoundError,
+    ToolNotFoundError,
+    ServerConfigurationError,
+)
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
@@ -19,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 class MCPManager:
     """Manages MCP server connections and tool loading"""
+
+    DEFAULT_SERVERS = {"calculator", "tavily", "time"}
 
     def __init__(self, config_path: Optional[str] = None):
         """
@@ -54,6 +60,9 @@ class MCPManager:
     def _ensure_config_loaded(self) -> None:
         if not self.config:
             self.config = self._load_config()
+        mcp_servers = self.config.get("mcp_servers")
+        if not isinstance(mcp_servers, dict):
+            self.config["mcp_servers"] = {}
 
     def _build_server_config(self) -> Dict[str, Dict[str, Any]]:
         mcp_servers = self.config.get("mcp_servers", {})
@@ -317,8 +326,15 @@ class MCPManager:
         if "mcp_servers" not in self.config:
             self.config["mcp_servers"] = {}
 
+        if server_name in self.DEFAULT_SERVERS:
+            raise ServerConfigurationError(
+                f"Server '{server_name}' is reserved and managed by the system"
+            )
+
         if server_name in self.config["mcp_servers"]:
-            raise ValueError(f"Server '{server_name}' already exists")
+            raise ServerConfigurationError(
+                f"Server '{server_name}' already exists"
+            )
 
         self.config["mcp_servers"][server_name] = server_config
         self.save_config()
@@ -327,6 +343,10 @@ class MCPManager:
         self._ensure_config_loaded()
         if server_name not in self.config.get("mcp_servers", {}):
             raise ServerNotFoundError(server_name)
+        if server_name in self.DEFAULT_SERVERS:
+            raise ServerConfigurationError(
+                f"Cannot remove core server '{server_name}'"
+            )
 
         # Cleanup session if active
         if server_name in self._sessions:
