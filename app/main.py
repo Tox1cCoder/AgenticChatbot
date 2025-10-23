@@ -16,6 +16,7 @@ from app.api import (
     feedback_router,
 )
 from app.api.documents import router as documents_router
+from app.api.mcp import router as mcp_router
 from app.database.session import get_engine
 from app.api.auth import router as auth_router
 from app.utils.exception_handler import register_exception_handlers
@@ -56,6 +57,7 @@ def create_app() -> FastAPI:
             "app.api.messages",
             "app.api.feedback",
             "app.api.documents",
+            "app.api.mcp",
         ]
     )
 
@@ -88,6 +90,7 @@ def create_app() -> FastAPI:
     app.include_router(messages_router)
     app.include_router(feedback_router)
     app.include_router(documents_router)
+    app.include_router(mcp_router)
 
     # Initialize and register event listeners
     event_bus = get_event_bus()

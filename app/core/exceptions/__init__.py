@@ -2,6 +2,13 @@ from .auth import AuthenticationException, AuthorizationException, TokenExpiredE
 from .validation import ValidationException, FileValidationError
 from .resource import ResourceNotFoundException
 from .http import CustomHTTPException, DocumentProcessingError
+from .mcp import (
+    MCPException,
+    ServerNotFoundError,
+    ToolNotFoundError,
+    ToolExecutionError,
+    ServerConfigurationError,
+)
 
 __all__ = [
     "CustomHTTPException",
@@ -12,4 +19,9 @@ __all__ = [
     "FileValidationError",
     "ResourceNotFoundException",
     "DocumentProcessingError",
+    "MCPException",
+    "ServerNotFoundError",
+    "ToolNotFoundError",
+    "ToolExecutionError",
+    "ServerConfigurationError",
 ]

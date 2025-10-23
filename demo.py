@@ -1,7 +1,7 @@
-import base64
+﻿import base64
 import mimetypes
 import uuid
-from copy import deepcopy
+import json
 
 import streamlit as st
 import requests
@@ -34,6 +34,17 @@ PERSONA_TEMPLATES: Dict[str, str] = {
     ),
 }
 
+COLORS = {
+    "primary": "#3b82f6",
+    "primary_dark": "#1d4ed8",
+    "success": "#10b981",
+    "warning": "#f59e0b",
+    "error": "#ef4444",
+    "neutral": "#64748b",
+    "bg_light": "#f8fafc",
+    "bg_card": "#ffffff",
+    "border": "#e2e8f0",
+}
 
 _SELF_CLOSING_TAGS = {"br", "hr"}
 _ALLOWED_TAGS = {
@@ -59,85 +70,125 @@ _ALLOWED_TAGS = {
     "th",
     "td",
 }.union(_SELF_CLOSING_TAGS)
+
 APP_STYLE = """
 <style>
-    .main-container { max-width: 1200px; margin: 0 auto; }
-    .chat-wrapper {
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-        height: calc(100vh - 220px);
-        min-height: 460px;
-        position: relative;
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    
+    html, body, [class*="css"] {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
-    .chat-messages-container {
-        border: 1px solid #e2e8f0;
-        border-radius: 18px;
+    
+    /* Hide Streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    
+    /* Main container */
+    .main .block-container {
+        max-width: 1400px;
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    
+    .message-bubble {
+        border-radius: 16px;
+        padding: 14px 18px;
+        margin: 12px 0;
+        max-width: 75%;
+        width: fit-content;
+        min-width: 120px;
+        word-wrap: break-word;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        animation: slideIn 0.2s ease-out;
+    }
+    
+    .message-bubble-short {
+        max-width: 40%;
+    }
+    
+    @keyframes slideIn {
+        from {
+            opacity: 0;
+            transform: translateY(10px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+    
+    .user-bubble {
+        background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+        color: white;
+        margin-left: auto;
+        border-bottom-right-radius: 4px;
+    }
+    
+    .assistant-bubble {
         background: #ffffff;
-        box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
-        flex: 1 1 auto;
+        color: #1f2937;
+        border: 1px solid #e2e8f0;
+        margin-right: auto;
+        border-bottom-left-radius: 4px;
+    }
+    
+    .message-header {
         display: flex;
-        flex-direction: column;
-        overflow: hidden;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        font-size: 0.85rem;
+        opacity: 0.9;
     }
-    .chat-messages-scroll {
-        padding: 20px;
-        flex: 1 1 auto;
-        overflow-y: auto;
+    
+    .message-avatar {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 600;
+        font-size: 13px;
     }
-    .chat-messages-scroll::-webkit-scrollbar {
-        width: 8px;
+    
+    .user-avatar {
+        background: white;
+        color: #3b82f6;
+        border: 2px solid #3b82f6;
     }
-    .chat-messages-scroll::-webkit-scrollbar-thumb {
-        background: #cbd5f5;
+    
+    .assistant-avatar {
+        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        color: white;
+    }
+    
+    .message-time {
+        font-size: 0.75rem;
+        opacity: 0.7;
+        margin-left: auto;
+    }
+    
+    /* Code blocks */
+    .message-bubble code {
+        background: rgba(0,0,0,0.05);
+        padding: 2px 6px;
         border-radius: 4px;
+        font-size: 0.9em;
     }
-    .chat-input-container {
-        background: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 18px;
-        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
-        padding: 25px;
-        margin-top: 4px;
-        position: sticky;
-        bottom: 0;
-        z-index: 5;
-        flex-shrink: 0;
+    
+    .user-bubble code {
+        background: rgba(255,255,255,0.2);
     }
-    .chat-input-container form {
-        margin: 0;
-    }
-    .user-message {
-        background: #ffffff;
-        color: #1f2937;
-        border: 1px solid #93c5fd;
-        padding: 12px 16px;
-        border-radius: 18px 18px 4px 18px;
-        margin: 8px 0 8px auto;
-        max-width: 72%;
-        word-wrap: break-word;
-        box-shadow: 0 8px 20px rgba(59, 130, 246, 0.16);
-    }
-    .bot-message {
-        background: #ffffff;
-        color: #1f2937;
-        border: 1px solid #86efac;
-        padding: 12px 16px;
-        border-radius: 18px 18px 18px 4px;
-        margin: 8px auto 8px 0;
-        max-width: 60%;
-        white-space: normal;
-        line-height: 1.5;
-        word-wrap: break-word;
-        overflow-wrap: anywhere;
-        box-shadow: 0 8px 20px rgba(34, 197, 94, 0.16);
-    }
+    
+    /* Attachments */
     .message-attachments {
         display: flex;
         gap: 10px;
         flex-wrap: wrap;
         margin: 6px 0 0;
     }
+    
     .message-attachments .attachment-thumb {
         width: 72px;
         height: 72px;
@@ -149,84 +200,168 @@ APP_STYLE = """
         cursor: pointer;
         transition: transform 0.15s ease, box-shadow 0.15s ease;
     }
+    
     .message-attachments .attachment-thumb:hover {
         transform: scale(1.05);
         box-shadow: 0 6px 18px rgba(15, 23, 42, 0.2);
     }
+    
     .message-attachments .attachment-thumb-link {
         display: inline-flex;
         border-radius: 12px;
         text-decoration: none;
     }
+    
     .message-attachments .attachment-thumb-link:focus-visible {
         outline: 2px solid #38bdf8;
         outline-offset: 2px;
     }
-    .pending-attachments .attachment-thumb img,
+    
     .message-attachments .attachment-thumb img {
         width: 100%;
         height: 100%;
         object-fit: cover;
         display: block;
     }
-    .user-message p,
-    .bot-message p {
-        margin: 0 0 0.75rem 0;
+    
+    .attachment-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+        gap: 8px;
+        margin-top: 12px;
     }
-    .user-message p:last-child,
-    .bot-message p:last-child {
-        margin-bottom: 0;
-    }
-    .user-message ul,
-    .user-message ol,
-    .bot-message ul,
-    .bot-message ol {
-        margin: 0.5rem 0 0.5rem 1.25rem;
-        padding-left: 1.25rem;
-    }
-    .user-message code,
-    .bot-message code {
-        background: #f9fafb;
-        padding: 0.15rem 0.35rem;
-        border-radius: 4px;
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
-        font-size: 0.85rem;
-    }
-    .user-message pre,
-    .bot-message pre {
-        background: #f9fafb;
-        padding: 0.75rem;
+    
+    .attachment-item {
+        position: relative;
         border-radius: 8px;
-        overflow-x: auto;
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
-        font-size: 0.85rem;
-        margin: 0.5rem 0;
-    }
-    .sidebar-conversation {
-        background: #f8f9fa;
-        border-radius: 8px;
-        padding: 10px;
-        margin: 5px 0;
+        overflow: hidden;
+        aspect-ratio: 1;
         cursor: pointer;
-        border: 1px solid #dee2e6;
-        transition: all 0.3s ease;
+        transition: transform 0.2s;
+        border: 2px solid rgba(0,0,0,0.1);
     }
-    .sidebar-conversation:hover { background: #e9ecef; transform: translateX(5px); }
-    .sidebar-conversation.active {
-        background: linear-gradient(135deg, #28a745, #1e7e34);
-        color: white;
-        border-color: #1e7e34;
+    
+    .attachment-item:hover {
+        transform: scale(1.05);
     }
-    .login-container {
-        max-width: 400px;
-        margin: 0 auto;
-        padding: 40px 20px;
-        background: white;
+    
+    .attachment-item img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+    
+    /* Input area */
+    .stTextArea textarea {
+        border-radius: 12px !important;
+        border: 2px solid #e2e8f0 !important;
+        padding: 12px !important;
+        font-size: 0.95rem !important;
+    }
+    
+    .stTextArea textarea:focus {
+        border-color: #3b82f6 !important;
+        box-shadow: 0 0 0 3px rgba(59,130,246,0.1) !important;
+    }
+    
+    /* Buttons */
+    .stButton button {
+        border-radius: 8px;
+        font-weight: 500;
+        transition: all 0.2s;
+    }
+    
+    .stButton button[kind="primary"] {
+        background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+    }
+    
+    .stButton button[kind="primary"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(59,130,246,0.3);
+    }
+    
+    /* Sidebar */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+    }
+    
+    [data-testid="stSidebar"] .stButton button {
+        width: 100%;
+        text-align: left;
+    }
+    
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        border-bottom: 2px solid #e2e8f0;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px 8px 0 0;
+        padding: 12px 24px;
+        font-weight: 500;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+        color: white !important;
+    }
+    
+    /* Metrics */
+    [data-testid="stMetricValue"] {
+        font-size: 1.5rem;
+        font-weight: 600;
+    }
+    
+    /* Expanders */
+    .streamlit-expanderHeader {
+        border-radius: 8px;
+        background: #f8fafc;
+        font-weight: 500;
+    }
+    
+    /* Status indicators */
+    .status-badge {
+        display: inline-block;
+        padding: 4px 12px;
         border-radius: 12px;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        font-size: 0.8rem;
+        font-weight: 500;
     }
-    .message-timestamp { font-size: 0.8em; color: #64748b; margin-top: 5px; white-space: normal; display: block; max-width: 100%; overflow-wrap: anywhere; }
-    div:empty { display: none !important; }
+    
+    .status-processing {
+        background: #fef3c7;
+        color: #92400e;
+    }
+    
+    .status-ready {
+        background: #d1fae5;
+        color: #065f46;
+    }
+    
+    .status-failed {
+        background: #fee2e2;
+        color: #991b1b;
+    }
+    
+    /* Scrollbar */
+    ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+    
+    ::-webkit-scrollbar-track {
+        background: #f1f5f9;
+    }
+    
+    ::-webkit-scrollbar-thumb {
+        background: #cbd5e1;
+        border-radius: 4px;
+    }
+    
+    ::-webkit-scrollbar-thumb:hover {
+        background: #94a3b8;
+    }
 </style>
 """
 
@@ -253,6 +388,11 @@ SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
     "image_viewer_open": lambda: False,
     "image_viewer_payload": lambda: None,
     "API_BASE_URL": lambda: API_BASE_URL,
+    "active_view": lambda: "chat",
+    "mcp_tools_list": lambda: None,
+    "mcp_servers_list": lambda: None,
+    "selected_tool": lambda: None,
+    "tool_execution_result": lambda: None,
 }
 
 
@@ -302,13 +442,9 @@ class _SafeHTMLRenderer(HTMLParser):
         elif tag in _ALLOWED_TAGS:
             self.result.append(f"<{tag}></{tag}>")
 
-    def _inside_block(self, tag: str) -> bool:
-        return tag in self._tag_stack
-
     def handle_data(self, data: str):
         if not data:
             return
-
         escaped = html.escape(data, quote=False)
         self.result.append(escaped)
 
@@ -324,6 +460,254 @@ def _sanitize_rendered_html(html_fragment: str) -> str:
     parser.feed(html_fragment)
     parser.close()
     return "".join(parser.result)
+
+
+@st.cache_data(show_spinner=False, max_entries=500)
+def sanitize_message_content(content: str) -> str:
+    """Render limited markdown to HTML while preventing unsafe tags."""
+    if not content or not isinstance(content, str):
+        return ""
+
+    normalized = (
+        html.unescape(content).replace("\r\n", "\n").replace("\r", "\n").strip()
+    )
+    if not normalized:
+        return ""
+
+    # Replace inline images with accessible text fallback
+    normalized = re.sub(
+        r"!\[([^\]]*)\]\(([^)]+)\)", r"\1 (\2)", normalized, flags=re.MULTILINE
+    )
+
+    rendered = _markdown.markdown(
+        normalized,
+        extensions=["extra", "sane_lists"],
+        output_format="html5",
+    )
+
+    safe_html = _sanitize_rendered_html(rendered)
+    safe_html = safe_html.replace("<p></p>", "").replace("<p><br></p>", "<br>")
+    safe_html = re.sub(r"(?:<br>\s*){3,}", "<br><br>", safe_html)
+    safe_html = re.sub(r"\s*(</?p>)\s*", r"\1", safe_html)
+    safe_html = safe_html.strip()
+
+    return safe_html
+
+
+def format_time(iso_string: str) -> str:
+    """Format timestamp intelligently"""
+    try:
+        dt = parser.isoparse(iso_string)
+        now = datetime.now(dt.tzinfo)
+
+        if dt.date() == now.date():
+            return dt.strftime("%I:%M %p")
+        elif now - timedelta(days=1) < dt <= now:
+            return "Yesterday " + dt.strftime("%I:%M %p")
+        elif now - timedelta(days=7) < dt <= now:
+            return dt.strftime("%a %I:%M %p")
+        else:
+            return dt.strftime("%b %d, %Y")
+    except Exception:
+        return iso_string
+
+
+def group_conversations_by_date(
+    conversations: List[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Group conversations by time period"""
+    groups = {"Today": [], "Yesterday": [], "This Week": [], "Older": []}
+
+    now = datetime.now()
+
+    for conv in conversations:
+        try:
+            created_at = conv.get("createdAt", "")
+            # Handle different datetime formats
+            if isinstance(created_at, str):
+                dt = parser.isoparse(created_at)
+            else:
+                dt = created_at
+
+            # Make sure both datetimes are timezone-aware or both naive
+            if dt.tzinfo is not None:
+                # Make now timezone-aware with same timezone
+                now_aware = datetime.now(dt.tzinfo)
+                days_ago = (now_aware.date() - dt.date()).days
+            else:
+                days_ago = (now.date() - dt.date()).days
+
+            if days_ago == 0:
+                groups["Today"].append(conv)
+            elif days_ago == 1:
+                groups["Yesterday"].append(conv)
+            elif days_ago <= 7:
+                groups["This Week"].append(conv)
+            else:
+                groups["Older"].append(conv)
+        except Exception as e:
+            # If parsing fails, put in Older
+            groups["Older"].append(conv)
+
+    # Remove empty groups
+    return {k: v for k, v in groups.items() if v}
+
+
+st.set_page_config(
+    page_title="ChatBot",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    page_icon="🤖",
+)
+
+st.markdown(APP_STYLE, unsafe_allow_html=True)
+initialize_session_state()
+
+# Clear any old cached functions on first run
+if "cache_cleared_v2" not in st.session_state:
+    st.cache_data.clear()
+    st.session_state.cache_cleared_v2 = True
+
+
+def reset_conversation_state() -> None:
+    st.session_state.messages = []
+    st.session_state.conversation_messages_meta = None
+    st.session_state.conversation_messages_page = 0
+    st.session_state.has_more_messages = True
+    st.session_state.pending_persona_prompt = ""
+    st.session_state.persona_editor_origin = None
+    st.session_state.persona_editor_value = ""
+    st.session_state.persona_editor_pending_value = ""
+    st.session_state.persona_editor_pending = False
+    st.session_state.pending_image_attachments = []
+    st.session_state.show_attachment_uploader = False
+    st.session_state.image_viewer_open = False
+    st.session_state.image_viewer_payload = None
+    st.session_state.message_image_thumbnails = {}
+
+
+def refresh_conversations_list(
+    *, fallback_conversation: Optional[Dict[str, Any]] = None
+) -> None:
+    """Reload conversations list from the API, optionally seeding with a fallback."""
+    get_conversations.clear()
+    refreshed = get_conversations(include_messages=False)
+    if refreshed and refreshed.get("data"):
+        st.session_state.conversations_list = refreshed["data"]["items"]
+        return
+
+    if fallback_conversation:
+        st.session_state.conversations_list = [
+            fallback_conversation,
+            *(
+                conv
+                for conv in st.session_state.conversations_list
+                if conv.get("id") != fallback_conversation.get("id")
+            ),
+        ]
+
+
+def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
+    url = f"{API_BASE_URL}{endpoint}"
+    headers = {}
+    if st.session_state.get("auth_token"):
+        headers["Authorization"] = f"Bearer {st.session_state.auth_token}"
+
+    try:
+        response = getattr(requests, method.lower())(url, json=data, headers=headers)
+        response.raise_for_status()
+        response_data = response.json()
+    except requests.exceptions.HTTPError as http_error:
+        st.toast(f"HTTP error {http_error.response.status_code}", icon="❌")
+        return {}
+    except requests.exceptions.ConnectionError:
+        st.toast("Cannot connect to API", icon="❌")
+        return {}
+    except ValueError:
+        st.toast("Unexpected response from API", icon="❌")
+        return {}
+    except Exception as exc:
+        st.toast(f"Error: {exc}", icon="❌")
+        return {}
+
+    if not response_data.get("success"):
+        error_code = response_data.get("code", "unknown_error")
+        error_message = response_data.get("message", "An unknown error occurred.")
+
+        if error_code == "unauthenticated":
+            st.session_state.auth_token = None
+            st.session_state.current_user_id = None
+            st.session_state.show_login = True
+            st.toast("🔒 Please log in", icon="🔒")
+        else:
+            st.toast(f"❌ {error_message}", icon="❌")
+        return {}
+
+    return response_data
+
+
+@st.cache_data(show_spinner=False)
+def get_user(user_id: str) -> Dict[str, Any]:
+    response = make_api_request("GET", f"/users/{user_id}")
+    return response.get("data", {})
+
+
+@st.cache_data(show_spinner=False)
+def get_conversations(
+    page: int = 1,
+    limit: int = 20,
+    include_messages: bool = False,
+    latest_messages: int = 3,
+) -> Dict[str, Any]:
+    """Get paginated conversations with optional message inclusion"""
+    endpoint = f"/conversations/?page={page}&limit={limit}"
+    if include_messages:
+        endpoint += f"&include=messages&latestMessages={latest_messages}"
+    response = make_api_request("GET", endpoint)
+    return response
+
+
+@st.cache_data(show_spinner=False)
+def get_messages(
+    conversation_id: str,
+    page: int = 1,
+    limit: int = 10,
+    order_by: str = "createdAt",
+    order_direction: str = "desc",
+) -> Dict[str, Any]:
+    """Get paginated conversation messages"""
+    endpoint = (
+        f"/conversations/{conversation_id}/messages"
+        f"?page={page}&limit={limit}&orderBy={order_by}&orderDirection={order_direction}&include=feedback"
+    )
+    response = make_api_request("GET", endpoint)
+    return response
+
+
+def normalize_persona_input(raw: str) -> str:
+    """Normalize persona text similarly to backend sanitization."""
+    if not isinstance(raw, str):
+        return ""
+
+    normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r" +", " ", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    normalized = normalized.strip()
+
+    if len(normalized) > _MAX_PERSONA_LENGTH:
+        normalized = normalized[:_MAX_PERSONA_LENGTH]
+
+    return normalized
+
+
+def persona_preview(text: Optional[str], limit: int = 160) -> str:
+    """Return a compact preview of persona text for UI surfaces."""
+    if not text:
+        return ""
+    cleaned = text.strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip() + "..."
 
 
 def _attachment_from_upload(uploaded_file) -> Optional[Dict[str, str]]:
@@ -377,57 +761,14 @@ def _handle_new_image_attachments(uploaded_files: List) -> None:
 
     remaining = _MAX_IMAGE_ATTACHMENTS - len(pending)
     if remaining <= 0:
-        st.warning(f"Maximum of {_MAX_IMAGE_ATTACHMENTS} images per message reached.")
+        st.toast(f"⚠️ Max {_MAX_IMAGE_ATTACHMENTS} images", icon="⚠️")
         return
 
     if len(new_items) > remaining:
-        st.info("Some images were ignored because the limit was reached.")
+        st.toast("⚠️ Some images ignored", icon="⚠️")
 
     pending.extend(new_items[:remaining])
     st.session_state.pending_image_attachments = pending
-
-
-def render_pending_attachment_preview(allow_remove: bool = True):
-    attachments = st.session_state.get("pending_image_attachments", [])
-    if not attachments:
-        return
-
-    st.caption(
-        f"Attachments ready to send ({len(attachments)}/{_MAX_IMAGE_ATTACHMENTS}):"
-    )
-    columns = st.columns(min(len(attachments), 4))
-    remove_token: Optional[str] = None
-
-    for idx, attachment in enumerate(attachments):
-        column = columns[idx % len(columns)]
-        with column:
-            image_bytes = base64.b64decode(attachment["data"])
-            st.image(image_bytes, caption=attachment["name"], width=96, clamp=True)
-            if allow_remove:
-                if st.button(
-                    "Remove",
-                    key=f"remove_pending_{attachment['token']}",
-                    use_container_width=True,
-                ):
-                    remove_token = attachment["token"]
-
-    if remove_token:
-        st.session_state.pending_image_attachments = [
-            item for item in attachments if item["token"] != remove_token
-        ]
-        st.rerun()
-
-
-def _guess_extension(mime: Optional[str]) -> str:
-    if not mime:
-        return "png"
-    base_mime = mime.split(";")[0]
-    ext = mimetypes.guess_extension(base_mime)
-    if ext:
-        return ext.lstrip(".")
-    if base_mime.endswith("jpeg"):
-        return "jpg"
-    return "png"
 
 
 def _format_image_only_message(attachments: List[Dict[str, str]]) -> str:
@@ -459,478 +800,122 @@ def _format_image_only_message(attachments: List[Dict[str, str]]) -> str:
     return f"[Image attachments: {displayed}]"
 
 
-def render_message_attachments(message_id: str, align: str = "left"):
-    attachments = st.session_state.get("message_image_thumbnails", {}).get(message_id)
-    if not attachments:
-        return
+@st.cache_data(show_spinner=False, ttl=30)
+def get_mcp_servers() -> Optional[Dict[str, Any]]:
+    """Fetch list of MCP servers"""
+    response = make_api_request("GET", "/mcp/servers")
+    return response.get("data") if response else None
 
-    prepared: List[Dict[str, Any]] = []
-    thumbnail_fragments: List[str] = []
 
-    for idx, att in enumerate(attachments, start=1):
-        if not isinstance(att, dict):
-            continue
+@st.cache_data(show_spinner=False, ttl=30)
+def get_mcp_tools(server_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Fetch MCP tools, optionally filtered by server"""
+    endpoint = "/mcp/tools"
+    if server_name:
+        endpoint += f"?serverName={server_name}"
+    response = make_api_request("GET", endpoint)
+    return response.get("data") if response else None
 
-        mime = att.get("mime", "image/png")
-        data_str = att.get("data")
-        url_str = att.get("url")
 
-        data_str = data_str.strip() if isinstance(data_str, str) else ""
-        url_str = url_str.strip() if isinstance(url_str, str) else ""
+@st.cache_data(show_spinner=False, ttl=30)
+def get_tool_details(tool_name: str) -> Optional[Dict[str, Any]]:
+    """Fetch detailed information about a specific tool"""
+    response = make_api_request("GET", f"/mcp/tools/{tool_name}")
+    return response.get("data") if response else None
 
-        has_data = bool(data_str)
-        has_url = bool(url_str)
 
-        if not has_data and not has_url:
-            continue
-
-        name = att.get("name") or f"Attachment {idx}"
-        escaped_name = html.escape(name, quote=True)
-        display_src = f"data:{mime};base64,{data_str}" if has_data else url_str
-        escaped_src = html.escape(display_src, quote=True)
-        download_name = att.get("download_name") or name
-        if "." not in download_name:
-            download_name = f"{download_name}.{_guess_extension(mime)}"
-
-        rel_value = "noopener"
-        if has_url and not has_data:
-            rel_value = "noopener noreferrer"
-        rel_attr = f' rel="{rel_value}"' if rel_value else ""
-
-        download_attr = (
-            f' download="{html.escape(download_name, quote=True)}"' if has_data else ""
-        )
-
-        thumbnail_fragments.append(
-            f'<a class="attachment-thumb-link" href="{escaped_src}" target="_blank"{rel_attr} '
-            f'aria-label="Open {escaped_name}" title="{escaped_name}"{download_attr}>'
-            f'<div class="attachment-thumb">'
-            f'<img src="{escaped_src}" alt="{escaped_name}" loading="lazy" />'
-            f"</div></a>"
-        )
-
-        prepared.append(
-            {
-                "token": att.get("token") or f"{message_id}_{idx}",
-                "name": name,
-                "mime": mime,
-                "has_data": has_data,
-                "data": data_str if has_data else None,
-                "url": url_str if has_url else None,
-                "display_src": display_src,
-                "download_name": download_name,
-            }
-        )
-
-    if not thumbnail_fragments:
-        return
-
-    justify = "flex-end" if align == "right" else "flex-start"
-    margin_css = "margin:6px 45px 0 0;" if align == "right" else "margin:6px 0 0 45px;"
-    st.markdown(
-        f'<div class="message-attachments-wrapper" '
-        f'style="display:flex; justify-content:{justify}; {margin_css}">'
-        f'<div class="message-attachments">{"".join(thumbnail_fragments)}</div>'
-        f"</div>",
-        unsafe_allow_html=True,
+def execute_mcp_tool(
+    tool_name: str, arguments: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Execute an MCP tool with provided arguments"""
+    response = make_api_request(
+        "POST", f"/mcp/tools/{tool_name}/execute", {"arguments": arguments}
     )
-
-    viewer_items = [
-        {
-            "name": item["name"],
-            "mime": item["mime"],
-            "has_data": item["has_data"],
-            "data": item["data"],
-            "url": item["url"],
-            "display_src": item["display_src"],
-            "download_name": item["download_name"],
-        }
-        for item in prepared
-    ]
+    return response.get("data") if response else None
 
 
-def render_agent_images(message_metadata: dict, message_id: str):
-    """Render images from agent responses"""
-    if not message_metadata:
+def render_tool_result_payload(payload: Any) -> None:
+    if payload is None:
+        st.write("No data returned.")
         return
 
-    images = message_metadata.get("images", [])
-    if not images:
+    if isinstance(payload, (dict, list)):
+        st.json(payload)
         return
 
-    prepared: List[Dict[str, Any]] = []
-    image_fragments: List[str] = []
+    if isinstance(payload, (bytes, bytearray)):
+        text = payload.decode("utf-8", errors="replace")
+    else:
+        text = str(payload)
 
-    for idx, img in enumerate(images, start=1):
-        if isinstance(img, dict):
-            if "url" in img:
-                url = img.get("url", "")
-                description = img.get("description", "")
-                if url:
-                    escaped_url = html.escape(url, quote=True)
-                    text = description or f"Image {idx}"
-                    escaped_text = html.escape(text, quote=True)
-                    image_fragments.append(
-                        f'<a class="attachment-thumb-link" href="{escaped_url}" target="_blank" '
-                        f'rel="noopener noreferrer" aria-label="Open {escaped_text}" '
-                        f'title="{escaped_text}">'
-                        f'<div class="attachment-thumb">'
-                        f'<img src="{escaped_url}" alt="{escaped_text}" loading="lazy" />'
-                        f"</div></a>"
-                    )
-                    prepared.append(
-                        {
-                            "token": img.get("token") or f"{message_id}_url_{idx}",
-                            "name": text,
-                            "mime": img.get("mime", "image/png"),
-                            "has_data": False,
-                            "data": None,
-                            "url": url,
-                            "display_src": url,
-                            "download_name": (
-                                text
-                                if "." in text
-                                else f"{text}.{_guess_extension(img.get('mime'))}"
-                            ),
-                        }
-                    )
-            elif "data" in img:
-                data = img.get("data", "")
-                mime = img.get("mime", "image/png")
-                name = img.get("name", "Generated image")
-                if data:
-                    escaped_name = html.escape(name, quote=True)
-                    data_url = f"data:{mime};base64,{data}"
-                    image_fragments.append(
-                        f'<a class="attachment-thumb-link" href="{data_url}" target="_blank" rel="noopener" '
-                        f'aria-label="Open {escaped_name}" title="{escaped_name}" download="{escaped_name}">'
-                        f'<div class="attachment-thumb">'
-                        f'<img src="{data_url}" alt="{escaped_name}" loading="lazy" />'
-                        f"</div></a>"
-                    )
-                    prepared.append(
-                        {
-                            "token": img.get("token") or f"{message_id}_data_{idx}",
-                            "name": name,
-                            "mime": mime,
-                            "has_data": True,
-                            "data": data,
-                            "url": None,
-                            "display_src": data_url,
-                            "download_name": (
-                                name
-                                if "." in name
-                                else f"{name}.{_guess_extension(mime)}"
-                            ),
-                        }
-                    )
-
-    if image_fragments:
-        st.markdown(
-            f'<div class="message-attachments-wrapper" '
-            f'style="display:flex; justify-content:flex-start; margin:6px 0 0 45px;">'
-            f'<div class="message-attachments">{"".join(image_fragments)}</div>'
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-        viewer_items = [
-            {
-                "name": item["name"],
-                "mime": item["mime"],
-                "has_data": item["has_data"],
-                "data": item["data"],
-                "url": item["url"],
-                "display_src": item["display_src"],
-                "download_name": item["download_name"],
-            }
-            for item in prepared
-        ]
-
-
-def normalize_persona_input(raw: str) -> str:
-    """Normalize persona text similarly to backend sanitization."""
-    if not isinstance(raw, str):
-        return ""
-
-    normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
-    normalized = re.sub(r" +", " ", normalized)
-    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-    normalized = normalized.strip()
-
-    if len(normalized) > _MAX_PERSONA_LENGTH:
-        normalized = normalized[:_MAX_PERSONA_LENGTH]
-
-    return normalized
-
-
-def persona_preview(text: Optional[str], limit: int = 160) -> str:
-    """Return a compact preview of persona text for UI surfaces."""
-    if not text:
-        return ""
-
-    cleaned = text.strip()
-    if len(cleaned) <= limit:
-        return cleaned
-
-    return cleaned[:limit].rstrip() + "..."
-
-
-@st.cache_data(show_spinner=False, max_entries=500)
-def sanitize_message_content(content: str) -> str:
-    """Render limited markdown to HTML while preventing unsafe tags."""
-    if not content or not isinstance(content, str):
-        return ""
-
-    normalized = (
-        html.unescape(content).replace("\r\n", "\n").replace("\r", "\n").strip()
-    )
-    if not normalized:
-        return ""
-
-    # Replace inline images with accessible text fallback
-    normalized = re.sub(
-        r"!\[([^\]]*)\]\(([^)]+)\)", r"\1 (\2)", normalized, flags=re.MULTILINE
-    )
-
-    rendered = _markdown.markdown(
-        normalized,
-        extensions=["extra", "sane_lists"],
-        output_format="html5",
-    )
-
-    safe_html = _sanitize_rendered_html(rendered)
-    # Batch replace operations
-    safe_html = safe_html.replace("<p></p>", "").replace("<p><br></p>", "<br>")
-    safe_html = re.sub(r"(?:<br>\s*){3,}", "<br><br>", safe_html)
-    safe_html = re.sub(r"\s*(</?p>)\s*", r"\1", safe_html)
-    safe_html = safe_html.strip()
-
-    return safe_html
-
-
-st.set_page_config(
-    page_title="ChatBot", layout="wide", initial_sidebar_state="expanded"
-)
-
-st.markdown(APP_STYLE, unsafe_allow_html=True)
-
-initialize_session_state()
-
-
-def reset_conversation_state() -> None:
-    st.session_state.messages = []
-    st.session_state.conversation_messages_meta = None
-    st.session_state.conversation_messages_page = 0
-    st.session_state.has_more_messages = True
-    st.session_state.pending_persona_prompt = ""
-    st.session_state.persona_editor_origin = None
-    st.session_state.persona_editor_value = ""
-    st.session_state.persona_editor_pending_value = ""
-    st.session_state.persona_editor_pending = False
-    st.session_state.pending_image_attachments = []
-    st.session_state.show_attachment_uploader = False
-    st.session_state.image_viewer_open = False
-    st.session_state.image_viewer_payload = None
-    st.session_state.message_image_thumbnails = {}
-
-
-def refresh_conversations_list(
-    *, fallback_conversation: Optional[Dict[str, Any]] = None
-) -> None:
-    """Reload conversations list from the API, optionally seeding with a fallback."""
-    get_conversations.clear()
-    refreshed = get_conversations(include_messages=False)
-    if refreshed and refreshed.get("data"):
-        st.session_state.conversations_list = refreshed["data"]["items"]
+    stripped = text.strip()
+    if not stripped:
+        st.write("Result was empty.")
         return
-
-    if fallback_conversation:
-        st.session_state.conversations_list = [
-            fallback_conversation,
-            *(
-                conv
-                for conv in st.session_state.conversations_list
-                if conv.get("id") != fallback_conversation.get("id")
-            ),
-        ]
-
-
-def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
-    url = f"{API_BASE_URL}{endpoint}"
-    headers = {}
-    if st.session_state.get("auth_token"):
-        headers["Authorization"] = f"Bearer {st.session_state.auth_token}"
 
     try:
-        response = getattr(requests, method.lower())(url, json=data, headers=headers)
-        response.raise_for_status()
-        response_data = response.json()
-    except requests.exceptions.HTTPError as http_error:
-        st.error(f"HTTP error {http_error.response.status_code}: {http_error}")
-        return {}
-    except requests.exceptions.ConnectionError:
-        st.error(
-            "Cannot connect to the API. Make sure the FastAPI server is running on localhost:8000."
-        )
-        return {}
-    except ValueError:
-        st.error("Received an unexpected response from the API.")
-        return {}
-    except Exception as exc:
-        st.error(f"Unexpected error: {exc}")
-        return {}
-
-    if not response_data.get("success"):
-        error_code = response_data.get("code", "unknown_error")
-        error_message = response_data.get("message", "An unknown error occurred.")
-
-        if error_code == "unauthenticated":
-            st.error(
-                f"Authentication required. Please log in. (Error: {error_message})"
-            )
-            st.session_state.auth_token = None
-            st.session_state.current_user_id = None
-            st.session_state.show_login = True
-        else:
-            st.error(f"API Error ({error_code}): {error_message}")
-        return {}
-
-    return response_data
+        parsed = json.loads(stripped)
+    except (TypeError, json.JSONDecodeError):
+        language = "json" if stripped[:1] in ("{", "[") else "text"
+        st.code(text, language=language)
+    else:
+        st.json(parsed)
 
 
-@st.cache_data(show_spinner=False)
-def get_user(user_id: str) -> Dict[str, Any]:
-    response = make_api_request("GET", f"/users/{user_id}")
-    return response.get("data", {})
+def add_mcp_server(server_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Add a new MCP server"""
+    response = make_api_request("POST", "/mcp/servers", server_config)
+    if response:
+        # Clear caches to refresh data
+        get_mcp_servers.clear()
+        get_mcp_tools.clear()
+    return response.get("data") if response else None
 
 
-@st.cache_data(show_spinner=False)
-def get_conversations(
-    page: int = 1,
-    limit: int = 20,
-    include_messages: bool = False,
-    latest_messages: int = 3,
-) -> Dict[str, Any]:
-    """Get paginated conversations with optional message inclusion"""
-    endpoint = f"/conversations/?page={page}&limit={limit}"
-    if include_messages:
-        endpoint += f"&include=messages&latestMessages={latest_messages}"
-    response = make_api_request("GET", endpoint)
-    return response
+def remove_mcp_server(server_name: str) -> Optional[Dict[str, Any]]:
+    """Remove an MCP server"""
+    response = make_api_request("DELETE", f"/mcp/servers/{server_name}")
+    if response:
+        # Clear caches to refresh data
+        get_mcp_servers.clear()
+        get_mcp_tools.clear()
+    return response.get("data") if response else None
 
 
-@st.cache_data(show_spinner=False)
-def get_messages(
-    conversation_id: str,
-    page: int = 1,
-    limit: int = 10,
-    order_by: str = "createdAt",
-    order_direction: str = "desc",
-) -> Dict[str, Any]:
-    """Get paginated conversation messages"""
-    endpoint = (
-        f"/conversations/{conversation_id}/messages"
-        f"?page={page}&limit={limit}&orderBy={order_by}&orderDirection={order_direction}&include=feedback"
-    )
-    response = make_api_request("GET", endpoint)
-    return response  # Returns full response with meta and items
-
-
-@st.cache_data(show_spinner=False)
-def get_user_messages_paginated(
-    page: int = 1,
-    limit: int = 10,
-    order_by: str = "createdAt",
-    order_direction: str = "asc",
-) -> Dict[str, Any]:
-    """Get paginated user messages"""
+def toggle_mcp_server(server_name: str, enabled: bool) -> Optional[Dict[str, Any]]:
+    """Enable or disable an MCP server"""
     response = make_api_request(
-        "GET",
-        f"/messages/?page={page}&limit={limit}&orderBy={order_by}&orderDirection={order_direction}",
+        "PATCH", f"/mcp/servers/{server_name}/toggle?enabled={enabled}"
     )
-    return response  # Returns full response with meta and items
-
-
-def get_feedback(message_id: str) -> Optional[Dict[str, Any]]:
-    """Get feedback for a specific message (1-1 relationship)"""
-    response = make_api_request("GET", f"/messages/{message_id}/feedbacks")
-    if not response:
-        return None
-
-    data = response.get("data")
-
-    if isinstance(data, dict):
-        return data
-
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                return item
-
-    return None
+    if response:
+        get_mcp_servers.clear()
+        get_mcp_tools.clear()
+    return response.get("data") if response else None
 
 
 def render_login_page():
+    st.markdown("<br><br>", unsafe_allow_html=True)
+
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.markdown('<div class="login-container">', unsafe_allow_html=True)
         st.markdown("# ChatBot")
-        st.markdown("### Welcome back!")
+        st.markdown("### Welcome! Please sign in to continue")
 
         tab1, tab2 = st.tabs(["Sign In", "Sign Up"])
 
         with tab1:
-            with st.form("login_form"):
-                st.markdown("#### Sign in to your account")
-                email = st.text_input("Email", placeholder="Enter your email")
+            with st.form("login_form", clear_on_submit=False):
+                email = st.text_input("📧 Email", placeholder="your@email.com")
                 password = st.text_input(
-                    "Password", type="password", placeholder="Enter your password"
+                    "🔒 Password", type="password", placeholder="Enter password"
                 )
 
-                if st.form_submit_button("Sign In", use_container_width=True):
-                    auth_response = make_api_request(
-                        "POST", "/auth/login", {"email": email, "password": password}
-                    )
-                    if auth_response and "data" in auth_response:
-                        st.session_state.auth_token = auth_response["data"][
-                            "accessToken"
-                        ]
-                        st.session_state.current_user_id = auth_response["data"][
-                            "userId"
-                        ]
-                        st.session_state.show_login = False
-                        st.success("Signed in successfully!")
-                        st.rerun()
-                    else:
-                        st.error("Invalid credentials")
-
-        with tab2:
-            with st.form("signup_form"):
-                st.markdown("#### Create a new account")
-                username = st.text_input("Username", placeholder="Choose a username")
-                email = st.text_input("Email", placeholder="Enter your email")
-                password = st.text_input(
-                    "Password", type="password", placeholder="Create a password"
-                )
-                confirm_password = st.text_input(
-                    "Confirm Password",
-                    type="password",
-                    placeholder="Confirm your password",
-                )
-
-                if st.form_submit_button("Create Account", use_container_width=True):
-                    if not username or not email or not password:
-                        st.error("Please fill out all fields")
-                    elif password != confirm_password:
-                        st.error("Passwords do not match")
-                    else:
-                        user_data = {
-                            "username": username,
-                            "email": email,
-                            "password": password,
-                        }
-                        result = make_api_request("POST", "/auth/signup", user_data)
-                        if result:
+                col_a, col_b = st.columns([1, 1])
+                with col_a:
+                    if st.form_submit_button(
+                        "Sign In", use_container_width=True, type="primary"
+                    ):
+                        with st.spinner("Signing in..."):
                             auth_response = make_api_request(
                                 "POST",
                                 "/auth/login",
@@ -944,36 +929,75 @@ def render_login_page():
                                     "data"
                                 ]["userId"]
                                 st.session_state.show_login = False
-                                st.success(
-                                    "Account created and signed in successfully!"
-                                )
+                                st.toast("✅ Welcome back!", icon="✅")
                                 st.rerun()
                             else:
-                                st.success("Account created! Please sign in.")
-                                st.rerun()
+                                st.error("Invalid credentials")
 
-        st.markdown("</div>", unsafe_allow_html=True)
+        with tab2:
+            with st.form("signup_form", clear_on_submit=False):
+                username = st.text_input("👤 Username", placeholder="Choose a username")
+                email = st.text_input("📧 Email", placeholder="your@email.com")
+                password = st.text_input(
+                    "🔒 Password", type="password", placeholder="Create password"
+                )
+                confirm_password = st.text_input(
+                    "🔒 Confirm", type="password", placeholder="Confirm password"
+                )
+
+                if st.form_submit_button(
+                    "Create Account", use_container_width=True, type="primary"
+                ):
+                    if not username or not email or not password:
+                        st.error("Please fill all fields")
+                    elif password != confirm_password:
+                        st.error("Passwords don't match")
+                    else:
+                        with st.spinner("Creating account..."):
+                            user_data = {
+                                "username": username,
+                                "email": email,
+                                "password": password,
+                            }
+                            result = make_api_request("POST", "/auth/signup", user_data)
+                            if result:
+                                auth_response = make_api_request(
+                                    "POST",
+                                    "/auth/login",
+                                    {"email": email, "password": password},
+                                )
+                                if auth_response and "data" in auth_response:
+                                    st.session_state.auth_token = auth_response["data"][
+                                        "accessToken"
+                                    ]
+                                    st.session_state.current_user_id = auth_response[
+                                        "data"
+                                    ]["userId"]
+                                    st.session_state.show_login = False
+                                    st.toast("✅ Account created!", icon="✅")
+                                    st.rerun()
 
 
-def render_conversation_sidebar():
+def render_sidebar():
     with st.sidebar:
-        st.markdown("### Conversations")
+        st.markdown("# 🤖 ChatBot")
 
-        if st.button("New Chat", use_container_width=True):
+        # New chat button
+        if st.button("New Chat", use_container_width=True, type="primary"):
             st.session_state.current_conversation_id = "pending_new"
+            st.session_state.active_view = "chat"
+            st.session_state.show_conversation_manager = False
             reset_conversation_state()
             st.rerun()
 
+        # Manage conversations button
         if st.button("Manage Conversations", use_container_width=True):
             st.session_state.show_conversation_manager = True
             st.rerun()
 
-        if st.button("Instructions", use_container_width=True):
-            st.session_state.show_instructions = True
-            st.rerun()
-
         st.divider()
 
+        # Load conversations if needed
         if (
             not st.session_state.conversations_list
             and st.session_state.current_user_id
@@ -985,40 +1009,54 @@ def render_conversation_sidebar():
                     "items"
                 ]
 
+        # Grouped conversations
         if st.session_state.conversations_list:
+            st.markdown("### 💬 Conversations")
+
             sorted_conversations = sorted(
                 st.session_state.conversations_list,
                 key=lambda x: parser.parse(x.get("createdAt")),
                 reverse=True,
             )
 
-            for conv in sorted_conversations:
-                is_active = conv["id"] == st.session_state.current_conversation_id
+            grouped = group_conversations_by_date(sorted_conversations)
 
-                # Show only conversation title in sidebar
-                display_title = conv["title"]
-
-                if st.button(
-                    display_title,
-                    key=f"conv_{conv['id']}",
-                    use_container_width=True,
-                    type="primary" if is_active else "secondary",
+            for group_name, convs in grouped.items():
+                with st.expander(
+                    f"📅 {group_name} ({len(convs)})", expanded=(group_name == "Today")
                 ):
-                    if conv["id"] != st.session_state.current_conversation_id:
-                        st.session_state.current_conversation_id = conv["id"]
-                        reset_conversation_state()
-                        st.rerun()
+                    for conv in convs:
+                        is_active = (
+                            conv["id"] == st.session_state.current_conversation_id
+                        )
 
-        # Document upload and list section for selected conversation
+                        button_type = "primary" if is_active else "secondary"
+                        if st.button(
+                            f"💬 {conv['title'][:40]}...",
+                            key=f"conv_{conv['id']}",
+                            use_container_width=True,
+                            type=button_type,
+                        ):
+                            if conv["id"] != st.session_state.current_conversation_id:
+                                st.session_state.current_conversation_id = conv["id"]
+                                st.session_state.active_view = "chat"
+                                st.session_state.show_conversation_manager = False
+                                reset_conversation_state()
+                                st.rerun()
+
+        st.divider()
+
+        # Documents section
         render_upload_section()
         render_document_list()
 
         st.divider()
 
+        # User section
         if st.session_state.current_user_id:
             user = get_user(st.session_state.current_user_id)
             if user:
-                st.markdown(f"**User: {user['username']}**")
+                st.markdown(f"**{user['username']}**")
                 if st.button("Sign Out", use_container_width=True):
                     st.session_state.current_user_id = None
                     st.session_state.current_conversation_id = None
@@ -1028,408 +1066,762 @@ def render_conversation_sidebar():
                     st.session_state.show_login = True
                     st.session_state.pending_image_attachments = []
                     st.session_state.message_image_thumbnails = {}
+                    st.toast("👋 Goodbye!", icon="👋")
                     st.rerun()
 
 
-def render_instructions_modal():
-    """Render instructions modal with persona editing support."""
-    if not st.session_state.show_instructions:
+def _guess_extension(mime: Optional[str]) -> str:
+    """Guess file extension from MIME type"""
+    if not mime:
+        return "png"
+    base_mime = mime.split(";")[0]
+    ext = mimetypes.guess_extension(base_mime)
+    if ext:
+        return ext.lstrip(".")
+    if base_mime.endswith("jpeg"):
+        return "jpg"
+    return "png"
+
+
+def render_agent_images(message_metadata: dict, message_id: str):
+    """Render images from agent responses as thumbnails (Tavily, Image Generator)"""
+    if not message_metadata:
         return
 
-    conversation_id = st.session_state.get("current_conversation_id")
-    is_new_conversation = conversation_id == "pending_new"
-    has_conversation = conversation_id not in (None, "pending_new")
+    images = message_metadata.get("images", [])
+    if not images:
+        return
 
-    if st.session_state.persona_editor_pending:
-        st.session_state.persona_editor_value = (
-            st.session_state.persona_editor_pending_value or ""
-        )
-        st.session_state.persona_editor_pending = False
+    thumbnail_fragments: List[str] = []
 
-    current_conv: Optional[Dict[str, Any]] = None
-    if has_conversation:
-        current_conv = next(
-            (
-                conv
-                for conv in st.session_state.conversations_list
-                if conv.get("id") == conversation_id
-            ),
-            None,
-        )
-        if current_conv is None:
-            response = make_api_request("GET", f"/conversations/{conversation_id}")
-            if response and response.get("data"):
-                current_conv = response["data"]
+    for idx, img in enumerate(images, start=1):
+        if not isinstance(img, dict):
+            continue
 
-    if st.session_state.persona_editor_origin != conversation_id:
-        if has_conversation and current_conv:
-            initial_value = current_conv.get("personaPrompt") or ""
-        elif is_new_conversation:
-            initial_value = st.session_state.get("pending_persona_prompt", "")
-        else:
-            initial_value = ""
-        st.session_state.persona_editor_origin = conversation_id
-        st.session_state.persona_editor_value = initial_value or ""
+        # Handle URL images (Tavily)
+        if "url" in img:
+            url = img.get("url", "")
+            if url:
+                escaped_url = html.escape(url, quote=True)
+                name = img.get("description") or f"Image {idx}"
+                escaped_name = html.escape(str(name), quote=True)
 
-    col1, col2, col3 = st.columns([1, 3, 1])
-    with col2:
-        st.markdown("### Conversation Instructions")
-
-        if conversation_id is None:
-            st.info(
-                "Select a conversation or click **New Chat** to configure instructions."
-            )
-            if st.button("Close", use_container_width=True):
-                st.session_state.show_instructions = False
-                st.session_state.persona_editor_origin = None
-                st.rerun()
-            return
-
-        if has_conversation:
-            title = current_conv.get("title") if current_conv else "Conversation"
-            st.caption(
-                f"Assistant responses in **{title}** will follow these instructions."
-            )
-            if current_conv is None:
-                st.warning(
-                    "Conversation details are unavailable. The instructions shown may be out of date."
+                thumbnail_fragments.append(
+                    f'<a class="attachment-thumb-link" href="{escaped_url}" target="_blank" '
+                    f'rel="noopener noreferrer" aria-label="Open {escaped_name}" title="{escaped_name}">'
+                    f'<div class="attachment-thumb">'
+                    f'<img src="{escaped_url}" alt="{escaped_name}" loading="lazy" />'
+                    f"</div></a>"
                 )
-        else:
-            st.caption(
-                "These instructions will be applied when you send the first message in this chat."
-            )
 
-        st.write(
-            "Describe how the assistant should behave. This field is optional and limited to "
-            f"{_MAX_PERSONA_LENGTH} characters."
+        # Handle base64 images (Image Generator)
+        elif "data" in img:
+            data = img.get("data", "")
+            mime = img.get("mime", "image/png")
+            name = img.get("name") or f"Generated image {idx}"
+            if data:
+                escaped_name = html.escape(str(name), quote=True)
+                data_url = f"data:{mime};base64,{data}"
+                download_name = (
+                    name if "." in name else f"{name}.{_guess_extension(mime)}"
+                )
+                escaped_download = html.escape(str(download_name), quote=True)
+
+                thumbnail_fragments.append(
+                    f'<a class="attachment-thumb-link" href="{data_url}" target="_blank" rel="noopener" '
+                    f'aria-label="Open {escaped_name}" title="{escaped_name}" download="{escaped_download}">'
+                    f'<div class="attachment-thumb">'
+                    f'<img src="{data_url}" alt="{escaped_name}" loading="lazy" />'
+                    f"</div></a>"
+                )
+
+    if not thumbnail_fragments:
+        return
+
+    # Render thumbnails in a row, aligned to the left with margin
+    st.markdown(
+        f'<div class="message-attachments-wrapper" '
+        f'style="display:flex; justify-content:flex-start; margin:6px 0 0 45px;">'
+        f'<div class="message-attachments">{"".join(thumbnail_fragments)}</div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_message_bubble(msg: Dict[str, Any], is_user: bool):
+    bubble_class = "user-bubble" if is_user else "assistant-bubble"
+    avatar_class = "user-avatar" if is_user else "assistant-avatar"
+    avatar_text = "U" if is_user else "AI"
+    sender_name = "You" if is_user else "Assistant"
+
+    content_html = sanitize_message_content(msg.get("content", ""))
+    timestamp = format_time(msg.get("createdAt", ""))
+
+    # Determine if message is short (less than 50 chars)
+    content_text = msg.get("content", "")
+    is_short = len(content_text) < 50
+    size_class = "message-bubble-short" if is_short else ""
+
+    # Build message HTML
+    message_html = f"""
+    <div class="message-bubble {bubble_class} {size_class}">
+        <div class="message-header">
+            <div class="message-avatar {avatar_class}">{avatar_text}</div>
+            <strong>{sender_name}</strong>
+            <span class="message-time">{timestamp}</span>
+        </div>
+        <div>{content_html}</div>
+    </div>
+    """
+
+    st.markdown(message_html, unsafe_allow_html=True)
+
+    # Show attachments if user message
+    if is_user:
+        attachments = st.session_state.get("message_image_thumbnails", {}).get(
+            str(msg.get("id", ""))
         )
+        if attachments:
+            cols = st.columns(min(len(attachments), 4))
+            for idx, att in enumerate(attachments[:4]):
+                with cols[idx % len(cols)]:
+                    if att.get("data"):
+                        image_bytes = base64.b64decode(att["data"])
+                        st.image(image_bytes, caption=att.get("name", ""), width=100)
 
-        if PERSONA_TEMPLATES:
-            with st.expander("Need inspiration?", expanded=False):
-                template_cols = st.columns(len(PERSONA_TEMPLATES))
-                for idx, (label, template) in enumerate(PERSONA_TEMPLATES.items()):
-                    if template_cols[idx].button(label, key=f"persona_template_{idx}"):
-                        st.session_state.persona_editor_value = template[
-                            :_MAX_PERSONA_LENGTH
-                        ]
+    # Show agent-sent images (from Tavily or Image Generator) for assistant messages
+    if not is_user:
+        render_agent_images(msg.get("messageMetadata", {}), str(msg.get("id", "")))
 
-        st.text_area(
-            "Custom persona",
-            key="persona_editor_value",
-            height=200,
-            placeholder="Describe how the AI should behave (optional)",
-        )
-
-        current_value = st.session_state.get("persona_editor_value", "")
-        char_count = len(current_value)
-        exceeds_limit = char_count > _MAX_PERSONA_LENGTH
-        st.caption(f"{char_count}/{_MAX_PERSONA_LENGTH} characters")
-        if exceeds_limit:
-            st.error(
-                "Persona exceeds the 2000 character limit. Please shorten it before saving."
-            )
-
-        action_cols = st.columns([2, 2, 1])
-
-        with action_cols[0]:
-            if is_new_conversation:
-                if st.button(
-                    "Apply to New Chat",
-                    use_container_width=True,
-                    disabled=exceeds_limit,
-                ):
-                    sanitized = normalize_persona_input(current_value)
-                    st.session_state.pending_persona_prompt = sanitized
-                    st.session_state.persona_editor_pending_value = sanitized
-                    st.session_state.persona_editor_pending = True
-                    st.session_state.persona_feedback = (
-                        "Persona saved for the next new conversation."
-                        if sanitized
-                        else "Persona cleared for the next new conversation."
-                    )
-                    st.session_state.show_instructions = False
-                    st.session_state.persona_editor_origin = None
-                    st.rerun()
-            else:
-                if st.button(
-                    "Save Persona",
-                    use_container_width=True,
-                    disabled=exceeds_limit,
-                ):
-                    sanitized = normalize_persona_input(current_value)
-                    payload = {"personaPrompt": sanitized or None}
-                    response = make_api_request(
-                        "PATCH", f"/conversations/{conversation_id}", payload
-                    )
-                    if response and response.get("data"):
-                        updated = response["data"]
-                        st.session_state.persona_editor_pending_value = (
-                            updated.get("personaPrompt") or ""
-                        )
-                        st.session_state.persona_editor_pending = True
-                        st.session_state.persona_feedback = (
-                            "Persona updated for this conversation."
-                        )
-                        refresh_conversations_list()
-                        st.session_state.show_instructions = False
-                        st.session_state.persona_editor_origin = None
-                        st.rerun()
-                    else:
-                        st.error("Unable to update persona. Please try again.")
-
-        with action_cols[1]:
-            if is_new_conversation:
-                if st.button("Clear", use_container_width=True):
-                    st.session_state.persona_editor_pending_value = ""
-                    st.session_state.persona_editor_pending = True
-                    st.session_state.pending_persona_prompt = ""
-                    st.rerun()
-            else:
-                if st.button("Clear Persona", use_container_width=True):
-                    response = make_api_request(
-                        "PATCH",
-                        f"/conversations/{conversation_id}",
-                        {"personaPrompt": None},
-                    )
-                    if response and response.get("data"):
-                        refresh_conversations_list()
-                        st.session_state.persona_editor_pending_value = ""
-                        st.session_state.persona_editor_pending = True
-                        st.session_state.persona_feedback = (
-                            "Persona removed for this conversation."
-                        )
-                        st.session_state.show_instructions = False
-                        st.session_state.persona_editor_origin = None
-                        st.rerun()
-                    else:
-                        st.error("Unable to clear persona. Please try again.")
-
-        with action_cols[2]:
-            if st.button("Close", use_container_width=True):
-                st.session_state.show_instructions = False
-                st.session_state.persona_editor_origin = None
-                st.rerun()
+    # Show feedback for assistant messages
+    if not is_user:
+        render_message_feedback_inline(msg)
 
 
-def render_conversation_manager():
-    if st.session_state.show_conversation_manager:
-        col1, col2, col3 = st.columns([1, 3, 1])
-        with col2:
-            st.markdown("### Conversation Manager")
-
-            if st.session_state.persona_feedback:
-                st.success(st.session_state.persona_feedback)
-                st.session_state.persona_feedback = None
-
-            # Load conversations with messages for the manager
-            if st.session_state.current_user_id:
-                with st.spinner("Loading conversations with messages..."):
-                    manager_conversations_response = get_conversations(
-                        include_messages=True, latest_messages=3
-                    )
-                    if (
-                        manager_conversations_response
-                        and manager_conversations_response.get("data")
-                    ):
-                        manager_conversations = manager_conversations_response["data"][
-                            "items"
-                        ]
-                    else:
-                        manager_conversations = []
-            else:
-                manager_conversations = []
-
-            search_term = st.text_input(
-                "Search conversations:", placeholder="Type to search..."
-            )
-
-            if manager_conversations:
-                filtered_convs = manager_conversations
-
-                if search_term:
-                    filtered_convs = []
-                    for conv in manager_conversations:
-                        # Check if conversation title contains search term
-                        if search_term.lower() in conv.get("title", "").lower():
-                            if conv not in filtered_convs:
-                                filtered_convs.append(conv)
-                            continue
-
-                        # Check messages that are already included in the conversation
-                        messages = conv.get("messages", [])
-                        if messages:
-                            # Use pre-loaded messages to avoid API call
-                            for msg in messages:
-                                if (
-                                    search_term.lower()
-                                    in msg.get("content", "").lower()
-                                ):
-                                    if conv not in filtered_convs:
-                                        filtered_convs.append(conv)
-                                    break
-
-                if filtered_convs:
-                    for conv in filtered_convs:
-                        with st.expander(
-                            f"Conversation - {conv['title']}", expanded=False
-                        ):
-                            if conv.get("messages"):
-                                for msg in conv["messages"]:
-                                    sender_value = msg.get("sender")
-                                    sender_icon = (
-                                        "[User]"
-                                        if sender_value in (1, "user", "USER", "User")
-                                        else "[Assistant]"
-                                    )
-                                    sender_name = (
-                                        "user"
-                                        if sender_value in (1, "user", "USER", "User")
-                                        else "assistant"
-                                    )
-                                    preview = msg.get("content", "")
-                                    st.markdown(
-                                        f"{sender_icon} **{sender_name}:** {preview[:100]}..."
-                                    )
-                            else:
-                                st.markdown("No messages available")
-
-                            col_open, col_delete = st.columns(2)
-                            with col_open:
-                                if st.button("Select", key=f"open_{conv['id']}"):
-                                    st.session_state.current_conversation_id = conv[
-                                        "id"
-                                    ]
-                                    reset_conversation_state()
-                                    st.session_state.show_conversation_manager = False
-                                    st.rerun()
-
-                            with col_delete:
-                                if st.button(
-                                    "Delete",
-                                    key=f"delete_{conv['id']}",
-                                    type="secondary",
-                                ):
-                                    result = make_api_request(
-                                        "DELETE", f"/conversations/{conv['id']}"
-                                    )
-                                    if result:
-                                        st.session_state.conversations_list = []
-                                        if (
-                                            st.session_state.current_conversation_id
-                                            == conv["id"]
-                                        ):
-                                            st.session_state.current_conversation_id = (
-                                                None
-                                            )
-                                            reset_conversation_state()
-                                        get_messages.clear()
-                                        refresh_conversations_list()
-                                        st.success(f"Deleted '{conv['title']}'")
-                                        st.rerun()
-                else:
-                    st.info("No conversations found matching your search.")
-            else:
-                st.info("No conversations available.")
-
-            if st.button("Close Manager", use_container_width=True):
-                st.session_state.show_conversation_manager = False
-                st.rerun()
-
-
-def render_message_feedback(msg: Dict[str, Any]) -> None:
-    """Render feedback section for a message outside the main loop."""
-    feedback_key = f"feedback_msg_{msg['id']}"
-
-    # Show existing feedback directly beneath the bot message
+def render_message_feedback_inline(msg: Dict[str, Any]):
+    """Inline feedback for assistant messages using popover"""
     feedback = msg.get("feedback")
 
-    with st.container():
-        st.markdown('<div style="margin-left: 45px;">', unsafe_allow_html=True)
+    if isinstance(feedback, dict) and feedback:
+        # Show existing feedback
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            rating = feedback.get("rating", 0)
+            stars = "⭐" * rating
+            st.caption(f"{stars} {rating}/5")
+            comment = feedback.get("comment")
+            if comment:
+                st.caption(f"💬 {comment[:60]}...")
+        with col2:
+            with st.popover("✏️", help="Edit feedback"):
+                st.markdown("**Edit Feedback**")
+                with st.form(f"edit_feedback_{msg['id']}", clear_on_submit=True):
+                    rating = st.select_slider(
+                        "Rating",
+                        options=[1, 2, 3, 4, 5],
+                        value=feedback.get("rating", 5),
+                    )
+                    comment = st.text_area(
+                        "Comment (optional)",
+                        value=feedback.get("comment", ""),
+                        height=60,
+                    )
 
-        if isinstance(feedback, dict) and feedback:
-            rating = feedback.get("rating")
-            comment_text = feedback.get("comment")
-
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                if rating is not None:
-                    st.markdown(f"⭐ Rating: {rating}/5")
-                if comment_text:
-                    preview = comment_text[:80]
-                    suffix = "..." if len(comment_text) > 80 else ""
-                    st.markdown(f'💬 *"{preview}{suffix}"*')
-            with col2:
-                if st.button(
-                    "Edit", key=f"edit_feedback_{msg['id']}", use_container_width=True
-                ):
-                    st.session_state[feedback_key] = True
-                    st.rerun()
-
-        # Show feedback form only if triggered
-        if st.session_state.get(feedback_key, False):
-            with st.form(f"feedback_form_{msg['id']}", clear_on_submit=True):
-                rating = st.selectbox(
-                    "Rating", [1, 2, 3, 4, 5], index=4, key=f"rating_{msg['id']}"
-                )
-                comment = st.text_area(
-                    "Comment (optional)", height=80, key=f"comment_{msg['id']}"
-                )
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.form_submit_button("Submit", use_container_width=True):
+                    if st.form_submit_button(
+                        "Update", use_container_width=True, type="primary"
+                    ):
                         feedback_data = {
                             "messageId": msg["id"],
                             "rating": rating,
                             "comment": comment,
                         }
                         response = make_api_request(
-                            "POST",
-                            f"/messages/{msg['id']}/feedbacks",
-                            feedback_data,
+                            "POST", f"/messages/{msg['id']}/feedbacks", feedback_data
                         )
                         if response:
-                            st.session_state[feedback_key] = False
                             get_messages.clear()
                             st.session_state.conversation_messages_page = 0
-                            st.success("✓ Feedback submitted!")
+                            st.toast("✅ Feedback updated!", icon="✅")
                             st.rerun()
-                with col2:
-                    if st.form_submit_button("Cancel", use_container_width=True):
-                        st.session_state[feedback_key] = False
+    else:
+        # Show add feedback popover
+        with st.popover("💬 Feedback", help="Give feedback"):
+            st.markdown("**Provide Feedback**")
+            with st.form(f"add_feedback_{msg['id']}", clear_on_submit=True):
+                rating = st.select_slider("Rating", options=[1, 2, 3, 4, 5], value=5)
+                comment = st.text_area("Comment (optional)", height=60)
+
+                if st.form_submit_button(
+                    "Submit", use_container_width=True, type="primary"
+                ):
+                    feedback_data = {
+                        "messageId": msg["id"],
+                        "rating": rating,
+                        "comment": comment,
+                    }
+                    response = make_api_request(
+                        "POST", f"/messages/{msg['id']}/feedbacks", feedback_data
+                    )
+                    if response:
+                        get_messages.clear()
+                        st.session_state.conversation_messages_page = 0
+                        st.toast("✅ Feedback submitted!", icon="✅")
                         st.rerun()
-        elif not feedback:
-            if st.button(
-                "💬 Feedback",
-                key=f"add_feedback_{msg['id']}",
-                type="secondary",
-            ):
-                st.session_state[feedback_key] = True
-                st.rerun()
-
-        st.markdown("</div>", unsafe_allow_html=True)
 
 
-def render_chat_interface():
+def render_tool_parameter_form(args_schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Render dynamic form fields based on tool's JSON Schema and return parameter values"""
+    parameters = {}
+
+    if not args_schema or "properties" not in args_schema:
+        st.info("This tool doesn't require any parameters.")
+        return parameters
+
+    properties = args_schema.get("properties", {})
+    required = args_schema.get("required", [])
+
+    st.markdown("#### Parameters")
+
+    for param_name, param_info in properties.items():
+        param_type = param_info.get("type", "string")
+        param_desc = param_info.get("description", "")
+        is_required = param_name in required
+
+        label = f"{param_name}{'*' if is_required else ''}"
+        help_text = param_desc if param_desc else None
+
+        # Render appropriate input based on type
+        if param_type == "boolean":
+            parameters[param_name] = st.checkbox(label, help=help_text)
+        elif param_type == "number" or param_type == "integer":
+            default_val = param_info.get("default", 0)
+            parameters[param_name] = st.number_input(
+                label, value=default_val, help=help_text
+            )
+        elif param_type == "string":
+            # Check for enum
+            if "enum" in param_info:
+                enum_values = param_info["enum"]
+                parameters[param_name] = st.selectbox(
+                    label, options=enum_values, help=help_text
+                )
+            else:
+                default_val = param_info.get("default", "")
+                parameters[param_name] = st.text_input(
+                    label, value=default_val, help=help_text
+                )
+        else:
+            # Fallback for complex types
+            parameters[param_name] = st.text_area(
+                label, help=help_text or f"Enter {param_type} value"
+            )
+
+    return parameters
+
+
+def render_tools_tab():
+    """Render the MCP Tools management and testing interface"""
+    st.markdown("### 🔧 MCP Tools Management")
+    st.markdown(
+        "Discover and test Model Context Protocol (MCP) tools available to the chatbot."
+    )
+
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        if st.button("🔄 Refresh", use_container_width=True):
+            get_mcp_servers.clear()
+            get_mcp_tools.clear()
+            st.rerun()
+
+    st.markdown("---")
+
+    # Fetch servers and tools
+    servers_data = get_mcp_servers()
+    tools_data = get_mcp_tools()
+
+    if not servers_data or not tools_data:
+        st.error("Failed to load MCP data. Make sure the API is running.")
+        return
+
+    # Server Management Section
+    with st.expander("📡 **MCP Servers Management**", expanded=False):
+        servers = servers_data.get("servers", [])
+
+        # Add Server Section
+        st.markdown("#### ➕ Add New Server")
+
+        # Quick test button
+        col_test1, col_test2 = st.columns([1, 3])
+        with col_test1:
+            if st.button("🔍 Test API", help="Test if the MCP API is responding"):
+                test_response = make_api_request("GET", "/mcp/servers")
+                if test_response and test_response.get("success"):
+                    st.success("✅ API is working!")
+                else:
+                    st.error("❌ API connection issue")
+                    if test_response:
+                        st.json(test_response)
+
+        tab1, tab2 = st.tabs(["JSON Config", "Form"])
+
+        with tab1:
+            st.markdown("Paste your MCP server configuration in JSON format:")
+            st.caption(
+                "Supports both full config format (with mcpServers) or single server format"
+            )
+            json_config = st.text_area(
+                "JSON Configuration",
+                height=250,
+                placeholder="""{
+  "mcpServers": {
+    "my-server": {
+      "command": "python",
+      "args": ["path/to/server.py"],
+      "description": "My custom MCP server"
+    }
+  }
+}
+
+OR single server format:
+{
+  "name": "my-server",
+  "command": "python",
+  "args": ["path/to/server.py"]
+}""",
+                label_visibility="collapsed",
+            )
+
+            if st.button("Add Server from JSON", use_container_width=True):
+                if json_config.strip():
+                    try:
+                        config = json.loads(json_config)
+
+                        # Handle two formats:
+                        # Format 1: Full config with "mcpServers" or "mcp_servers" wrapper
+                        # Format 2: Individual server config with "name" field
+
+                        servers_to_add = []
+
+                        # Check if this is a full config file format
+                        if "mcpServers" in config or "mcp_servers" in config:
+                            # Extract servers from the wrapper
+                            servers_dict = config.get("mcpServers") or config.get(
+                                "mcp_servers"
+                            )
+                            for server_name, server_config in servers_dict.items():
+                                # Add the name to the config
+                                server_config["name"] = server_name
+                                # Add default transport if not specified
+                                if "transport" not in server_config:
+                                    server_config["transport"] = "stdio"
+                                servers_to_add.append(server_config)
+
+                        # Check if this is a single server config with name
+                        elif "name" in config:
+                            if "transport" not in config:
+                                config["transport"] = "stdio"
+                            servers_to_add.append(config)
+
+                        # Invalid format
+                        else:
+                            st.error(
+                                "❌ Invalid format. Please use one of these formats:"
+                            )
+                            st.code(
+                                """Format 1 - Full config:
+{
+  "mcpServers": {
+    "server-name": {
+      "command": "python",
+      "args": ["path/to/server.py"]
+    }
+  }
+}
+
+Format 2 - Single server:
+{
+  "name": "server-name",
+  "transport": "stdio",
+  "command": "python",
+  "args": ["path/to/server.py"]
+}""",
+                                language="json",
+                            )
+                            servers_to_add = []
+
+                        # Add all servers
+                        if servers_to_add:
+                            success_count = 0
+                            failed_servers = []
+
+                            for server_config in servers_to_add:
+                                server_name = server_config.get("name", "unknown")
+
+                                with st.spinner(f"Adding server '{server_name}'..."):
+                                    # Show what we're sending for debugging
+                                    with st.expander(
+                                        f"📤 Request for '{server_name}' (debug)",
+                                        expanded=False,
+                                    ):
+                                        st.json(server_config)
+
+                                    # Make API request
+                                    response = make_api_request(
+                                        "POST", "/mcp/servers", server_config
+                                    )
+
+                                    # Show response for debugging
+                                    with st.expander(
+                                        f"📥 Response for '{server_name}' (debug)",
+                                        expanded=False,
+                                    ):
+                                        st.json(
+                                            response
+                                            if response
+                                            else {"error": "No response"}
+                                        )
+
+                                    if response and response.get("success"):
+                                        success_count += 1
+                                        st.success(
+                                            f"✅ Server '{server_name}' added successfully!"
+                                        )
+                                    else:
+                                        error_msg = (
+                                            response.get("message", "Unknown error")
+                                            if response
+                                            else "No response from API"
+                                        )
+                                        failed_servers.append(
+                                            f"{server_name}: {error_msg}"
+                                        )
+                                        st.error(
+                                            f"❌ Failed to add '{server_name}': {error_msg}"
+                                        )
+
+                            # Show summary
+                            if success_count > 0:
+                                st.info(
+                                    f"✅ Successfully added {success_count} server(s). Refreshing..."
+                                )
+                                # Clear caches
+                                get_mcp_servers.clear()
+                                get_mcp_tools.clear()
+                                # Small delay to ensure file is written
+                                import time
+
+                                time.sleep(0.5)
+                                st.rerun()
+
+                            if failed_servers:
+                                st.warning(
+                                    f"Failed to add {len(failed_servers)} server(s)"
+                                )
+                                for failure in failed_servers:
+                                    st.text(f"  • {failure}")
+                    except json.JSONDecodeError as e:
+                        st.error(f"❌ Invalid JSON: {e}")
+                    except Exception as e:
+                        st.error(f"❌ Error: {str(e)}")
+                else:
+                    st.warning("Please enter a JSON configuration")
+
+        with tab2:
+            with st.form("add_server_form"):
+                st.markdown("Fill in the server details:")
+
+                server_name_input = st.text_input(
+                    "Server Name*", placeholder="my-server"
+                )
+                transport_input = st.selectbox(
+                    "Transport Type*",
+                    options=["stdio", "http", "sse", "streamable_http"],
+                    index=0,
+                )
+
+                if transport_input == "stdio":
+                    command_input = st.text_input(
+                        "Command*", value="python", placeholder="python"
+                    )
+                    args_input = st.text_input(
+                        "Arguments (comma-separated)*",
+                        placeholder="app/ai/mcp_servers/my_server.py",
+                    )
+                    env_input = st.text_area(
+                        "Environment Variables (JSON, optional)",
+                        placeholder='{"API_KEY": "value"}',
+                        height=100,
+                    )
+                else:
+                    url_input = st.text_input(
+                        "URL*", placeholder="http://localhost:8080"
+                    )
+                    headers_input = st.text_area(
+                        "Headers (JSON, optional)",
+                        placeholder='{"Authorization": "Bearer token"}',
+                        height=100,
+                    )
+
+                description_input = st.text_area(
+                    "Description (optional)",
+                    placeholder="Brief description of the server",
+                )
+                enabled_input = st.checkbox("Enable server", value=True)
+
+                if st.form_submit_button("Add Server", use_container_width=True):
+                    if not server_name_input:
+                        st.error("Server name is required")
+                    else:
+                        try:
+                            config = {
+                                "name": server_name_input,
+                                "transport": transport_input,
+                                "enabled": enabled_input,
+                            }
+
+                            if description_input:
+                                config["description"] = description_input
+
+                            if transport_input == "stdio":
+                                if not command_input or not args_input:
+                                    st.error(
+                                        "Command and arguments are required for stdio transport"
+                                    )
+                                else:
+                                    config["command"] = command_input
+                                    config["args"] = [
+                                        arg.strip() for arg in args_input.split(",")
+                                    ]
+
+                                    if env_input.strip():
+                                        try:
+                                            config["env"] = json.loads(env_input)
+                                        except json.JSONDecodeError:
+                                            st.error(
+                                                "Invalid JSON in environment variables"
+                                            )
+
+                                    with st.spinner("Adding server..."):
+                                        result = add_mcp_server(config)
+                                        if result:
+                                            st.success(
+                                                f"✅ Server '{server_name_input}' added!"
+                                            )
+                                            st.rerun()
+                                        else:
+                                            st.error("Failed to add server")
+                            else:
+                                if not url_input:
+                                    st.error("URL is required for HTTP transport")
+                                else:
+                                    config["url"] = url_input
+
+                                    if headers_input.strip():
+                                        try:
+                                            config["headers"] = json.loads(
+                                                headers_input
+                                            )
+                                        except json.JSONDecodeError:
+                                            st.error("Invalid JSON in headers")
+
+                                    with st.spinner("Adding server..."):
+                                        result = add_mcp_server(config)
+                                        if result:
+                                            st.success(
+                                                f"✅ Server '{server_name_input}' added!"
+                                            )
+                                            st.rerun()
+                                        else:
+                                            st.error("Failed to add server")
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+
+        st.markdown("---")
+        st.markdown("#### 📋 Configured Servers")
+
+        if not servers:
+            st.info("No MCP servers configured.")
+        else:
+            for server in servers:
+                server_name = server.get("name", "Unknown")
+                enabled = server.get("enabled", False)
+                tool_count = server.get("toolCount", 0)
+                transport = server.get("transport", "unknown")
+                description = server.get("description", "No description")
+
+                status_color = "🟢" if enabled else "🔴"
+                status_text = "Enabled" if enabled else "Disabled"
+
+                col1, col2, col3 = st.columns([3, 1, 1])
+
+                with col1:
+                    st.markdown(
+                        f"""
+                    **{status_color} {server_name}** - {status_text}
+                    - Transport: `{transport}`
+                    - Tools: {tool_count}
+                    - {description if description else "No description available"}
+                    """
+                    )
+
+                with col2:
+                    toggle_label = "Disable" if enabled else "Enable"
+                    if st.button(toggle_label, key=f"toggle_{server_name}"):
+                        with st.spinner(f"{toggle_label}ing server..."):
+                            result = toggle_mcp_server(server_name, not enabled)
+                            if result:
+                                st.rerun()
+
+                with col3:
+                    if st.button("🗑️ Remove", key=f"remove_{server_name}"):
+                        with st.spinner("Removing server..."):
+                            result = remove_mcp_server(server_name)
+                            if result:
+                                st.success(f"Removed '{server_name}'")
+                                st.rerun()
+
+                st.markdown("---")
+
+    # Tools List Section
+    st.markdown("### Available Tools")
+
+    tools = tools_data.get("tools", [])
+    total_count = tools_data.get("totalCount", 0)
+
+    if not tools:
+        st.info("No tools available. Enable MCP servers to load tools.")
+        return
+
+    st.markdown(
+        f"**{total_count} tools** available from {tools_data.get('serversCount', 0)} servers"
+    )
+
+    # Tool selection
+    tool_names = [tool.get("name", "") for tool in tools]
+
+    # Search/filter
+    search_query = st.text_input(
+        "🔍 Search tools", placeholder="Filter by name or description..."
+    )
+
+    filtered_tools = tools
+    if search_query:
+        search_lower = search_query.lower()
+        filtered_tools = [
+            tool
+            for tool in tools
+            if search_lower in tool.get("name", "").lower()
+            or search_lower in tool.get("description", "").lower()
+        ]
+
+    if not filtered_tools:
+        st.warning(f"No tools match '{search_query}'")
+        return
+
+    # Display tools as selectbox
+    selected_tool_name = st.selectbox(
+        "Select a tool to test",
+        options=[tool.get("name") for tool in filtered_tools],
+        format_func=lambda x: f"{x} ({next((t.get('serverName', '') for t in filtered_tools if t.get('name') == x), '')})",
+    )
+
+    if not selected_tool_name:
+        return
+
+    # Get selected tool details
+    selected_tool = next(
+        (t for t in filtered_tools if t.get("name") == selected_tool_name), None
+    )
+
+    if not selected_tool:
+        return
+
+    # Display tool details
+    st.markdown("---")
+    st.markdown(f"## {selected_tool.get('name')}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"**Server:** `{selected_tool.get('serverName', 'Unknown')}`")
+    with col2:
+        st.markdown(f"**Type:** Tool")
+
+    st.markdown(
+        f"**Description:** {selected_tool.get('description', 'No description available')}"
+    )
+
+    # Tool parameter form
+    st.markdown("---")
+    args_schema = selected_tool.get("argsSchema", {})
+
+    with st.form(key=f"tool_execute_form_{selected_tool_name}"):
+        st.markdown("### Execute Tool")
+
+        # Render parameter inputs
+        parameters = render_tool_parameter_form(args_schema)
+
+        # Submit button
+        execute_button = st.form_submit_button(
+            "▶️ Execute Tool", use_container_width=True
+        )
+
+        if execute_button:
+            with st.spinner(f"Executing {selected_tool_name}..."):
+                result = execute_mcp_tool(selected_tool_name, parameters)
+
+                if result:
+                    st.session_state.tool_execution_result = result
+                else:
+                    st.error("Tool execution failed. Check API logs.")
+
+    # Display execution result
+    if st.session_state.tool_execution_result:
+        result = st.session_state.tool_execution_result
+
+        st.markdown("---")
+        st.markdown("### Execution Result")
+
+        success = result.get("success", False)
+        execution_time = result.get("executionTime", 0)
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            status_label = "✅ Success" if success else "❌ Failed"
+            st.markdown(f"**Status:** {status_label}")
+        with col2:
+            st.markdown(f"**Time:** {execution_time:.3f}s")
+        with col3:
+            st.markdown(f"**Tool:** {result.get('toolName', 'Unknown')}")
+
+        if success:
+            st.success("Tool executed successfully!")
+        else:
+            error_msg = result.get("error", "Unknown error")
+            st.error(f"Execution failed: {error_msg}")
+
+        payload = result.get("result")
+        if payload is not None:
+            with st.expander("Result Data", expanded=True):
+                render_tool_result_payload(payload)
+
+        # Clear button
+        if st.button("Clear Result"):
+            st.session_state.tool_execution_result = None
+            st.rerun()
+
+
+def render_chat_view():
+    """Main chat interface"""
     conversation_id = st.session_state.get("current_conversation_id")
-    user_id = st.session_state.get("current_user_id")
 
-    # Conversations list is already loaded in sidebar, no need to reload here
-
-    if st.session_state.persona_feedback:
-        st.success(st.session_state.persona_feedback)
-        st.session_state.persona_feedback = None
-
+    # Load messages
     def load_messages_page(page: int, *, show_spinner: bool = False) -> None:
         conv_id = st.session_state.get("current_conversation_id")
         if not conv_id or conv_id == "pending_new":
             return
 
         fetch_page = lambda: get_messages(
-            conv_id,
-            page=page,
-            limit=10,
-            order_direction="desc",
+            conv_id, page=page, limit=10, order_direction="desc"
         )
 
         if show_spinner:
@@ -1446,8 +1838,8 @@ def render_chat_interface():
             attachments_state = st.session_state.setdefault(
                 "message_image_thumbnails", {}
             )
-
             existing_messages = {msg["id"]: msg for msg in st.session_state.messages}
+
             for item in items:
                 msg_id = item.get("id")
                 if msg_id:
@@ -1506,7 +1898,6 @@ def render_chat_interface():
             st.session_state.messages = sorted_messages
             st.session_state.conversation_messages_meta = meta
 
-            # API returns camelCase keys (currentPage, lastPage)
             current_page = meta.get("currentPage", meta.get("current_page", page))
             last_page = meta.get("lastPage", meta.get("last_page", current_page))
             st.session_state.conversation_messages_page = current_page
@@ -1521,6 +1912,7 @@ def render_chat_interface():
         if st.session_state.conversation_messages_page == 0:
             load_messages_page(1, show_spinner=True)
 
+    # Show conversation title
     current_conv = next(
         (c for c in st.session_state.conversations_list if c["id"] == conversation_id),
         None,
@@ -1530,41 +1922,33 @@ def render_chat_interface():
         st.markdown(f"# {current_conv['title']}")
         active_persona = current_conv.get("personaPrompt")
         if active_persona:
-            st.caption(f"Instructions active: {persona_preview(active_persona)}")
+            st.info(
+                f"🎭 **Instructions active:** {persona_preview(active_persona, 100)}"
+            )
     elif conversation_id == "pending_new":
-        st.markdown("# New Chat - Start typing to begin!")
+        st.markdown("# New Chat")
         queued_persona = st.session_state.get("pending_persona_prompt", "")
         if queued_persona:
-            st.caption(f"Instructions queued: {persona_preview(queued_persona)}")
+            st.info(
+                f"🎭 **Instructions queued:** {persona_preview(queued_persona, 100)}"
+            )
     else:
-        st.markdown("# Welcome! Select a conversation to view messages")
+        st.markdown("# 👋 Welcome!")
+        st.info(
+            "Select a conversation from the sidebar or create a new chat to get started."
+        )
+        return
 
-    if conversation_id and conversation_id not in (None, "pending_new"):
+    # Load more button
+    if conversation_id and conversation_id != "pending_new":
         if st.session_state.has_more_messages:
-            if st.button("Load older messages", key="load_more_messages"):
+            if st.button("📜 Load older messages", use_container_width=True):
                 next_page = st.session_state.conversation_messages_page + 1
                 load_messages_page(next_page, show_spinner=True)
-        elif st.session_state.conversation_messages_page > 0:
-            st.caption("All caught up - showing the entire thread.")
 
-    st.markdown('<div class="chat-wrapper">', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="chat-messages-container"><div class="chat-messages-scroll">',
-        unsafe_allow_html=True,
-    )
+    st.divider()
 
-    def format_time(iso_string: str) -> str:
-        try:
-            dt = parser.isoparse(iso_string)
-            now = datetime.now(dt.tzinfo)
-            if dt.date() == now.date():
-                return dt.strftime("%H:%M")
-            if now - timedelta(days=7) < dt <= now:
-                return dt.strftime("%a %H:%M")
-            return dt.strftime("%b %d, %Y %H:%M")
-        except Exception:
-            return iso_string
-
+    # Messages
     messages_to_display = (
         st.session_state.messages
         if conversation_id and conversation_id != "pending_new"
@@ -1572,110 +1956,79 @@ def render_chat_interface():
     )
 
     if not messages_to_display and conversation_id not in (None, "pending_new"):
-        st.markdown(
-            "<div style='text-align:center; color:#94a3b8;'>No messages yet - send the first one!</div>",
-            unsafe_allow_html=True,
-        )
+        st.info("💬 No messages yet. Start the conversation!")
 
     for msg in messages_to_display:
         sender_value = msg.get("sender")
         is_user_message = sender_value in (1, "user", "USER", "User")
+        render_message_bubble(msg, is_user_message)
 
-        if is_user_message:
-            # User message with no feedback option
-            st.markdown(
-                f"""
-                <div style="display: flex; justify-content: flex-end; margin: 10px 0; align-items: flex-start; gap: 10px;">
-                    <div class="user-message">
-                        {sanitize_message_content(msg.get("content"))}
-                        <div class="message-timestamp">You - {format_time(msg.get("createdAt", "now"))}</div>
-                    </div>
-                    <div style="border: 2px solid #007bff; color: #007bff; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">U</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            render_message_attachments(str(msg.get("id", "")), align="right")
-        else:
-            # Assistant message with feedback option
-            st.markdown(
-                f"""
-                <div style="display: flex; justify-content: flex-start; margin: 10px 0; align-items: flex-start; gap: 10px;">
-                    <div style="border: 2px solid #28a745; color: #28a745; border-radius: 50%; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; flex-shrink: 0;">AI</div>
-                    <div style="display: flex; flex-direction: column;">
-                        <div class="bot-message" style="margin: 0;">
-                            {sanitize_message_content(msg.get("content"))}
-                            <div class="message-timestamp">Assistant - {format_time(msg.get("createdAt", "now"))}</div>
-                        </div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+    st.divider()
 
-            # Render agent-sent images (from Tavily or Image Generator)
-            render_agent_images(
-                msg.get("messageMetadata", {}),
-                str(msg.get("id", "")),
-            )
-
-            # Add feedback section below the message
-            render_message_feedback(msg)
-
-    st.markdown("</div></div>", unsafe_allow_html=True)
-
+    # Input area
     if conversation_id:
-        st.markdown(
-            '<div class="chat-input-container">',
-            unsafe_allow_html=True,
-        )
-
+        # Show pending attachments
         if st.session_state.pending_image_attachments:
-            render_pending_attachment_preview()
+            st.caption(
+                f"📎 {len(st.session_state.pending_image_attachments)} attachment(s) ready"
+            )
+            cols = st.columns(min(len(st.session_state.pending_image_attachments), 4))
+            for idx, att in enumerate(st.session_state.pending_image_attachments):
+                with cols[idx % len(cols)]:
+                    image_bytes = base64.b64decode(att["data"])
+                    st.image(image_bytes, caption=att["name"], width=80)
+                    if st.button("❌", key=f"remove_{att['token']}"):
+                        st.session_state.pending_image_attachments = [
+                            item
+                            for item in st.session_state.pending_image_attachments
+                            if item["token"] != att["token"]
+                        ]
+                        st.rerun()
 
+        # File uploader
         file_uploader_key = (
             f"chat_image_uploader_{conversation_id}" if conversation_id else None
         )
 
-        message_input_key = (
-            f"message_input_{conversation_id}" if conversation_id else "message_input"
-        )
-        message_clear_flag_key = f"{message_input_key}_clear_flag"
+        if st.session_state.show_attachment_uploader and file_uploader_key:
+            uploaded_files = st.file_uploader(
+                "📎 Attach images",
+                type=["png", "jpg", "jpeg", "gif", "webp"],
+                accept_multiple_files=True,
+                key=file_uploader_key,
+                help=f"Up to {_MAX_IMAGE_ATTACHMENTS} images",
+            )
+            if uploaded_files:
+                _handle_new_image_attachments(uploaded_files)
 
-        if st.session_state.pop(message_clear_flag_key, False):
-            st.session_state[message_input_key] = ""
+        # Message form
+        with st.form("message_form", clear_on_submit=True):
+            col1, col2, col3 = st.columns([6, 1, 1])
 
-        with st.form("message_form", clear_on_submit=False):
-
-            message_col, button_col = st.columns([5, 1])
-            with message_col:
-                if st.session_state.show_attachment_uploader and file_uploader_key:
-                    uploaded_files = st.file_uploader(
-                        "Attach images",
-                        type=["png", "jpg", "jpeg", "gif", "webp"],
-                        accept_multiple_files=True,
-                        key=file_uploader_key,
-                        help=f"You can attach up to {_MAX_IMAGE_ATTACHMENTS} images.",
-                    )
-                    if uploaded_files:
-                        _handle_new_image_attachments(uploaded_files)
+            with col1:
                 message_content = st.text_area(
                     "Message",
-                    placeholder="Type your message here...",
-                    height=80,
+                    placeholder="Type your message...",
+                    height=100,
                     label_visibility="collapsed",
-                    key=message_input_key,
+                    key=f"msg_input_{conversation_id}",
                 )
-            with button_col:
-                send_button = st.form_submit_button("Send", use_container_width=True)
+
+            with col2:
+                send_button = st.form_submit_button(
+                    "\nSend", use_container_width=True, type="primary"
+                )
+
+            with col3:
                 attach_button = st.form_submit_button(
-                    "Attach Images", use_container_width=True, type="secondary"
+                    "📎\nAttach", use_container_width=True
                 )
 
             if attach_button:
                 st.session_state.show_attachment_uploader = not st.session_state.get(
                     "show_attachment_uploader", False
                 )
+                st.rerun()
 
             if send_button:
                 pending_attachments = list(
@@ -1684,9 +2037,7 @@ def render_chat_interface():
                 stripped_message = message_content.strip()
 
                 if not stripped_message and not pending_attachments:
-                    st.warning(
-                        "Please enter a message or attach images before sending."
-                    )
+                    st.toast("⚠️ Please enter a message", icon="⚠️")
                 else:
                     message_to_send = stripped_message or _format_image_only_message(
                         pending_attachments
@@ -1708,57 +2059,325 @@ def render_chat_interface():
                         persona_payload = normalize_persona_input(pending_persona)
                         if persona_payload:
                             conversation_data["personaPrompt"] = persona_payload
-                        conv_response = make_api_request(
-                            "POST", "/conversations/", conversation_data
-                        )
-                        if conv_response and conv_response.get("data"):
-                            new_conversation = conv_response["data"]
-                            st.session_state.current_conversation_id = new_conversation[
-                                "id"
-                            ]
-                            refresh_conversations_list(
-                                fallback_conversation=new_conversation
+
+                        with st.status(
+                            "Creating conversation...", expanded=True
+                        ) as status:
+                            conv_response = make_api_request(
+                                "POST", "/conversations/", conversation_data
                             )
-                            reset_conversation_state()
-                            st.session_state.pending_image_attachments = (
-                                saved_attachments
-                            )
-                            conversation_id = st.session_state.current_conversation_id
-                            pending_attachments = list(saved_attachments)
-                        else:
-                            st.error("Failed to create conversation")
-                            return
+                            if conv_response and conv_response.get("data"):
+                                new_conversation = conv_response["data"]
+                                st.session_state.current_conversation_id = (
+                                    new_conversation["id"]
+                                )
+                                refresh_conversations_list(
+                                    fallback_conversation=new_conversation
+                                )
+                                reset_conversation_state()
+                                st.session_state.pending_image_attachments = (
+                                    saved_attachments
+                                )
+                                conversation_id = (
+                                    st.session_state.current_conversation_id
+                                )
+                                pending_attachments = list(saved_attachments)
+                                status.update(
+                                    label="Conversation created!", state="complete"
+                                )
+                            else:
+                                st.toast("Failed to create conversation", icon="❌")
+                                return
 
                     message_data = {
                         "content": message_to_send,
                         "conversationId": st.session_state.current_conversation_id,
                     }
 
-                    # Include attachments if present
                     if pending_attachments:
                         message_data["attachments"] = pending_attachments
 
-                    with st.spinner("Thinking..."):
+                    with st.status("Sending message...", expanded=True) as status:
                         response = make_api_request("POST", "/messages/", message_data)
+                        if response and response.get("data"):
+                            st.session_state.pending_image_attachments = []
+                            get_messages.clear()
+                            refresh_conversations_list()
+                            reset_conversation_state()
+                            st.session_state.show_attachment_uploader = False
+                            load_messages_page(1)
+                            status.update(label="Message sent!", state="complete")
+                            st.toast("✅ Message sent!", icon="✅")
+                            st.rerun()
+                        else:
+                            st.toast("Failed to send message", icon="❌")
 
-                    if response and response.get("data"):
-                        st.session_state.pending_image_attachments = []
-                        st.session_state[message_clear_flag_key] = True
-                        get_messages.clear()
-                        refresh_conversations_list()
-                        reset_conversation_state()
-                        st.session_state.show_attachment_uploader = False
-                        load_messages_page(1)
-                        st.rerun()
-                    else:
-                        st.error("Failed to send message")
 
-        st.markdown("</div>", unsafe_allow_html=True)
+def render_manage_modal():
+    """Conversation management modal dialog"""
+    if not st.session_state.get("show_conversation_manager", False):
+        return
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    @st.dialog("📋 Manage Conversations", width="large")
+    def manage_dialog():
+        if st.session_state.current_user_id:
+            with st.status("Loading conversations...", expanded=False):
+                # Get conversations with latest 3 messages for preview
+                manager_conversations_response = get_conversations(
+                    include_messages=True, latest_messages=3
+                )
+                if (
+                    manager_conversations_response
+                    and manager_conversations_response.get("data")
+                ):
+                    manager_conversations = manager_conversations_response["data"][
+                        "items"
+                    ]
+                else:
+                    manager_conversations = []
+        else:
+            manager_conversations = []
+
+        # Search
+        search_term = st.text_input(
+            "🔍 Search conversations", placeholder="Type to search..."
+        )
+
+        if manager_conversations:
+            filtered_convs = manager_conversations
+
+            if search_term:
+                filtered_convs = []
+                for conv in manager_conversations:
+                    if search_term.lower() in conv.get("title", "").lower():
+                        if conv not in filtered_convs:
+                            filtered_convs.append(conv)
+                        continue
+
+                    messages = conv.get("messages", [])
+                    if messages:
+                        for msg in messages:
+                            if search_term.lower() in msg.get("content", "").lower():
+                                if conv not in filtered_convs:
+                                    filtered_convs.append(conv)
+                                break
+
+            if filtered_convs:
+                st.caption(f"Found {len(filtered_convs)} conversation(s)")
+
+                for conv in filtered_convs:
+                    with st.expander(f"{conv['title']}", expanded=False):
+                        # Show stats
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            # Backend now returns messageCount field with accurate total
+                            message_count = conv.get(
+                                "messageCount", len(conv.get("messages", []))
+                            )
+                            st.metric("Messages", message_count)
+                        with col2:
+                            created = format_time(conv.get("createdAt", ""))
+                            st.metric("Created", created)
+                        with col3:
+                            persona = conv.get("personaPrompt")
+                            st.metric("Persona", "Yes" if persona else "No")
+
+                        # Show latest 3 message previews
+                        if conv.get("messages"):
+                            st.markdown("**Recent messages:**")
+                            for msg in conv["messages"][:3]:
+                                sender_value = msg.get("sender")
+                                sender_icon = (
+                                    "👤"
+                                    if sender_value in (1, "user", "USER", "User")
+                                    else "🤖"
+                                )
+                                preview = msg.get("content", "")[:80]
+                                st.caption(f"{sender_icon} {preview}...")
+                        else:
+                            st.caption("No messages")
+
+                        # Actions
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if st.button(
+                                "📖 Open",
+                                key=f"open_{conv['id']}",
+                                use_container_width=True,
+                                type="primary",
+                            ):
+                                st.session_state.current_conversation_id = conv["id"]
+                                st.session_state.show_conversation_manager = False
+                                reset_conversation_state()
+                                st.rerun()
+                        with col2:
+                            if st.button(
+                                "🗑️ Delete",
+                                key=f"delete_{conv['id']}",
+                                use_container_width=True,
+                            ):
+                                result = make_api_request(
+                                    "DELETE", f"/conversations/{conv['id']}"
+                                )
+                                if result:
+                                    st.session_state.conversations_list = []
+                                    if (
+                                        st.session_state.current_conversation_id
+                                        == conv["id"]
+                                    ):
+                                        st.session_state.current_conversation_id = None
+                                        reset_conversation_state()
+                                    get_messages.clear()
+                                    refresh_conversations_list()
+                                    st.toast(f"✅ Deleted '{conv['title']}'", icon="✅")
+                                    st.rerun()
+            else:
+                st.info("No conversations found matching your search.")
+        else:
+            st.info("No conversations available.")
+
+        if st.button("Close", use_container_width=True):
+            st.session_state.show_conversation_manager = False
+            st.rerun()
+
+    manage_dialog()
+
+
+def render_settings_view():
+    """Settings and instructions view"""
+    st.markdown("# ⚙️ Instructions")
+
+    conversation_id = st.session_state.get("current_conversation_id")
+    is_new_conversation = conversation_id == "pending_new"
+    has_conversation = conversation_id not in (None, "pending_new")
+
+    if conversation_id is None:
+        st.info(
+            "💡 Select a conversation or create a new chat to configure instructions."
+        )
+        return
+
+    # Persona editor
+    current_conv: Optional[Dict[str, Any]] = None
+    if has_conversation:
+        current_conv = next(
+            (
+                conv
+                for conv in st.session_state.conversations_list
+                if conv.get("id") == conversation_id
+            ),
+            None,
+        )
+
+    if st.session_state.persona_editor_origin != conversation_id:
+        if has_conversation and current_conv:
+            initial_value = current_conv.get("personaPrompt") or ""
+        elif is_new_conversation:
+            initial_value = st.session_state.get("pending_persona_prompt", "")
+        else:
+            initial_value = ""
+        st.session_state.persona_editor_origin = conversation_id
+        st.session_state.persona_editor_value = initial_value or ""
+
+    if has_conversation:
+        title = current_conv.get("title") if current_conv else "Conversation"
+        st.info(f"💬 Editing instructions for: **{title}**")
+    else:
+        st.info("📝 These instructions will be applied to your new chat")
+
+    # Templates
+    with st.expander("💡 Template Library", expanded=False):
+        cols = st.columns(len(PERSONA_TEMPLATES))
+        for idx, (label, template) in enumerate(PERSONA_TEMPLATES.items()):
+            with cols[idx]:
+                if st.button(label, key=f"template_{idx}", use_container_width=True):
+                    st.session_state.persona_editor_value = template[
+                        :_MAX_PERSONA_LENGTH
+                    ]
+                    st.rerun()
+
+    # Editor
+    current_value = st.text_area(
+        "Custom Instructions",
+        key="persona_editor_value",
+        height=200,
+        placeholder="Describe how the AI should behave (optional)",
+        help=f"Max {_MAX_PERSONA_LENGTH} characters",
+    )
+
+    char_count = len(current_value)
+    exceeds_limit = char_count > _MAX_PERSONA_LENGTH
+
+    col1, col2 = st.columns([5, 1])
+    with col1:
+        progress = min(char_count / _MAX_PERSONA_LENGTH, 1.0)
+        st.progress(progress)
+    with col2:
+        st.caption(f"{char_count}/{_MAX_PERSONA_LENGTH}")
+
+    if exceeds_limit:
+        st.error("⚠️ Character limit exceeded. Please shorten your instructions.")
+
+    # Actions
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if is_new_conversation:
+            if st.button(
+                "✅ Apply to New Chat",
+                use_container_width=True,
+                disabled=exceeds_limit,
+                type="primary",
+            ):
+                sanitized = normalize_persona_input(current_value)
+                st.session_state.pending_persona_prompt = sanitized
+                st.session_state.persona_editor_pending_value = sanitized
+                st.session_state.persona_editor_pending = True
+                st.toast("✅ Persona saved for new chat!", icon="✅")
+                st.session_state.active_view = "chat"
+                st.rerun()
+        else:
+            if st.button(
+                "💾 Save Persona",
+                use_container_width=True,
+                disabled=exceeds_limit,
+                type="primary",
+            ):
+                sanitized = normalize_persona_input(current_value)
+                payload = {"personaPrompt": sanitized or None}
+                response = make_api_request(
+                    "PATCH", f"/conversations/{conversation_id}", payload
+                )
+                if response and response.get("data"):
+                    refresh_conversations_list()
+                    st.toast("✅ Persona updated!", icon="✅")
+                    st.session_state.active_view = "chat"
+                    st.rerun()
+                else:
+                    st.toast("❌ Failed to update persona", icon="❌")
+
+    with col2:
+        if is_new_conversation:
+            if st.button("🗑️ Clear", use_container_width=True):
+                st.session_state.persona_editor_pending_value = ""
+                st.session_state.persona_editor_pending = True
+                st.session_state.pending_persona_prompt = ""
+                st.rerun()
+        else:
+            if st.button("🗑️ Clear Persona", use_container_width=True):
+                response = make_api_request(
+                    "PATCH",
+                    f"/conversations/{conversation_id}",
+                    {"personaPrompt": None},
+                )
+                if response and response.get("data"):
+                    refresh_conversations_list()
+                    st.toast("✅ Persona removed!", icon="✅")
+                    st.rerun()
 
 
 def main():
+    """Main application entry point"""
     if (
         st.session_state.show_login
         or not st.session_state.current_user_id
@@ -1767,17 +2386,22 @@ def main():
         render_login_page()
         return
 
-    render_conversation_sidebar()
+    render_sidebar()
 
-    if st.session_state.show_instructions:
-        render_instructions_modal()
-        return
+    # Show manage modal if active
+    render_manage_modal()
 
-    if st.session_state.show_conversation_manager:
-        render_conversation_manager()
-        return
+    # Tab-based navigation (Chat and Settings only)
+    tab1, tab2, tab3 = st.tabs(["💬 Chat", "⚙️ Instructions", "MCP Config"])
 
-    render_chat_interface()
+    with tab1:
+        render_chat_view()
+
+    with tab2:
+        render_settings_view()
+
+    with tab3:
+        render_tools_tab()
 
 
 if __name__ == "__main__":

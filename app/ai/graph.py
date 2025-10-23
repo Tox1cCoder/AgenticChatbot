@@ -58,6 +58,8 @@ class MultiAgentWorkflow:
             f"Multi-agent workflow initialized (checkpointing: {'enabled' if checkpointer else 'disabled'})"
         )
 
+        self._cleanup_agents = [self.chat_agent, self.search_agent]
+
     def _build_graph(self) -> StateGraph:
         workflow = StateGraph(GraphState)
 
@@ -427,6 +429,20 @@ class MultiAgentWorkflow:
 
         result = await self.graph.ainvoke(initial_state, config=config)
         return result.get("response")
+
+    async def cleanup(self):
+        """Cleanup resources from agents that use MCP tools"""
+        logger.info("Cleaning up MultiAgentWorkflow resources...")
+        for agent in self._cleanup_agents:
+            if hasattr(agent, "cleanup"):
+                try:
+                    await agent.cleanup()
+                    logger.debug(f"Cleaned up agent: {agent.__class__.__name__}")
+                except Exception as e:
+                    logger.error(
+                        f"Error cleaning up agent {agent.__class__.__name__}: {e}"
+                    )
+        logger.info("MultiAgentWorkflow cleanup completed")
 
 
 def create_workflow(
