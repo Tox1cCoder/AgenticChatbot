@@ -8,8 +8,8 @@ import requests
 import html
 import re
 from html.parser import HTMLParser
-from typing import Any, Callable, Dict, List, Optional
-from upload_support import render_upload_section, render_document_list
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from upload_support import delete_document, get_uploaded_documents, upload_document
 from datetime import datetime, timedelta
 from dateutil import parser
 import markdown as _markdown
@@ -556,8 +556,7 @@ def group_conversations_by_date(
 st.set_page_config(
     page_title="ChatBot",
     layout="wide",
-    initial_sidebar_state="expanded",
-    page_icon="🤖",
+    initial_sidebar_state="expanded"
 )
 
 st.markdown(APP_STYLE, unsafe_allow_html=True)
@@ -638,9 +637,9 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
             st.session_state.auth_token = None
             st.session_state.current_user_id = None
             st.session_state.show_login = True
-            st.toast("🔒 Please log in", icon="🔒")
+            st.toast("Please log in", icon="🔒")
         else:
-            st.toast(f"❌ {error_message}", icon="❌")
+            st.toast(f"{error_message}", icon="❌")
         return {}
 
     return response_data
@@ -659,12 +658,66 @@ def get_conversations(
     include_messages: bool = False,
     latest_messages: int = 3,
 ) -> Dict[str, Any]:
-    """Get paginated conversations with optional message inclusion"""
-    endpoint = f"/conversations/?page={page}&limit={limit}"
-    if include_messages:
-        endpoint += f"&include=messages&latestMessages={latest_messages}"
-    response = make_api_request("GET", endpoint)
-    return response
+    """Retrieve *all* conversations, aggregating across pages when necessary."""
+    current_page = page
+    aggregated_items: List[Dict[str, Any]] = []
+    aggregated_meta: Dict[str, Any] = {}
+    last_response: Optional[Dict[str, Any]] = None
+
+    while True:
+        endpoint = f"/conversations/?page={current_page}&limit={limit}"
+        if include_messages:
+            endpoint += f"&include=messages&latestMessages={latest_messages}"
+
+        response = make_api_request("GET", endpoint)
+        if not response:
+            return {}
+
+        if not response.get("success", False):
+            return response
+
+        data = response.get("data") or {}
+        items = data.get("items") or []
+        aggregated_items.extend(items)
+
+        meta = data.get("meta") or {}
+        aggregated_meta = meta
+        last_response = response
+
+        current = meta.get("currentPage", current_page)
+        last = meta.get("lastPage", current_page)
+        if current >= last:
+            break
+
+        current_page += 1
+
+    if not last_response:
+        return {}
+
+    normalized_meta = {
+        "total": len(aggregated_items),
+        "perPage": len(aggregated_items),
+        "currentPage": 1,
+        "lastPage": 1,
+    }
+    for key, value in aggregated_meta.items():
+        if key not in normalized_meta:
+            normalized_meta[key] = value
+
+    result: Dict[str, Any] = {
+        "success": last_response.get("success", True),
+        "message": last_response.get("message", ""),
+        "data": {
+            "items": aggregated_items,
+            "meta": normalized_meta,
+        },
+    }
+
+    for optional_key in ("code", "errors"):
+        if optional_key in last_response:
+            result[optional_key] = last_response[optional_key]
+
+    return result
 
 
 @st.cache_data(show_spinner=False)
@@ -761,11 +814,11 @@ def _handle_new_image_attachments(uploaded_files: List) -> None:
 
     remaining = _MAX_IMAGE_ATTACHMENTS - len(pending)
     if remaining <= 0:
-        st.toast(f"⚠️ Max {_MAX_IMAGE_ATTACHMENTS} images", icon="⚠️")
+        st.toast(f"{_MAX_IMAGE_ATTACHMENTS} images", icon="⚠️")
         return
 
     if len(new_items) > remaining:
-        st.toast("⚠️ Some images ignored", icon="⚠️")
+        st.toast("Some images ignored", icon="⚠️")
 
     pending.extend(new_items[:remaining])
     st.session_state.pending_image_attachments = pending
@@ -910,29 +963,27 @@ def render_login_page():
                     "🔒 Password", type="password", placeholder="Enter password"
                 )
 
-                col_a, col_b = st.columns([1, 1])
-                with col_a:
-                    if st.form_submit_button(
-                        "Sign In", use_container_width=True, type="primary"
-                    ):
-                        with st.spinner("Signing in..."):
-                            auth_response = make_api_request(
-                                "POST",
-                                "/auth/login",
-                                {"email": email, "password": password},
-                            )
-                            if auth_response and "data" in auth_response:
-                                st.session_state.auth_token = auth_response["data"][
-                                    "accessToken"
-                                ]
-                                st.session_state.current_user_id = auth_response[
-                                    "data"
-                                ]["userId"]
-                                st.session_state.show_login = False
-                                st.toast("✅ Welcome back!", icon="✅")
-                                st.rerun()
-                            else:
-                                st.error("Invalid credentials")
+                if st.form_submit_button(
+                    "Sign In", use_container_width=True, type="primary"
+                ):
+                    with st.spinner("Signing in..."):
+                        auth_response = make_api_request(
+                            "POST",
+                            "/auth/login",
+                            {"email": email, "password": password},
+                        )
+                        if auth_response and "data" in auth_response:
+                            st.session_state.auth_token = auth_response["data"][
+                                "accessToken"
+                            ]
+                            st.session_state.current_user_id = auth_response["data"][
+                                "userId"
+                            ]
+                            st.session_state.show_login = False
+                            st.toast("Welcome back!", icon="✅")
+                            st.rerun()
+                        else:
+                            st.error("Invalid credentials")
 
         with tab2:
             with st.form("signup_form", clear_on_submit=False):
@@ -1032,7 +1083,7 @@ def render_sidebar():
 
                         button_type = "primary" if is_active else "secondary"
                         if st.button(
-                            f"💬 {conv['title'][:40]}...",
+                            f"{conv['title'][:40]}...",
                             key=f"conv_{conv['id']}",
                             use_container_width=True,
                             type=button_type,
@@ -1043,12 +1094,6 @@ def render_sidebar():
                                 st.session_state.show_conversation_manager = False
                                 reset_conversation_state()
                                 st.rerun()
-
-        st.divider()
-
-        # Documents section
-        render_upload_section()
-        render_document_list()
 
         st.divider()
 
@@ -1269,18 +1314,31 @@ def render_message_feedback_inline(msg: Dict[str, Any]):
                         st.rerun()
 
 
-def render_tool_parameter_form(args_schema: Dict[str, Any]) -> Dict[str, Any]:
-    """Render dynamic form fields based on tool's JSON Schema and return parameter values"""
-    parameters = {}
+def render_tool_parameter_form(
+    args_schema: Dict[str, Any], key_prefix: str = ""
+) -> Tuple[Dict[str, Any], List[str]]:
+    """Render dynamic form fields based on a tool's JSON Schema."""
+    parameters: Dict[str, Any] = {}
+    parsing_errors: List[str] = []
 
     if not args_schema or "properties" not in args_schema:
         st.info("This tool doesn't require any parameters.")
-        return parameters
+        return parameters, parsing_errors
 
     properties = args_schema.get("properties", {})
     required = args_schema.get("required", [])
 
     st.markdown("#### Parameters")
+
+    def _stringify_default(value: Any) -> str:
+        if value in (None, "", [], {}):
+            return ""
+        if isinstance(value, str):
+            return value
+        try:
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            return str(value)
 
     for param_name, param_info in properties.items():
         param_type = param_info.get("type", "string")
@@ -1289,34 +1347,102 @@ def render_tool_parameter_form(args_schema: Dict[str, Any]) -> Dict[str, Any]:
 
         label = f"{param_name}{'*' if is_required else ''}"
         help_text = param_desc if param_desc else None
+        base_key = f"{key_prefix}_{param_name}" if key_prefix else param_name
 
-        # Render appropriate input based on type
         if param_type == "boolean":
-            parameters[param_name] = st.checkbox(label, help=help_text)
-        elif param_type == "number" or param_type == "integer":
-            default_val = param_info.get("default", 0)
+            default_val = bool(param_info.get("default", False))
+            parameters[param_name] = st.checkbox(
+                label,
+                value=default_val,
+                help=help_text,
+                key=f"{base_key}_bool",
+            )
+        elif param_type == "integer":
+            default_val = int(param_info.get("default", 0) or 0)
+            value = st.number_input(
+                label,
+                value=default_val,
+                step=1,
+                format="%d",
+                help=help_text,
+                key=f"{base_key}_int",
+            )
+            parameters[param_name] = int(value)
+        elif param_type == "number":
+            default_val = float(param_info.get("default", 0.0) or 0.0)
             parameters[param_name] = st.number_input(
-                label, value=default_val, help=help_text
+                label,
+                value=default_val,
+                help=help_text,
+                key=f"{base_key}_number",
             )
         elif param_type == "string":
-            # Check for enum
             if "enum" in param_info:
                 enum_values = param_info["enum"]
                 parameters[param_name] = st.selectbox(
-                    label, options=enum_values, help=help_text
+                    label,
+                    options=enum_values,
+                    help=help_text,
+                    key=f"{base_key}_enum",
                 )
             else:
-                default_val = param_info.get("default", "")
+                default_val = _stringify_default(param_info.get("default", ""))
                 parameters[param_name] = st.text_input(
-                    label, value=default_val, help=help_text
+                    label,
+                    value=default_val,
+                    help=help_text,
+                    key=f"{base_key}_text",
                 )
-        else:
-            # Fallback for complex types
-            parameters[param_name] = st.text_area(
-                label, help=help_text or f"Enter {param_type} value"
+        elif param_type in {"object", "array"}:
+            default_val = param_info.get(
+                "default", {} if param_type == "object" else []
             )
+            default_text = _stringify_default(default_val)
+            placeholder = (
+                "Enter JSON object value"
+                if param_type == "object"
+                else "Enter JSON array value"
+            )
+            raw_value = st.text_area(
+                label,
+                value=default_text,
+                help=help_text or placeholder,
+                placeholder=placeholder,
+                key=f"{base_key}_json",
+                height=150,
+            )
+            if raw_value.strip():
+                try:
+                    parameters[param_name] = json.loads(raw_value)
+                except json.JSONDecodeError as exc:
+                    parsing_errors.append(
+                        f"{param_name}: Invalid JSON ({exc.msg} at column {exc.colno})"
+                    )
+                    st.warning(f"Invalid JSON provided for {param_name}.")
+                    parameters[param_name] = raw_value
+            else:
+                parameters[param_name] = default_val
+        else:
+            raw_value = st.text_area(
+                label,
+                help=help_text or f"Enter {param_type} value (JSON supported)",
+                placeholder="Enter value (JSON supported, e.g. 42 or {\"key\": \"value\"})",
+                key=f"{base_key}_fallback",
+                height=120,
+            )
+            if raw_value.strip():
+                try:
+                    parameters[param_name] = json.loads(raw_value)
+                except json.JSONDecodeError as exc:
+                    parsing_errors.append(
+                        f"{param_name}: Invalid JSON ({exc.msg} at column {exc.colno})"
+                    )
+                    st.warning(f"Invalid JSON provided for {param_name}.")
+                    parameters[param_name] = raw_value
+            else:
+                parameters[param_name] = None
 
-    return parameters
+    return parameters, parsing_errors
 
 
 def render_tools_tab():
@@ -1758,7 +1884,9 @@ Format 2 - Single server:
         st.markdown("### Execute Tool")
 
         # Render parameter inputs
-        parameters = render_tool_parameter_form(args_schema)
+        parameters, parameter_errors = render_tool_parameter_form(
+            args_schema, key_prefix=selected_tool_name
+        )
 
         # Submit button
         execute_button = st.form_submit_button(
@@ -1766,13 +1894,17 @@ Format 2 - Single server:
         )
 
         if execute_button:
-            with st.spinner(f"Executing {selected_tool_name}..."):
-                result = execute_mcp_tool(selected_tool_name, parameters)
+            if parameter_errors:
+                for error_msg in parameter_errors:
+                    st.error(error_msg)
+            else:
+                with st.spinner(f"Executing {selected_tool_name}..."):
+                    result = execute_mcp_tool(selected_tool_name, parameters)
 
-                if result:
-                    st.session_state.tool_execution_result = result
-                else:
-                    st.error("Tool execution failed. Check API logs.")
+                    if result:
+                        st.session_state.tool_execution_result = result
+                    else:
+                        st.error("Tool execution failed. Check API logs.")
 
     # Display execution result
     if st.session_state.tool_execution_result:
@@ -2243,6 +2375,157 @@ def render_manage_modal():
     manage_dialog()
 
 
+def render_documents_tab():
+    """Documents management workspace (moved from the sidebar)."""
+    st.markdown("# 📄 Documents")
+
+    conversation_id = st.session_state.get("current_conversation_id")
+    if conversation_id in (None, "pending_new"):
+        st.info(
+            "Select an existing conversation to upload or manage documents. "
+            "Start a new chat and send your first message to unlock uploads."
+        )
+        return
+
+    current_conv = next(
+        (
+            conv
+            for conv in st.session_state.conversations_list
+            if conv.get("id") == conversation_id
+        ),
+        None,
+    )
+    if current_conv:
+        title = current_conv.get("title") or "Conversation"
+        st.caption(f"Managing documents for **{title}**")
+    else:
+        st.caption("Managing documents for the active conversation.")
+
+    st.markdown(
+        "Upload supporting files and monitor their processing status for retrieval."
+    )
+
+    upload_col, tips_col = st.columns([1.25, 1])
+
+    with upload_col:
+        st.subheader("Upload a Document")
+        st.caption(
+            "Files attach to this conversation and become searchable once processing completes."
+        )
+        uploader_key = f"doc_uploader_{conversation_id}"
+        uploaded_file = st.file_uploader(
+            "Select a file",
+            type=["txt", "pdf", "docx", "md"],
+            key=uploader_key,
+            help="Supported formats: TXT, PDF, DOCX, MD",
+        )
+
+        if uploaded_file is not None:
+            file_size_kb = uploaded_file.size / 1024
+            st.write(f"**Selected:** {uploaded_file.name} ({file_size_kb:.1f} KB)")
+
+            if st.button(
+                "Upload & Process",
+                key=f"upload_doc_{conversation_id}",
+                use_container_width=True,
+                type="primary",
+            ):
+                with st.spinner("Uploading document..."):
+                    upload_result = upload_document(uploaded_file)
+
+                if upload_result:
+                    st.success("Upload complete. Processing has started.")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error("Upload failed. Please try again.")
+
+    with tips_col:
+        st.subheader("Workspace Tips")
+        st.markdown(
+            "- Keep documents focused on the active conversation.\n"
+            "- Replace outdated files to avoid stale context.\n"
+            "- Refresh the library to pick up the latest status updates."
+        )
+        if st.button(
+            "Refresh document list",
+            key="documents_refresh",
+            use_container_width=True,
+        ):
+            st.cache_data.clear()
+            st.rerun()
+
+    def _format_timestamp(value: Optional[str]) -> str:
+        if not value:
+            return "Unknown"
+        try:
+            dt_value = parser.parse(value)
+            return dt_value.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return value[:16]
+
+    st.markdown("---")
+
+    header_col, metric_col = st.columns([3, 1])
+    with header_col:
+        st.subheader("Conversation Library")
+
+    docs_response = get_uploaded_documents()
+    if not docs_response:
+        st.warning("Unable to load documents. Try refreshing the list.")
+        return
+
+    doc_data = docs_response.get("data") or {}
+    documents = doc_data.get("documents") or []
+    total_docs = doc_data.get("total", len(documents))
+
+    with metric_col:
+        st.metric("Documents", total_docs)
+
+    if not documents:
+        st.info("No documents uploaded yet. Use the uploader above to add one.")
+        return
+
+    status_map = {
+        1: {"label": "Processing", "icon": "⏳", "help": "Indexing in progress"},
+        2: {"label": "Ready", "icon": "✅", "help": "Available for retrieval"},
+        3: {"label": "Failed", "icon": "⚠️", "help": "Processing failed"},
+    }
+
+    for doc in documents:
+        status = status_map.get(
+            doc.get("status"),
+            {"label": "Unknown", "icon": "❔", "help": "Status unavailable"},
+        )
+
+        with st.container():
+            info_col, status_col, action_col = st.columns([3, 1.2, 1])
+
+            with info_col:
+                st.markdown(f"**{doc.get('filename', 'Untitled document')}**")
+                st.caption(f"Uploaded {_format_timestamp(doc.get('upload_time'))}")
+
+            with status_col:
+                st.markdown(f"{status['icon']} **{status['label']}**")
+                st.caption(status["help"])
+
+            with action_col:
+                if st.button(
+                    "Delete",
+                    key=f"delete_doc_{doc.get('id')}",
+                    use_container_width=True,
+                ):
+                    with st.spinner("Removing document..."):
+                        if delete_document(doc.get("id")):
+                            st.cache_data.clear()
+                            st.toast("Document deleted.", icon="🗑️")
+                            st.rerun()
+                        else:
+                            st.error("Delete failed. Please try again.")
+
+        st.divider()
+
+
 def render_settings_view():
     """Settings and instructions view"""
     st.markdown("# ⚙️ Instructions")
@@ -2333,7 +2616,7 @@ def render_settings_view():
                 st.session_state.pending_persona_prompt = sanitized
                 st.session_state.persona_editor_pending_value = sanitized
                 st.session_state.persona_editor_pending = True
-                st.toast("✅ Persona saved for new chat!", icon="✅")
+                st.toast("Persona saved for new chat!", icon="✅")
                 st.session_state.active_view = "chat"
                 st.rerun()
         else:
@@ -2350,11 +2633,11 @@ def render_settings_view():
                 )
                 if response and response.get("data"):
                     refresh_conversations_list()
-                    st.toast("✅ Persona updated!", icon="✅")
+                    st.toast("Persona updated!", icon="✅")
                     st.session_state.active_view = "chat"
                     st.rerun()
                 else:
-                    st.toast("❌ Failed to update persona", icon="❌")
+                    st.toast("Failed to update persona", icon="❌")
 
     with col2:
         if is_new_conversation:
@@ -2372,7 +2655,7 @@ def render_settings_view():
                 )
                 if response and response.get("data"):
                     refresh_conversations_list()
-                    st.toast("✅ Persona removed!", icon="✅")
+                    st.toast("Persona removed!", icon="✅")
                     st.rerun()
 
 
@@ -2391,16 +2674,21 @@ def main():
     # Show manage modal if active
     render_manage_modal()
 
-    # Tab-based navigation (Chat and Settings only)
-    tab1, tab2, tab3 = st.tabs(["💬 Chat", "⚙️ Instructions", "🔧 MCP Config"])
+    # Tab-based navigation across primary workspaces
+    tab_chat, tab_docs, tab_instructions, tab_mcp = st.tabs(
+        ["💬 Chat", "📄 Documents", "⚙️ Instructions", "🔧 MCP Config"]
+    )
 
-    with tab1:
+    with tab_chat:
         render_chat_view()
 
-    with tab2:
+    with tab_docs:
+        render_documents_tab()
+
+    with tab_instructions:
         render_settings_view()
 
-    with tab3:
+    with tab_mcp:
         render_tools_tab()
 
 
