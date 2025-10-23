@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 from fastapi import APIRouter, status
 from uuid import UUID
 
@@ -62,12 +63,11 @@ async def refresh_token(
     )
 
 
-@router.post("/logout", response_model=ApiResponse)
+@router.post("/logout", response_model=ApiResponse[Any])
 @AppAutoInjector.auto_inject()
 async def logout(
-    auth_service: IAuthService,
     current_user_id: UUID,
-) -> ApiResponse:
+) -> ApiResponse[Any]:
     """Logout endpoint with token invalidation"""
 
     logging.info(f"User {current_user_id} logged out successfully")

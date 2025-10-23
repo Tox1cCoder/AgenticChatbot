@@ -23,6 +23,7 @@ from app.repositories.message import MessageRepository
 from app.repositories.feedback import FeedbackRepository
 from app.repositories.document import DocumentRepository
 from app.services.document_processing_service import DocumentProcessingService
+from app.services.mcp_service import MCPService
 from app.utils.validation.user_validation import UserValidationUtils
 from app.utils.validation.conversation_validation import (
     ConversationValidationUtils,
@@ -118,6 +119,7 @@ class AppAutoInjector(AutoInjector):
             DocumentProcessingService: getattr(
                 container_ref, "document_processing_service"
             ),
+            MCPService: getattr(container_ref, "mcp_service"),
         }
 
     @classmethod

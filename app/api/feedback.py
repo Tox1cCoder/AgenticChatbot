@@ -52,8 +52,7 @@ async def get_message_rating_stats(
 async def get_user_feedback_for_message(
     message_id: UUID,
     user_id: UUID,
-    feedback_service: IFeedbackService,
-    authenticated_user_id: UUID,
+    feedback_service: IFeedbackService
 ) -> ApiResponse[FeedbackRead]:
     """Get authenticated user's feedback for a message"""
     feedback = feedback_service.get_user_feedback_for_message(message_id, user_id)
@@ -85,7 +84,6 @@ async def get_message_feedbacks(
 )
 @AppAutoInjector.auto_inject()
 async def update_feedback(
-    message_id: UUID,
     feedback_id: UUID,
     feedback_data: FeedbackUpdate,
     feedback_service: IFeedbackService,

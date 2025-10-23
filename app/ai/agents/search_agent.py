@@ -9,6 +9,7 @@ from langchain.tools import BaseTool
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_search_prompt
 from ...core.config import settings
+from ...core.exceptions.mcp import ServerNotFoundError
 from ..mcp_integration import MCPManager
 
 logger = logging.getLogger(__name__)
@@ -43,21 +44,32 @@ class SearchAgent:
                 self.mcp_manager = MCPManager()
                 await self.mcp_manager.initialize()
 
-                tavily_tools = await self.mcp_manager.get_server_tools("tavily") or []
-                time_tools = await self.mcp_manager.get_server_tools("time") or []
-
                 combined_tools: Dict[str, BaseTool] = {}
-                for tool in list(tavily_tools) + list(time_tools):
-                    combined_tools[tool.name] = tool
+
+                preferred_servers = ["tavily", "time"]
+                missing_servers: List[str] = []
+
+                for server_name in preferred_servers:
+                    try:
+                        server_tools = await self.mcp_manager.get_server_tools(
+                            server_name
+                        )
+                    except ServerNotFoundError:
+                        missing_servers.append(server_name)
+                        logger.debug(
+                            "Preferred MCP server '%s' not configured for SearchAgent",
+                            server_name,
+                        )
+                        continue
+
+                    for tool in server_tools:
+                        combined_tools[tool.name] = tool
+
+                if not combined_tools:
+                    for tool in await self.mcp_manager.get_tools():
+                        combined_tools[tool.name] = tool
 
                 self.tools = list(combined_tools.values())
-
-                logger.info(
-                    "Loaded %d MCP tools for SearchAgent (tavily=%d, time=%d)",
-                    len(self.tools),
-                    len(tavily_tools),
-                    len(time_tools),
-                )
 
             except Exception as e:
                 logger.error(f"Failed to initialize MCP manager: {e}", exc_info=True)

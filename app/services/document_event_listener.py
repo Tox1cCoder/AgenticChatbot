@@ -19,7 +19,7 @@ class DocumentEventLogger(EventListener):
             "user_id": str(data.user_id) if data.user_id else None,
             "filename": data.filename,
             "status": data.status,
-            "metadata": data.metadata or {},
+            "metadata": data.metadata or {}
         }
         try:
             if event_type == DocumentEvent.UPLOAD_STARTED:

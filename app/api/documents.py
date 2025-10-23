@@ -1,3 +1,4 @@
+from typing import Any, Dict
 from uuid import UUID
 
 from fastapi import (
@@ -24,7 +25,7 @@ from app.core.events import get_event_bus, DocumentEvent, DocumentEventData
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
-@router.post("/upload", response_model=ApiResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/upload", response_model=ApiResponse[Dict[str, Any]], status_code=status.HTTP_201_CREATED)
 @AppAutoInjector.auto_inject()
 async def upload_document(
     document_service: IDocumentService,
@@ -32,7 +33,7 @@ async def upload_document(
     current_user_id: UUID,
     file: UploadFile = File(...),
     conversation_id: UUID = Form(...),
-) -> ApiResponse:
+) -> ApiResponse[Dict[str, Any]]:
     """Upload a document and start background processing.
 
     Emits: DocumentEvent.UPLOAD_STARTED after document record creation.
@@ -56,7 +57,6 @@ async def upload_document(
         str(document.id), file_content, file.filename or "unknown"
     )
 
-    # Emit UPLOAD_STARTED event
     try:
         await get_event_bus().emit(
             DocumentEvent.UPLOAD_STARTED,
@@ -70,7 +70,6 @@ async def upload_document(
             ),
         )
     except Exception:
-        # Non-blocking on event failure
         pass
 
     return ApiResponse(
@@ -80,12 +79,12 @@ async def upload_document(
     )
 
 
-@router.get("/task/{task_id}", response_model=ApiResponse)
+@router.get("/task/{task_id}", response_model=ApiResponse[Dict[str, Any]])
 @AppAutoInjector.auto_inject()
 async def get_task_status(
     document_processing_service: DocumentProcessingService,
     task_id: str,
-) -> ApiResponse:
+) -> ApiResponse[Dict[str, Any]]:
     """Get Celery task status by task ID"""
     task_status = await document_processing_service.get_processing_status(task_id)
 
@@ -96,13 +95,13 @@ async def get_task_status(
     )
 
 
-@router.get("/{document_id}", response_model=ApiResponse)
+@router.get("/{document_id}", response_model=ApiResponse[Dict[str, Any]])
 @AppAutoInjector.auto_inject()
 async def get_document(
     document_service: IDocumentService,
     current_user_id: UUID,
     document_id: UUID,
-) -> ApiResponse:
+) -> ApiResponse[Dict[str, Any]]:
     """Get document by ID"""
 
     # Validate document access
@@ -122,7 +121,7 @@ async def get_document(
     )
 
 
-@router.get("/conversation/{conversation_id}", response_model=ApiResponse)
+@router.get("/conversation/{conversation_id}", response_model=ApiResponse[Dict[str, Any]])
 @AppAutoInjector.auto_inject()
 async def get_conversation_documents(
     document_service: IDocumentService,
@@ -130,7 +129,7 @@ async def get_conversation_documents(
     conversation_id: UUID,
     page: int = 1,
     page_size: int = 20,
-) -> ApiResponse:
+) -> ApiResponse[Dict[str, Any]]:
     """Get documents for a conversation with pagination"""
     # Validate conversation access
     ConversationValidationUtils(
@@ -147,14 +146,14 @@ async def get_conversation_documents(
     )
 
 
-@router.put("/{document_id}", response_model=ApiResponse)
+@router.put("/{document_id}", response_model=ApiResponse[Dict[str, Any]])
 @AppAutoInjector.auto_inject()
 async def update_document(
     document_service: IDocumentService,
     current_user_id: UUID,
     document_id: UUID,
     update_data: DocumentUpdate,
-) -> ApiResponse:
+) -> ApiResponse[Dict[str, Any]]:
     """Update document"""
 
     DocumentValidationUtils(
@@ -170,13 +169,13 @@ async def update_document(
     )
 
 
-@router.delete("/{document_id}", response_model=ApiResponse)
+@router.delete("/{document_id}", response_model=ApiResponse[Dict[str, Any]])
 @AppAutoInjector.auto_inject()
 async def delete_document(
     document_service: IDocumentService,
     current_user_id: UUID,
     document_id: UUID,
-) -> ApiResponse:
+) -> ApiResponse[Dict[str, Any]]:
     """Delete document"""
     DocumentValidationUtils(
         document_service.repository.session_factory

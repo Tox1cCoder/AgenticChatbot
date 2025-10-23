@@ -81,6 +81,9 @@ class MessageService(IMessageService):
             if sanitized_persona:
                 bot_metadata.setdefault("persona_used", sanitized_persona)
 
+            if bot_response and bot_response.tool_artifacts:
+                bot_metadata.setdefault("tool_artifacts", bot_response.tool_artifacts)
+
             # Extract images from bot response metadata (from Search or Image Generator agents)
             if (
                 bot_response

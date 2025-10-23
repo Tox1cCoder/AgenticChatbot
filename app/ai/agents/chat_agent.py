@@ -127,6 +127,8 @@ class ChatAgent:
                 tools_used = []
                 tool_artifacts = []
 
+        response_text = self._coerce_response_text(response_text)
+
         response_message = AgentMessage(
             role=MessageRole.ASSISTANT, content=response_text
         )
@@ -153,6 +155,7 @@ class ChatAgent:
             agent_id="chat_agent",
             message=response_message,
             metadata=metadata,
+            tool_artifacts=tool_artifacts if tool_artifacts else None,
         )
 
     async def _generate(self, prompt: str) -> str:

@@ -41,6 +41,10 @@ class AgentResponse(BaseModel):
     agent_id: str
     message: AgentMessage
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    tool_artifacts: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Optional list of artifacts produced while executing tools",
+    )
     error: Optional[str] = None
 
 

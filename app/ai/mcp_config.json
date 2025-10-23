@@ -4,37 +4,28 @@
       "enabled": true,
       "transport": "stdio",
       "command": "python",
-      "args": ["app/ai/mcp_servers/calculator_server.py"],
+      "args": [
+        "app/ai/mcp_servers/calculator_server.py"
+      ],
       "description": "Basic calculator operations (add, subtract, multiply, divide, power)"
     },
     "tavily": {
       "enabled": true,
       "transport": "stdio",
       "command": "python",
-      "args": ["app/ai/mcp_servers/tavily_server.py"],
+      "args": [
+        "app/ai/mcp_servers/tavily_server.py"
+      ],
       "description": "Web search using Tavily API for real-time information retrieval"
     },
     "time": {
       "enabled": true,
       "transport": "stdio",
       "command": "python",
-      "args": ["app/ai/mcp_servers/time_server.py"],
-      "description": "Current time lookup utility with timezone support"
-    },
-    "desktop-commander": {
-      "transport": "stdio",
-      "command": "cmd",
       "args": [
-        "/c",
-        "npx",
-        "-y",
-        "@smithery/cli@latest",
-        "run",
-        "@wonderwhy-er/desktop-commander",
-        "--key",
-        "83ba8c64-cf9d-4033-ab36-91366e89f9c8"
+        "app/ai/mcp_servers/time_server.py"
       ],
-      "enabled": true
+      "description": "Current time lookup utility with timezone support"
     }
   }
 }

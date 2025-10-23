@@ -2,11 +2,7 @@ import json
 from datetime import datetime, timezone as dt_timezone
 
 from mcp.server.fastmcp import FastMCP
-
-try:
-    from zoneinfo import ZoneInfo  # Python 3.9+
-except ImportError:  # pragma: no cover - zoneinfo should exist on supported versions
-    ZoneInfo = None  # type: ignore[assignment]
+from zoneinfo import ZoneInfo
 
 mcp = FastMCP("Time")
 
