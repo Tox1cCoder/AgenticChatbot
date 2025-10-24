@@ -11,10 +11,17 @@ mcp = FastMCP("Time")
 def get_current_time(timezone: str = "UTC", format: str = "%Y-%m-%d %H:%M:%S %Z") -> str:
     """
     Return the current time for the requested IANA timezone.
-
+    
     Args:
-        timezone: IANA timezone identifier (e.g. 'UTC', 'America/New_York').
-        format: Optional strftime-compatible format for the human_readable field.
+        timezone: IANA timezone identifier string. Must be a valid IANA timezone name.
+            Common timezones: 'UTC', 'America/New_York', 'Europe/London', 'Asia/Tokyo', 'Asia/Ho_Chi_Minh'
+        
+        format: Optional strftime-compatible format string for the human_readable field.
+            Format examples:
+                '%Y-%m-%d %H:%M:%S' for '2024-01-15 14:30:00'
+                '%I:%M %p' for '02:30 PM'
+                '%A, %B %d, %Y' for 'Monday, January 15, 2024'
+                '%Y-%m-%d %I:%M %p %Z' for '2024-01-15 02:30 PM EST'
     """
     tzinfo = None
     resolved_timezone = timezone

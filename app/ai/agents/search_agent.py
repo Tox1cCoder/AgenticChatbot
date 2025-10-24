@@ -7,7 +7,7 @@ from langchain.messages import HumanMessage, ToolMessage
 from langchain.tools import BaseTool
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import build_search_prompt
+from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT
 from ...core.config import settings
 from ...core.exceptions.mcp import ServerNotFoundError
 from ..mcp_integration import MCPManager
@@ -32,9 +32,8 @@ class SearchAgent:
 
         if api_key.startswith("GEMINI_API_KEY="):
             api_key = api_key.split("=", 1)[-1].strip()
-
         self.langchain_model = ChatGoogleGenerativeAI(
-            model=self.model_name, google_api_key=api_key, temperature=0.7
+            model=self.model_name, google_api_key=api_key, temperature=0.0
         )
 
     async def _init_mcp(self):
@@ -103,7 +102,6 @@ class SearchAgent:
             # Create initial message
             messages = [HumanMessage(content=prompt)]
 
-            # Agent loop: model -> tool calls -> model -> response
             max_iterations = 5
             extracted_images = []
 

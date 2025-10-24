@@ -571,9 +571,7 @@ def group_conversations_by_date(
 
 
 st.set_page_config(
-    page_title="ChatBot",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="ChatBot", layout="wide", initial_sidebar_state="expanded"
 )
 
 st.markdown(APP_STYLE, unsafe_allow_html=True)
@@ -601,9 +599,11 @@ def reset_conversation_state() -> None:
     st.session_state.image_viewer_payload = None
     st.session_state.message_image_thumbnails = {}
 
+
 def open_conversation_manager() -> None:
     st.session_state.conversation_manager_visible = True
     st.session_state.show_conversation_manager = True
+
 
 def close_conversation_manager() -> None:
     st.session_state.conversation_manager_visible = False
@@ -1157,7 +1157,9 @@ def _guess_extension(mime: Optional[str]) -> str:
     return "png"
 
 
-def _build_attachment_thumbnail(href: str, name: str, *, download: Optional[str] = None) -> str:
+def _build_attachment_thumbnail(
+    href: str, name: str, *, download: Optional[str] = None
+) -> str:
     """Create HTML anchor for a single attachment thumbnail."""
     escaped_href = html.escape(str(href), quote=True)
     escaped_name = html.escape(str(name), quote=True)
@@ -1191,7 +1193,9 @@ def render_attachment_gallery(attachments: List[Dict[str, str]], *, align: str) 
             source = f"data:{mime};base64,{data_b64}"
             download_name = attachment.get("download_name")
             if not download_name:
-                download_name = name if "." in name else f"{name}.{_guess_extension(mime)}"
+                download_name = (
+                    name if "." in name else f"{name}.{_guess_extension(mime)}"
+                )
             fragments.append(
                 _build_attachment_thumbnail(source, name, download=download_name)
             )
@@ -1479,7 +1483,7 @@ def render_tool_parameter_form(
             raw_value = st.text_area(
                 label,
                 help=help_text or f"Enter {param_type} value (JSON supported)",
-                placeholder="Enter value (JSON supported, e.g. 42 or {\"key\": \"value\"})",
+                placeholder='Enter value (JSON supported, e.g. 42 or {"key": "value"})',
                 key=f"{base_key}_fallback",
                 height=120,
             )
@@ -2308,7 +2312,9 @@ def render_manage_modal():
 
     @st.dialog("📋 Manage Conversations", width="large")
     def manage_dialog():
-        def _deduplicate_conversations(conversations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        def _deduplicate_conversations(
+            conversations: List[Dict[str, Any]],
+        ) -> List[Dict[str, Any]]:
             """Return conversations with duplicate IDs removed, preserving order."""
             seen = set()
             deduped: List[Dict[str, Any]] = []
@@ -2453,7 +2459,9 @@ def render_manage_modal():
                                             st.session_state.current_conversation_id
                                             == conv_id
                                         ):
-                                            st.session_state.current_conversation_id = None
+                                            st.session_state.current_conversation_id = (
+                                                None
+                                            )
                                             reset_conversation_state()
                                         get_messages.clear()
                                         refresh_conversations_list()
