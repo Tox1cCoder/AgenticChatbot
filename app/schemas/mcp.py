@@ -109,7 +109,7 @@ class MCPToolExecuteResponse(BaseModel):
 
 
 class MCPOperationResponse(BaseModel):
-    """Schema for simple MCP operation responses (add/remove/toggle server)."""
+    """Schema for MCP operation responses (add/remove/toggle server)."""
 
     message: str = Field(..., description="Operation result message")
 
