@@ -125,9 +125,7 @@ class ImageGeneratorAgent:
                     aspect_ratio=self.default_aspect_ratio,
                 )
             except Exception as err:
-                logger.debug(
-                    "Unable to configure image generation parameters: %s", err
-                )
+                logger.debug("Unable to configure image generation parameters: %s", err)
 
         generate_config = types.GenerateContentConfig(**config_kwargs)
 

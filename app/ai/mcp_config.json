@@ -27,7 +27,7 @@
       ],
       "description": "Current time lookup utility with timezone support"
     },
-    "github": {
+    "postgres": {
       "transport": "stdio",
       "command": "cmd",
       "args": [
@@ -36,7 +36,7 @@
         "-y",
         "@smithery/cli@latest",
         "run",
-        "@smithery-ai/github",
+        "@smithery-ai/postgres",
         "--key",
         "83ba8c64-cf9d-4033-ab36-91366e89f9c8",
         "--profile",

@@ -36,7 +36,7 @@ SEARCH_SYSTEM_PROMPT = """You are a web research assistant providing accurate, u
 
 INSTRUCTIONS:
 1. Search for current information using available tools
-2. Synthesize findings into a clear, comprehensive answer
+2. Synthesize findings into a clear, comprehensive and detail answer
 3. Always cite sources with URLs in markdown format: [Source Name](URL)
 4. Highlight key facts, dates, and important details
 5. If information conflicts across sources, present both perspectives
@@ -50,17 +50,15 @@ RESPONSE FORMAT:
 When images are found in results, they will be displayed automatically below your response.
 If information cannot be verified or found, clearly state the limitations."""
 
-IMAGE_GENERATOR_SYSTEM_PROMPT = """You are a creative visual artist assistant specializing in detailed image prompts.
+IMAGE_GENERATOR_SYSTEM_PROMPT = """You are an image generation assistant. Generate images based on user requests without providing lengthy descriptions of what you created.
 
-Transform user requests into vivid, specific image descriptions including:
-- Subject: What/who is the focus
-- Setting: Where the scene takes place
-- Lighting: Time of day, mood, atmosphere
-- Style: Photorealistic, artistic, illustration, etc.
-- Composition: Camera angle, framing, perspective
-- Details: Colors, textures, emotions, actions
+Focus on creating the image. Do not describe or explain the generated image to the user.
 
-Be specific and descriptive to guide accurate image generation."""
+When creating images, consider:
+- Subject, setting, lighting, style, composition
+- Colors, textures, emotions, camera angle
+
+Be specific in your image generation prompt."""
 
 ROUTER_SYSTEM_PROMPT = """Route the user's message to the appropriate agent.
 
@@ -224,15 +222,13 @@ def build_rag_prompt(
             parts.append(
                 f"\n[Document {i}] Source: {source} | {page_info} | Chunk {chunk_index} | Relevance: {score:.2%}"
             )
-            parts.append(f"\"\"\"\n{content}\n\"\"\"")
+            parts.append(f'"""\n{content}\n"""')
 
             total_tokens += chunk_tokens
             chunks_used += 1
 
         # Add context summary
-        parts.append(
-            f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        )
+        parts.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         parts.append(
             f"📊 Context: {chunks_used} chunks | ~{total_tokens} tokens | {len(retrieved_docs)} documents retrieved"
         )
@@ -270,10 +266,10 @@ def build_search_prompt(
     user_message: str, conversation_history: list, persona: Optional[str] = None
 ) -> str:
     """Build a prompt for the search agent including conversation history."""
-    parts = []
+    parts = [SEARCH_SYSTEM_PROMPT]
 
     if persona is not None and persona.strip():
-        parts.append(f"Custom Persona:\n{persona.strip()}\n\n---\n")
+        parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
     # Add conversation history if available
     if conversation_history:
@@ -328,10 +324,14 @@ def build_image_generator_prompt(
         )
 
         if selected_history:
-            parts.append("\n\nRelevant prior requests:")
+            parts.append("\n\nRelevant prior context:")
             for msg in selected_history:
-                role = "User" if msg.role.value == "user" else "Assistant"
+                role_value = getattr(getattr(msg, "role", None), "value", None)
+                role = "User" if role_value == "user" else "Assistant"
                 parts.append(f"{role}: {msg.content}")
+            parts.append(
+                "\nUse the conversation context above to understand pronouns or references to earlier images."
+            )
 
     parts.append("\n\nCreate a detailed image based on this request:")
     parts.append(user_message)
