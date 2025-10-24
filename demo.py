@@ -46,6 +46,8 @@ COLORS = {
     "border": "#e2e8f0",
 }
 
+CONVERSATION_MANAGER_DIALOG_KEY = "conversation_manager_dialog"
+
 _SELF_CLOSING_TAGS = {"br", "hr"}
 _ALLOWED_TAGS = {
     "p",
@@ -388,6 +390,7 @@ SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
     "conversations_list": list,
     "show_conversation_manager": lambda: False,
     "conversation_manager_visible": lambda: False,
+    CONVERSATION_MANAGER_DIALOG_KEY: lambda: False,
     "show_instructions": lambda: False,
     "auth_token": lambda: None,
     "conversation_messages_meta": lambda: None,
@@ -603,11 +606,13 @@ def reset_conversation_state() -> None:
 def open_conversation_manager() -> None:
     st.session_state.conversation_manager_visible = True
     st.session_state.show_conversation_manager = True
+    st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = True
 
 
 def close_conversation_manager() -> None:
     st.session_state.conversation_manager_visible = False
     st.session_state.show_conversation_manager = False
+    st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = False
 
 
 def refresh_conversations_list(
@@ -937,7 +942,10 @@ def render_tool_result_payload(payload: Any) -> None:
         language = "json" if stripped[:1] in ("{", "[") else "text"
         st.code(text, language=language)
     else:
-        st.json(parsed)
+        if isinstance(parsed, (dict, list)):
+            st.json(parsed)
+        else:
+            st.code(json.dumps(parsed, ensure_ascii=False), language="json")
 
 
 def add_mcp_server(server_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2304,13 +2312,26 @@ def render_chat_view():
 
 def render_manage_modal():
     """Conversation management modal dialog"""
+    dialog_state = st.session_state.get(CONVERSATION_MANAGER_DIALOG_KEY, False)
     visible = st.session_state.get("conversation_manager_visible", False)
     if st.session_state.get("show_conversation_manager", False) != visible:
         st.session_state.show_conversation_manager = visible
+    if not dialog_state and visible:
+        close_conversation_manager()
+        visible = False
+    elif dialog_state and not visible:
+        st.session_state.conversation_manager_visible = True
+        visible = True
     if not visible:
         return
 
-    @st.dialog("📋 Manage Conversations", width="large")
+    st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = True
+
+    @st.dialog(
+        "📋 Manage Conversations",
+        width="large",
+        key=CONVERSATION_MANAGER_DIALOG_KEY,
+    )
     def manage_dialog():
         def _deduplicate_conversations(
             conversations: List[Dict[str, Any]],
