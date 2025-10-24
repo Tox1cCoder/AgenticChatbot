@@ -125,7 +125,9 @@ class ImageGeneratorAgent:
                     aspect_ratio=self.default_aspect_ratio,
                 )
             except Exception as err:
-                logger.debug("Unable to configure image generation parameters: %s", err)
+                logger.debug(
+                    "Unable to configure image generation parameters: %s", err
+                )
 
         generate_config = types.GenerateContentConfig(**config_kwargs)
 
@@ -187,11 +189,9 @@ class ImageGeneratorAgent:
             if isinstance(raw_data, (bytes, bytearray)):
                 return base64.b64encode(raw_data).decode("utf-8")
             if isinstance(raw_data, str):
-                # Library may already return base64-encoded string
                 return raw_data
             if isinstance(raw_data, memoryview):
                 return base64.b64encode(raw_data.tobytes()).decode("utf-8")
-            # Fallback: attempt to convert to bytes
             return base64.b64encode(bytes(raw_data)).decode("utf-8")
         except Exception as err:
             logger.error("Failed to encode image data: %s", err, exc_info=True)
