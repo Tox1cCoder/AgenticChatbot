@@ -182,11 +182,27 @@ APP_STYLE = """
     }
     
     /* Attachments */
+    .message-attachments-wrapper {
+        display: flex;
+        max-width: 75%;
+        margin: 4px 0 12px;
+    }
+    
+    .message-attachments-wrapper.align-right {
+        margin-left: auto;
+        justify-content: flex-end;
+    }
+    
+    .message-attachments-wrapper.align-left {
+        margin-right: auto;
+        justify-content: flex-start;
+    }
+    
     .message-attachments {
         display: flex;
-        gap: 10px;
+        gap: 8px;
         flex-wrap: wrap;
-        margin: 6px 0 0;
+        margin: 0;
     }
     
     .message-attachments .attachment-thumb {
@@ -371,6 +387,7 @@ SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
     "messages": list,
     "conversations_list": list,
     "show_conversation_manager": lambda: False,
+    "conversation_manager_visible": lambda: False,
     "show_instructions": lambda: False,
     "auth_token": lambda: None,
     "conversation_messages_meta": lambda: None,
@@ -583,6 +600,14 @@ def reset_conversation_state() -> None:
     st.session_state.image_viewer_open = False
     st.session_state.image_viewer_payload = None
     st.session_state.message_image_thumbnails = {}
+
+def open_conversation_manager() -> None:
+    st.session_state.conversation_manager_visible = True
+    st.session_state.show_conversation_manager = True
+
+def close_conversation_manager() -> None:
+    st.session_state.conversation_manager_visible = False
+    st.session_state.show_conversation_manager = False
 
 
 def refresh_conversations_list(
@@ -1037,13 +1062,16 @@ def render_sidebar():
         if st.button("New Chat", use_container_width=True, type="primary"):
             st.session_state.current_conversation_id = "pending_new"
             st.session_state.active_view = "chat"
-            st.session_state.show_conversation_manager = False
+            close_conversation_manager()
             reset_conversation_state()
             st.rerun()
 
         # Manage conversations button
         if st.button("Manage Conversations", use_container_width=True):
-            st.session_state.show_conversation_manager = True
+            if st.session_state.get("conversation_manager_visible"):
+                close_conversation_manager()
+            else:
+                open_conversation_manager()
             st.rerun()
 
         st.divider()
@@ -1091,7 +1119,7 @@ def render_sidebar():
                             if conv["id"] != st.session_state.current_conversation_id:
                                 st.session_state.current_conversation_id = conv["id"]
                                 st.session_state.active_view = "chat"
-                                st.session_state.show_conversation_manager = False
+                                close_conversation_manager()
                                 reset_conversation_state()
                                 st.rerun()
 
@@ -1105,6 +1133,7 @@ def render_sidebar():
                 if st.button("Sign Out", use_container_width=True):
                     st.session_state.current_user_id = None
                     st.session_state.current_conversation_id = None
+                    close_conversation_manager()
                     reset_conversation_state()
                     st.session_state.conversations_list = []
                     st.session_state.auth_token = None
@@ -1128,69 +1157,98 @@ def _guess_extension(mime: Optional[str]) -> str:
     return "png"
 
 
+def _build_attachment_thumbnail(href: str, name: str, *, download: Optional[str] = None) -> str:
+    """Create HTML anchor for a single attachment thumbnail."""
+    escaped_href = html.escape(str(href), quote=True)
+    escaped_name = html.escape(str(name), quote=True)
+    download_attr = (
+        f' download="{html.escape(str(download), quote=True)}"' if download else ""
+    )
+    return (
+        f'<a class="attachment-thumb-link" href="{escaped_href}" target="_blank" '
+        f'rel="noopener noreferrer" aria-label="Open {escaped_name}" '
+        f'title="{escaped_name}"{download_attr}>'
+        f'<div class="attachment-thumb">'
+        f'<img src="{escaped_href}" alt="{escaped_name}" loading="lazy" />'
+        f"</div></a>"
+    )
+
+
+def render_attachment_gallery(attachments: List[Dict[str, str]], *, align: str) -> None:
+    """Render a row of attachment thumbnails aligned to the speaker."""
+    if not attachments:
+        return
+
+    fragments: List[str] = []
+
+    for idx, attachment in enumerate(attachments, start=1):
+        name = attachment.get("name") or f"Attachment {idx}"
+        data_b64 = attachment.get("data")
+        url_value = attachment.get("url")
+
+        if isinstance(data_b64, str) and data_b64:
+            mime = attachment.get("mime", "image/png")
+            source = f"data:{mime};base64,{data_b64}"
+            download_name = attachment.get("download_name")
+            if not download_name:
+                download_name = name if "." in name else f"{name}.{_guess_extension(mime)}"
+            fragments.append(
+                _build_attachment_thumbnail(source, name, download=download_name)
+            )
+        elif isinstance(url_value, str) and url_value:
+            fragments.append(_build_attachment_thumbnail(url_value, name))
+
+    if not fragments:
+        return
+
+    wrapper_class = "align-right" if align == "right" else "align-left"
+
+    st.markdown(
+        (
+            f'<div class="message-attachments-wrapper {wrapper_class}">'
+            f'<div class="message-attachments">' + "".join(fragments) + "</div>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
 def render_agent_images(message_metadata: dict, message_id: str):
     """Render images from agent responses as thumbnails (Tavily, Image Generator)"""
     if not message_metadata:
         return
 
-    images = message_metadata.get("images", [])
+    images = message_metadata.get("images") or []
     if not images:
         return
 
-    thumbnail_fragments: List[str] = []
+    gallery_items: List[Dict[str, str]] = []
 
-    for idx, img in enumerate(images, start=1):
-        if not isinstance(img, dict):
+    for idx, image in enumerate(images, start=1):
+        if not isinstance(image, dict):
             continue
 
-        # Handle URL images (Tavily)
-        if "url" in img:
-            url = img.get("url", "")
-            if url:
-                escaped_url = html.escape(url, quote=True)
-                name = img.get("description") or f"Image {idx}"
-                escaped_name = html.escape(str(name), quote=True)
+        url_value = image.get("url")
+        data_value = image.get("data")
 
-                thumbnail_fragments.append(
-                    f'<a class="attachment-thumb-link" href="{escaped_url}" target="_blank" '
-                    f'rel="noopener noreferrer" aria-label="Open {escaped_name}" title="{escaped_name}">'
-                    f'<div class="attachment-thumb">'
-                    f'<img src="{escaped_url}" alt="{escaped_name}" loading="lazy" />'
-                    f"</div></a>"
-                )
+        if isinstance(url_value, str) and url_value:
+            gallery_items.append(
+                {
+                    "url": url_value,
+                    "name": image.get("description") or f"Image {idx}",
+                }
+            )
+        elif isinstance(data_value, str) and data_value:
+            gallery_items.append(
+                {
+                    "data": data_value,
+                    "mime": image.get("mime", "image/png"),
+                    "name": image.get("name") or f"Generated image {idx}",
+                }
+            )
 
-        # Handle base64 images (Image Generator)
-        elif "data" in img:
-            data = img.get("data", "")
-            mime = img.get("mime", "image/png")
-            name = img.get("name") or f"Generated image {idx}"
-            if data:
-                escaped_name = html.escape(str(name), quote=True)
-                data_url = f"data:{mime};base64,{data}"
-                download_name = (
-                    name if "." in name else f"{name}.{_guess_extension(mime)}"
-                )
-                escaped_download = html.escape(str(download_name), quote=True)
-
-                thumbnail_fragments.append(
-                    f'<a class="attachment-thumb-link" href="{data_url}" target="_blank" rel="noopener" '
-                    f'aria-label="Open {escaped_name}" title="{escaped_name}" download="{escaped_download}">'
-                    f'<div class="attachment-thumb">'
-                    f'<img src="{data_url}" alt="{escaped_name}" loading="lazy" />'
-                    f"</div></a>"
-                )
-
-    if not thumbnail_fragments:
-        return
-
-    # Render thumbnails in a row, aligned to the left with margin
-    st.markdown(
-        f'<div class="message-attachments-wrapper" '
-        f'style="display:flex; justify-content:flex-start; margin:6px 0 0 45px;">'
-        f'<div class="message-attachments">{"".join(thumbnail_fragments)}</div>'
-        f"</div>",
-        unsafe_allow_html=True,
-    )
+    if gallery_items:
+        render_attachment_gallery(gallery_items, align="left")
 
 
 def render_message_bubble(msg: Dict[str, Any], is_user: bool):
@@ -1227,12 +1285,7 @@ def render_message_bubble(msg: Dict[str, Any], is_user: bool):
             str(msg.get("id", ""))
         )
         if attachments:
-            cols = st.columns(min(len(attachments), 4))
-            for idx, att in enumerate(attachments[:4]):
-                with cols[idx % len(cols)]:
-                    if att.get("data"):
-                        image_bytes = base64.b64decode(att["data"])
-                        st.image(image_bytes, caption=att.get("name", ""), width=100)
+            render_attachment_gallery(attachments, align="right")
 
     # Show agent-sent images (from Tavily or Image Generator) for assistant messages
     if not is_user:
@@ -2247,11 +2300,26 @@ def render_chat_view():
 
 def render_manage_modal():
     """Conversation management modal dialog"""
-    if not st.session_state.get("show_conversation_manager", False):
+    visible = st.session_state.get("conversation_manager_visible", False)
+    if st.session_state.get("show_conversation_manager", False) != visible:
+        st.session_state.show_conversation_manager = visible
+    if not visible:
         return
 
     @st.dialog("📋 Manage Conversations", width="large")
     def manage_dialog():
+        def _deduplicate_conversations(conversations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            """Return conversations with duplicate IDs removed, preserving order."""
+            seen = set()
+            deduped: List[Dict[str, Any]] = []
+            for conv in conversations:
+                conv_id = str(conv.get("id", ""))
+                if not conv_id or conv_id in seen:
+                    continue
+                seen.add(conv_id)
+                deduped.append(conv)
+            return deduped
+
         if st.session_state.current_user_id:
             with st.status("Loading conversations...", expanded=False):
                 # Get conversations with latest 3 messages for preview
@@ -2276,29 +2344,41 @@ def render_manage_modal():
         )
 
         if manager_conversations:
-            filtered_convs = manager_conversations
+            manager_conversations = _deduplicate_conversations(manager_conversations)
 
             if search_term:
-                filtered_convs = []
+                filtered_map: Dict[str, Dict[str, Any]] = {}
+                search_lower = search_term.lower()
+
                 for conv in manager_conversations:
-                    if search_term.lower() in conv.get("title", "").lower():
-                        if conv not in filtered_convs:
-                            filtered_convs.append(conv)
+                    conv_id = str(conv.get("id", ""))
+                    if not conv_id:
                         continue
 
-                    messages = conv.get("messages", [])
-                    if messages:
-                        for msg in messages:
-                            if search_term.lower() in msg.get("content", "").lower():
-                                if conv not in filtered_convs:
-                                    filtered_convs.append(conv)
-                                break
+                    if search_lower in (conv.get("title") or "").lower():
+                        filtered_map.setdefault(conv_id, conv)
+                        continue
 
-            if filtered_convs:
-                st.caption(f"Found {len(filtered_convs)} conversation(s)")
+                    messages = conv.get("messages") or []
+                    for msg in messages:
+                        if search_lower in (msg.get("content") or "").lower():
+                            filtered_map.setdefault(conv_id, conv)
+                            break
 
-                for conv in filtered_convs:
-                    with st.expander(f"{conv['title']}", expanded=False):
+                filtered_convs = list(filtered_map.values())
+            else:
+                filtered_convs = manager_conversations
+
+            display_conversations = _deduplicate_conversations(filtered_convs)
+
+            if display_conversations:
+                st.caption(f"Found {len(display_conversations)} conversation(s)")
+
+                for idx, conv in enumerate(display_conversations):
+                    conv_id = conv.get("id")
+                    conv_id_str = str(conv_id) if conv_id is not None else ""
+                    conv_title = conv.get("title") or "Untitled conversation"
+                    with st.expander(conv_title, expanded=False):
                         # Show stats
                         col1, col2, col3 = st.columns(3)
                         with col1:
@@ -2332,44 +2412,62 @@ def render_manage_modal():
                         # Actions
                         col1, col2 = st.columns(2)
                         with col1:
+                            open_button_key = (
+                                f"conversation_manager_open_{conv_id_str}_{idx}"
+                                if conv_id_str
+                                else f"conversation_manager_open_{idx}"
+                            )
                             if st.button(
                                 "📖 Open",
-                                key=f"open_{conv['id']}",
+                                key=open_button_key,
                                 use_container_width=True,
                                 type="primary",
                             ):
-                                st.session_state.current_conversation_id = conv["id"]
-                                st.session_state.show_conversation_manager = False
-                                reset_conversation_state()
-                                st.rerun()
+                                if conv_id is not None:
+                                    st.session_state.current_conversation_id = conv_id
+                                    close_conversation_manager()
+                                    reset_conversation_state()
+                                    st.rerun()
+                                else:
+                                    st.toast("Conversation is missing an ID", icon="⚠️")
                         with col2:
+                            delete_button_key = (
+                                f"conversation_manager_delete_{conv_id_str}_{idx}"
+                                if conv_id_str
+                                else f"conversation_manager_delete_{idx}"
+                            )
                             if st.button(
                                 "🗑️ Delete",
-                                key=f"delete_{conv['id']}",
+                                key=delete_button_key,
                                 use_container_width=True,
                             ):
-                                result = make_api_request(
-                                    "DELETE", f"/conversations/{conv['id']}"
-                                )
-                                if result:
-                                    st.session_state.conversations_list = []
-                                    if (
-                                        st.session_state.current_conversation_id
-                                        == conv["id"]
-                                    ):
-                                        st.session_state.current_conversation_id = None
-                                        reset_conversation_state()
-                                    get_messages.clear()
-                                    refresh_conversations_list()
-                                    st.toast(f"✅ Deleted '{conv['title']}'", icon="✅")
-                                    st.rerun()
+                                if conv_id is None:
+                                    st.toast("Conversation is missing an ID", icon="⚠️")
+                                else:
+                                    result = make_api_request(
+                                        "DELETE", f"/conversations/{conv_id}"
+                                    )
+                                    if result:
+                                        st.session_state.conversations_list = []
+                                        if (
+                                            st.session_state.current_conversation_id
+                                            == conv_id
+                                        ):
+                                            st.session_state.current_conversation_id = None
+                                            reset_conversation_state()
+                                        get_messages.clear()
+                                        refresh_conversations_list()
+                                        st.toast(
+                                            f"✅ Deleted '{conv.get('title', 'Conversation')}'",
+                                            icon="✅",
+                                        )
+                                        st.rerun()
             else:
                 st.info("No conversations found matching your search.")
         else:
             st.info("No conversations available.")
-
         if st.button("Close", use_container_width=True):
-            st.session_state.show_conversation_manager = False
+            close_conversation_manager()
             st.rerun()
 
     manage_dialog()
