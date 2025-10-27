@@ -70,7 +70,6 @@ class ChatAgent:
                     for tool in server_tools:
                         combined_tools[tool.name] = tool
 
-                # Fallback: include all available tools to support dynamic expansion
                 for tool in await self.mcp_manager.get_tools():
                     combined_tools.setdefault(tool.name, tool)
 

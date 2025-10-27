@@ -44,9 +44,6 @@ def format_tool_result(value: Any) -> str:
     """
     Format tool execution results as JSON or string.
     
-    Attempts to serialize the value as JSON for structured data,
-    falls back to string representation for simple values.
-    
     Args:
         value: The tool result to format
         

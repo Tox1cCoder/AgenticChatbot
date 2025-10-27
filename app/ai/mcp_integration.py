@@ -112,11 +112,7 @@ class MCPManager:
         """Return names of all enabled servers from configuration."""
         self._ensure_config_loaded()
         servers = self.config.get("mcp_servers", {})
-        return [
-            name
-            for name, cfg in servers.items()
-            if cfg.get("enabled", True)
-        ]
+        return [name for name, cfg in servers.items() if cfg.get("enabled", True)]
 
     async def initialize(self) -> None:
         if settings.tavily_api_key:
@@ -171,8 +167,8 @@ class MCPManager:
 
         combined_tools: List[BaseTool] = []
         for server_name in enabled_servers:
-              server_tools = self._server_tools.get(server_name, [])
-              combined_tools.extend(server_tools)
+            server_tools = self._server_tools.get(server_name, [])
+            combined_tools.extend(server_tools)
 
         self._tools = combined_tools
         return self._tools
@@ -199,18 +195,20 @@ class MCPManager:
             session = await session_context.__aenter__()
             tools = list(await load_mcp_tools(session))
 
+            cleaned_tools = self._clean_tool_schemas(tools)
+
             self._sessions[server_name] = {
                 "context": session_context,
                 "session": session,
             }
-            self._index_server_tools(server_name, tools)
+            self._index_server_tools(server_name, cleaned_tools)
 
             logger.info(
                 "Loaded %d tools from server '%s' (session kept open)",
-                len(tools),
+                len(cleaned_tools),
                 server_name,
             )
-            return tools
+            return cleaned_tools
         except Exception as exc:
             logger.error(
                 "Failed to load tools from server '%s': %s",
@@ -219,7 +217,7 @@ class MCPManager:
                 exc_info=True,
             )
             await session_context.__aexit__(*([None] * 3))
-            
+
             return []
 
     def _index_server_tools(self, server_name: str, tools: Iterable[BaseTool]) -> None:
@@ -233,36 +231,81 @@ class MCPManager:
             if not any(existing is tool for existing in indexed_tools):
                 indexed_tools.append(tool)
 
+    def _clean_tool_schemas(self, tools: List[BaseTool]) -> List[BaseTool]:
+
+        cleaned_tools = []
+        for tool in tools:
+            # Check if tool has an args_schema
+            if not hasattr(tool, "args_schema") or tool.args_schema is None:
+                cleaned_tools.append(tool)
+                continue
+
+            args_schema = tool.args_schema
+
+            # If args_schema is a Pydantic model class, we need to patch its schema method
+            if isinstance(args_schema, type) and issubclass(
+                args_schema, PydanticBaseModel
+            ):
+                # Get the original schema
+                original_schema_method = args_schema.model_json_schema
+
+                # Create a wrapper that filters unsupported keys
+                def filtered_schema_method(*args, **kwargs):
+                    schema = original_schema_method(*args, **kwargs)
+                    if isinstance(schema, dict):
+                        # Remove unsupported keys at root level
+                        unsupported_keys = {"$schema", "additionalProperties"}
+                        schema = {
+                            k: v for k, v in schema.items() if k not in unsupported_keys
+                        }
+                    return schema
+
+                args_schema.model_json_schema = staticmethod(filtered_schema_method)
+
+            cleaned_tools.append(tool)
+
+        return cleaned_tools
+
     def _serialize_args_schema(self, schema: Any) -> Dict[str, Any]:
         """Normalize a tool args schema into a serializable dictionary."""
         if not schema:
             return {}
 
-        if isinstance(schema, dict):
-            return schema
+        result_schema = {}
 
-        if PydanticBaseModel is not None:
+        if isinstance(schema, dict):
+            result_schema = schema
+        elif PydanticBaseModel is not None:
             if isinstance(schema, type) and issubclass(schema, PydanticBaseModel):
                 if hasattr(schema, "model_json_schema"):
-                    return schema.model_json_schema()
-            if isinstance(schema, PydanticBaseModel):
+                    result_schema = schema.model_json_schema()
+            elif isinstance(schema, PydanticBaseModel):
                 if hasattr(schema, "model_json_schema"):
-                    return schema.model_json_schema()
+                    result_schema = schema.model_json_schema()
 
-        # Generic callable schema exporters
-        for attr_name in ("model_json_schema", "json_schema", "schema"):
-            exporter = getattr(schema, attr_name, None)
-            if callable(exporter):
-                try:
-                    return exporter()
-                except TypeError:
+        if not result_schema:
+            for attr_name in ("model_json_schema", "json_schema", "schema"):
+                exporter = getattr(schema, attr_name, None)
+                if callable(exporter):
                     try:
-                        return exporter(by_alias=True)
+                        result_schema = exporter()
+                        break
+                    except TypeError:
+                        try:
+                            result_schema = exporter(by_alias=True)
+                            break
+                        except Exception:
+                            continue
                     except Exception:
                         continue
-                except Exception:
-                    continue
-        return {}
+
+        unsupported_keys = {"$schema", "additionalProperties"}
+        if result_schema and isinstance(result_schema, dict):
+            result_schema = {
+                k: v for k, v in result_schema.items() if k not in unsupported_keys
+            }
+
+        return result_schema
 
     def get_tool_args_schema(self, tool: BaseTool) -> Dict[str, Any]:
         """Public helper to expose argument schema for a tool."""
@@ -315,9 +358,7 @@ class MCPManager:
             )
 
         if server_name in self.config["mcp_servers"]:
-            raise ServerConfigurationError(
-                f"Server '{server_name}' already exists"
-            )
+            raise ServerConfigurationError(f"Server '{server_name}' already exists")
 
         self.config["mcp_servers"][server_name] = server_config
         self.save_config()
@@ -327,9 +368,7 @@ class MCPManager:
         if server_name not in self.config.get("mcp_servers", {}):
             raise ServerNotFoundError(server_name)
         if server_name in self.DEFAULT_SERVERS:
-            raise ServerConfigurationError(
-                f"Cannot remove core server '{server_name}'"
-            )
+            raise ServerConfigurationError(f"Cannot remove core server '{server_name}'")
 
         # Cleanup session if active
         if server_name in self._sessions:

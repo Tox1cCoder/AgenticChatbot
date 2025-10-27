@@ -25,10 +25,7 @@ RESPONSE QUALITY:
 - Use exact quotes when precision matters
 - Explain context and relationships between different document sections
 - If asked for more detail, dive deeper into specific document sections
-
-CITATION FORMAT:
-- Reference: "Document [number], [page info]"
-- Example: "Document 2, page 15 states that..."
+"
 
 If the documents are insufficient to answer fully, acknowledge what's missing."""
 

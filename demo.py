@@ -494,7 +494,6 @@ def sanitize_message_content(content: str) -> str:
     if not normalized:
         return ""
 
-    # Replace inline images with accessible text fallback
     normalized = re.sub(
         r"!\[([^\]]*)\]\(([^)]+)\)", r"\1 (\2)", normalized, flags=re.MULTILINE
     )
@@ -708,6 +707,10 @@ def get_conversations(
 
         data = response.get("data") or {}
         items = data.get("items") or []
+
+        if not items:
+            break
+
         aggregated_items.extend(items)
 
         meta = data.get("meta") or {}
@@ -716,7 +719,9 @@ def get_conversations(
 
         current = meta.get("currentPage", current_page)
         last = meta.get("lastPage", current_page)
-        if current >= last:
+
+        total = meta.get("total", 0)
+        if current >= last or (total > 0 and len(aggregated_items) >= total):
             break
 
         current_page += 1
@@ -1438,6 +1443,8 @@ def render_tool_parameter_form(
             parameters[param_name] = st.number_input(
                 label,
                 value=default_val,
+                step=0.1,
+                format="%.6f",
                 help=help_text,
                 key=f"{base_key}_number",
             )
@@ -2083,16 +2090,12 @@ def render_chat_view():
         st.markdown(f"# {current_conv['title']}")
         active_persona = current_conv.get("personaPrompt")
         if active_persona:
-            st.info(
-                f"**Instructions active:** {persona_preview(active_persona, 100)}"
-            )
+            st.info(f"**Instructions active:** {persona_preview(active_persona, 100)}")
     elif conversation_id == "pending_new":
         st.markdown("# New Chat")
         queued_persona = st.session_state.get("pending_persona_prompt", "")
         if queued_persona:
-            st.info(
-                f"**Instructions queued:** {persona_preview(queued_persona, 100)}"
-            )
+            st.info(f"**Instructions queued:** {persona_preview(queued_persona, 100)}")
     else:
         st.markdown("# Welcome!")
         st.info(
