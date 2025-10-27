@@ -260,6 +260,24 @@ class Settings(BaseSettings):
         description="Approximate maximum tokens of search history to include in prompts (0 = no limit)",
     )
 
+    # ReAct Agent Configuration
+    react_agent_max_iterations: int = Field(
+        default=10,
+        description="Maximum reasoning/acting cycles before stopping",
+    )
+    react_agent_recursion_limit: int = Field(
+        default=25,
+        description="LangGraph recursion limit for agent execution",
+    )
+    enable_parallel_tool_calls: bool = Field(
+        default=True,
+        description="Allow models to call multiple tools in parallel",
+    )
+    tool_choice_mode: str = Field(
+        default="auto",
+        description="Tool calling mode: 'auto', 'any', 'none', or specific tool name",
+    )
+
     # Health Check Configuration
     health_check_timeout: int = Field(
         default=5,

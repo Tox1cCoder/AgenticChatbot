@@ -2730,13 +2730,13 @@ def render_settings_view():
 
     with col2:
         if is_new_conversation:
-            if st.button("🗑️ Clear", use_container_width=True):
+            if st.button("Clear", use_container_width=True):
                 st.session_state.persona_editor_pending_value = ""
                 st.session_state.persona_editor_pending = True
                 st.session_state.pending_persona_prompt = ""
                 st.rerun()
         else:
-            if st.button("🗑️ Clear Persona", use_container_width=True):
+            if st.button("Clear Persona", use_container_width=True):
                 response = make_api_request(
                     "PATCH",
                     f"/conversations/{conversation_id}",

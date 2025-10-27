@@ -418,6 +418,9 @@ class MultiAgentWorkflow:
         initial_state["selected_agent"] = None
         initial_state["response"] = None
         initial_state["persona"] = persona
+        initial_state["reasoning_steps"] = None
+        initial_state["tool_results"] = None
+        initial_state["iteration_count"] = None
 
         # Store attachments in context for agent access
         if attachments:

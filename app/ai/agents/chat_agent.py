@@ -6,11 +6,13 @@ from typing import Optional, List, Dict, Any
 from google import genai
 from google.genai import types
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.messages import HumanMessage, ToolMessage
-from langchain.tools import BaseTool
+from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.tools import BaseTool
+from langgraph.prebuilt import ToolNode
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_chat_prompt
+from ..utils import coerce_response_text, format_tool_result, make_json_safe
 from ...core.config import settings
 from ...core.exceptions.mcp import ServerNotFoundError
 from ..mcp_integration import MCPManager
@@ -127,7 +129,7 @@ class ChatAgent:
                 tools_used = []
                 tool_artifacts = []
 
-        response_text = self._coerce_response_text(response_text)
+        response_text = coerce_response_text(response_text)
 
         response_message = AgentMessage(
             role=MessageRole.ASSISTANT, content=response_text
@@ -173,74 +175,134 @@ class ChatAgent:
             return f"Error generating response: {str(e)}"
 
     async def _generate_with_tools(self, prompt: str) -> tuple[str, List[str], List[Dict[str, Any]]]:
-        """Generate response with tool calling support."""
+        """Generate response with tool calling support using ReAct pattern."""
         try:
+            # Configure tool calling based on settings
+            tool_choice = settings.tool_choice_mode if hasattr(settings, 'tool_choice_mode') else "auto"
+            parallel_tool_calls = settings.enable_parallel_tool_calls if hasattr(settings, 'enable_parallel_tool_calls') else True
+            max_iterations = settings.react_agent_max_iterations if hasattr(settings, 'react_agent_max_iterations') else 10
+            
             llm_with_tools = self.langchain_model.bind_tools(
-                self.tools, tool_config={"function_calling_config": {"mode": "AUTO"}}
+                self.tools, 
+                tool_config={
+                    "function_calling_config": {
+                        "mode": tool_choice.upper() if tool_choice in ["auto", "any", "none"] else "AUTO"
+                    }
+                },
+                parallel_tool_calls=parallel_tool_calls
             )
 
             messages = [HumanMessage(content=prompt)]
             tools_used: List[str] = []
             tool_artifacts: List[Dict[str, Any]] = []
-            max_iterations = 5
+            reasoning_steps: List[Dict[str, Any]] = []
+            iteration_count = 0
 
-            for _ in range(max_iterations):
+            for iteration in range(max_iterations):
+                iteration_count = iteration + 1
+                
+                # Reasoning step: Get agent's thought and potential actions
                 ai_message = await llm_with_tools.ainvoke(messages)
                 messages.append(ai_message)
+                
+                # Extract reasoning trace if present
+                if hasattr(ai_message, 'content') and ai_message.content:
+                    reasoning_steps.append({
+                        "iteration": iteration_count,
+                        "thought": coerce_response_text(ai_message.content),
+                        "type": "reasoning"
+                    })
 
+                # Check if agent decided to finish (no tool calls)
                 if not ai_message.tool_calls:
-                    response_text = self._coerce_response_text(ai_message.content)
+                    response_text = coerce_response_text(ai_message.content)
                     break
 
+                # Acting step: Execute tool calls
                 for tool_call in ai_message.tool_calls:
                     tool_name = tool_call["name"]
                     tool_args = tool_call["args"]
                     tool_id = tool_call["id"]
 
                     tools_used.append(tool_name)
+                    
+                    reasoning_steps.append({
+                        "iteration": iteration_count,
+                        "action": tool_name,
+                        "arguments": make_json_safe(tool_args),
+                        "type": "action"
+                    })
 
+                    # Execute the tool
                     tool_output_text: str
+                    tool_found = False
                     for tool in self.tools:
                         if tool.name != tool_name:
                             continue
+                        tool_found = True
                         try:
                             response_payload = await tool.ainvoke(tool_args)
-                            tool_output_text = self._format_tool_result(response_payload)
+                            tool_output_text = format_tool_result(response_payload)
                             tool_artifacts.append(
                                 {
                                     "tool": tool_name,
-                                    "arguments": self._make_json_safe(tool_args),
+                                    "arguments": make_json_safe(tool_args),
                                     "output": tool_output_text,
                                 }
                             )
+                            reasoning_steps.append({
+                                "iteration": iteration_count,
+                                "observation": tool_output_text,
+                                "type": "observation"
+                            })
                             logger.info("ChatAgent executed tool: %s", tool_name)
                         except Exception as exc:
                             tool_output_text = f"Error executing tool: {exc}"
                             tool_artifacts.append(
                                 {
                                     "tool": tool_name,
-                                    "arguments": self._make_json_safe(tool_args),
+                                    "arguments": make_json_safe(tool_args),
                                     "error": str(exc),
                                 }
                             )
+                            reasoning_steps.append({
+                                "iteration": iteration_count,
+                                "observation": tool_output_text,
+                                "error": str(exc),
+                                "type": "observation"
+                            })
                             logger.error("Tool execution error: %s", exc)
                         break
-                    else:
+                    
+                    if not tool_found:
                         tool_output_text = f"Tool {tool_name} not found"
                         tool_artifacts.append(
                             {
                                 "tool": tool_name,
-                                "arguments": self._make_json_safe(tool_args),
+                                "arguments": make_json_safe(tool_args),
                                 "error": "Tool not found",
                             }
                         )
+                        reasoning_steps.append({
+                            "iteration": iteration_count,
+                            "observation": tool_output_text,
+                            "error": "Tool not found",
+                            "type": "observation"
+                        })
 
+                    # Observation step: Add tool result to message history
                     messages.append(
                         ToolMessage(content=tool_output_text, tool_call_id=tool_id)
                     )
 
             else:
+                # Max iterations reached without final answer
                 response_text = "Response completed but max iterations reached."
+                reasoning_steps.append({
+                    "iteration": iteration_count,
+                    "note": "Maximum iterations reached",
+                    "type": "termination"
+                })
 
             return response_text, tools_used, tool_artifacts
 
@@ -248,6 +310,46 @@ class ChatAgent:
             logger.error("Error in tool calling flow: %s", exc, exc_info=True)
             fallback = await self._generate(prompt)
             return fallback, [], []
+
+    def _coerce_response_text(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text_value = item.get("text") or item.get("content")
+                    if text_value:
+                        parts.append(str(text_value))
+                else:
+                    parts.append(str(item))
+            return "\n".join(filter(None, parts))
+        if content is None:
+            return ""
+        return str(content)
+
+    def _format_tool_result(self, value: Any) -> str:
+        if isinstance(value, (dict, list)):
+            try:
+                return json.dumps(value, ensure_ascii=False, indent=2)
+            except TypeError:
+                return str(value)
+        return "" if value is None else str(value)
+
+    def _make_json_safe(self, value: Any) -> Any:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, dict):
+            return {str(k): self._make_json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [self._make_json_safe(v) for v in value]
+        if hasattr(value, "model_dump"):
+            return self._make_json_safe(value.model_dump())
+        if hasattr(value, "dict"):
+            return self._make_json_safe(value.dict())
+        return str(value)
 
     def _coerce_response_text(self, content: Any) -> str:
         if isinstance(content, str):
@@ -326,43 +428,3 @@ class ChatAgent:
                 logger.info("ChatAgent MCP cleanup completed")
             except Exception as e:
                 logger.error(f"Error cleaning up ChatAgent MCP resources: {e}")
-    def _coerce_response_text(self, content: Any) -> str:
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: List[str] = []
-            for item in content:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, dict):
-                    text_value = item.get("text") or item.get("content")
-                    if text_value:
-                        parts.append(str(text_value))
-                else:
-                    parts.append(str(item))
-            return "\n".join(filter(None, parts))
-        if content is None:
-            return ""
-        return str(content)
-
-    def _format_tool_result(self, value: Any) -> str:
-        if isinstance(value, (dict, list)):
-            try:
-                return json.dumps(value, ensure_ascii=False, indent=2)
-            except TypeError:
-                return str(value)
-        return "" if value is None else str(value)
-
-    def _make_json_safe(self, value: Any) -> Any:
-        if isinstance(value, (str, int, float, bool)) or value is None:
-            return value
-        if isinstance(value, dict):
-            return {str(k): self._make_json_safe(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple, set)):
-            return [self._make_json_safe(v) for v in value]
-        if hasattr(value, "model_dump"):
-            return self._make_json_safe(value.model_dump())
-        if hasattr(value, "dict"):
-            return self._make_json_safe(value.dict())
-        return str(value)
-

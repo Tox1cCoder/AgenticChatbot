@@ -193,7 +193,6 @@ class MCPManager:
         try:
             session_context = self.client.session(server_name)
         except ValueError as exc:
-            # MultiServerMCPClient raises ValueError when server is unknown
             raise ServerNotFoundError(server_name) from exc
 
         try:
@@ -219,11 +218,8 @@ class MCPManager:
                 exc,
                 exc_info=True,
             )
-            # Ensure the context is cleaned up if __aenter__ succeeded earlier
-            try:
-                await session_context.__aexit__(*([None] * 3))
-            except Exception:  # pragma: no cover - best effort cleanup
-                logger.debug("Suppressed cleanup error for server '%s'", server_name)
+            await session_context.__aexit__(*([None] * 3))
+            
             return []
 
     def _index_server_tools(self, server_name: str, tools: Iterable[BaseTool]) -> None:
@@ -245,21 +241,13 @@ class MCPManager:
         if isinstance(schema, dict):
             return schema
 
-        # Handle Pydantic model classes or instances
         if PydanticBaseModel is not None:
-            try:
-                if isinstance(schema, type) and issubclass(schema, PydanticBaseModel):
-                    if hasattr(schema, "model_json_schema"):
-                        return schema.model_json_schema()
-                    if hasattr(schema, "schema"):
-                        return schema.schema()
-                if isinstance(schema, PydanticBaseModel):
-                    if hasattr(schema, "model_json_schema"):
-                        return schema.model_json_schema()
-                    if hasattr(schema, "schema"):
-                        return schema.schema()
-            except Exception as exc:  # pragma: no cover - defensive logging
-                logger.debug("Failed to serialize Pydantic schema: %s", exc)
+            if isinstance(schema, type) and issubclass(schema, PydanticBaseModel):
+                if hasattr(schema, "model_json_schema"):
+                    return schema.model_json_schema()
+            if isinstance(schema, PydanticBaseModel):
+                if hasattr(schema, "model_json_schema"):
+                    return schema.model_json_schema()
 
         # Generic callable schema exporters
         for attr_name in ("model_json_schema", "json_schema", "schema"):
@@ -274,8 +262,6 @@ class MCPManager:
                         continue
                 except Exception:
                     continue
-
-        logger.debug("Unsupported args_schema type: %s", type(schema))
         return {}
 
     def get_tool_args_schema(self, tool: BaseTool) -> Dict[str, Any]:
@@ -432,8 +418,6 @@ class MCPManager:
             len(self._server_tools),
         )
 
-    # ===== Tool Information & Execution Methods =====
-
     async def get_all_tools_info(self) -> List[Dict[str, Any]]:
         """
         Get information about all available tools
@@ -533,8 +517,6 @@ class MCPManager:
                 "tool_name": tool_name,
                 "server_name": server_name,
             }
-
-    # ===== Server Status Methods =====
 
     def get_servers_status(self) -> Dict[str, Dict[str, Any]]:
         """

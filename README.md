@@ -48,6 +48,158 @@ app/
 └── utils/             # Helpers and utilities
 ```
 
+## ReAct Agent Architecture
+
+This chatbot uses a modern **ReAct (Reasoning + Acting)** pattern for intelligent tool-calling agents, powered by LangChain v1.0 and LangGraph v0.2.
+
+### What is ReAct?
+
+ReAct is an agent pattern that interleaves:
+
+1. **Reasoning** - The agent thinks about what to do next
+2. **Acting** - The agent executes tools or takes actions
+3. **Observation** - The agent observes the results
+4. Repeat until the agent has enough information to provide a final answer
+
+This creates a transparent thought → action → observation cycle that makes agent behavior more predictable and debuggable.
+
+### Architecture Overview
+
+```
+User Message
+    ↓
+Router (selects agent)
+    ↓
+┌─────────────────────────────────────┐
+│      ReAct Agent (Chat/Search)      │
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │  Iteration 1                │   │
+│  │  • Thought: "I need X"      │   │
+│  │  • Action: call_tool()      │   │
+│  │  • Observation: result      │   │
+│  └─────────────────────────────┘   │
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │  Iteration 2                │   │
+│  │  • Thought: "Now I need Y"  │   │
+│  │  • Action: call_tool()      │   │
+│  │  • Observation: result      │   │
+│  └─────────────────────────────┘   │
+│                                     │
+│  ┌─────────────────────────────┐   │
+│  │  Final Answer               │   │
+│  │  • Thought: "I have enough" │   │
+│  │  • Response: complete       │   │
+│  └─────────────────────────────┘   │
+└─────────────────────────────────────┘
+    ↓
+Response with tool artifacts
+```
+
+### ReAct Configuration
+
+You can control ReAct behavior via environment variables or settings:
+
+```env
+# Maximum number of reasoning/acting cycles
+REACT_AGENT_MAX_ITERATIONS=10
+
+# LangGraph recursion limit for agent execution
+REACT_AGENT_RECURSION_LIMIT=25
+
+# Allow models to call multiple tools in parallel
+ENABLE_PARALLEL_TOOL_CALLS=true
+
+# Tool calling mode: "auto", "any", "none", or specific tool name
+TOOL_CHOICE_MODE="auto"
+```
+
+### Configuration Options Explained
+
+- **`react_agent_max_iterations`** (default: 10)
+  - Controls how many reasoning/acting cycles the agent can perform
+  - Prevents infinite loops while allowing complex multi-step reasoning
+  - Increase for tasks requiring many tool calls
+
+- **`react_agent_recursion_limit`** (default: 25)
+  - LangGraph's internal recursion limit
+  - Should be higher than `max_iterations` to account for internal graph operations
+  - Prevents stack overflow in complex workflows
+
+- **`enable_parallel_tool_calls`** (default: true)
+  - When true, the model can request multiple tool calls simultaneously
+  - Example: Searching multiple sources at once
+  - Improves efficiency but requires tools to be independent
+
+- **`tool_choice_mode`** (default: "auto")
+  - `"auto"` - Model decides whether to use tools
+  - `"any"` - Model must use at least one tool
+  - `"none"` - Model cannot use tools (direct response only)
+  - `"tool_name"` - Force use of a specific tool
+
+### Agent-Specific Behavior
+
+#### Chat Agent
+- **Tools**: Calculator, time, and all MCP-enabled tools
+- **Use Case**: General conversations with tool access
+- **ReAct Flow**: Thinks → calls tools as needed → synthesizes answer
+- **Vision Support**: When images are attached, bypasses tool calling for multimodal processing
+
+#### Search Agent
+- **Tools**: Tavily web search, time
+- **Use Case**: Web search queries
+- **ReAct Flow**: Analyzes query → searches web → extracts images → formats results
+- **Special Feature**: Automatically extracts and includes images from Tavily results
+
+### Tool Artifacts & Observability
+
+Responses from ReAct agents include detailed tool execution metadata:
+
+```json
+{
+  "message": {
+    "content": "The weather in Tokyo is..."
+  },
+  "tool_artifacts": [
+    {
+      "tool": "tavily_search",
+      "arguments": {"query": "Tokyo weather"},
+      "output": "{...search results...}"
+    }
+  ],
+  "metadata": {
+    "tools_used": ["tavily_search"],
+    "tool_calls_count": 1,
+    "reasoning_steps": [
+      {"iteration": 1, "thought": "I need current weather data", "type": "reasoning"},
+      {"iteration": 1, "action": "tavily_search", "type": "action"},
+      {"iteration": 1, "observation": "Weather data retrieved", "type": "observation"}
+    ]
+  }
+}
+```
+
+### Benefits of ReAct Pattern
+
+1. **Transparency**: Clear reasoning traces show why the agent made decisions
+2. **Debuggability**: Track exactly which tools were called and why
+3. **Control**: Configure max iterations and tool choice behavior
+4. **Efficiency**: Parallel tool calls when appropriate
+5. **Safety**: Recursion limits prevent runaway execution
+6. **Modern API**: Uses LangChain v1.0 best practices
+
+### Migration from Manual Tool Calling
+
+Previous implementations used manual for-loops for tool calling. The new ReAct implementation:
+
+- ✅ Uses LangChain's built-in `bind_tools` API
+- ✅ Proper state management with structured reasoning traces
+- ✅ Configurable behavior via settings
+- ✅ Better error handling and logging
+- ✅ Eliminates code duplication with shared utilities
+- ✅ Maintains backward compatibility with existing services
+
 ## Quickstart
 
 ### 1. Clone & Setup
