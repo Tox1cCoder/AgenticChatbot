@@ -1064,7 +1064,7 @@ def render_login_page():
 
 def render_sidebar():
     with st.sidebar:
-        st.markdown("# 🤖 ChatBot")
+        st.markdown("# Multi-agent ChatBot")
 
         # New chat button
         if st.button("New Chat", use_container_width=True, type="primary"):
@@ -1225,7 +1225,7 @@ def render_attachment_gallery(attachments: List[Dict[str, str]], *, align: str) 
     )
 
 
-def render_agent_images(message_metadata: dict, message_id: str):
+def render_agent_images(message_metadata: dict):
     """Render images from agent responses as thumbnails (Tavily, Image Generator)"""
     if not message_metadata:
         return
@@ -1299,9 +1299,9 @@ def render_message_bubble(msg: Dict[str, Any], is_user: bool):
         if attachments:
             render_attachment_gallery(attachments, align="right")
 
-    # Show agent-sent images (from Tavily or Image Generator) for assistant messages
+    # Show agent-sent images for assistant messages
     if not is_user:
-        render_agent_images(msg.get("messageMetadata", {}), str(msg.get("id", "")))
+        render_agent_images(msg.get("messageMetadata", {}))
 
     # Show feedback for assistant messages
     if not is_user:
@@ -1512,17 +1512,15 @@ def render_tool_parameter_form(
 
 def render_tools_tab():
     """Render the MCP Tools management and testing interface"""
-    st.markdown("### 🔧 MCP Tools Management")
+    st.markdown("# 🔧 MCP Tools Management")
     st.markdown(
         "Discover and test Model Context Protocol (MCP) tools available to the chatbot."
     )
 
-    col1, col2 = st.columns([3, 1])
-    with col2:
-        if st.button("🔄 Refresh", use_container_width=True):
-            get_mcp_servers.clear()
-            get_mcp_tools.clear()
-            st.rerun()
+    if st.button("🔄 Refresh", use_container_width=True):
+        get_mcp_servers.clear()
+        get_mcp_tools.clear()
+        st.rerun()
 
     st.markdown("---")
 
@@ -1535,11 +1533,11 @@ def render_tools_tab():
         return
 
     # Server Management Section
-    with st.expander("📡 **MCP Servers Management**", expanded=False):
+    with st.expander("**MCP Servers Management**", expanded=False):
         servers = servers_data.get("servers", [])
 
         # Add Server Section
-        st.markdown("#### ➕ Add New Server")
+        st.markdown("#### Add New Server")
 
         # Quick test button
         col_test1, col_test2 = st.columns([1, 3])
@@ -1557,27 +1555,17 @@ def render_tools_tab():
 
         with tab1:
             st.markdown("Paste your MCP server configuration in JSON format:")
-            st.caption(
-                "Supports both full config format (with mcpServers) or single server format"
-            )
             json_config = st.text_area(
                 "JSON Configuration",
                 height=250,
                 placeholder="""{
-  "mcpServers": {
+"mcpServers": {
     "my-server": {
-      "command": "python",
-      "args": ["path/to/server.py"],
-      "description": "My custom MCP server"
+    "command": "python",
+    "args": ["path/to/server.py"],
+    "description": "My custom MCP server"
     }
-  }
 }
-
-OR single server format:
-{
-  "name": "my-server",
-  "command": "python",
-  "args": ["path/to/server.py"]
 }""",
                 label_visibility="collapsed",
             )
@@ -1586,10 +1574,6 @@ OR single server format:
                 if json_config.strip():
                     try:
                         config = json.loads(json_config)
-
-                        # Handle two formats:
-                        # Format 1: Full config with "mcpServers" or "mcp_servers" wrapper
-                        # Format 2: Individual server config with "name" field
 
                         servers_to_add = []
 
@@ -1618,26 +1602,6 @@ OR single server format:
                             st.error(
                                 "❌ Invalid format. Please use one of these formats:"
                             )
-                            st.code(
-                                """Format 1 - Full config:
-{
-  "mcpServers": {
-    "server-name": {
-      "command": "python",
-      "args": ["path/to/server.py"]
-    }
-  }
-}
-
-Format 2 - Single server:
-{
-  "name": "server-name",
-  "transport": "stdio",
-  "command": "python",
-  "args": ["path/to/server.py"]
-}""",
-                                language="json",
-                            )
                             servers_to_add = []
 
                         # Add all servers
@@ -1651,7 +1615,7 @@ Format 2 - Single server:
                                 with st.spinner(f"Adding server '{server_name}'..."):
                                     # Show what we're sending for debugging
                                     with st.expander(
-                                        f"📤 Request for '{server_name}' (debug)",
+                                        f"Request for '{server_name}' (debug)",
                                         expanded=False,
                                     ):
                                         st.json(server_config)
@@ -1663,7 +1627,7 @@ Format 2 - Single server:
 
                                     # Show response for debugging
                                     with st.expander(
-                                        f"📥 Response for '{server_name}' (debug)",
+                                        f"Response for '{server_name}' (debug)",
                                         expanded=False,
                                     ):
                                         st.json(
@@ -1711,9 +1675,9 @@ Format 2 - Single server:
                                 for failure in failed_servers:
                                     st.text(f"  • {failure}")
                     except json.JSONDecodeError as e:
-                        st.error(f"❌ Invalid JSON: {e}")
+                        st.error(f"Invalid JSON: {e}")
                     except Exception as e:
-                        st.error(f"❌ Error: {str(e)}")
+                        st.error(f"Error: {str(e)}")
                 else:
                     st.warning("Please enter a JSON configuration")
 
@@ -1864,7 +1828,7 @@ Format 2 - Single server:
                                 st.rerun()
 
                 with col3:
-                    if st.button("🗑️ Remove", key=f"remove_{server_name}"):
+                    if st.button("Remove", key=f"remove_{server_name}"):
                         with st.spinner("Removing server..."):
                             result = remove_mcp_server(server_name)
                             if result:
@@ -1892,7 +1856,7 @@ Format 2 - Single server:
 
     # Search/filter
     search_query = st.text_input(
-        "🔍 Search tools", placeholder="Filter by name or description..."
+        "Search tools", placeholder="Filter by name or description..."
     )
 
     filtered_tools = tools
@@ -1955,7 +1919,7 @@ Format 2 - Single server:
 
         # Submit button
         execute_button = st.form_submit_button(
-            "▶️ Execute Tool", use_container_width=True
+            "▶Execute Tool", use_container_width=True
         )
 
         if execute_button:
@@ -2120,17 +2084,17 @@ def render_chat_view():
         active_persona = current_conv.get("personaPrompt")
         if active_persona:
             st.info(
-                f"🎭 **Instructions active:** {persona_preview(active_persona, 100)}"
+                f"**Instructions active:** {persona_preview(active_persona, 100)}"
             )
     elif conversation_id == "pending_new":
         st.markdown("# New Chat")
         queued_persona = st.session_state.get("pending_persona_prompt", "")
         if queued_persona:
             st.info(
-                f"🎭 **Instructions queued:** {persona_preview(queued_persona, 100)}"
+                f"**Instructions queued:** {persona_preview(queued_persona, 100)}"
             )
     else:
-        st.markdown("# 👋 Welcome!")
+        st.markdown("# Welcome!")
         st.info(
             "Select a conversation from the sidebar or create a new chat to get started."
         )
@@ -2139,7 +2103,7 @@ def render_chat_view():
     # Load more button
     if conversation_id and conversation_id != "pending_new":
         if st.session_state.has_more_messages:
-            if st.button("📜 Load older messages", use_container_width=True):
+            if st.button("Load older messages", use_container_width=True):
                 next_page = st.session_state.conversation_messages_page + 1
                 load_messages_page(next_page, show_spinner=True)
 
@@ -2167,7 +2131,7 @@ def render_chat_view():
         # Show pending attachments
         if st.session_state.pending_image_attachments:
             st.caption(
-                f"📎 {len(st.session_state.pending_image_attachments)} attachment(s) ready"
+                f"{len(st.session_state.pending_image_attachments)} attachment(s) ready"
             )
             cols = st.columns(min(len(st.session_state.pending_image_attachments), 4))
             for idx, att in enumerate(st.session_state.pending_image_attachments):
@@ -2234,7 +2198,7 @@ def render_chat_view():
                 stripped_message = message_content.strip()
 
                 if not stripped_message and not pending_attachments:
-                    st.toast("⚠️ Please enter a message", icon="⚠️")
+                    st.toast("Please enter a message", icon="⚠️")
                 else:
                     message_to_send = stripped_message or _format_image_only_message(
                         pending_attachments
@@ -2304,7 +2268,7 @@ def render_chat_view():
                             st.session_state.show_attachment_uploader = False
                             load_messages_page(1)
                             status.update(label="Message sent!", state="complete")
-                            st.toast("✅ Message sent!", icon="✅")
+                            st.toast("Message sent!", icon="✅")
                             st.rerun()
                         else:
                             st.toast("Failed to send message", icon="❌")
@@ -2328,9 +2292,8 @@ def render_manage_modal():
     st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = True
 
     @st.dialog(
-        "📋 Manage Conversations",
+        "Manage Conversations",
         width="large",
-        key=CONVERSATION_MANAGER_DIALOG_KEY,
     )
     def manage_dialog():
         def _deduplicate_conversations(
@@ -2367,7 +2330,7 @@ def render_manage_modal():
 
         # Search
         search_term = st.text_input(
-            "🔍 Search conversations", placeholder="Type to search..."
+            "Search conversations", placeholder="Type to search..."
         )
 
         if manager_conversations:
@@ -2409,7 +2372,6 @@ def render_manage_modal():
                         # Show stats
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            # Backend now returns messageCount field with accurate total
                             message_count = conv.get(
                                 "messageCount", len(conv.get("messages", []))
                             )
@@ -2445,7 +2407,7 @@ def render_manage_modal():
                                 else f"conversation_manager_open_{idx}"
                             )
                             if st.button(
-                                "📖 Open",
+                                "Open",
                                 key=open_button_key,
                                 use_container_width=True,
                                 type="primary",
@@ -2464,7 +2426,7 @@ def render_manage_modal():
                                 else f"conversation_manager_delete_{idx}"
                             )
                             if st.button(
-                                "🗑️ Delete",
+                                "Delete",
                                 key=delete_button_key,
                                 use_container_width=True,
                             ):
@@ -2487,7 +2449,7 @@ def render_manage_modal():
                                         get_messages.clear()
                                         refresh_conversations_list()
                                         st.toast(
-                                            f"✅ Deleted '{conv.get('title', 'Conversation')}'",
+                                            f"Deleted '{conv.get('title', 'Conversation')}'",
                                             icon="✅",
                                         )
                                         st.rerun()
@@ -2691,12 +2653,12 @@ def render_settings_view():
 
     if has_conversation:
         title = current_conv.get("title") if current_conv else "Conversation"
-        st.info(f"💬 Editing instructions for: **{title}**")
+        st.info(f"Editing instructions for: **{title}**")
     else:
-        st.info("📝 These instructions will be applied to your new chat")
+        st.info("These instructions will be applied to your new chat")
 
     # Templates
-    with st.expander("💡 Template Library", expanded=False):
+    with st.expander("Template Library", expanded=False):
         cols = st.columns(len(PERSONA_TEMPLATES))
         for idx, (label, template) in enumerate(PERSONA_TEMPLATES.items()):
             with cols[idx]:

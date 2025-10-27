@@ -158,7 +158,7 @@ class MCPManager:
                 await self.get_server_tools(server_name)
             except ServerNotFoundError as exc:
                 logger.warning("Configured server '%s' not found: %s", server_name, exc)
-            except Exception as exc:  # pragma: no cover - defensive logging
+            except Exception as exc:
                 logger.error(
                     "Unexpected error loading tools for server '%s': %s",
                     server_name,
@@ -166,7 +166,6 @@ class MCPManager:
                     exc_info=True,
                 )
 
-        # If no new servers were added and we have a populated cache, reuse it
         if not missing_servers and self._tools:
             return self._tools
 
@@ -318,8 +317,6 @@ class MCPManager:
             self.client = None
             logger.info("MCP client cleaned up")
 
-    # ===== Dynamic Server Management Methods =====
-
     def add_server(self, server_name: str, server_config: Dict[str, Any]) -> None:
         self._ensure_config_loaded()
 
@@ -339,7 +336,7 @@ class MCPManager:
         self.config["mcp_servers"][server_name] = server_config
         self.save_config()
 
-    def remove_server(self, server_name: str) -> None:
+    async def remove_server(self, server_name: str) -> None:
         self._ensure_config_loaded()
         if server_name not in self.config.get("mcp_servers", {}):
             raise ServerNotFoundError(server_name)
@@ -352,10 +349,9 @@ class MCPManager:
         if server_name in self._sessions:
             try:
                 context = self._sessions[server_name]["context"]
-                import asyncio
-
-                asyncio.create_task(context.__aexit__(None, None, None))
+                await context.__aexit__(None, None, None)
                 del self._sessions[server_name]
+                logger.debug(f"Closed session for {server_name} during removal")
             except Exception as e:
                 logger.error(f"Error cleaning up session for {server_name}: {e}")
 
@@ -375,7 +371,7 @@ class MCPManager:
         del self.config["mcp_servers"][server_name]
         self.save_config()
 
-    def enable_server(self, server_name: str) -> None:
+    async def enable_server(self, server_name: str) -> None:
         self._ensure_config_loaded()
         if server_name not in self.config.get("mcp_servers", {}):
             raise ServerNotFoundError(server_name)
@@ -383,10 +379,33 @@ class MCPManager:
         self.config["mcp_servers"][server_name]["enabled"] = True
         self.save_config()
 
-    def disable_server(self, server_name: str) -> None:
+    async def disable_server(self, server_name: str) -> None:
         self._ensure_config_loaded()
         if server_name not in self.config.get("mcp_servers", {}):
             raise ServerNotFoundError(server_name)
+
+        if server_name in self._sessions:
+            try:
+                context = self._sessions[server_name]["context"]
+                await context.__aexit__(None, None, None)
+                del self._sessions[server_name]
+                logger.debug(f"Closed session for {server_name} during disable")
+            except Exception as e:
+                logger.error(f"Error closing session for {server_name}: {e}")
+
+        # Remove tools from caches
+        removed_tools = self._server_tools.pop(server_name, [])
+        for tool in removed_tools:
+            self._tool_server_map.pop(id(tool), None)
+            indexed = self._tool_index.get(tool.name)
+            if indexed:
+                self._tool_index[tool.name] = [
+                    existing for existing in indexed if existing is not tool
+                ]
+                if not self._tool_index[tool.name]:
+                    del self._tool_index[tool.name]
+        if removed_tools:
+            self._tools = [tool for tool in self._tools if tool not in removed_tools]
 
         self.config["mcp_servers"][server_name]["enabled"] = False
         self.save_config()

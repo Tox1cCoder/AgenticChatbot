@@ -132,7 +132,7 @@ class MCPService:
         Raises:
             ServerNotFoundError: If server doesn't exist
         """
-        self.mcp_manager.remove_server(server_name)
+        await self.mcp_manager.remove_server(server_name)
 
         # Reload tools to reflect removal
         await self.mcp_manager.reload_tools()
@@ -155,9 +155,9 @@ class MCPService:
             ServerNotFoundError: If server doesn't exist
         """
         if enabled:
-            self.mcp_manager.enable_server(server_name)
+            await self.mcp_manager.enable_server(server_name)
         else:
-            self.mcp_manager.disable_server(server_name)
+            await self.mcp_manager.disable_server(server_name)
 
         # Reload tools to reflect changes
         await self.mcp_manager.reload_tools()
