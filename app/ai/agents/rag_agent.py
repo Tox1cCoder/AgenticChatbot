@@ -167,7 +167,7 @@ class RAGAgent:
 
         # Log retrieval results
         logger.info(
-            f"Retrieved {len(search_results)} chunks with scores: {[r.score for r in search_results]}"
+            f"Retrieved {len(search_results)} chunks"
         )
 
         results = []
@@ -198,31 +198,27 @@ class RAGAgent:
         if not self.reranker or not results:
             return results
 
-        try:
-            # Prepare pairs for re-ranking
-            pairs = [[query, doc["content"]] for doc in results]
+        # Prepare pairs for re-ranking
+        pairs = [[query, doc["content"]] for doc in results]
 
-            # Get re-ranking scores
-            rerank_scores = self.reranker.predict(pairs)
+        # Get re-ranking scores
+        rerank_scores = self.reranker.predict(pairs)
 
-            # Add rerank scores to results
-            for i, score in enumerate(rerank_scores):
-                results[i]["rerank_score"] = float(score)
+        # Add rerank scores to results
+        for i, score in enumerate(rerank_scores):
+            results[i]["rerank_score"] = float(score)
 
-            # Sort by rerank score
-            results = sorted(
-                results, key=lambda x: x.get("rerank_score", 0), reverse=True
-            )
+        # Sort by rerank score
+        results = sorted(
+            results, key=lambda x: x.get("rerank_score", 0), reverse=True
+        )
 
-            # Keep only top K after re-ranking
-            results = results[: self.settings.rerank_top_k]
+        # Keep only top K after re-ranking
+        results = results[: self.settings.rerank_top_k]
 
-            logger.info(f"Re-ranked results, kept top {len(results)} chunks")
+        logger.info(f"Re-ranked results, kept top {len(results)} chunks")
 
-            return results
-        except Exception as e:
-            logger.warning(f"Re-ranking failed, using original results: {e}")
-            return results
+        return results
 
     async def _generate(self, prompt: str) -> str:
         response = self.gemini_client.models.generate_content(
@@ -237,12 +233,9 @@ class RAGAgent:
 
     async def cleanup(self):
         """Cleanup resources"""
-        try:
-            if hasattr(self.qdrant_client, "close"):
-                self.qdrant_client.close()
-            logger.info("RAG Agent cleaned up successfully")
-        except Exception as e:
-            logger.warning(f"Error during RAG Agent cleanup: {e}")
+        if hasattr(self.qdrant_client, "close"):
+            self.qdrant_client.close()
+        logger.info("RAG Agent cleaned up successfully")
 
     def get_status(self) -> dict:
         """Get the current status of the RAG agent"""

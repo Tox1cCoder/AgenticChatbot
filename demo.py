@@ -2261,7 +2261,7 @@ def render_chat_view():
                     if pending_attachments:
                         message_data["attachments"] = pending_attachments
 
-                    with st.status("Sending message...", expanded=True) as status:
+                    with st.status("Thinking...", expanded=True) as status:
                         response = make_api_request("POST", "/messages/", message_data)
                         if response and response.get("data"):
                             st.session_state.pending_image_attachments = []
@@ -2713,7 +2713,7 @@ def render_settings_view():
                 st.rerun()
         else:
             if st.button(
-                "💾 Save Persona",
+                "Save Persona",
                 use_container_width=True,
                 disabled=exceeds_limit,
                 type="primary",

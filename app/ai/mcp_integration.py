@@ -103,7 +103,6 @@ class MCPManager:
                 if "headers" in server_info:
                     server_config[server_name]["headers"] = server_info["headers"]
             else:
-                logger.warning(f"Unknown transport type for {server_name}: {transport}")
                 continue
 
         return server_config
@@ -135,10 +134,7 @@ class MCPManager:
         if self.client:
             return True
         await self.initialize()
-        if not self.client:
-            logger.warning("MCP client is unavailable.")
-            return False
-        return True
+        return bool(self.client)
 
     async def get_tools(self) -> List[BaseTool]:
         if not await self._ensure_client_ready():
@@ -153,7 +149,7 @@ class MCPManager:
             try:
                 await self.get_server_tools(server_name)
             except ServerNotFoundError as exc:
-                logger.warning("Configured server '%s' not found: %s", server_name, exc)
+                pass
             except Exception as exc:
                 logger.error(
                     "Unexpected error loading tools for server '%s': %s",
@@ -183,7 +179,6 @@ class MCPManager:
             raise ServerNotFoundError(server_name)
 
         if server_name in self._server_tools:
-            logger.debug("Returning cached tools for server '%s'", server_name)
             return self._server_tools[server_name]
 
         try:
@@ -332,7 +327,6 @@ class MCPManager:
             try:
                 context = session_info["context"]
                 await context.__aexit__(None, None, None)
-                logger.debug(f"Closed session for {server_name}")
             except Exception as e:
                 logger.error(f"Error closing session for {server_name}: {e}")
 
@@ -376,7 +370,6 @@ class MCPManager:
                 context = self._sessions[server_name]["context"]
                 await context.__aexit__(None, None, None)
                 del self._sessions[server_name]
-                logger.debug(f"Closed session for {server_name} during removal")
             except Exception as e:
                 logger.error(f"Error cleaning up session for {server_name}: {e}")
 
@@ -414,7 +407,6 @@ class MCPManager:
                 context = self._sessions[server_name]["context"]
                 await context.__aexit__(None, None, None)
                 del self._sessions[server_name]
-                logger.debug(f"Closed session for {server_name} during disable")
             except Exception as e:
                 logger.error(f"Error closing session for {server_name}: {e}")
 
@@ -451,11 +443,6 @@ class MCPManager:
         await self.cleanup()
         await self.initialize()
         await self.get_tools()
-        logger.debug(
-            "Reloaded %d MCP tools from %d servers",
-            len(self._tools),
-            len(self._server_tools),
-        )
 
     async def get_all_tools_info(self) -> List[Dict[str, Any]]:
         """

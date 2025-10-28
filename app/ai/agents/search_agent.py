@@ -1,14 +1,16 @@
 import logging
 import json
+import asyncio
 from typing import Optional, List, Dict, Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
+from langchain.agents import create_agent
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT
-from ..utils import coerce_response_text, format_tool_result, make_json_safe
+from ..utils import format_tool_result, make_json_safe, extract_agent_execution_info, execute_tools_concurrently
 from ...core.config import settings
 from ...core.exceptions.mcp import ServerNotFoundError
 from ..mcp_integration import MCPManager
@@ -80,8 +82,9 @@ class SearchAgent:
         message: AgentMessage,
         conversation_id: Optional[str] = None,
     ) -> AgentResponse:
-        """Process a search query using ReAct pattern with tool calling"""
+        """Process a search query using create_agent with tool calling"""
 
+        # Initialize MCP tools if needed
         if self.mcp_manager is None:
             await self._init_mcp()
 
@@ -95,144 +98,39 @@ class SearchAgent:
         )
 
         try:
-            # Configure tool calling based on settings
-            tool_choice = settings.tool_choice_mode if hasattr(settings, 'tool_choice_mode') else "auto"
-            parallel_tool_calls = settings.enable_parallel_tool_calls if hasattr(settings, 'enable_parallel_tool_calls') else True
-            max_iterations = settings.react_agent_max_iterations if hasattr(settings, 'react_agent_max_iterations') else 10
+            # Create agent executor
+            agent_executor = self._create_agent_executor(self.tools, SEARCH_SYSTEM_PROMPT)
             
-            # Bind tools to model for this request
-            llm_with_tools = self.langchain_model.bind_tools(
-                self.tools, 
-                tool_config={
-                    "function_calling_config": {
-                        "mode": tool_choice.upper() if tool_choice in ["auto", "any", "none"] else "AUTO"
-                    }
-                },
-                parallel_tool_calls=parallel_tool_calls
-            )
-
-            # Create initial message
-            messages = [HumanMessage(content=prompt)]
+            # Invoke agent with the user message
+            agent_response = await agent_executor.ainvoke({
+                "messages": [HumanMessage(content=prompt)]
+            })
             
+            # Extract execution info
+            execution_info = extract_agent_execution_info(agent_response)
+            
+            response_text = execution_info["response_text"]
+            tools_used = execution_info["tools_used"]
+            tool_artifacts = execution_info["tool_artifacts"]
+            
+            # Extract images from Tavily results
             extracted_images = []
-            tools_used: List[str] = []
-            tool_artifacts: List[Dict[str, Any]] = []
-            reasoning_steps: List[Dict[str, Any]] = []
-            iteration_count = 0
-
-            # ReAct Loop: Reasoning → Acting → Observation
-            for iteration in range(max_iterations):
-                iteration_count = iteration + 1
-                
-                # Reasoning step: Get agent's thought and potential actions
-                ai_message = await llm_with_tools.ainvoke(messages)
-                messages.append(ai_message)
-                
-                # Extract reasoning trace if present
-                if hasattr(ai_message, 'content') and ai_message.content:
-                    reasoning_steps.append({
-                        "iteration": iteration_count,
-                        "thought": coerce_response_text(ai_message.content),
-                        "type": "reasoning"
-                    })
-
-                # Check if agent decided to finish (no tool calls)
-                if not ai_message.tool_calls:
-                    response_text = coerce_response_text(ai_message.content)
-                    break
-
-                # Acting step: Execute tool calls
-                for tool_call in ai_message.tool_calls:
-                    tool_name = tool_call["name"]
-                    tool_args = tool_call["args"]
-                    tool_id = tool_call["id"]
-
-                    tools_used.append(tool_name)
-                    
-                    reasoning_steps.append({
-                        "iteration": iteration_count,
-                        "action": tool_name,
-                        "arguments": make_json_safe(tool_args),
-                        "type": "action"
-                    })
-
-                    # Find and execute the tool
-                    tool_result = None
-                    tool_found = False
-                    for tool in self.tools:
-                        if tool.name == tool_name:
-                            tool_found = True
-                            try:
-                                tool_result = await tool.ainvoke(tool_args)
-                                tool_output_text = format_tool_result(tool_result)
-
-                                # Extract images from Tavily response
-                                if tool_name == "tavily_search":
-                                    images = self._extract_images_from_tavily(tool_result)
-                                    if images:
-                                        extracted_images.extend(images)
-
-                                tool_artifacts.append({
-                                    "tool": tool_name,
-                                    "arguments": make_json_safe(tool_args),
-                                    "output": tool_output_text,
-                                })
-                                
-                                reasoning_steps.append({
-                                    "iteration": iteration_count,
-                                    "observation": tool_output_text,
-                                    "type": "observation"
-                                })
-                                
-                                logger.info("SearchAgent executed tool: %s", tool_name)
-
-                            except Exception as e:
-                                tool_output_text = f"Error executing tool: {str(e)}"
-                                tool_artifacts.append({
-                                    "tool": tool_name,
-                                    "arguments": make_json_safe(tool_args),
-                                    "error": str(e),
-                                })
-                                reasoning_steps.append({
-                                    "iteration": iteration_count,
-                                    "observation": tool_output_text,
-                                    "error": str(e),
-                                    "type": "observation"
-                                })
-                                logger.error("Tool execution error: %s", e)
-                            break
-
-                    # Handle tool not found
-                    if not tool_found:
-                        tool_output_text = f"Tool {tool_name} not found"
-                        tool_artifacts.append({
-                            "tool": tool_name,
-                            "arguments": make_json_safe(tool_args),
-                            "error": "Tool not found",
-                        })
-                        reasoning_steps.append({
-                            "iteration": iteration_count,
-                            "observation": tool_output_text,
-                            "error": "Tool not found",
-                            "type": "observation"
-                        })
-
-                    # Observation step: Add tool result to message history
-                    messages.append(
-                        ToolMessage(content=tool_output_text, tool_call_id=tool_id)
-                    )
-            else:
-                # Max iterations reached
-                response_text = "Search completed but max iterations reached."
-                reasoning_steps.append({
-                    "iteration": iteration_count,
-                    "note": "Maximum iterations reached",
-                    "type": "termination"
-                })
+            for artifact in tool_artifacts:
+                if artifact.get("tool") == "tavily_search" and artifact.get("output"):
+                    images = self._extract_images_from_tavily(artifact["output"])
+                    if images:
+                        extracted_images.extend(images)
+            
+            # Log parallel tool execution summary
+            if tools_used:
+                logger.info(f"SearchAgent executed {len(tools_used)} tool(s): {', '.join(tools_used)}")
 
         except Exception as e:
             logger.error(f"Error invoking search agent: {e}", exc_info=True)
             response_text = "An error occurred while processing your search request."
+            tools_used = []
+            tool_artifacts = []
+            extracted_images = []
 
         # Create response metadata
         search_metadata = {
@@ -265,6 +163,107 @@ class SearchAgent:
             metadata=search_metadata,
             tool_artifacts=tool_artifacts if tool_artifacts else None,
         )
+
+    def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
+        """Create agent executor with proper tool binding configuration."""
+        # Configure tool calling based on settings
+        tool_choice = settings.tool_choice_mode if hasattr(settings, 'tool_choice_mode') else "auto"
+        
+        # Configure model with tool binding
+        llm_with_tools = self.langchain_model.bind_tools(
+            tools, 
+            tool_config={
+                "function_calling_config": {
+                    "mode": tool_choice.upper() if tool_choice in ["auto", "any", "none"] else "AUTO"
+                }
+            }
+        )
+        
+        agent = create_agent(
+            model=llm_with_tools,
+            tools=tools,
+            system_prompt=system_prompt
+        )
+        
+        return agent
+
+    async def _execute_tools_parallel(self, tool_calls: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+        """Execute multiple tool calls concurrently and extract images from  results."""
+        if not tool_calls or not settings.enable_parallel_tool_calls:
+            # Fall back to sequential execution
+            results = []
+            images = []
+            for tool_call in tool_calls:
+                tool_name = tool_call.get("name", "")
+                tool_args = tool_call.get("args", {})
+                
+                # Find and execute tool
+                tool_found = False
+                for tool in self.tools:
+                    if tool.name == tool_name:
+                        tool_found = True
+                        try:
+                            result = await tool.ainvoke(tool_args)
+                            formatted_result = format_tool_result(result)
+                            
+                            # Extract images
+                            if tool_name == "tavily_search":
+                                tavily_images = self._extract_images_from_tavily(result)
+                                if tavily_images:
+                                    images.extend(tavily_images)
+                            
+                            results.append({
+                                "tool": tool_name,
+                                "args": make_json_safe(tool_args),
+                                "output": formatted_result
+                            })
+                        except Exception as e:
+                            results.append({
+                                "tool": tool_name,
+                                "args": make_json_safe(tool_args),
+                                "error": str(e)
+                            })
+                        break
+                
+                if not tool_found:
+                    results.append({
+                        "tool": tool_name,
+                        "args": make_json_safe(tool_args),
+                        "error": "Tool not found"
+                    })
+            
+            return results, images
+        
+        # Execute tools concurrently
+        parallel_results = await execute_tools_concurrently(tool_calls, self.tools)
+        
+        # Convert to tool artifacts format and extract images
+        tool_artifacts = []
+        extracted_images = []
+        for tool_name, tool_args, result, success in parallel_results:
+            if success:
+                formatted_result = format_tool_result(result)
+                
+                # Extract images
+                if tool_name == "tavily_search":
+                    tavily_images = self._extract_images_from_tavily(result)
+                    if tavily_images:
+                        extracted_images.extend(tavily_images)
+                
+                tool_artifacts.append({
+                    "tool": tool_name,
+                    "args": make_json_safe(tool_args),
+                    "output": formatted_result
+                })
+            else:
+                tool_artifacts.append({
+                    "tool": tool_name,
+                    "args": make_json_safe(tool_args),
+                    "error": str(result)
+                })
+        
+        logger.info(f"Executed {len(tool_artifacts)} tools in parallel")
+        return tool_artifacts, extracted_images
 
     def _extract_images_from_tavily(self, tool_result: Any) -> List[Dict[str, str]]:
         """Extract images from Tavily search results"""

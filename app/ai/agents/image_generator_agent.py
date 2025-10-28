@@ -26,7 +26,6 @@ class ImageGeneratorAgent:
     def _init_gemini(self) -> None:
         """Initialize Gemini client"""
         if not self.enabled:
-            logger.info("Image generation disabled via configuration")
             return
 
         api_key = settings.gemini_api_key
@@ -119,15 +118,10 @@ class ImageGeneratorAgent:
         config_kwargs = {"response_modalities": ["IMAGE", "TEXT"]}
         image_config_cls = getattr(types, "ImageGenerationConfig", None)
         if image_config_cls is not None:
-            try:
-                config_kwargs["image_generation_config"] = image_config_cls(
-                    number_of_images=self.max_images,
-                    aspect_ratio=self.default_aspect_ratio,
-                )
-            except Exception as err:
-                logger.debug(
-                    "Unable to configure image generation parameters: %s", err
-                )
+            config_kwargs["image_generation_config"] = image_config_cls(
+                number_of_images=self.max_images,
+                aspect_ratio=self.default_aspect_ratio,
+            )
 
         generate_config = types.GenerateContentConfig(**config_kwargs)
 

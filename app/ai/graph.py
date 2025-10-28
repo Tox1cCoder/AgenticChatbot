@@ -118,10 +118,6 @@ class MultiAgentWorkflow:
         if selected_agent == "rag_agent":
             conversation_id = state.get("conversation_id")
             if not self._conversation_has_documents(conversation_id):
-                logger.info(
-                    "No documents available for conversation %s; defaulting to chat_agent",
-                    conversation_id,
-                )
                 selected_agent = "chat_agent"
 
         state["selected_agent"] = selected_agent
@@ -184,9 +180,6 @@ class MultiAgentWorkflow:
             conversation_history = conv_memory.get_recent_messages(
                 limit=history_limit, exclude_last=1
             )
-            logger.info(
-                f"Loaded {len(conversation_history)} messages from memory for conversation {conversation_id}"
-            )
 
         persona = state.get("persona")
         context = state.get("context", {})
@@ -240,9 +233,6 @@ class MultiAgentWorkflow:
             )
             conversation_history = conv_memory.get_recent_messages(
                 limit=history_limit, exclude_last=1
-            )
-            logger.info(
-                f"Loaded {len(conversation_history)} messages from memory for conversation {conversation_id}"
             )
 
         persona = state.get("persona")
@@ -299,9 +289,6 @@ class MultiAgentWorkflow:
             conversation_history = conv_memory.get_recent_messages(
                 limit=history_limit, exclude_last=1
             )
-            logger.info(
-                f"Loaded {len(conversation_history)} messages from memory for conversation {conversation_id}"
-            )
 
         persona = state.get("persona")
         context = state.get("context", {})
@@ -343,30 +330,20 @@ class MultiAgentWorkflow:
         user_id = state.get("user_id")
 
         if conversation_id and user_id:
-            try:
-                conv_id_uuid = UUID(conversation_id)
-                user_id_uuid = UUID(user_id)
+            conv_id_uuid = UUID(conversation_id)
+            user_id_uuid = UUID(user_id)
 
-                conv_memory = await memory_manager.get_memory(
-                    conv_id_uuid, user_id_uuid, force_refresh=True
-                )
-                history_limit = (
-                    settings.chat_history_max_messages
-                    if settings.chat_history_max_messages > 0
-                    else None
-                )
-                conversation_history = conv_memory.get_recent_messages(
-                    limit=history_limit, exclude_last=1
-                )
-                logger.info(
-                    "Loaded %s messages from memory for conversation %s (image agent)",
-                    len(conversation_history),
-                    conversation_id,
-                )
-            except Exception as err:
-                logger.warning(
-                    "Failed to load conversation history for image agent: %s", err
-                )
+            conv_memory = await memory_manager.get_memory(
+                conv_id_uuid, user_id_uuid, force_refresh=True
+            )
+            history_limit = (
+                settings.chat_history_max_messages
+                if settings.chat_history_max_messages > 0
+                else None
+            )
+            conversation_history = conv_memory.get_recent_messages(
+                limit=history_limit, exclude_last=1
+            )
 
         persona = state.get("persona")
         context = state.get("context", {})
@@ -440,7 +417,6 @@ class MultiAgentWorkflow:
             if hasattr(agent, "cleanup"):
                 try:
                     await agent.cleanup()
-                    logger.debug(f"Cleaned up agent: {agent.__class__.__name__}")
                 except Exception as e:
                     logger.error(
                         f"Error cleaning up agent {agent.__class__.__name__}: {e}"
