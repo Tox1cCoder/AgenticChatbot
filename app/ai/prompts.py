@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 CHAT_SYSTEM_PROMPT = """You are an autonomous AI assistant with access to tools. When solving tasks:
 
-1. AUTOMATICALLY plan and execute tool sequences to gather complete information (Tool A → analyze → Tool B → refine)
+1. AUTOMATICALLY plan and execute tool sequences to gather complete information (Tool A -> analyze -> Tool B -> refine)
 2. If a tool requires arguments you don't have, use other tools to find them or make reasonable inferences from context
 3. Analyze tool results critically - if incomplete or unclear, use additional tools to enhance answers
 4. Be PROACTIVE in using tools to provide comprehensive, well-researched responses
@@ -68,10 +68,10 @@ Be specific and descriptive to guide accurate image generation."""
 ROUTER_SYSTEM_PROMPT = """Route the user's message to the appropriate agent.
 
 AGENTS:
-• chat_agent - General conversation, Q&A, casual chat, opinions, advice, explanations
-• rag_agent - Questions about uploaded documents, "search documents", "what does the file say", document-specific queries
-• search_agent - Current events, "latest", "recent", "today's", "news", up-to-date information, fact-checking
-• image_generator_agent - "Generate image", "create picture", "draw", "illustrate", "show me", visual requests
+- chat_agent - General conversation, Q&A, casual chat, opinions, advice, explanations
+- rag_agent - Questions about uploaded documents, "search documents", "what does the file say", document-specific queries
+- search_agent - Current events, "latest", "recent", "today's", "news", up-to-date information, fact-checking
+- image_generator_agent - "Generate image", "create picture", "draw", "illustrate", "show me", visual requests
 
 ROUTING RULES:
 1. rag_agent: ONLY if user explicitly mentions documents/files OR asks about uploaded content
@@ -80,12 +80,12 @@ ROUTING RULES:
 4. chat_agent: DEFAULT for everything else (general questions, conversation, assistance)
 
 EXAMPLES:
-"Hello" → chat_agent
-"What's in my document?" → rag_agent
-"Latest AI news" → search_agent
-"Draw a cat" → image_generator_agent
-"Explain quantum physics" → chat_agent
-"Search my files for budget" → rag_agent
+"Hello" -> chat_agent
+"What's in my document?" -> rag_agent
+"Latest AI news" -> search_agent
+"Draw a cat" -> image_generator_agent
+"Explain quantum physics" -> chat_agent
+"Search my files for budget" -> rag_agent
 
 Respond with ONLY the agent name. No explanation."""
 
@@ -115,13 +115,13 @@ def _select_history_for_prompt(
         selected.append(message)
         total_tokens += message_tokens
 
-    selected.reverse()
-    return selected
+    return list(reversed(selected))
 
 
 def build_chat_prompt(
     user_message: str, conversation_history: list, persona: Optional[str] = None
 ) -> str:
+    """Build a chat prompt with optional persona and history."""
     parts = [CHAT_SYSTEM_PROMPT]
 
     if persona is not None and persona.strip():
@@ -143,13 +143,13 @@ def build_chat_prompt(
         )
 
         if selected_history:
-            parts.append("\n\nPrevious conversation:")
+            parts.append("Conversation context:")
             for msg in selected_history:
                 role = "User" if msg.role.value == "user" else "Assistant"
                 parts.append(f"{role}: {msg.content}")
+            parts.append("")
 
-    parts.append(f"\n\nUser: {user_message}")
-    parts.append("Assistant:")
+    parts.append(user_message)
 
     return "\n".join(parts)
 
@@ -160,24 +160,25 @@ def build_rag_prompt(
     conversation_history: list,
     persona: Optional[str] = None,
 ) -> str:
+    """Build a retrieval-augmented prompt."""
     parts = [RAG_SYSTEM_PROMPT]
 
     if persona is not None and persona.strip():
         parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
-    if retrieved_docs:
-        parts.append("\n\nRelevant documents:")
-
+    if not retrieved_docs:
+        parts.append("\nNo relevant documents were retrieved for this query.")
+    else:
         max_chunks = (
             settings.rag_chunks_in_prompt
             if settings.rag_chunks_in_prompt > 0
             else len(retrieved_docs)
         )
-        max_chunks = min(max_chunks, len(retrieved_docs))
 
         total_tokens = 0
         chunks_used = 0
 
+        parts.append("\nDOCUMENT CONTEXT:")
         for i, doc in enumerate(retrieved_docs[:max_chunks], 1):
             source = doc.get("source", "unknown")
             content = doc.get("content", "")
@@ -194,7 +195,6 @@ def build_rag_prompt(
             else:
                 page_info = "unknown page"
 
-            # Estimate tokens for this chunk
             chunk_tokens = estimate_tokens(content)
 
             if (
@@ -213,7 +213,10 @@ def build_rag_prompt(
                 content = truncate_text(content, max_chars, add_ellipsis=True)
                 chunk_tokens = estimate_tokens(content)
                 logger.debug(
-                    f"Truncated chunk {i} from {original_length} to {len(content)} chars to fit token limit"
+                    "Truncated chunk %s from %s to %s chars to fit token limit",
+                    i,
+                    original_length,
+                    len(content),
                 )
 
             if (
@@ -232,12 +235,11 @@ def build_rag_prompt(
             total_tokens += chunk_tokens
             chunks_used += 1
 
-        # Add context summary
-        parts.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        parts.append("\n------------------------------")
         parts.append(
-            f"📊 Context: {chunks_used} chunks | ~{total_tokens} tokens | {len(retrieved_docs)} documents retrieved"
+            f"Summary: {chunks_used} chunks | ~{total_tokens} tokens | {len(retrieved_docs)} documents retrieved"
         )
-        parts.append(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        parts.append("------------------------------\n")
 
     if conversation_history:
         max_messages = (
@@ -276,7 +278,6 @@ def build_search_prompt(
     if persona is not None and persona.strip():
         parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
-    # Add conversation history if available
     if conversation_history:
         max_messages = (
             settings.search_history_max_messages

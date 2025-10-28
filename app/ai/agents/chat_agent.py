@@ -1,6 +1,5 @@
 ﻿import logging
 import base64
-import asyncio
 from typing import Optional, List, Dict, Any
 
 from google import genai
@@ -12,7 +11,7 @@ from langchain.agents import create_agent
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_chat_prompt
-from ..utils import coerce_response_text, format_tool_result, make_json_safe, extract_agent_execution_info, execute_tools_concurrently, get_error_recovery_hint
+from ..utils import coerce_response_text, extract_agent_execution_info, get_error_recovery_hint
 from ...core.config import settings
 from ...core.exceptions.mcp import ServerNotFoundError
 from ..mcp_integration import MCPManager
@@ -123,7 +122,7 @@ class ChatAgent:
                 if self.mcp_manager is None:
                     await self._init_tools()
 
-                if self.tools:
+                if self.tools and self.langchain_model:
                     response_text, tools_used, tool_artifacts = await self._generate_with_tools(prompt)
                 else:
                     response_text = await self._generate(prompt)
@@ -181,17 +180,15 @@ class ChatAgent:
 
     async def _generate(self, prompt: str) -> str:
         if not self.gemini_client:
-            logger.error("Gemini client not initialized")
-            return "Error: Gemini API not configured"
+            raise RuntimeError("Gemini client not initialized")
 
         try:
             response = self.gemini_client.models.generate_content(
                 model=self.model_name, contents=prompt
             )
             return response.text if hasattr(response, "text") else str(response)
-        except Exception as e:
-            logger.error(f"Gemini API error: {e}")
-            return f"Error generating response: {str(e)}"
+        except Exception as exc:
+            raise RuntimeError(f"Gemini API error: {exc}") from exc
 
     async def _handle_generation_error(self, prompt: str, error: Exception) -> str:
         """Ask the base LLM to craft a user-facing reply that acknowledges an internal error."""
@@ -208,14 +205,10 @@ class ChatAgent:
         )
 
         fallback_response = await self._generate(fallback_prompt)
-        fallback_response = coerce_response_text(fallback_response)
-        if fallback_response.startswith("Error generating response"):
-            raise RuntimeError(fallback_response)
-        return fallback_response
-
+        return coerce_response_text(fallback_response)
 
     async def _generate_with_tools(self, prompt: str) -> tuple[str, List[str], List[Dict[str, Any]]]:
-        """Generate response with tool calling support using create_agent."""
+        """Generate response with tool calling support"""
         try:
             # Create agent executor
             agent_executor = self._create_agent_executor(self.tools, prompt)
@@ -257,7 +250,6 @@ class ChatAgent:
             }
         )
         
-        # Create agent using LangChain's create_agent
         agent = create_agent(
             model=llm_with_tools,
             tools=tools,
@@ -266,80 +258,6 @@ class ChatAgent:
         
         return agent
 
-    async def _execute_tools_parallel(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Execute multiple tool calls concurrently using asyncio.gather."""
-        if not tool_calls or not settings.enable_parallel_tool_calls:
-            # Fall back to sequential execution
-            results = []
-            for tool_call in tool_calls:
-                tool_name = tool_call.get("name", "")
-                tool_args = tool_call.get("args", {})
-                
-                # Find and execute tool
-                tool_found = False
-                for tool in self.tools:
-                    if tool.name == tool_name:
-                        tool_found = True
-                        try:
-                            result = await tool.ainvoke(tool_args)
-                            results.append({
-                                "tool": tool_name,
-                                "args": make_json_safe(tool_args),
-                                "output": format_tool_result(result)
-                            })
-                        except Exception as e:
-                            # Get error recovery hint
-                            recovery_hint = get_error_recovery_hint(e, tool_name, tool_args)
-                            error_message = f"Error ({type(e).__name__}): {str(e)}. Hint: {recovery_hint}"
-                            
-                            results.append({
-                                "tool": tool_name,
-                                "args": make_json_safe(tool_args),
-                                "error": error_message
-                            })
-                            
-                            # Log detailed error
-                            logger.error(
-                                f"Error in sequential tool execution '{tool_name}': {str(e)}", 
-                                exc_info=True
-                            )
-                        break
-                
-                if not tool_found:
-                    # List available tools for helpful error message
-                    available_tools = [t.name for t in self.tools[:5]]  # Show first 5
-                    tool_suggestions = f"Available tools: {', '.join(available_tools)}" if available_tools else ""
-                    
-                    results.append({
-                        "tool": tool_name,
-                        "args": make_json_safe(tool_args),
-                        "error": f"Tool '{tool_name}' not found. {tool_suggestions}"
-                    })
-            
-            return results
-        
-        # Execute tools concurrently
-        parallel_results = await execute_tools_concurrently(tool_calls, self.tools)
-        
-        # Convert to tool artifacts format
-        tool_artifacts = []
-        for tool_name, tool_args, result, success in parallel_results:
-            if success:
-                tool_artifacts.append({
-                    "tool": tool_name,
-                    "args": make_json_safe(tool_args),
-                    "output": format_tool_result(result)
-                })
-            else:
-                tool_artifacts.append({
-                    "tool": tool_name,
-                    "args": make_json_safe(tool_args),
-                    "error": str(result)
-                })
-        
-        logger.info(f"Executed {len(tool_artifacts)} tools in parallel")
-        return tool_artifacts
-        
     async def _generate_with_vision(self, prompt: str, attachments: List[dict]) -> str:
         """Generate response with vision support using multimodal content"""
         parts = []

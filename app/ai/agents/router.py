@@ -18,9 +18,6 @@ class Router:
 
     def _init_gemini(self):
         api_key = settings.gemini_api_key
-        if not api_key:
-            logger.error("Gemini API key not configured")
-            return
 
         if api_key.startswith("GEMINI_API_KEY="):
             api_key = api_key.split("=", 1)[-1].strip()
@@ -40,10 +37,10 @@ class Router:
         else:
             prompt = f"{ROUTER_SYSTEM_PROMPT}\n\nUser message: {content}"
 
-        # Get LLM decision using Gemini
         response = self.gemini_client.models.generate_content(
             model=self.model_name, contents=prompt
         )
+
         response_text = response.text if hasattr(response, "text") else str(response)
         selected_agent = response_text.strip().lower()
 
@@ -52,11 +49,8 @@ class Router:
             logger.info(f"LLM routed to {selected_agent}: {content[:50]}...")
             return selected_agent
 
-        fallback_agent = "chat_agent" if "chat_agent" in available_agents else available_agents[0]
-        logger.warning(
-            "Router received unrecognized agent '%s'. Falling back to '%s'. Response was: %s",
-            selected_agent,
-            fallback_agent,
-            response_text.strip(),
+        fallback_agent = (
+            "chat_agent" if "chat_agent" in available_agents else available_agents[0]
         )
+
         return fallback_agent

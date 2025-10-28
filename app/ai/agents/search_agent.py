@@ -1,6 +1,5 @@
 import logging
 import json
-import asyncio
 from typing import Optional, List, Dict, Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -10,7 +9,7 @@ from langchain.agents import create_agent
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT
-from ..utils import format_tool_result, make_json_safe, extract_agent_execution_info, execute_tools_concurrently, get_error_recovery_hint
+from ..utils import coerce_response_text, extract_agent_execution_info, get_error_recovery_hint
 from ...core.config import settings
 from ...core.exceptions.mcp import ServerNotFoundError
 from ..mcp_integration import MCPManager
@@ -29,9 +28,6 @@ class SearchAgent:
 
     def _init_gemini(self):
         api_key = settings.gemini_api_key
-        if not api_key:
-            logger.error("Gemini API key not configured")
-            return
 
         if api_key.startswith("GEMINI_API_KEY="):
             api_key = api_key.split("=", 1)[-1].strip()
@@ -49,20 +45,11 @@ class SearchAgent:
                 combined_tools: Dict[str, BaseTool] = {}
 
                 preferred_servers = ["tavily", "time"]
-                missing_servers: List[str] = []
 
                 for server_name in preferred_servers:
-                    try:
-                        server_tools = await self.mcp_manager.get_server_tools(
-                            server_name
-                        )
-                    except ServerNotFoundError:
-                        missing_servers.append(server_name)
-                        logger.debug(
-                            "Preferred MCP server '%s' not configured for SearchAgent",
-                            server_name,
-                        )
-                        continue
+                    server_tools = await self.mcp_manager.get_server_tools(
+                        server_name
+                    )
 
                     for tool in server_tools:
                         combined_tools[tool.name] = tool
@@ -82,7 +69,7 @@ class SearchAgent:
         message: AgentMessage,
         conversation_id: Optional[str] = None,
     ) -> AgentResponse:
-        """Process a search query using create_agent with tool calling"""
+        """Process a search query with tool calling"""
 
         # Initialize MCP tools if needed
         if self.mcp_manager is None:
@@ -97,6 +84,7 @@ class SearchAgent:
             message.content, conversation_history, persona=persona
         )
 
+        error_message: Optional[str] = None
         try:
             # Create agent executor
             agent_executor = self._create_agent_executor(self.tools, SEARCH_SYSTEM_PROMPT)
@@ -113,25 +101,30 @@ class SearchAgent:
             tools_used = execution_info["tools_used"]
             tool_artifacts = execution_info["tool_artifacts"]
             
-            # Extract images from Tavily results
             extracted_images = []
             for artifact in tool_artifacts:
                 if artifact.get("tool") == "tavily_search" and artifact.get("output"):
                     images = self._extract_images_from_tavily(artifact["output"])
                     if images:
                         extracted_images.extend(images)
-            
-            # Log parallel tool execution summary
-            if tools_used:
-                logger.info(f"SearchAgent executed {len(tools_used)} tool(s): {', '.join(tools_used)}")
 
         except Exception as e:
             logger.error(f"Error invoking search agent: {e}", exc_info=True)
-            response_text = "An error occurred while processing your search request."
+            error_message = f"{type(e).__name__}: {e}"
+            recovery_hint = get_error_recovery_hint(e, "search_agent", {})
             tools_used = []
-            tool_artifacts = []
+            tool_artifacts = [
+                {
+                    "tool": "search_agent",
+                    "args": {},
+                    "error": error_message,
+                    "hint": recovery_hint,
+                }
+            ]
             extracted_images = []
 
+        response_text = coerce_response_text(response_text)
+        
         # Create response metadata
         search_metadata = {
             "model": self.model_name,
@@ -150,6 +143,15 @@ class SearchAgent:
         # Add images to metadata if any were extracted
         if extracted_images:
             search_metadata["images"] = extracted_images
+        if tool_artifacts:
+            search_metadata["tool_artifacts"] = tool_artifacts
+            if not error_message:
+                error_entries = [art["error"] for art in tool_artifacts if art.get("error")]
+                if error_entries:
+                    error_message = error_entries[0]
+                    search_metadata["error"] = error_message
+        elif error_message:
+            search_metadata["error"] = error_message
 
         # Create response message
         response_message = AgentMessage(
@@ -162,10 +164,14 @@ class SearchAgent:
             message=response_message,
             metadata=search_metadata,
             tool_artifacts=tool_artifacts if tool_artifacts else None,
+            error=error_message,
         )
 
     def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
         """Create agent executor with proper tool binding configuration."""
+        if not self.langchain_model:
+            raise RuntimeError("SearchAgent language model not initialized")
+
         # Configure tool calling based on settings
         tool_choice = settings.tool_choice_mode if hasattr(settings, 'tool_choice_mode') else "auto"
         
@@ -186,98 +192,6 @@ class SearchAgent:
         )
         
         return agent
-
-    async def _execute_tools_parallel(self, tool_calls: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
-        """Execute multiple tool calls concurrently and extract images from  results."""
-        if not tool_calls or not settings.enable_parallel_tool_calls:
-            # Fall back to sequential execution
-            results = []
-            images = []
-            for tool_call in tool_calls:
-                tool_name = tool_call.get("name", "")
-                tool_args = tool_call.get("args", {})
-                
-                # Find and execute tool
-                tool_found = False
-                for tool in self.tools:
-                    if tool.name == tool_name:
-                        tool_found = True
-                        try:
-                            result = await tool.ainvoke(tool_args)
-                            formatted_result = format_tool_result(result)
-                            
-                            # Extract images
-                            if tool_name == "tavily_search":
-                                tavily_images = self._extract_images_from_tavily(result)
-                                if tavily_images:
-                                    images.extend(tavily_images)
-                            
-                            results.append({
-                                "tool": tool_name,
-                                "args": make_json_safe(tool_args),
-                                "output": formatted_result
-                            })
-                        except Exception as e:
-                            # Get error recovery hint
-                            recovery_hint = get_error_recovery_hint(e, tool_name, tool_args)
-                            error_message = f"Error ({type(e).__name__}): {str(e)}. Hint: {recovery_hint}"
-                            
-                            results.append({
-                                "tool": tool_name,
-                                "args": make_json_safe(tool_args),
-                                "error": error_message
-                            })
-                            
-                            # Log detailed error
-                            logger.error(
-                                f"Error in sequential tool execution '{tool_name}': {str(e)}", 
-                                exc_info=True
-                            )
-                        break
-                
-                if not tool_found:
-                    # List available tools for helpful error message
-                    available_tools = [t.name for t in self.tools[:5]]  # Show first 5
-                    tool_suggestions = f"Available tools: {', '.join(available_tools)}" if available_tools else ""
-                    
-                    results.append({
-                        "tool": tool_name,
-                        "args": make_json_safe(tool_args),
-                        "error": f"Tool '{tool_name}' not found. {tool_suggestions}"
-                    })
-            
-            return results, images
-        
-        # Execute tools concurrently
-        parallel_results = await execute_tools_concurrently(tool_calls, self.tools)
-        
-        # Convert to tool artifacts format and extract images
-        tool_artifacts = []
-        extracted_images = []
-        for tool_name, tool_args, result, success in parallel_results:
-            if success:
-                formatted_result = format_tool_result(result)
-                
-                # Extract images
-                if tool_name == "tavily_search":
-                    tavily_images = self._extract_images_from_tavily(result)
-                    if tavily_images:
-                        extracted_images.extend(tavily_images)
-                
-                tool_artifacts.append({
-                    "tool": tool_name,
-                    "args": make_json_safe(tool_args),
-                    "output": formatted_result
-                })
-            else:
-                tool_artifacts.append({
-                    "tool": tool_name,
-                    "args": make_json_safe(tool_args),
-                    "error": str(result)
-                })
-        
-        logger.info(f"Executed {len(tool_artifacts)} tools in parallel")
-        return tool_artifacts, extracted_images
 
     def _extract_images_from_tavily(self, tool_result: Any) -> List[Dict[str, str]]:
         """Extract images from Tavily search results"""

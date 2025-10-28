@@ -88,7 +88,6 @@ class ImageGeneratorAgent:
             }
         )
         
-        # Create agent using LangChain's create_agent
         agent = create_agent(
             model=llm_with_tools,
             tools=tools,
@@ -125,7 +124,6 @@ class ImageGeneratorAgent:
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
 
-        # Enhance prompt with tools if available
         enhanced_content = message.content
         tools_used = []
         tool_artifacts = []
@@ -136,7 +134,6 @@ class ImageGeneratorAgent:
                     message.content, conversation_history, persona
                 )
             except Exception as e:
-                logger.warning(f"Tool enhancement failed, using original prompt: {e}")
                 enhanced_content = message.content
 
         prompt = build_image_generator_prompt(
@@ -196,16 +193,11 @@ class ImageGeneratorAgent:
     ) -> tuple[str, List[str], List[Dict[str, Any]]]:
         """
         Enhance the image prompt with contextual information from tools.
-        
-        For example:
-        - "Draw today's weather" -> use time/weather tools to get context
-        - "Draw a sunset" -> no tool enhancement needed
         """
         if not self.tools:
             return original_prompt, [], []
         
         try:
-            # Create enhancement prompt
             enhancement_system_prompt = f"""You are analyzing a user's image generation request to determine if external tools can provide useful context.
 
 User request: {original_prompt}

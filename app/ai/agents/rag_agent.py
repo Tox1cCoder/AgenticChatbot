@@ -15,13 +15,17 @@ from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
 from langchain.agents import create_agent
 
-
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_rag_prompt
 from ...core.config import Settings
 from ..mcp_integration import MCPManager
 from ...core.exceptions.mcp import ServerNotFoundError
-from ..utils import extract_agent_execution_info
+from ...core.config import settings
+from ..utils import (
+    coerce_response_text,
+    extract_agent_execution_info,
+    get_error_recovery_hint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +73,7 @@ class RAGAgent:
             api_key = api_key.split("=", 1)[-1].strip()
 
         self.gemini_client = genai.Client(api_key=api_key)
-        
+
         self.langchain_model = ChatGoogleGenerativeAI(
             model=self.model_name, google_api_key=api_key, temperature=0.7
         )
@@ -88,7 +92,6 @@ class RAGAgent:
 
                 combined_tools: Dict[str, BaseTool] = {}
 
-                # Prefer calculator and time tools for document analysis
                 preferred_servers = ["calculator", "time"]
                 for server_name in preferred_servers:
                     try:
@@ -113,7 +116,9 @@ class RAGAgent:
 
                 server_status = self.mcp_manager.get_servers_status()
                 active_servers = [
-                    name for name, status in server_status.items() if status.get("enabled")
+                    name
+                    for name, status in server_status.items()
+                    if status.get("enabled")
                 ]
                 logger.info(
                     "Loaded %d MCP tools for RAGAgent from %d servers",
@@ -130,28 +135,31 @@ class RAGAgent:
 
     def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
         """Create agent executor with proper tool binding configuration."""
-        from ...core.config import settings
-        
-        # Configure tool calling based on settings
-        tool_choice = settings.tool_choice_mode if hasattr(settings, 'tool_choice_mode') else "auto"
-        
+
+        tool_choice = (
+            settings.tool_choice_mode
+            if hasattr(settings, "tool_choice_mode")
+            else "auto"
+        )
+
         # Configure model with tool binding
         llm_with_tools = self.langchain_model.bind_tools(
-            tools, 
+            tools,
             tool_config={
                 "function_calling_config": {
-                    "mode": tool_choice.upper() if tool_choice in ["auto", "any", "none"] else "AUTO"
+                    "mode": (
+                        tool_choice.upper()
+                        if tool_choice in ["auto", "any", "none"]
+                        else "AUTO"
+                    )
                 }
-            }
+            },
         )
-        
-        # Create agent using LangChain's create_agent
+
         agent = create_agent(
-            model=llm_with_tools,
-            tools=tools,
-            system_prompt=system_prompt
+            model=llm_with_tools, tools=tools, system_prompt=system_prompt
         )
-        
+
         return agent
 
     async def process_message(
@@ -174,19 +182,37 @@ class RAGAgent:
             query, retrieved_docs, conversation_history, persona=persona
         )
 
-        # Use tools if available for enhanced document analysis
-        if self.tools:
-            response_text, tools_used, tool_artifacts = await self._generate_with_tools(prompt)
-        else:
-            response_text = await self._generate(prompt)
+        response_text: str = ""
+        tools_used: List[str] = []
+        tool_artifacts: List[Dict[str, Any]] = []
+        error_message: Optional[str] = None
+
+        try:
+            if self.tools and self.langchain_model:
+                response_text, tools_used, tool_artifacts = (
+                    await self._generate_with_tools(prompt)
+                )
+            else:
+                response_text = await self._generate(prompt)
+        except Exception as exc:
+            logger.error("Error generating RAG response: %s", exc, exc_info=True)
+            error_message = f"{type(exc).__name__}: {exc}"
             tools_used = []
-            tool_artifacts = []
+            tool_artifacts = [
+                {
+                    "tool": "rag_agent",
+                    "args": {},
+                    "error": error_message,
+                    "hint": get_error_recovery_hint(exc, "rag_agent", {}),
+                }
+            ]
+
+        response_text = coerce_response_text(response_text)
 
         response_message = AgentMessage(
             role=MessageRole.ASSISTANT, content=response_text
         )
 
-        # Expand citations to include all used chunks with more metadata
         citations = [
             {
                 "source": doc.get("source", "unknown"),
@@ -228,6 +254,17 @@ class RAGAgent:
             metadata["tool_calls_count"] = len(tools_used)
         if tool_artifacts:
             metadata["tool_artifacts"] = tool_artifacts
+            if not error_message:
+                error_entries = [
+                    artifact.get("error")
+                    for artifact in tool_artifacts
+                    if artifact.get("error")
+                ]
+                if error_entries:
+                    error_message = error_entries[0]
+                    metadata["error"] = error_message
+        elif error_message:
+            metadata["error"] = error_message
 
         return AgentResponse(
             agent_type=AgentType.RAG,
@@ -235,30 +272,29 @@ class RAGAgent:
             message=response_message,
             metadata=metadata,
             tool_artifacts=tool_artifacts if tool_artifacts else None,
+            error=error_message,
         )
 
-    async def _generate_with_tools(self, prompt: str) -> tuple[str, List[str], List[Dict[str, Any]]]:
+    async def _generate_with_tools(
+        self, prompt: str
+    ) -> tuple[str, List[str], List[Dict[str, Any]]]:
         """Generate response with tool calling support using create_agent."""
         try:
             # Create agent executor
             agent_executor = self._create_agent_executor(self.tools, prompt)
-            
+
             # Invoke agent with the user message
-            agent_response = await agent_executor.ainvoke({
-                "messages": [HumanMessage(content=prompt)]
-            })
-            
+            agent_response = await agent_executor.ainvoke(
+                {"messages": [HumanMessage(content=prompt)]}
+            )
+
             # Extract execution info
             execution_info = extract_agent_execution_info(agent_response)
-            
+
             response_text = execution_info["response_text"]
             tools_used = execution_info["tools_used"]
             tool_artifacts = execution_info["tool_artifacts"]
-            
-            # Log tool execution summary
-            if tools_used:
-                logger.info(f"RAGAgent executed {len(tools_used)} tool(s): {', '.join(tools_used)}")
-            
+
             return response_text, tools_used, tool_artifacts
 
         except Exception as exc:
@@ -294,20 +330,12 @@ class RAGAgent:
         )
 
         if not search_results and conversation_id:
-            logger.info(
-                f"No results found for conversation {conversation_id}, trying global search"
-            )
             search_results = self.qdrant_client.search(
                 collection_name=self.collection_name,
                 query_vector=query_embedding,
                 limit=top_k,
                 score_threshold=self.score_threshold,
             )
-
-        # Log retrieval results
-        logger.info(
-            f"Retrieved {len(search_results)} chunks"
-        )
 
         results = []
         for result in search_results:
@@ -348,42 +376,35 @@ class RAGAgent:
             results[i]["rerank_score"] = float(score)
 
         # Sort by rerank score
-        results = sorted(
-            results, key=lambda x: x.get("rerank_score", 0), reverse=True
-        )
+        results = sorted(results, key=lambda x: x.get("rerank_score", 0), reverse=True)
 
         # Keep only top K after re-ranking
         results = results[: self.settings.rerank_top_k]
 
-        logger.info(f"Re-ranked results, kept top {len(results)} chunks")
-
         return results
 
     async def _generate(self, prompt: str) -> str:
-        response = self.gemini_client.models.generate_content(
-            model=self.model_name, contents=prompt
-        )
-        return response.text if hasattr(response, "text") else str(response)
+        try:
+            response = self.gemini_client.models.generate_content(
+                model=self.model_name, contents=prompt
+            )
+            return response.text if hasattr(response, "text") else str(response)
+        except Exception as exc:
+            raise RuntimeError(f"Gemini API error: {exc}") from exc
 
     async def initialize(self):
         """Initialize the RAG agent"""
-        logger.info("RAG Agent initialized")
         return True
 
     async def cleanup(self):
         """Cleanup resources"""
         # Cleanup MCP resources
         if self.mcp_manager:
-            try:
-                await self.mcp_manager.cleanup()
-                logger.info("RAGAgent MCP cleanup completed")
-            except Exception as e:
-                logger.error(f"Error cleaning up RAGAgent MCP resources: {e}")
-        
+            await self.mcp_manager.cleanup()
+
         # Cleanup Qdrant
         if hasattr(self.qdrant_client, "close"):
             self.qdrant_client.close()
-        logger.info("RAG Agent cleaned up successfully")
 
     def get_status(self) -> dict:
         """Get the current status of the RAG agent"""
