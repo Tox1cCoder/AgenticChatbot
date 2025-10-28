@@ -111,21 +111,37 @@ class ChatAgent:
             else None
         )
 
-        if attachments:
-            response_text = await self._generate_with_vision(prompt, attachments)
-            tools_used: List[str] = []
-            tool_artifacts: List[Dict[str, Any]] = []
-        else:
-            # Initialize tools if not done yet
-            if self.mcp_manager is None:
-                await self._init_tools()
+        response_text: str = ""
+        tools_used: List[str] = []
+        tool_artifacts: List[Dict[str, Any]] = []
 
-            if self.tools:
-                response_text, tools_used, tool_artifacts = await self._generate_with_tools(prompt)
+        try:
+            if attachments:
+                response_text = await self._generate_with_vision(prompt, attachments)
             else:
-                response_text = await self._generate(prompt)
-                tools_used = []
-                tool_artifacts = []
+                # Initialize tools if not done yet
+                if self.mcp_manager is None:
+                    await self._init_tools()
+
+                if self.tools:
+                    response_text, tools_used, tool_artifacts = await self._generate_with_tools(prompt)
+                else:
+                    response_text = await self._generate(prompt)
+        except Exception as exc:
+            logger.error(
+                "Error while processing message in ChatAgent: %s", exc, exc_info=True
+            )
+            response_text = await self._handle_generation_error(prompt, exc)
+            error_description = f"{type(exc).__name__}: {exc}"
+            tool_artifacts.append(
+                {
+                    "tool": "chat_agent",
+                    "args": {},
+                    "error": error_description,
+                }
+            )
+            # Signal that the normal tool flow failed
+            tools_used = []
 
         response_text = coerce_response_text(response_text)
 
@@ -149,6 +165,11 @@ class ChatAgent:
             metadata["tool_calls_count"] = len(tools_used)
         if tool_artifacts:
             metadata["tool_artifacts"] = tool_artifacts
+            error_artifacts = [
+                artifact for artifact in tool_artifacts if artifact.get("error")
+            ]
+            if error_artifacts:
+                metadata["error"] = error_artifacts[0]["error"]
 
         return AgentResponse(
             agent_type=AgentType.CHAT,
@@ -171,6 +192,27 @@ class ChatAgent:
         except Exception as e:
             logger.error(f"Gemini API error: {e}")
             return f"Error generating response: {str(e)}"
+
+    async def _handle_generation_error(self, prompt: str, error: Exception) -> str:
+        """Ask the base LLM to craft a user-facing reply that acknowledges an internal error."""
+        error_message = f"{type(error).__name__}: {error}"
+        recovery_hint = get_error_recovery_hint(error, "chat_agent", {})
+
+        fallback_prompt = (
+            f"{prompt}\n\n"
+            "SYSTEM NOTE FOR ASSISTANT:\n"
+            "You attempted to respond to the user but encountered a system error.\n"
+            f"Error details: {error_message}\n"
+            f"Recovery hint: {recovery_hint}\n\n"
+            "Compose a concise, empathetic reply to the user acknowledging the issue and, if possible, suggesting a next step."
+        )
+
+        fallback_response = await self._generate(fallback_prompt)
+        fallback_response = coerce_response_text(fallback_response)
+        if fallback_response.startswith("Error generating response"):
+            raise RuntimeError(fallback_response)
+        return fallback_response
+
 
     async def _generate_with_tools(self, prompt: str) -> tuple[str, List[str], List[Dict[str, Any]]]:
         """Generate response with tool calling support using create_agent."""
