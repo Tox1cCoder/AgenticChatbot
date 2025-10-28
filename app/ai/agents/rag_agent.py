@@ -10,11 +10,18 @@ from qdrant_client.models import (
     FilterSelector,
 )
 from sentence_transformers import SentenceTransformer, CrossEncoder
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import BaseTool
+from langchain.agents import create_agent
 
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_rag_prompt
 from ...core.config import Settings
+from ..mcp_integration import MCPManager
+from ...core.exceptions.mcp import ServerNotFoundError
+from ..utils import extract_agent_execution_info
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +43,9 @@ class RAGAgent:
         self.embedding_dimension = settings.embedding_dimension
         self.model_name = "gemini-2.5-flash"
         self.gemini_client = None
+        self.langchain_model = None
+        self.mcp_manager = None
+        self.tools = []
 
         # Store retrieval parameters
         self.top_k = settings.rag_top_k
@@ -59,11 +69,90 @@ class RAGAgent:
             api_key = api_key.split("=", 1)[-1].strip()
 
         self.gemini_client = genai.Client(api_key=api_key)
+        
+        self.langchain_model = ChatGoogleGenerativeAI(
+            model=self.model_name, google_api_key=api_key, temperature=0.7
+        )
 
     def _init_reranker(self):
         """Initialize the re-ranker model"""
         self.reranker = CrossEncoder(self.settings.reranker_model)
         logger.info(f"Re-ranker initialized: {self.settings.reranker_model}")
+
+    async def _init_tools(self):
+        """Initialize MCP manager and load tools useful for document analysis"""
+        if self.mcp_manager is None:
+            try:
+                self.mcp_manager = MCPManager()
+                await self.mcp_manager.initialize()
+
+                combined_tools: Dict[str, BaseTool] = {}
+
+                # Prefer calculator and time tools for document analysis
+                preferred_servers = ["calculator", "time"]
+                for server_name in preferred_servers:
+                    try:
+                        server_tools = await self.mcp_manager.get_server_tools(
+                            server_name
+                        )
+                    except ServerNotFoundError:
+                        logger.debug(
+                            "Preferred MCP server '%s' not configured for RAGAgent",
+                            server_name,
+                        )
+                        continue
+
+                    for tool in server_tools:
+                        combined_tools[tool.name] = tool
+
+                # Add all other available tools
+                for tool in await self.mcp_manager.get_tools():
+                    combined_tools.setdefault(tool.name, tool)
+
+                self.tools = list(combined_tools.values())
+
+                server_status = self.mcp_manager.get_servers_status()
+                active_servers = [
+                    name for name, status in server_status.items() if status.get("enabled")
+                ]
+                logger.info(
+                    "Loaded %d MCP tools for RAGAgent from %d servers",
+                    len(self.tools),
+                    len(active_servers),
+                )
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to initialize MCP manager for RAGAgent: {e}",
+                    exc_info=True,
+                )
+                self.tools = []
+
+    def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
+        """Create agent executor with proper tool binding configuration."""
+        from ...core.config import settings
+        
+        # Configure tool calling based on settings
+        tool_choice = settings.tool_choice_mode if hasattr(settings, 'tool_choice_mode') else "auto"
+        
+        # Configure model with tool binding
+        llm_with_tools = self.langchain_model.bind_tools(
+            tools, 
+            tool_config={
+                "function_calling_config": {
+                    "mode": tool_choice.upper() if tool_choice in ["auto", "any", "none"] else "AUTO"
+                }
+            }
+        )
+        
+        # Create agent using LangChain's create_agent
+        agent = create_agent(
+            model=llm_with_tools,
+            tools=tools,
+            system_prompt=system_prompt
+        )
+        
+        return agent
 
     async def process_message(
         self,
@@ -75,13 +164,23 @@ class RAGAgent:
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
 
+        # Initialize tools if not done yet
+        if self.mcp_manager is None:
+            await self._init_tools()
+
         retrieved_docs = await self._search(query, conversation_id=conversation_id)
 
         prompt = build_rag_prompt(
             query, retrieved_docs, conversation_history, persona=persona
         )
 
-        response_text = await self._generate(prompt)
+        # Use tools if available for enhanced document analysis
+        if self.tools:
+            response_text, tools_used, tool_artifacts = await self._generate_with_tools(prompt)
+        else:
+            response_text = await self._generate(prompt)
+            tools_used = []
+            tool_artifacts = []
 
         response_message = AgentMessage(
             role=MessageRole.ASSISTANT, content=response_text
@@ -108,23 +207,63 @@ class RAGAgent:
             else 0.0
         )
 
+        # Build metadata
+        metadata = {
+            "model": self.model_name,
+            "conversation_id": conversation_id,
+            "documents_found": len(retrieved_docs),
+            "citations": citations,
+            "context_messages": len(conversation_history),
+            "retrieval_stats": {
+                "total_retrieved": len(retrieved_docs),
+                "avg_score": avg_score,
+            },
+            "persona_used": persona,
+            "tools_available": len(self.tools),
+        }
+
+        # Add tool usage metadata if tools were used
+        if tools_used:
+            metadata["tools_used"] = tools_used
+            metadata["tool_calls_count"] = len(tools_used)
+        if tool_artifacts:
+            metadata["tool_artifacts"] = tool_artifacts
+
         return AgentResponse(
             agent_type=AgentType.RAG,
             agent_id="rag_agent",
             message=response_message,
-            metadata={
-                "model": self.model_name,
-                "conversation_id": conversation_id,
-                "documents_found": len(retrieved_docs),
-                "citations": citations,
-                "context_messages": len(conversation_history),
-                "retrieval_stats": {
-                    "total_retrieved": len(retrieved_docs),
-                    "avg_score": avg_score,
-                },
-                "persona_used": persona,
-            },
+            metadata=metadata,
+            tool_artifacts=tool_artifacts if tool_artifacts else None,
         )
+
+    async def _generate_with_tools(self, prompt: str) -> tuple[str, List[str], List[Dict[str, Any]]]:
+        """Generate response with tool calling support using create_agent."""
+        try:
+            # Create agent executor
+            agent_executor = self._create_agent_executor(self.tools, prompt)
+            
+            # Invoke agent with the user message
+            agent_response = await agent_executor.ainvoke({
+                "messages": [HumanMessage(content=prompt)]
+            })
+            
+            # Extract execution info
+            execution_info = extract_agent_execution_info(agent_response)
+            
+            response_text = execution_info["response_text"]
+            tools_used = execution_info["tools_used"]
+            tool_artifacts = execution_info["tool_artifacts"]
+            
+            # Log tool execution summary
+            if tools_used:
+                logger.info(f"RAGAgent executed {len(tools_used)} tool(s): {', '.join(tools_used)}")
+            
+            return response_text, tools_used, tool_artifacts
+
+        except Exception as exc:
+            logger.error("Error in RAGAgent tool calling flow: %s", exc, exc_info=True)
+            raise
 
     async def _search(
         self, query: str, top_k: int = None, conversation_id: Optional[str] = None
@@ -233,6 +372,15 @@ class RAGAgent:
 
     async def cleanup(self):
         """Cleanup resources"""
+        # Cleanup MCP resources
+        if self.mcp_manager:
+            try:
+                await self.mcp_manager.cleanup()
+                logger.info("RAGAgent MCP cleanup completed")
+            except Exception as e:
+                logger.error(f"Error cleaning up RAGAgent MCP resources: {e}")
+        
+        # Cleanup Qdrant
         if hasattr(self.qdrant_client, "close"):
             self.qdrant_client.close()
         logger.info("RAG Agent cleaned up successfully")

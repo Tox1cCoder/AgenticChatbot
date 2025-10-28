@@ -219,8 +219,19 @@ async def execute_tools_concurrently(
             return (tool_name, tool_args, result, True)
         
         except Exception as e:
-            logger.error(f"Error executing tool '{tool_name}': {str(e)}")
-            return (tool_name, tool_args, f"Error: {str(e)}", False)
+            # Get error recovery hint
+            recovery_hint = get_error_recovery_hint(e, tool_name, tool_args)
+            
+            # Format error with type and hint
+            error_message = f"Error ({type(e).__name__}): {str(e)}. Hint: {recovery_hint}"
+            
+            # Log detailed error info for debugging
+            logger.error(
+                f"Error executing tool '{tool_name}' with args {tool_args}: {str(e)}", 
+                exc_info=True
+            )
+            
+            return (tool_name, tool_args, error_message, False)
     
     # Execute all tool calls concurrently
     results = await asyncio.gather(
@@ -229,3 +240,56 @@ async def execute_tools_concurrently(
     )
     
     return results
+
+
+def get_error_recovery_hint(error: Exception, tool_name: str, tool_args: Dict[str, Any]) -> str:
+    """
+    Analyze an exception and provide a recovery hint for the LLM.
+    
+    Args:
+        error: The exception that occurred
+        tool_name: Name of the tool that failed
+        tool_args: Arguments passed to the tool
+        
+    Returns:
+        A helpful hint string for the LLM on how to recover
+    """
+    error_type = type(error).__name__
+    error_msg = str(error).lower()
+    
+    # Missing argument errors
+    if "missing" in error_msg and ("argument" in error_msg or "parameter" in error_msg or "required" in error_msg):
+        return "Missing required argument: check the tool's schema and provide all required parameters"
+    
+    # Type errors
+    if isinstance(error, TypeError):
+        if "got an unexpected keyword argument" in error_msg:
+            return "Invalid argument name: verify the argument names match the tool's schema"
+        if "takes" in error_msg and "positional argument" in error_msg:
+            return "Wrong number of arguments: check the tool's parameter requirements"
+        return "Type mismatch: ensure argument types match the tool's expected types"
+    
+    # Value errors
+    if isinstance(error, ValueError):
+        if "invalid" in error_msg or "format" in error_msg:
+            return "Invalid argument format: check the expected format/structure for this argument"
+        return "Invalid value: verify the argument values are within acceptable ranges"
+    
+    # Key errors
+    if isinstance(error, KeyError):
+        return "Missing key in arguments: verify all required parameters are provided with correct names"
+    
+    # Connection/Network errors
+    if "connection" in error_msg or "network" in error_msg or "timeout" in error_msg:
+        return "Network issue: retry the operation or use an alternative tool if available"
+    
+    # Permission/Auth errors
+    if "permission" in error_msg or "unauthorized" in error_msg or "forbidden" in error_msg:
+        return "Permission denied: this tool may require additional credentials or access rights"
+    
+    # Not found errors
+    if "not found" in error_msg or isinstance(error, (FileNotFoundError, AttributeError)):
+        return "Resource not found: verify the resource exists or try alternative search terms"
+    
+    # Generic fallback
+    return f"Unexpected {error_type}: review the error message and adjust arguments or try a different approach"

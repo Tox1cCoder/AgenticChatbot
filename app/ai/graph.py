@@ -58,7 +58,7 @@ class MultiAgentWorkflow:
             f"Multi-agent workflow initialized (checkpointing: {'enabled' if checkpointer else 'disabled'})"
         )
 
-        self._cleanup_agents = [self.chat_agent, self.search_agent]
+        self._cleanup_agents = [self.chat_agent, self.search_agent, self.rag_agent, self.image_generator_agent]
 
     def _build_graph(self) -> StateGraph:
         workflow = StateGraph(GraphState)

@@ -12,7 +12,7 @@ from langchain.agents import create_agent
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_chat_prompt
-from ..utils import coerce_response_text, format_tool_result, make_json_safe, extract_agent_execution_info, execute_tools_concurrently
+from ..utils import coerce_response_text, format_tool_result, make_json_safe, extract_agent_execution_info, execute_tools_concurrently, get_error_recovery_hint
 from ...core.config import settings
 from ...core.exceptions.mcp import ServerNotFoundError
 from ..mcp_integration import MCPManager
@@ -120,7 +120,6 @@ class ChatAgent:
             if self.mcp_manager is None:
                 await self._init_tools()
 
-            # For text-only messages, use tool calling flow if tools are available
             if self.tools:
                 response_text, tools_used, tool_artifacts = await self._generate_with_tools(prompt)
             else:
@@ -247,18 +246,32 @@ class ChatAgent:
                                 "output": format_tool_result(result)
                             })
                         except Exception as e:
+                            # Get error recovery hint
+                            recovery_hint = get_error_recovery_hint(e, tool_name, tool_args)
+                            error_message = f"Error ({type(e).__name__}): {str(e)}. Hint: {recovery_hint}"
+                            
                             results.append({
                                 "tool": tool_name,
                                 "args": make_json_safe(tool_args),
-                                "error": str(e)
+                                "error": error_message
                             })
+                            
+                            # Log detailed error
+                            logger.error(
+                                f"Error in sequential tool execution '{tool_name}': {str(e)}", 
+                                exc_info=True
+                            )
                         break
                 
                 if not tool_found:
+                    # List available tools for helpful error message
+                    available_tools = [t.name for t in self.tools[:5]]  # Show first 5
+                    tool_suggestions = f"Available tools: {', '.join(available_tools)}" if available_tools else ""
+                    
                     results.append({
                         "tool": tool_name,
                         "args": make_json_safe(tool_args),
-                        "error": "Tool not found"
+                        "error": f"Tool '{tool_name}' not found. {tool_suggestions}"
                     })
             
             return results

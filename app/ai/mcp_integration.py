@@ -11,6 +11,7 @@ from app.core.exceptions.mcp import (
     ToolNotFoundError,
     ServerConfigurationError,
 )
+from .utils import get_error_recovery_hint
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
@@ -534,15 +535,48 @@ class MCPManager:
             }
         except Exception as e:
             execution_time = time.time() - start_time
-            logger.error(f"Tool execution failed for {tool_name}: {e}")
+            
+            # Get error recovery hint
+            recovery_hint = get_error_recovery_hint(e, tool_name, arguments)
+            
+            # Categorize error type
+            error_category = self._categorize_error(e)
+            
+            # Log detailed error with full traceback
+            logger.error(
+                f"Tool execution failed for {tool_name} with args {arguments}: {e}", 
+                exc_info=True
+            )
+            
             return {
                 "success": False,
                 "result": None,
-                "error": str(e),
+                "error": f"{type(e).__name__}: {str(e)}",
+                "error_category": error_category,
+                "error_hint": recovery_hint,
                 "execution_time": execution_time,
                 "tool_name": tool_name,
                 "server_name": server_name,
             }
+
+    def _categorize_error(self, error: Exception) -> str:
+        """Categorize error for structured error handling."""
+        error_msg = str(error).lower()
+        
+        if isinstance(error, TypeError):
+            return "argument_error"
+        elif isinstance(error, ValueError):
+            return "value_error"
+        elif isinstance(error, KeyError):
+            return "missing_key"
+        elif "connection" in error_msg or "network" in error_msg or "timeout" in error_msg:
+            return "network_error"
+        elif "permission" in error_msg or "unauthorized" in error_msg:
+            return "permission_error"
+        elif "not found" in error_msg:
+            return "not_found"
+        else:
+            return "unknown_error"
 
     def get_servers_status(self) -> Dict[str, Dict[str, Any]]:
         """

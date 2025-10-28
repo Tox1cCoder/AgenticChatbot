@@ -2699,7 +2699,7 @@ def render_settings_view():
     with col1:
         if is_new_conversation:
             if st.button(
-                "✅ Apply to New Chat",
+                "Apply to New Chat",
                 use_container_width=True,
                 disabled=exceeds_limit,
                 type="primary",
