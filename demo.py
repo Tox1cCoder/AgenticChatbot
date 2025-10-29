@@ -71,6 +71,7 @@ _ALLOWED_TAGS = {
     "tr",
     "th",
     "td",
+    "a",
 }.union(_SELF_CLOSING_TAGS)
 
 APP_STYLE = """
@@ -181,6 +182,28 @@ APP_STYLE = """
     
     .user-bubble code {
         background: rgba(255,255,255,0.2);
+    }
+    
+    /* Links */
+    .message-bubble a {
+        color: #2563eb;
+        text-decoration: underline;
+        font-weight: 500;
+        transition: color 0.2s ease;
+    }
+    
+    .message-bubble a:hover {
+        color: #1d4ed8;
+        text-decoration: underline;
+    }
+    
+    .user-bubble a {
+        color: #e0f2fe;
+        text-decoration: underline;
+    }
+    
+    .user-bubble a:hover {
+        color: #ffffff;
     }
     
     /* Attachments */
@@ -443,8 +466,30 @@ class _SafeHTMLRenderer(HTMLParser):
             self.result.append(f"<{tag}>")
             return
 
-        self.result.append(f"<{tag}>")
-        self._tag_stack.append(tag)
+        # Handle anchor tags with href attribute
+        if tag == "a":
+            href = None
+            for attr_name, attr_value in attrs:
+                if attr_name.lower() == "href":
+                    href = attr_value
+                    break
+            
+            if href:
+                # Sanitize href to prevent javascript: and data: URLs
+                href_lower = href.lower().strip()
+                if href_lower.startswith(("http://", "https://", "/")):
+                    escaped_href = html.escape(href, quote=True)
+                    self.result.append(f'<a href="{escaped_href}" target="_blank" rel="noopener noreferrer">')
+                    self._tag_stack.append(tag)
+                else:
+                    # Skip unsafe URLs but keep the text content
+                    return
+            else:
+                # No href, skip the tag but keep the text content
+                return
+        else:
+            self.result.append(f"<{tag}>")
+            self._tag_stack.append(tag)
 
     def handle_endtag(self, tag: str):
         tag = tag.lower()

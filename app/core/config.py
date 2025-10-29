@@ -53,7 +53,7 @@ class Settings(BaseSettings):
         description="JWT signing algorithm",
     )
     access_token_expire_minutes: int = Field(
-        default=240,
+        default=600,
         description="Access token expiration in minutes",
     )
     refresh_token_expire_days: int = Field(
@@ -146,24 +146,6 @@ class Settings(BaseSettings):
         description="Celery result backend URL",
     )
 
-    # Celery Worker Configuration
-    celery_task_time_limit: int = Field(
-        default=300,
-        description="Hard time limit for Celery tasks in seconds",
-    )
-    celery_task_soft_time_limit: int = Field(
-        default=240,
-        description="Soft time limit for Celery tasks in seconds",
-    )
-    celery_worker_concurrency: int = Field(
-        default=2,
-        description="Number of concurrent Celery workers",
-    )
-    celery_worker_prefetch_multiplier: int = Field(
-        default=1,
-        description="Task prefetch multiplier for Celery workers",
-    )
-
     # File Storage Configuration
     temp_storage_path: str = Field(
         default="app/temp",
@@ -175,10 +157,6 @@ class Settings(BaseSettings):
     )
 
     # Document Processing Configuration
-    allowed_file_extensions: List[str] = Field(
-        default=[".txt", ".pdf", ".docx"],
-        description="List of allowed file extensions for document upload",
-    )
     document_chunk_size: int = Field(
         default=1000,
         description="Chunk size for text splitting in characters",
@@ -186,10 +164,6 @@ class Settings(BaseSettings):
     document_chunk_overlap: int = Field(
         default=200,
         description="Overlap between chunks in characters",
-    )
-    document_processing_timeout: int = Field(
-        default=300,
-        description="Maximum processing time for documents in seconds",
     )
 
     # RAG Retrieval Configuration
@@ -227,10 +201,6 @@ class Settings(BaseSettings):
     )
 
     # Advanced Chunking Configuration
-    chunk_by_sentences: bool = Field(
-        default=True,
-        description="Chunk by complete sentences instead of arbitrary splits",
-    )
     preserve_cross_page_context: bool = Field(
         default=True,
         description="Preserve context across PDF pages",
@@ -247,10 +217,6 @@ class Settings(BaseSettings):
     )
 
     # Search Agent Configuration
-    search_max_results: int = Field(
-        default=5,
-        description="Maximum number of search results to return",
-    )
     search_history_max_messages: int = Field(
         default=0,
         description="Maximum prior messages to include when building search prompts (0 = no limit)",
@@ -262,30 +228,64 @@ class Settings(BaseSettings):
 
     # ReAct Agent Configuration
     react_agent_max_iterations: int = Field(
-        default=10,
-        description="Maximum reasoning/acting cycles before stopping",
+        default=3,
+        description="Maximum number of refinement iterations before stopping",
+    )
+    react_agent_quality_threshold: float = Field(
+        default=0.7,
+        description="Minimum quality score (0.0-1.0) to accept response without refinement",
     )
     react_agent_recursion_limit: int = Field(
         default=25,
-        description="LangGraph recursion limit for agent execution",
-    )
-    enable_parallel_tool_calls: bool = Field(
-        default=True,
-        description="Allow models to call multiple tools in parallel",
+        description="LangGraph recursion limit for agent execution. Should be set to 2 * react_agent_max_iterations + 1 per LangGraph best practices",
     )
     tool_choice_mode: str = Field(
         default="auto",
         description="Tool calling mode: 'auto', 'any', 'none', or specific tool name",
     )
 
-    # Health Check Configuration
-    health_check_timeout: int = Field(
-        default=5,
-        description="Timeout for health check requests in seconds",
+    # Tool Execution Configuration
+    tool_execution_timeout: int = Field(
+        default=30,
+        description="Timeout for individual tool calls in seconds",
     )
-    enable_health_checks: bool = Field(
+    tool_execution_max_retries: int = Field(
+        default=2,
+        description="Maximum retry attempts for failed tool executions",
+    )
+    tool_validation_enabled: bool = Field(
         default=True,
-        description="Enable or disable health check endpoints",
+        description="Enable/disable Pydantic validation for tool arguments and results",
+    )
+
+    # Hallucination Prevention Configuration
+    confidence_threshold_abstain: float = Field(
+        default=0.3,
+        description="Minimum confidence score below which agent should abstain from answering",
+    )
+    enable_structured_output_validation: bool = Field(
+        default=False,
+        description="Toggle for using Pydantic structured output schemas for response validation",
+    )
+    confidence_weight_tool_success: float = Field(
+        default=0.4,
+        description="Weight for tool success rate in confidence calculation",
+    )
+    confidence_weight_completeness: float = Field(
+        default=0.3,
+        description="Weight for response completeness in confidence calculation",
+    )
+    confidence_weight_retrieval: float = Field(
+        default=0.3,
+        description="Weight for retrieval quality (RAG) in confidence calculation",
+    )
+    enable_citation_verification: bool = Field(
+        default=True,
+        description="Enable citation verification for RAG agent responses",
+    )
+    min_citation_coverage: float = Field(
+        default=0.5,
+        description="Minimum fraction of retrieved docs that should be referenced in RAG response",
     )
 
     # LangGraph Checkpoint Configuration
@@ -296,10 +296,6 @@ class Settings(BaseSettings):
     checkpoint_schema: str = Field(
         default="public",
         description="PostgreSQL schema for checkpoint tables",
-    )
-    checkpoint_cleanup_days: int = Field(
-        default=30,
-        description="Days to retain old checkpoints before cleanup",
     )
 
     # Application metadata

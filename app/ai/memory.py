@@ -45,12 +45,6 @@ class ConversationMemory:
                 self._messages.clear()
                 self._messages.extend(loaded_messages)
 
-                logger.info(
-                    "Hydrated %s/%s messages into memory for conversation %s",
-                    len(loaded_messages),
-                    total_available,
-                    self.conversation_id,
-                )
             finally:
                 db.close()
 
@@ -132,7 +126,6 @@ class ConversationMemory:
 
     def clear(self):
         self._messages.clear()
-        logger.info(f"Cleared memory for conversation {self.conversation_id}")
 
     def _db_to_agent_message(self, db_message: Message) -> Optional[AgentMessage]:
         try:
@@ -166,7 +159,6 @@ class MemoryManager:
         self.max_messages = max_messages if max_messages and max_messages > 0 else None
         self.batch_size = max(1, batch_size)
         self._memories: Dict[str, ConversationMemory] = {}
-        logger.info("MemoryManager initialized")
 
     async def get_memory(
         self, conversation_id: UUID, user_id: UUID, force_refresh: bool = False
@@ -192,13 +184,11 @@ class MemoryManager:
         key = str(conversation_id)
         if key in self._memories:
             await self._memories[key].initialize(force_refresh=True)
-            logger.info(f"Refreshed memory for conversation {conversation_id}")
 
     def clear_memory(self, conversation_id: UUID):
         key = str(conversation_id)
         if key in self._memories:
             del self._memories[key]
-            logger.info(f"Cleared memory for conversation {conversation_id}")
 
 
 _memory_manager: Optional[MemoryManager] = None
