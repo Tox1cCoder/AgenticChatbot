@@ -21,6 +21,8 @@ from pydantic import BaseModel as PydanticBaseModel
 
 logger = logging.getLogger(__name__)
 
+logging.getLogger("langchain_google_genai.functions_utils").setLevel(logging.ERROR)
+
 
 class MCPManager:
     """Manages MCP server connections and tool loading"""
@@ -535,19 +537,19 @@ class MCPManager:
             }
         except Exception as e:
             execution_time = time.time() - start_time
-            
+
             # Get error recovery hint
             recovery_hint = get_error_recovery_hint(e, tool_name, arguments)
-            
+
             # Categorize error type
             error_category = self._categorize_error(e)
-            
+
             # Log detailed error with full traceback
             logger.error(
-                f"Tool execution failed for {tool_name} with args {arguments}: {e}", 
-                exc_info=True
+                f"Tool execution failed for {tool_name} with args {arguments}: {e}",
+                exc_info=True,
             )
-            
+
             return {
                 "success": False,
                 "result": None,
@@ -562,14 +564,18 @@ class MCPManager:
     def _categorize_error(self, error: Exception) -> str:
         """Categorize error for structured error handling."""
         error_msg = str(error).lower()
-        
+
         if isinstance(error, TypeError):
             return "argument_error"
         elif isinstance(error, ValueError):
             return "value_error"
         elif isinstance(error, KeyError):
             return "missing_key"
-        elif "connection" in error_msg or "network" in error_msg or "timeout" in error_msg:
+        elif (
+            "connection" in error_msg
+            or "network" in error_msg
+            or "timeout" in error_msg
+        ):
             return "network_error"
         elif "permission" in error_msg or "unauthorized" in error_msg:
             return "permission_error"

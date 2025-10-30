@@ -2324,20 +2324,13 @@ def render_chat_view():
 
 def render_manage_modal():
     """Conversation management modal dialog"""
-    dialog_state = st.session_state.get(CONVERSATION_MANAGER_DIALOG_KEY, False)
-    visible = st.session_state.get("conversation_manager_visible", False)
-    if st.session_state.get("show_conversation_manager", False) != visible:
-        st.session_state.show_conversation_manager = visible
-    if not dialog_state and visible:
-        close_conversation_manager()
-        visible = False
-    elif dialog_state and not visible:
-        st.session_state.conversation_manager_visible = True
-        visible = True
-    if not visible:
+    should_show = st.session_state.get(CONVERSATION_MANAGER_DIALOG_KEY, False)
+    
+    st.session_state.conversation_manager_visible = should_show
+    st.session_state.show_conversation_manager = should_show
+    
+    if not should_show:
         return
-
-    st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = True
 
     @st.dialog(
         "Manage Conversations",
