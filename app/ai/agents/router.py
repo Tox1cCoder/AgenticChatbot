@@ -25,17 +25,25 @@ class Router:
         self.gemini_client = genai.Client(api_key=api_key)
 
     async def route_message(
-        self, message: AgentMessage, available_agents: List[str]
+        self, message: AgentMessage, available_agents: List[str], has_documents: bool = False
     ) -> str:
         """Route the message to the appropriate agent"""
         content = message.content.strip()
         persona = message.metadata.get("persona")
 
-        # Build the routing prompt
+        # Build the routing prompt with document context
+        prompt_parts = []
+        
         if persona is not None and persona.strip():
-            prompt = f"Custom Persona: {persona}\n\n{ROUTER_SYSTEM_PROMPT}\n\nUser message: {content}"
-        else:
-            prompt = f"{ROUTER_SYSTEM_PROMPT}\n\nUser message: {content}"
+            prompt_parts.append(f"Custom Persona: {persona}\n")
+        
+        if has_documents:
+            prompt_parts.append("CONTEXT: This conversation has uploaded documents available.\n")
+        
+        prompt_parts.append(ROUTER_SYSTEM_PROMPT)
+        prompt_parts.append(f"\n\nUser message: {content}")
+        
+        prompt = "\n".join(prompt_parts)
 
         response = self.gemini_client.models.generate_content(
             model=self.model_name, contents=prompt

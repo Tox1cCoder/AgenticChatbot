@@ -350,6 +350,8 @@ class RAGAgent:
                     "document_id": result.payload.get("document_id", ""),
                     "conversation_id": result.payload.get("conversation_id", ""),
                     "chunk_index": result.payload.get("chunk_index", 0),
+                    "has_tables": result.payload.get("has_tables", False),
+                    "table_count": result.payload.get("table_count", 0),
                 }
             )
 

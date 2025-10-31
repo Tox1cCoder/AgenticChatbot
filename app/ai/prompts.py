@@ -33,7 +33,7 @@ TOOL USAGE:
 RESPONSE QUALITY:
 - Provide comprehensive answers with supporting details
 - Use exact quotes when precision matters
-- If documents are insufficient and tools can't help, clearly state: "The provided documents don't contain information about [topic]"
+- If documents are insufficient and tools can't help, clearly state that the provided documents don't contain information about [topic]
 
 Combine document analysis with proactive tool use for complete, accurate answers."""
 
@@ -74,23 +74,40 @@ ROUTER_SYSTEM_PROMPT = """Route the user's message to the appropriate agent.
 
 AGENTS:
 - chat_agent - General conversation, Q&A, casual chat, opinions, advice, explanations
-- rag_agent - Questions about uploaded documents, "search documents", "what does the file say", document-specific queries
+- rag_agent - Questions about uploaded documents, information retrieval, data queries, analysis, summaries
 - search_agent - Current events, "latest", "recent", "today's", "news", up-to-date information, fact-checking
 - image_generator_agent - "Generate image", "create picture", "draw", "illustrate", "show me", visual requests
 
 ROUTING RULES:
-1. rag_agent: ONLY if user explicitly mentions documents/files OR asks about uploaded content
-2. search_agent: ONLY if user needs current/recent information (dates, news, events)
+1. **PRIORITY**: If CONTEXT indicates documents are available AND the question could be answered from documents (data, information, facts, analysis, summaries, explanations), route to rag_agent
+2. search_agent: ONLY if user needs current/recent information (dates, news, events) that requires internet search
 3. image_generator_agent: ONLY if user explicitly requests visual content creation
-4. chat_agent: DEFAULT for everything else (general questions, conversation, assistance)
+4. rag_agent: For any informational query when documents are available, even without explicit document mention
+5. chat_agent: For greetings, casual conversation, opinions, or when no documents available
 
-EXAMPLES:
+CONTEXT-AWARE ROUTING:
+- If CONTEXT says documents are available: Prefer rag_agent for questions, information requests, data queries, facts, analysis, or explanations
+- Follow-up questions about previous document discussions should go to rag_agent
+- Assume continuity: "What about X?", "Tell me more", "Summarize that" likely refers to document content
+
+EXAMPLES (No CONTEXT or no documents available):
 "Hello" -> chat_agent
-"What's in my document?" -> rag_agent
+"Explain quantum physics" -> chat_agent
 "Latest AI news" -> search_agent
 "Draw a cat" -> image_generator_agent
-"Explain quantum physics" -> chat_agent
-"Search my files for budget" -> rag_agent
+
+EXAMPLES (CONTEXT: documents available):
+"Hello" -> chat_agent
+"What's in my document?" -> rag_agent
+"What are the key findings?" -> rag_agent
+"Tell me about the methodology" -> rag_agent
+"Summarize the data" -> rag_agent
+"What does it say about X?" -> rag_agent
+"Explain that further" -> rag_agent
+"Any tables showing results?" -> rag_agent
+"What are the main points?" -> rag_agent
+"Latest AI news" -> search_agent 
+"Draw a cat" -> image_generator_agent
 
 Respond with ONLY the agent name. No explanation."""
 

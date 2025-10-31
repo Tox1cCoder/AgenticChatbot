@@ -411,6 +411,8 @@ SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
     "current_conversation_id": lambda: None,
     "messages": list,
     "conversations_list": list,
+    "conversations_loaded": lambda: False,
+    "conversations_last_fetch_params": lambda: None,
     "show_conversation_manager": lambda: False,
     "conversation_manager_visible": lambda: False,
     CONVERSATION_MANAGER_DIALOG_KEY: lambda: False,
@@ -473,13 +475,15 @@ class _SafeHTMLRenderer(HTMLParser):
                 if attr_name.lower() == "href":
                     href = attr_value
                     break
-            
+
             if href:
                 # Sanitize href to prevent javascript: and data: URLs
                 href_lower = href.lower().strip()
                 if href_lower.startswith(("http://", "https://", "/")):
                     escaped_href = html.escape(href, quote=True)
-                    self.result.append(f'<a href="{escaped_href}" target="_blank" rel="noopener noreferrer">')
+                    self.result.append(
+                        f'<a href="{escaped_href}" target="_blank" rel="noopener noreferrer">'
+                    )
                     self._tag_stack.append(tag)
                 else:
                     # Skip unsafe URLs but keep the text content
@@ -645,6 +649,7 @@ def reset_conversation_state() -> None:
     st.session_state.image_viewer_open = False
     st.session_state.image_viewer_payload = None
     st.session_state.message_image_thumbnails = {}
+    st.session_state.conversations_loaded = False
 
 
 def open_conversation_manager() -> None:
@@ -663,10 +668,15 @@ def refresh_conversations_list(
     *, fallback_conversation: Optional[Dict[str, Any]] = None
 ) -> None:
     """Reload conversations list from the API, optionally seeding with a fallback."""
-    get_conversations.clear()
-    refreshed = get_conversations(include_messages=False)
+    st.session_state.conversations_loaded = False
+    refreshed = get_conversations(include_messages=False, fetch_all_pages=False)
     if refreshed and refreshed.get("data"):
         st.session_state.conversations_list = refreshed["data"]["items"]
+        st.session_state.conversations_loaded = True
+        st.session_state.conversations_last_fetch_params = {
+            "include_messages": False,
+            "fetch_all_pages": False,
+        }
         return
 
     if fallback_conversation:
@@ -719,20 +729,19 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
     return response_data
 
 
-@st.cache_data(show_spinner=False)
 def get_user(user_id: str) -> Dict[str, Any]:
     response = make_api_request("GET", f"/users/{user_id}")
     return response.get("data", {})
 
 
-@st.cache_data(show_spinner=False)
 def get_conversations(
     page: int = 1,
     limit: int = 20,
     include_messages: bool = False,
     latest_messages: int = 3,
+    fetch_all_pages: bool = False,
 ) -> Dict[str, Any]:
-    """Retrieve *all* conversations, aggregating across pages when necessary."""
+    """Retrieve conversations with controlled pagination."""
     current_page = page
     aggregated_items: List[Dict[str, Any]] = []
     aggregated_meta: Dict[str, Any] = {}
@@ -762,6 +771,9 @@ def get_conversations(
         aggregated_meta = meta
         last_response = response
 
+        if not fetch_all_pages:
+            break
+
         current = meta.get("currentPage", current_page)
         last = meta.get("lastPage", current_page)
 
@@ -774,12 +786,21 @@ def get_conversations(
     if not last_response:
         return {}
 
-    normalized_meta = {
-        "total": len(aggregated_items),
-        "perPage": len(aggregated_items),
-        "currentPage": 1,
-        "lastPage": 1,
-    }
+    if fetch_all_pages:
+        normalized_meta = {
+            "total": len(aggregated_items),
+            "perPage": len(aggregated_items),
+            "currentPage": 1,
+            "lastPage": 1,
+        }
+    else:
+        normalized_meta = {
+            "total": aggregated_meta.get("total", len(aggregated_items)),
+            "perPage": aggregated_meta.get("perPage", limit),
+            "currentPage": aggregated_meta.get("currentPage", page),
+            "lastPage": aggregated_meta.get("lastPage", 1),
+        }
+
     for key, value in aggregated_meta.items():
         if key not in normalized_meta:
             normalized_meta[key] = value
@@ -800,7 +821,6 @@ def get_conversations(
     return result
 
 
-@st.cache_data(show_spinner=False)
 def get_messages(
     conversation_id: str,
     page: int = 1,
@@ -933,14 +953,12 @@ def _format_image_only_message(attachments: List[Dict[str, str]]) -> str:
     return f"[Image attachments: {displayed}]"
 
 
-@st.cache_data(show_spinner=False, ttl=30)
 def get_mcp_servers() -> Optional[Dict[str, Any]]:
     """Fetch list of MCP servers"""
     response = make_api_request("GET", "/mcp/servers")
     return response.get("data") if response else None
 
 
-@st.cache_data(show_spinner=False, ttl=30)
 def get_mcp_tools(server_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Fetch MCP tools, optionally filtered by server"""
     endpoint = "/mcp/tools"
@@ -950,7 +968,6 @@ def get_mcp_tools(server_name: Optional[str] = None) -> Optional[Dict[str, Any]]
     return response.get("data") if response else None
 
 
-@st.cache_data(show_spinner=False, ttl=30)
 def get_tool_details(tool_name: str) -> Optional[Dict[str, Any]]:
     """Fetch detailed information about a specific tool"""
     response = make_api_request("GET", f"/mcp/tools/{tool_name}")
@@ -1001,20 +1018,12 @@ def render_tool_result_payload(payload: Any) -> None:
 def add_mcp_server(server_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Add a new MCP server"""
     response = make_api_request("POST", "/mcp/servers", server_config)
-    if response:
-        # Clear caches to refresh data
-        get_mcp_servers.clear()
-        get_mcp_tools.clear()
     return response.get("data") if response else None
 
 
 def remove_mcp_server(server_name: str) -> Optional[Dict[str, Any]]:
     """Remove an MCP server"""
     response = make_api_request("DELETE", f"/mcp/servers/{server_name}")
-    if response:
-        # Clear caches to refresh data
-        get_mcp_servers.clear()
-        get_mcp_tools.clear()
     return response.get("data") if response else None
 
 
@@ -1023,9 +1032,6 @@ def toggle_mcp_server(server_name: str, enabled: bool) -> Optional[Dict[str, Any
     response = make_api_request(
         "PATCH", f"/mcp/servers/{server_name}/toggle?enabled={enabled}"
     )
-    if response:
-        get_mcp_servers.clear()
-        get_mcp_tools.clear()
     return response.get("data") if response else None
 
 
@@ -1136,15 +1142,22 @@ def render_sidebar():
 
         # Load conversations if needed
         if (
-            not st.session_state.conversations_list
+            not st.session_state.conversations_loaded
             and st.session_state.current_user_id
             and st.session_state.auth_token
         ):
-            conversations_response = get_conversations(include_messages=False)
+            conversations_response = get_conversations(
+                include_messages=False, fetch_all_pages=False
+            )
             if conversations_response and conversations_response.get("data"):
                 st.session_state.conversations_list = conversations_response["data"][
                     "items"
                 ]
+                st.session_state.conversations_loaded = True
+                st.session_state.conversations_last_fetch_params = {
+                    "include_messages": False,
+                    "fetch_all_pages": False,
+                }
 
         # Grouped conversations
         if st.session_state.conversations_list:
@@ -1194,6 +1207,8 @@ def render_sidebar():
                     close_conversation_manager()
                     reset_conversation_state()
                     st.session_state.conversations_list = []
+                    st.session_state.conversations_loaded = False
+                    st.session_state.conversations_last_fetch_params = None
                     st.session_state.auth_token = None
                     st.session_state.show_login = True
                     st.session_state.pending_image_attachments = []
@@ -1399,7 +1414,6 @@ def render_message_feedback_inline(msg: Dict[str, Any]):
                             "POST", f"/messages/{msg['id']}/feedbacks", feedback_data
                         )
                         if response:
-                            get_messages.clear()
                             st.session_state.conversation_messages_page = 0
                             st.toast("✅ Feedback updated!", icon="✅")
                             st.rerun()
@@ -1423,7 +1437,6 @@ def render_message_feedback_inline(msg: Dict[str, Any]):
                         "POST", f"/messages/{msg['id']}/feedbacks", feedback_data
                     )
                     if response:
-                        get_messages.clear()
                         st.session_state.conversation_messages_page = 0
                         st.toast("✅ Feedback submitted!", icon="✅")
                         st.rerun()
@@ -1570,8 +1583,6 @@ def render_tools_tab():
     )
 
     if st.button("🔄 Refresh", use_container_width=True):
-        get_mcp_servers.clear()
-        get_mcp_tools.clear()
         st.rerun()
 
     st.markdown("---")
@@ -1711,9 +1722,6 @@ def render_tools_tab():
                                 st.info(
                                     f"✅ Successfully added {success_count} server(s). Refreshing..."
                                 )
-                                # Clear caches
-                                get_mcp_servers.clear()
-                                get_mcp_tools.clear()
                                 # Small delay to ensure file is written
                                 import time
 
@@ -2310,7 +2318,6 @@ def render_chat_view():
                         response = make_api_request("POST", "/messages/", message_data)
                         if response and response.get("data"):
                             st.session_state.pending_image_attachments = []
-                            get_messages.clear()
                             refresh_conversations_list()
                             reset_conversation_state()
                             st.session_state.show_attachment_uploader = False
@@ -2325,10 +2332,10 @@ def render_chat_view():
 def render_manage_modal():
     """Conversation management modal dialog"""
     should_show = st.session_state.get(CONVERSATION_MANAGER_DIALOG_KEY, False)
-    
+
     st.session_state.conversation_manager_visible = should_show
     st.session_state.show_conversation_manager = should_show
-    
+
     if not should_show:
         return
 
@@ -2355,7 +2362,7 @@ def render_manage_modal():
             with st.status("Loading conversations...", expanded=False):
                 # Get conversations with latest 3 messages for preview
                 manager_conversations_response = get_conversations(
-                    include_messages=True, latest_messages=3
+                    include_messages=True, latest_messages=3, fetch_all_pages=True
                 )
                 if (
                     manager_conversations_response
@@ -2487,7 +2494,6 @@ def render_manage_modal():
                                                 None
                                             )
                                             reset_conversation_state()
-                                        get_messages.clear()
                                         refresh_conversations_list()
                                         st.toast(
                                             f"Deleted '{conv.get('title', 'Conversation')}'",
@@ -2665,9 +2671,7 @@ def render_settings_view():
     has_conversation = conversation_id not in (None, "pending_new")
 
     if conversation_id is None:
-        st.info(
-            "Select a conversation or create a new chat to configure instructions."
-        )
+        st.info("Select a conversation or create a new chat to configure instructions.")
         return
 
     # Persona editor

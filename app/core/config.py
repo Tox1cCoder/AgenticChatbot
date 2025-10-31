@@ -206,6 +206,15 @@ class Settings(BaseSettings):
         description="Preserve context across PDF pages",
     )
 
+    # Table Processing Configuration
+    extract_tables_from_pdf: bool = Field(
+        default=True, description="Enable table extraction from PDF documents"
+    )
+    table_format: str = Field(
+        default="markdown",
+        description="Format for extracted tables (markdown, grid, plain)",
+    )
+
     # Prompt Configuration
     rag_chunks_in_prompt: int = Field(
         default=10,

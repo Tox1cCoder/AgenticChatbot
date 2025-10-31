@@ -18,6 +18,9 @@ from app.core.events import get_event_bus, DocumentEvent, DocumentEventData
 
 logger = logging.getLogger(__name__)
 
+import pdfplumber
+from tabulate import tabulate
+
 
 class DocumentProcessingService:
 
@@ -161,53 +164,7 @@ class DocumentProcessingService:
             ]
 
         elif filename.lower().endswith(".pdf"):
-            loader = PyPDFLoader(file_path)
-            documents = loader.load()
-
-            if self.settings.preserve_cross_page_context:
-                # Concatenate pages with page markers
-                pages_text = []
-                for doc in documents:
-                    page_num = doc.metadata.get("page", 0) + 1
-                    text = doc.page_content
-                    if text.strip():
-                        pages_text.append((page_num, text))
-
-                # Concatenate with page markers
-                full_text = "".join(
-                    [f"\n[PAGE {num}]\n{text}" for num, text in pages_text]
-                )
-
-                # Chunk the full document
-                chunks = self._create_chunks(
-                    [
-                        type(
-                            "Document", (), {"page_content": full_text, "metadata": {}}
-                        )()
-                    ]
-                )
-
-                # Extract page range for each chunk
-                for chunk in chunks:
-                    page_start, page_end = extract_page_range(chunk)
-                    chunks_with_metadata.append(
-                        {
-                            "text": chunk,
-                            "page_start": page_start,
-                            "page_end": page_end,
-                        }
-                    )
-            else:
-                # Per-page chunking
-                for doc in documents:
-                    page_num = doc.metadata.get("page", 0) + 1
-                    text = doc.page_content
-                    if text.strip():
-                        page_chunks = self._create_chunks([doc])
-                        for chunk in page_chunks:
-                            chunks_with_metadata.append(
-                                {"text": chunk, "page_number": page_num}
-                            )
+            chunks_with_metadata = await self._process_pdf_with_tables(file_path)
 
         elif filename.lower().endswith(".docx"):
             loader = Docx2txtLoader(file_path)
@@ -236,6 +193,89 @@ class DocumentProcessingService:
             "processing_time": processing_time,
             "filename": filename,
         }
+
+    async def _process_pdf_with_tables(self, file_path: str) -> List[Dict[str, Any]]:
+        """Extract text and tables from PDF, preserving table structure"""
+
+        chunks_with_metadata = []
+
+        with pdfplumber.open(file_path) as pdf:
+            for page_num, page in enumerate(pdf.pages, 1):
+                # Extract tables from the page
+                tables = page.extract_tables()
+                table_texts = []
+
+                for table_idx, table in enumerate(tables):
+                    if table and len(table) > 0:
+                        # Convert table to formatted text based on configuration
+                        table_format = self.settings.table_format
+
+                        if table_format == "markdown":
+                            table_md = tabulate(
+                                table, headers="firstrow", tablefmt="pipe"
+                            )
+                            table_texts.append(
+                                f"\n[TABLE {table_idx + 1} on PAGE {page_num}]\n{table_md}\n"
+                            )
+                        elif table_format == "grid":
+                            table_grid = tabulate(
+                                table, headers="firstrow", tablefmt="grid"
+                            )
+                            table_texts.append(
+                                f"\n[TABLE {table_idx + 1} on PAGE {page_num}]\n{table_grid}\n"
+                            )
+                        else:  # plain
+                            table_plain = tabulate(
+                                table, headers="firstrow", tablefmt="plain"
+                            )
+                            table_texts.append(
+                                f"\n[TABLE {table_idx + 1} on PAGE {page_num}]\n{table_plain}\n"
+                            )
+
+                # Extract text from the page
+                page_text = page.extract_text() or ""
+
+                # Combine text and tables
+                full_text = page_text
+                for table_text in table_texts:
+                    full_text += table_text
+
+                # Store page information with table metadata
+                if self.settings.preserve_cross_page_context:
+                    full_text = f"\n[PAGE {page_num}]\n{full_text}"
+                    chunks_with_metadata.append(
+                        {
+                            "text": full_text,
+                            "page_number": page_num,
+                            "has_tables": len(tables) > 0,
+                            "table_count": len(tables),
+                        }
+                    )
+                else:
+                    # Chunk per page
+                    page_chunks = self._create_chunks(
+                        [
+                            type(
+                                "Document",
+                                (),
+                                {"page_content": full_text, "metadata": {}},
+                            )()
+                        ]
+                    )
+                    for chunk in page_chunks:
+                        chunks_with_metadata.append(
+                            {
+                                "text": chunk,
+                                "page_number": page_num,
+                                "has_tables": len(tables) > 0,
+                                "table_count": len(tables),
+                            }
+                        )
+
+        logger.info(
+            f"Extracted {len(chunks_with_metadata)} chunks from PDF with table detection"
+        )
+        return chunks_with_metadata
 
     def _create_chunks(
         self, documents: List, max_chunk_size: int = None, overlap: int = None
@@ -313,6 +353,15 @@ class DocumentProcessingService:
                     payload["image_count"] = int(chunk_data["image_count"])
                 if chunk_data.get("image_prompts"):
                     payload["image_prompts"] = chunk_data["image_prompts"]
+
+                # Add table metadata
+                if "has_tables" in chunk_data:
+                    payload["has_tables"] = bool(chunk_data.get("has_tables", False))
+                if (
+                    "table_count" in chunk_data
+                    and chunk_data["table_count"] is not None
+                ):
+                    payload["table_count"] = int(chunk_data["table_count"])
 
             # Add page information
             if page_start is not None and page_end is not None:

@@ -107,21 +107,23 @@ class MultiAgentWorkflow:
             else str(last_message)
         )
 
+        # Check if conversation has documents available
+        conversation_id = state.get("conversation_id")
+        has_documents = self._conversation_has_documents(conversation_id)
+
         persona = state.get("persona")
         agent_msg = AgentMessage(
             role=MessageRole.USER, content=content, metadata={"persona": persona}
         )
+        
         selected_agent = await self.router.route_message(
-            agent_msg, list(self.agents.keys())
+            agent_msg, list(self.agents.keys()), has_documents=has_documents
         )
 
-        if selected_agent == "rag_agent":
-            conversation_id = state.get("conversation_id")
-            if not self._conversation_has_documents(conversation_id):
-                selected_agent = "chat_agent"
+        if selected_agent == "rag_agent" and not has_documents:
+            selected_agent = "chat_agent"
 
         state["selected_agent"] = selected_agent
-        logger.info(f"Routed to: {selected_agent}")
         return state
 
     def _conversation_has_documents(self, conversation_id: Optional[str]) -> bool:
