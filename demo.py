@@ -2666,7 +2666,7 @@ def render_settings_view():
 
     if conversation_id is None:
         st.info(
-            "💡 Select a conversation or create a new chat to configure instructions."
+            "Select a conversation or create a new chat to configure instructions."
         )
         return
 
