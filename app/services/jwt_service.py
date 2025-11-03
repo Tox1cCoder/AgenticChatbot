@@ -22,7 +22,9 @@ class JwtService:
         """Calculate token expiration time"""
         if delta:
             return datetime.now(timezone.utc) + delta
-        return datetime.now(timezone.utc) + timedelta(minutes=self.access_token_expire_minutes)
+        return datetime.now(timezone.utc) + timedelta(
+            minutes=self.access_token_expire_minutes
+        )
 
     def create_access_token(
         self, data: dict, expires_delta: Optional[timedelta] = None
@@ -30,14 +32,22 @@ class JwtService:
         """Create JWT access token"""
         to_encode = data.copy()
         expire = self._calculate_expiration_time(expires_delta)
-        to_encode.update({"exp": expire, "iat": datetime.now(timezone.utc)})
+        now = datetime.now(timezone.utc)
+        to_encode.update({"exp": int(expire.timestamp()), "iat": int(now.timestamp())})
         return jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
 
     def create_refresh_token(self, data: dict) -> str:
         """Create refresh token with longer expiration"""
         to_encode = data.copy()
-        expire = datetime.now(timezone.utc) + timedelta(days=self.refresh_token_expire_days)
-        to_encode.update({"exp": expire, "iat": datetime.now(timezone.utc), "type": "refresh"})
+        now = datetime.now(timezone.utc)
+        expire = now + timedelta(days=self.refresh_token_expire_days)
+        to_encode.update(
+            {
+                "exp": int(expire.timestamp()),
+                "iat": int(now.timestamp()),
+                "type": "refresh",
+            }
+        )
         return jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
 
     def decode_token(self, token: str) -> dict:

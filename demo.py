@@ -669,13 +669,13 @@ def refresh_conversations_list(
 ) -> None:
     """Reload conversations list from the API, optionally seeding with a fallback."""
     st.session_state.conversations_loaded = False
-    refreshed = get_conversations(include_messages=False, fetch_all_pages=False)
+    refreshed = get_conversations(include_messages=False, fetch_all_pages=True)
     if refreshed and refreshed.get("data"):
         st.session_state.conversations_list = refreshed["data"]["items"]
         st.session_state.conversations_loaded = True
         st.session_state.conversations_last_fetch_params = {
             "include_messages": False,
-            "fetch_all_pages": False,
+            "fetch_all_pages": True,
         }
         return
 
@@ -1147,7 +1147,7 @@ def render_sidebar():
             and st.session_state.auth_token
         ):
             conversations_response = get_conversations(
-                include_messages=False, fetch_all_pages=False
+                include_messages=False, fetch_all_pages=True
             )
             if conversations_response and conversations_response.get("data"):
                 st.session_state.conversations_list = conversations_response["data"][
@@ -1156,7 +1156,7 @@ def render_sidebar():
                 st.session_state.conversations_loaded = True
                 st.session_state.conversations_last_fetch_params = {
                     "include_messages": False,
-                    "fetch_all_pages": False,
+                    "fetch_all_pages": True,
                 }
 
         # Grouped conversations
