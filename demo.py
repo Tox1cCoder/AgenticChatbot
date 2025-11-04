@@ -1996,7 +1996,10 @@ def render_tools_tab():
                         st.error("Tool execution failed. Check API logs.")
 
     # Display execution result
-    if st.session_state.tool_execution_result:
+    if (
+        hasattr(st.session_state, "tool_execution_result")
+        and st.session_state.tool_execution_result
+    ):
         result = st.session_state.tool_execution_result
 
         st.markdown("---")
