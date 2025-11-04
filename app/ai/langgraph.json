@@ -9,7 +9,7 @@
         "agent": {
           "description": "Select which agent to use",
           "default": "chat",
-          "enum": ["chat", "rag", "router"]
+          "enum": ["chat_agent", "rag_agent", "search_agent", "image_generator_agent", "router"],
         },
         "max_iterations": {
           "description": "Maximum workflow iterations",

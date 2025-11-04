@@ -406,6 +406,239 @@ APP_STYLE = """
 </style>
 """
 
+
+def safe_api_call(
+    method: str,
+    endpoint: str,
+    data: Optional[Dict] = None,
+    error_message: str = "API request failed",
+    success_message: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Wrapper for API calls with consistent error handling and toast notifications.
+    
+    Args:
+        method: HTTP method (GET, POST, PUT, DELETE)
+        endpoint: API endpoint path
+        data: Optional request payload
+        error_message: Message to show on error
+        success_message: Optional message to show on success
+        
+    Returns:
+        Response data dict or None on error
+    """
+    try:
+        response_data = make_api_request(method, endpoint, data)
+        if response_data and response_data.get("success"):
+            if success_message:
+                st.toast(success_message, icon="✅")
+            return response_data
+        else:
+            st.toast(error_message, icon="❌")
+            return None
+    except Exception as e:
+        st.toast(f"{error_message}: {str(e)}", icon="❌")
+        return None
+
+
+def format_conversation_title(title: str, max_length: int = 40) -> str:
+    """
+    Format conversation title with truncation and ellipsis.
+    
+    Args:
+        title: Original title
+        max_length: Maximum length before truncation
+        
+    Returns:
+        Formatted title
+    """
+    if not title or title == "New Conversation":
+        return "New Conversation"
+    if len(title) > max_length:
+        return title[: max_length - 3] + "..."
+    return title
+
+
+def render_status_badge(status: str) -> str:
+    """
+    Render a status badge with consistent styling.
+    
+    Args:
+        status: Status string (processing, ready, failed, etc.)
+        
+    Returns:
+        HTML for the status badge
+    """
+    status_lower = status.lower()
+    badge_class = f"status-{status_lower}"
+    
+    status_icons = {
+        "processing": "⏳",
+        "ready": "✅",
+        "failed": "❌",
+        "pending": "⏸️",
+        "active": "🟢",
+        "inactive": "⚪",
+    }
+    
+    icon = status_icons.get(status_lower, "")
+    display_text = status.replace("_", " ").title()
+    
+    return f'<span class="status-badge {badge_class}">{icon} {display_text}</span>'
+
+
+def format_timestamp(timestamp: str) -> str:
+    """
+    Format timestamp for display.
+    
+    Args:
+        timestamp: ISO format timestamp string
+        
+    Returns:
+        Formatted timestamp string
+    """
+    try:
+        dt = parser.isoparse(timestamp)
+        now = datetime.now(dt.tzinfo)
+        diff = now - dt
+        
+        if diff < timedelta(minutes=1):
+            return "Just now"
+        elif diff < timedelta(hours=1):
+            minutes = int(diff.total_seconds() / 60)
+            return f"{minutes}m ago"
+        elif diff < timedelta(days=1):
+            hours = int(diff.total_seconds() / 3600)
+            return f"{hours}h ago"
+        elif diff < timedelta(days=7):
+            days = diff.days
+            return f"{days}d ago"
+        else:
+            return dt.strftime("%b %d, %Y")
+    except Exception:
+        return timestamp
+
+
+def get_agent_display_name(agent: str) -> str:
+    """
+    Get display-friendly name for an agent.
+    
+    Args:
+        agent: Agent identifier
+        
+    Returns:
+        Display name
+    """
+    agent_names = {
+        "chat_agent": "Chat Agent",
+        "rag_agent": "RAG Agent",
+        "search_agent": "Search Agent",
+        "image_generator_agent": "Image Generator",
+        "router": "Router",
+    }
+    return agent_names.get(agent, agent.replace("_", " ").title())
+
+
+def get_agent_icon(agent: str) -> str:
+    """
+    Get emoji icon for an agent.
+    
+    Args:
+        agent: Agent identifier
+        
+    Returns:
+        Emoji icon
+    """
+    agent_icons = {
+        "chat_agent": "💬",
+        "rag_agent": "📚",
+        "search_agent": "🔍",
+        "image_generator_agent": "🎨",
+        "router": "🔀",
+    }
+    return agent_icons.get(agent, "🤖")
+
+
+def render_conversation_button(
+    conversation: Dict[str, Any],
+    is_active: bool,
+    on_click_callback: Optional[Callable] = None,
+) -> None:
+    """
+    Render a conversation button with consistent styling.
+    
+    Args:
+        conversation: Conversation data dict
+        is_active: Whether this conversation is currently active
+        on_click_callback: Optional callback when button is clicked
+    """
+    title = format_conversation_title(conversation.get("title", "New Conversation"))
+    button_type = "primary" if is_active else "secondary"
+    
+    if st.button(
+        title,
+        key=f"conv_{conversation['id']}",
+        use_container_width=True,
+        type=button_type,
+    ):
+        if conversation["id"] != st.session_state.current_conversation_id:
+            st.session_state.current_conversation_id = conversation["id"]
+            st.session_state.active_view = "chat"
+            close_conversation_manager()
+            reset_conversation_state()
+            if on_click_callback:
+                on_click_callback()
+            st.rerun()
+
+
+def group_conversations_by_date(
+    conversations: List[Dict[str, Any]]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Group conversations by date (Today, Yesterday, Last 7 days, Last 30 days, Older).
+    
+    Args:
+        conversations: List of conversation dicts
+        
+    Returns:
+        Dict mapping group names to lists of conversations
+    """
+    now = datetime.now()
+    today = now.date()
+    yesterday = today - timedelta(days=1)
+    
+    groups: Dict[str, List[Dict[str, Any]]] = {
+        "Today": [],
+        "Yesterday": [],
+        "Last 7 days": [],
+        "Last 30 days": [],
+        "Older": [],
+    }
+    
+    for conv in conversations:
+        try:
+            created_at = parser.parse(conv.get("createdAt", ""))
+            conv_date = created_at.date()
+            
+            if conv_date == today:
+                groups["Today"].append(conv)
+            elif conv_date == yesterday:
+                groups["Yesterday"].append(conv)
+            elif (today - conv_date).days <= 7:
+                groups["Last 7 days"].append(conv)
+            elif (today - conv_date).days <= 30:
+                groups["Last 30 days"].append(conv)
+            else:
+                groups["Older"].append(conv)
+        except Exception:
+            groups["Older"].append(conv)
+    
+    # Return only non-empty groups
+    return {name: convs for name, convs in groups.items() if convs}
+
+
+# ==================== SESSION STATE DEFAULTS ====================
+
 SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
     "current_user_id": lambda: None,
     "current_conversation_id": lambda: None,
@@ -580,47 +813,6 @@ def format_time(iso_string: str) -> str:
         return iso_string
 
 
-def group_conversations_by_date(
-    conversations: List[Dict[str, Any]],
-) -> Dict[str, List[Dict[str, Any]]]:
-    """Group conversations by time period"""
-    groups = {"Today": [], "Yesterday": [], "This Week": [], "Older": []}
-
-    now = datetime.now()
-
-    for conv in conversations:
-        try:
-            created_at = conv.get("createdAt", "")
-            # Handle different datetime formats
-            if isinstance(created_at, str):
-                dt = parser.isoparse(created_at)
-            else:
-                dt = created_at
-
-            # Make sure both datetimes are timezone-aware or both naive
-            if dt.tzinfo is not None:
-                # Make now timezone-aware with same timezone
-                now_aware = datetime.now(dt.tzinfo)
-                days_ago = (now_aware.date() - dt.date()).days
-            else:
-                days_ago = (now.date() - dt.date()).days
-
-            if days_ago == 0:
-                groups["Today"].append(conv)
-            elif days_ago == 1:
-                groups["Yesterday"].append(conv)
-            elif days_ago <= 7:
-                groups["This Week"].append(conv)
-            else:
-                groups["Older"].append(conv)
-        except Exception as e:
-            # If parsing fails, put in Older
-            groups["Older"].append(conv)
-
-    # Remove empty groups
-    return {k: v for k, v in groups.items() if v}
-
-
 st.set_page_config(
     page_title="ChatBot", layout="wide", initial_sidebar_state="expanded"
 )
@@ -653,12 +845,14 @@ def reset_conversation_state() -> None:
 
 
 def open_conversation_manager() -> None:
+    """Open the conversation manager dialog on the next render."""
     st.session_state.conversation_manager_visible = True
     st.session_state.show_conversation_manager = True
     st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = True
 
 
 def close_conversation_manager() -> None:
+    """Close the conversation manager dialog and prevent reopening on rerun."""
     st.session_state.conversation_manager_visible = False
     st.session_state.show_conversation_manager = False
     st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = False
@@ -1179,20 +1373,7 @@ def render_sidebar():
                         is_active = (
                             conv["id"] == st.session_state.current_conversation_id
                         )
-
-                        button_type = "primary" if is_active else "secondary"
-                        if st.button(
-                            f"{conv['title'][:40]}...",
-                            key=f"conv_{conv['id']}",
-                            use_container_width=True,
-                            type=button_type,
-                        ):
-                            if conv["id"] != st.session_state.current_conversation_id:
-                                st.session_state.current_conversation_id = conv["id"]
-                                st.session_state.active_view = "chat"
-                                close_conversation_manager()
-                                reset_conversation_state()
-                                st.rerun()
+                        render_conversation_button(conv, is_active)
 
         st.divider()
 
@@ -2512,6 +2693,7 @@ def render_manage_modal():
             st.rerun()
 
     manage_dialog()
+    st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = False
 
 
 def render_documents_tab():

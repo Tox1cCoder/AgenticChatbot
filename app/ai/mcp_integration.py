@@ -229,6 +229,30 @@ class MCPManager:
             if not any(existing is tool for existing in indexed_tools):
                 indexed_tools.append(tool)
 
+    def _filter_schema_recursively(self, schema: Any) -> Any:
+        unsupported_keys = {"$schema", "additionalProperties"}
+        
+        if isinstance(schema, dict):
+            filtered = {}
+            for key, value in schema.items():
+                if key in unsupported_keys:
+                    continue
+                    
+                # Recursively filter nested structures
+                if key in ("properties", "items", "anyOf", "allOf", "oneOf", "definitions"):
+                    filtered[key] = self._filter_schema_recursively(value)
+                elif isinstance(value, dict):
+                    filtered[key] = self._filter_schema_recursively(value)
+                elif isinstance(value, list):
+                    filtered[key] = [self._filter_schema_recursively(item) for item in value]
+                else:
+                    filtered[key] = value
+            return filtered
+        elif isinstance(schema, list):
+            return [self._filter_schema_recursively(item) for item in schema]
+        else:
+            return schema
+
     def _clean_tool_schemas(self, tools: List[BaseTool]) -> List[BaseTool]:
 
         cleaned_tools = []
@@ -299,9 +323,7 @@ class MCPManager:
 
         unsupported_keys = {"$schema", "additionalProperties"}
         if result_schema and isinstance(result_schema, dict):
-            result_schema = {
-                k: v for k, v in result_schema.items() if k not in unsupported_keys
-            }
+            result_schema = self._filter_schema_recursively(result_schema)
 
         return result_schema
 
