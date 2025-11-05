@@ -56,7 +56,7 @@ RESPONSE FORMAT:
 - Support with evidence and relevant statistics/quotes
 - Include cited sources
 
-Be thorough and proactive in refining search results for comprehensive answers. Images from results display automatically."""
+Be thorough and proactive in refining search results for comprehensive answers."""
 
 IMAGE_GENERATOR_SYSTEM_PROMPT = """You are a creative visual artist assistant specializing in detailed image prompts.
 

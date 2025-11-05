@@ -416,14 +416,14 @@ def safe_api_call(
 ) -> Optional[Dict[str, Any]]:
     """
     Wrapper for API calls with consistent error handling and toast notifications.
-    
+
     Args:
         method: HTTP method (GET, POST, PUT, DELETE)
         endpoint: API endpoint path
         data: Optional request payload
         error_message: Message to show on error
         success_message: Optional message to show on success
-        
+
     Returns:
         Response data dict or None on error
     """
@@ -444,11 +444,11 @@ def safe_api_call(
 def format_conversation_title(title: str, max_length: int = 40) -> str:
     """
     Format conversation title with truncation and ellipsis.
-    
+
     Args:
         title: Original title
         max_length: Maximum length before truncation
-        
+
     Returns:
         Formatted title
     """
@@ -462,16 +462,16 @@ def format_conversation_title(title: str, max_length: int = 40) -> str:
 def render_status_badge(status: str) -> str:
     """
     Render a status badge with consistent styling.
-    
+
     Args:
         status: Status string (processing, ready, failed, etc.)
-        
+
     Returns:
         HTML for the status badge
     """
     status_lower = status.lower()
     badge_class = f"status-{status_lower}"
-    
+
     status_icons = {
         "processing": "⏳",
         "ready": "✅",
@@ -480,20 +480,20 @@ def render_status_badge(status: str) -> str:
         "active": "🟢",
         "inactive": "⚪",
     }
-    
+
     icon = status_icons.get(status_lower, "")
     display_text = status.replace("_", " ").title()
-    
+
     return f'<span class="status-badge {badge_class}">{icon} {display_text}</span>'
 
 
 def format_timestamp(timestamp: str) -> str:
     """
     Format timestamp for display.
-    
+
     Args:
         timestamp: ISO format timestamp string
-        
+
     Returns:
         Formatted timestamp string
     """
@@ -501,7 +501,7 @@ def format_timestamp(timestamp: str) -> str:
         dt = parser.isoparse(timestamp)
         now = datetime.now(dt.tzinfo)
         diff = now - dt
-        
+
         if diff < timedelta(minutes=1):
             return "Just now"
         elif diff < timedelta(hours=1):
@@ -522,10 +522,10 @@ def format_timestamp(timestamp: str) -> str:
 def get_agent_display_name(agent: str) -> str:
     """
     Get display-friendly name for an agent.
-    
+
     Args:
         agent: Agent identifier
-        
+
     Returns:
         Display name
     """
@@ -542,10 +542,10 @@ def get_agent_display_name(agent: str) -> str:
 def get_agent_icon(agent: str) -> str:
     """
     Get emoji icon for an agent.
-    
+
     Args:
         agent: Agent identifier
-        
+
     Returns:
         Emoji icon
     """
@@ -566,7 +566,7 @@ def render_conversation_button(
 ) -> None:
     """
     Render a conversation button with consistent styling.
-    
+
     Args:
         conversation: Conversation data dict
         is_active: Whether this conversation is currently active
@@ -574,7 +574,7 @@ def render_conversation_button(
     """
     title = format_conversation_title(conversation.get("title", "New Conversation"))
     button_type = "primary" if is_active else "secondary"
-    
+
     if st.button(
         title,
         key=f"conv_{conversation['id']}",
@@ -592,21 +592,21 @@ def render_conversation_button(
 
 
 def group_conversations_by_date(
-    conversations: List[Dict[str, Any]]
+    conversations: List[Dict[str, Any]],
 ) -> Dict[str, List[Dict[str, Any]]]:
     """
     Group conversations by date (Today, Yesterday, Last 7 days, Last 30 days, Older).
-    
+
     Args:
         conversations: List of conversation dicts
-        
+
     Returns:
         Dict mapping group names to lists of conversations
     """
     now = datetime.now()
     today = now.date()
     yesterday = today - timedelta(days=1)
-    
+
     groups: Dict[str, List[Dict[str, Any]]] = {
         "Today": [],
         "Yesterday": [],
@@ -614,12 +614,12 @@ def group_conversations_by_date(
         "Last 30 days": [],
         "Older": [],
     }
-    
+
     for conv in conversations:
         try:
             created_at = parser.parse(conv.get("createdAt", ""))
             conv_date = created_at.date()
-            
+
             if conv_date == today:
                 groups["Today"].append(conv)
             elif conv_date == yesterday:
@@ -632,7 +632,7 @@ def group_conversations_by_date(
                 groups["Older"].append(conv)
         except Exception:
             groups["Older"].append(conv)
-    
+
     # Return only non-empty groups
     return {name: convs for name, convs in groups.items() if convs}
 
@@ -930,7 +930,7 @@ def get_user(user_id: str) -> Dict[str, Any]:
 
 def get_conversations(
     page: int = 1,
-    limit: int = 20,
+    limit: int = 100,
     include_messages: bool = False,
     latest_messages: int = 3,
     fetch_all_pages: bool = False,
@@ -1604,7 +1604,7 @@ def render_message_feedback_inline(msg: Dict[str, Any]):
             st.markdown("**Provide Feedback**")
             with st.form(f"add_feedback_{msg['id']}", clear_on_submit=True):
                 rating = st.select_slider("Rating", options=[1, 2, 3, 4, 5], value=5)
-                comment = st.text_area("Comment (optional)", height=60)
+                comment = st.text_area("Comment (optional)", height=68)
 
                 if st.form_submit_button(
                     "Submit", use_container_width=True, type="primary"

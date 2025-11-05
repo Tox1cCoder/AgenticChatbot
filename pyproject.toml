@@ -50,6 +50,8 @@ dependencies = [
     # Vector Database & Embeddings
     "qdrant-client>=1.7.0",
     "sentence-transformers>=2.2.2",
+    "transformers>=4.30.0",
+    "torch>=2.1.0",
     
     # Token Counting & NLP
     "tiktoken>=0.5.0",
