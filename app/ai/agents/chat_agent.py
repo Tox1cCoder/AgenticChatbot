@@ -11,7 +11,11 @@ from langchain.agents import create_agent
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_chat_prompt
-from ..utils import coerce_response_text, extract_agent_execution_info, get_error_recovery_hint
+from ..utils import (
+    coerce_response_text,
+    extract_agent_execution_info,
+    get_error_recovery_hint,
+)
 from ...core.config import settings
 from ...core.exceptions.mcp import ServerNotFoundError
 from ..mcp_integration import MCPManager
@@ -76,7 +80,9 @@ class ChatAgent:
 
                 server_status = self.mcp_manager.get_servers_status()
                 active_servers = [
-                    name for name, status in server_status.items() if status.get("enabled")
+                    name
+                    for name, status in server_status.items()
+                    if status.get("enabled")
                 ]
                 logger.info(
                     "Loaded %d MCP tools for ChatAgent from %d servers",
@@ -123,7 +129,9 @@ class ChatAgent:
                     await self._init_tools()
 
                 if self.tools and self.langchain_model:
-                    response_text, tools_used, tool_artifacts = await self._generate_with_tools(prompt)
+                    response_text, tools_used, tool_artifacts = (
+                        await self._generate_with_tools(prompt)
+                    )
                 else:
                     response_text = await self._generate(prompt)
         except Exception as exc:
@@ -190,6 +198,28 @@ class ChatAgent:
         except Exception as exc:
             raise RuntimeError(f"Gemini API error: {exc}") from exc
 
+    async def _generate_stream(self, prompt: str):
+        """
+        Generate streaming response from Gemini API.
+        Yields text chunks as they arrive.
+        """
+        if not self.gemini_client:
+            raise RuntimeError("Gemini client not initialized")
+
+        try:
+            response_stream = self.gemini_client.models.generate_content_stream(
+                model=self.model_name,
+                contents=prompt,
+            )
+
+            for chunk in response_stream:
+                if hasattr(chunk, "text"):
+                    yield chunk.text
+
+        except Exception as exc:
+            logger.error(f"Error in streaming generation: {exc}", exc_info=True)
+            raise RuntimeError(f"Gemini streaming API error: {exc}") from exc
+
     async def _handle_generation_error(self, prompt: str, error: Exception) -> str:
         """Ask the base LLM to craft a user-facing reply that acknowledges an internal error."""
         error_message = f"{type(error).__name__}: {error}"
@@ -207,28 +237,59 @@ class ChatAgent:
         fallback_response = await self._generate(fallback_prompt)
         return coerce_response_text(fallback_response)
 
-    async def _generate_with_tools(self, prompt: str) -> tuple[str, List[str], List[Dict[str, Any]]]:
+    async def _generate_with_tools(
+        self, prompt: str, streaming_callback=None
+    ) -> tuple[str, List[str], List[Dict[str, Any]]]:
         """Generate response with tool calling support"""
         try:
             # Create agent executor
             agent_executor = self._create_agent_executor(self.tools, prompt)
-            
-            # Invoke agent with the user message
-            agent_response = await agent_executor.ainvoke({
-                "messages": [HumanMessage(content=prompt)]
-            })
-            
+
+            # If streaming callback provided, use streaming mode
+            if streaming_callback:
+                # Stream agent execution
+                full_response = ""
+                async for event in agent_executor.astream_events(
+                    {"messages": [HumanMessage(content=prompt)]}, version="v1"
+                ):
+                    # Extract tokens from LLM events
+                    if event.get("event") == "on_chat_model_stream":
+                        chunk = event.get("data", {}).get("chunk")
+                        if chunk and hasattr(chunk, "content"):
+                            token = chunk.content
+                            if token:
+                                full_response += token
+                                await streaming_callback(token)
+                    # Notify about tool executions
+                    elif event.get("event") == "on_tool_start":
+                        tool_name = event.get("name", "unknown_tool")
+                        await streaming_callback(
+                            f"\n[Executing tool: {tool_name}]\n", is_tool_event=True
+                        )
+
+                # Get final response for extraction
+                agent_response = await agent_executor.ainvoke(
+                    {"messages": [HumanMessage(content=prompt)]}
+                )
+            else:
+                # Invoke agent with the user message (non-streaming)
+                agent_response = await agent_executor.ainvoke(
+                    {"messages": [HumanMessage(content=prompt)]}
+                )
+
             # Extract execution info
             execution_info = extract_agent_execution_info(agent_response)
-            
+
             response_text = execution_info["response_text"]
             tools_used = execution_info["tools_used"]
             tool_artifacts = execution_info["tool_artifacts"]
-            
+
             # Log parallel tool execution summary
             if tools_used:
-                logger.info(f"ChatAgent executed {len(tools_used)} tool(s): {', '.join(tools_used)}")
-            
+                logger.info(
+                    f"ChatAgent executed {len(tools_used)} tool(s): {', '.join(tools_used)}"
+                )
+
             return response_text, tools_used, tool_artifacts
 
         except Exception as exc:
@@ -238,24 +299,30 @@ class ChatAgent:
     def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
         """Create agent executor with proper tool binding configuration."""
         # Configure tool calling based on settings
-        tool_choice = settings.tool_choice_mode if hasattr(settings, 'tool_choice_mode') else "auto"
-        
+        tool_choice = (
+            settings.tool_choice_mode
+            if hasattr(settings, "tool_choice_mode")
+            else "auto"
+        )
+
         # Configure model with tool binding
         llm_with_tools = self.langchain_model.bind_tools(
-            tools, 
+            tools,
             tool_config={
                 "function_calling_config": {
-                    "mode": tool_choice.upper() if tool_choice in ["auto", "any", "none"] else "AUTO"
+                    "mode": (
+                        tool_choice.upper()
+                        if tool_choice in ["auto", "any", "none"]
+                        else "AUTO"
+                    )
                 }
-            }
+            },
         )
-        
+
         agent = create_agent(
-            model=llm_with_tools,
-            tools=tools,
-            system_prompt=system_prompt
+            model=llm_with_tools, tools=tools, system_prompt=system_prompt
         )
-        
+
         return agent
 
     async def _generate_with_vision(self, prompt: str, attachments: List[dict]) -> str:

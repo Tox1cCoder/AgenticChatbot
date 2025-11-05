@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Optional, List, Dict, Any
 
 from google import genai
@@ -213,7 +214,8 @@ class RAGAgent:
             role=MessageRole.ASSISTANT, content=response_text
         )
 
-        citations = [
+        # Build initial citations from all retrieved documents
+        all_citations = [
             {
                 "source": doc.get("source", "unknown"),
                 "page_number": doc.get("page_number"),
@@ -225,6 +227,24 @@ class RAGAgent:
             }
             for doc in retrieved_docs
         ]
+
+        # Apply citation verification if enabled
+        citations = all_citations
+        citation_verification_enabled = False
+        citation_coverage = 100.0
+
+        if self.settings.enable_citation_verification and retrieved_docs:
+            verified_citations = self._verify_citations(
+                response_text, retrieved_docs, all_citations
+            )
+            if verified_citations is not None:
+                citations = verified_citations
+                citation_verification_enabled = True
+                citation_coverage = (
+                    (len(citations) / len(all_citations) * 100)
+                    if all_citations
+                    else 0.0
+                )
 
         # Calculate retrieval statistics
         avg_score = (
@@ -246,6 +266,8 @@ class RAGAgent:
             },
             "persona_used": persona,
             "tools_available": len(self.tools),
+            "citation_verification_enabled": citation_verification_enabled,
+            "citation_coverage": citation_coverage,
         }
 
         # Add tool usage metadata if tools were used
@@ -275,8 +297,98 @@ class RAGAgent:
             error=error_message,
         )
 
+    def _verify_citations(
+        self,
+        response_text: str,
+        retrieved_docs: List[Dict[str, Any]],
+        all_citations: List[Dict[str, Any]],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """
+        Verify which documents were actually referenced in the response text.
+        Returns filtered citations list or None if verification fails.
+        """
+        try:
+            citation_patterns = [
+                r"\[Document\s+(\d+)\]",  # [Document 1]
+                r"Document\s+(\d+)",  # Document 1
+                r"\[(\d+)\]",  # [1]
+                r"\(Document\s+(\d+)\)",  # (Document 1)
+                r"\((\d+)\)",  # (1)
+            ]
+
+            referenced_indices = set()
+
+            # Try each pattern to find document references
+            for pattern in citation_patterns:
+                matches = re.finditer(pattern, response_text, re.IGNORECASE)
+                for match in matches:
+                    try:
+                        doc_num = int(match.group(1))
+                        # Document numbers are 1-indexed in text, convert to 0-indexed
+                        if 1 <= doc_num <= len(retrieved_docs):
+                            referenced_indices.add(doc_num - 1)
+                    except (ValueError, IndexError):
+                        continue
+
+            # If no references found, check if coverage threshold is met
+            if not referenced_indices:
+                # No explicit citations found - could mean documents weren't used
+                # or citation format wasn't followed
+                logger.warning("No explicit document citations found in response")
+
+                # If minimum citation coverage is required and we have docs, mark all as potentially relevant
+                if self.settings.min_citation_coverage > 0:
+                    logger.info(
+                        "Marking all documents as potentially relevant due to no explicit citations"
+                    )
+                    # Mark all citations as "potentially relevant"
+                    for citation in all_citations:
+                        citation["potentially_relevant"] = True
+                    return all_citations
+                else:
+                    # Return empty citations if no references found and no minimum coverage required
+                    return []
+
+            # Filter citations to only include referenced documents
+            verified_citations = []
+            for idx in sorted(referenced_indices):
+                if idx < len(all_citations):
+                    citation = all_citations[idx].copy()
+                    citation["referenced"] = True
+                    verified_citations.append(citation)
+
+            logger.info(
+                f"Citation verification: {len(verified_citations)}/{len(all_citations)} documents were referenced"
+            )
+
+            return verified_citations
+
+        except Exception as exc:
+            logger.error(f"Error in citation verification: {exc}", exc_info=True)
+            # On error, return all citations to avoid losing information
+            return all_citations
+
+    async def _generate_stream(self, prompt: str):
+        """
+        Generate streaming response from Gemini API.
+        Yields text chunks as they arrive.
+        """
+        try:
+            response_stream = self.gemini_client.models.generate_content_stream(
+                model=self.model_name,
+                contents=prompt,
+            )
+
+            for chunk in response_stream:
+                if hasattr(chunk, "text"):
+                    yield chunk.text
+
+        except Exception as exc:
+            logger.error(f"Error in streaming generation: {exc}", exc_info=True)
+            raise RuntimeError(f"Gemini streaming API error: {exc}") from exc
+
     async def _generate_with_tools(
-        self, prompt: str
+        self, prompt: str, streaming_callback=None
     ) -> tuple[str, List[str], List[Dict[str, Any]]]:
         """Generate response with tool calling support using create_agent."""
         try:

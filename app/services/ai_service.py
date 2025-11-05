@@ -118,6 +118,85 @@ class AIService:
             attachments=attachments,
         )
 
+    async def generate_bot_response_stream(
+        self,
+        user_message: str,
+        conversation_id: Optional[UUID] = None,
+        user_id: Optional[UUID] = None,
+        attachments: Optional[list] = None,
+    ):
+        """
+        Generate bot response with streaming support.
+        Yields chunks as they arrive from the workflow.
+        """
+        thread_id = (
+            str(conversation_id) if conversation_id and self.checkpointer else None
+        )
+
+        # Load and sanitize persona
+        persona = None
+        if conversation_id:
+            persona = self._load_persona(conversation_id)
+            persona = sanitize_persona(persona)
+
+        # Track accumulated response
+        full_content = ""
+        final_response = None
+
+        try:
+            async for event in self.workflow.execute_stream(
+                message=user_message,
+                conversation_id=str(conversation_id) if conversation_id else None,
+                user_id=str(user_id) if user_id else None,
+                thread_id=thread_id,
+                persona=persona,
+                attachments=attachments,
+            ):
+                event_type = event.get("type")
+
+                if event_type == "node":
+                    # Yield node execution notification
+                    node_name = event.get("node")
+                    yield {"type": "node", "node": node_name}
+
+                elif event_type == "content":
+                    # Yield content chunks
+                    content = event.get("content", "")
+                    full_content = content  # Store full content
+                    yield {"type": "token", "content": content}
+
+                elif event_type == "tool_artifacts":
+                    # Yield tool execution information
+                    artifacts = event.get("artifacts", [])
+                    for artifact in artifacts:
+                        yield {
+                            "type": "tool",
+                            "name": artifact.get("tool", "unknown"),
+                            "status": "error" if artifact.get("error") else "success",
+                            "details": artifact,
+                        }
+
+                elif event_type == "complete":
+                    # Store final response
+                    final_response = event.get("response")
+
+            # Yield final complete event with full response
+            if final_response:
+                yield {"type": "complete", "response": final_response}
+            else:
+                # Build error response if no final response
+                error_response = self._build_error_response(
+                    "Error: No response generated"
+                )
+                yield {"type": "complete", "response": error_response}
+
+        except Exception as exc:
+            logger.error(
+                f"Error in streaming response generation: {exc}", exc_info=True
+            )
+            error_response = self._build_error_response(f"Error: {str(exc)}")
+            yield {"type": "error", "error": str(exc), "response": error_response}
+
     def get_bot_response_sync(
         self,
         user_message: str,

@@ -101,9 +101,169 @@ class MessageService(IMessageService):
 
         return MessageRead.model_validate(created_message)
 
+    async def create_message_stream(self, message_create_data: MessageCreate):
+        """
+        Create a message and stream the bot response.
+        Yields chunks as they arrive from the AI service.
+        """
+        self.conversation_validation_utils.validate_conversation_exists(
+            message_create_data.conversation_id
+        )
+
+        # Create and persist the user message
+        message_entity = MessageFactory.create_from_schema_with_role(
+            message_create_data, message_create_data.role
+        )
+        created_message = self.repository.create(message_entity)
+
+        # Yield user message creation event
+        yield {
+            "type": "user_message_created",
+            "message": MessageRead.model_validate(created_message).model_dump(
+                mode="json"
+            ),
+        }
+
+        if message_create_data.role == MessageRole.user:
+            # Get the user_id and persona from the conversation
+            conversation = (
+                self.conversation_validation_utils.conversation_repository.get_by_id(
+                    message_create_data.conversation_id
+                )
+            )
+            user_id = conversation.owner_id if conversation else None
+            persona = conversation.persona_prompt if conversation else None
+            sanitized_persona = sanitize_persona(persona)
+
+            # Extract attachments from message_create_data if present
+            attachments = (
+                message_create_data.attachments
+                if hasattr(message_create_data, "attachments")
+                else None
+            )
+
+            # Stream bot response generation
+            bot_response_content = "Error: No response generated"
+            bot_response = None
+
+            try:
+                async for event in self.ai_service.generate_bot_response_stream(
+                    user_message=message_create_data.content,
+                    conversation_id=message_create_data.conversation_id,
+                    user_id=user_id,
+                    attachments=attachments,
+                ):
+                    event_type = event.get("type")
+
+                    if event_type == "token":
+                        # Yield token to client
+                        yield {"type": "token", "content": event.get("content", "")}
+
+                    elif event_type == "tool":
+                        # Yield tool execution event
+                        yield {
+                            "type": "tool",
+                            "name": event.get("name"),
+                            "status": event.get("status"),
+                        }
+
+                    elif event_type == "complete":
+                        # Store final response
+                        bot_response = event.get("response")
+                        if bot_response and bot_response.message:
+                            content = bot_response.message.content
+                            # Ensure content is not empty
+                            bot_response_content = (
+                                content
+                                if content and content.strip()
+                                else "No response generated"
+                            )
+                        else:
+                            bot_response_content = "Error: No response generated"
+
+                    elif event_type == "error":
+                        # Handle error
+                        bot_response = event.get("response")
+                        error_msg = event.get("error", "Unknown error")
+                        if bot_response and bot_response.message:
+                            content = bot_response.message.content
+                            bot_response_content = (
+                                content
+                                if content and content.strip()
+                                else f"Error: {error_msg}"
+                            )
+                        else:
+                            bot_response_content = f"Error: {error_msg}"
+
+                # Ensure content is valid (not empty)
+                if not bot_response_content or not bot_response_content.strip():
+                    bot_response_content = "No response generated"
+
+                # Create metadata for bot response
+                bot_metadata = dict(bot_response.metadata) if bot_response else {}
+                if sanitized_persona:
+                    bot_metadata.setdefault("persona_used", sanitized_persona)
+
+                if bot_response and bot_response.tool_artifacts:
+                    bot_metadata.setdefault(
+                        "tool_artifacts", bot_response.tool_artifacts
+                    )
+
+                # Extract images from bot response metadata (from Search or Image Generator agents)
+                if (
+                    bot_response
+                    and bot_response.metadata
+                    and "images" in bot_response.metadata
+                ):
+                    bot_metadata["images"] = bot_response.metadata["images"]
+
+                # Create and persist bot response message
+                bot_response_entity = MessageFactory.create_bot_response(
+                    conversation_id=message_create_data.conversation_id,
+                    content=bot_response_content,
+                    message_metadata=bot_metadata,
+                )
+                bot_message = self.repository.create(bot_response_entity)
+
+                # Yield final completion event with full message
+                yield {
+                    "type": "complete",
+                    "message": MessageRead.model_validate(bot_message).model_dump(
+                        mode="json"
+                    ),
+                }
+
+            except Exception as exc:
+                logger.error(
+                    f"Error in streaming message creation: {exc}", exc_info=True
+                )
+
+                # Create error bot response
+                error_content = f"Error generating response: {str(exc)}"
+                error_metadata = {"error": str(exc)}
+
+                error_response_entity = MessageFactory.create_bot_response(
+                    conversation_id=message_create_data.conversation_id,
+                    content=error_content,
+                    message_metadata=error_metadata,
+                )
+                error_message = self.repository.create(error_response_entity)
+
+                yield {
+                    "type": "error",
+                    "error": str(exc),
+                    "message": MessageRead.model_validate(error_message).model_dump(
+                        mode="json"
+                    ),
+                }
+
     def get_by_id(self, message_id: UUID, user_id: UUID) -> MessageRead:
         self.message_validation_utils.validate_message_access(user_id, message_id)
         message_entity = self.repository.get_by_id(message_id)
+        if hasattr(message_entity, "content") and (
+            not message_entity.content or not message_entity.content.strip()
+        ):
+            message_entity.content = "[Empty message]"
         return MessageRead.model_validate(message_entity)
 
     def get_conversation_messages(
@@ -130,10 +290,12 @@ class MessageService(IMessageService):
             order_direction=order_direction,
             include_feedback=include_feedback,
         )
-        # Convert items to MessageRead schemas
-        message_reads = [
-            MessageRead.model_validate(msg) for msg in paginated_messages.items
-        ]
+        message_reads = []
+        for msg in paginated_messages.items:
+            if hasattr(msg, "content") and (not msg.content or not msg.content.strip()):
+                msg.content = "[Empty message]"
+            message_reads.append(MessageRead.model_validate(msg))
+
         # Return new Paginator with converted items
         return Paginator.create(
             message_reads, paginated_messages.meta.total, page, limit
@@ -159,10 +321,12 @@ class MessageService(IMessageService):
             order_direction=order_direction,
             include_feedback=include_feedback,
         )
-        # Convert items to MessageRead schemas
-        message_reads = [
-            MessageRead.model_validate(msg) for msg in paginated_messages.items
-        ]
+        message_reads = []
+        for msg in paginated_messages.items:
+            if hasattr(msg, "content") and (not msg.content or not msg.content.strip()):
+                msg.content = "[Empty message]"
+            message_reads.append(MessageRead.model_validate(msg))
+
         # Return new Paginator with converted items
         return Paginator.create(
             message_reads, paginated_messages.meta.total, page, limit

@@ -1,6 +1,8 @@
 from typing import List
 from uuid import UUID
+import json
 from fastapi import APIRouter, status, Query
+from fastapi.responses import StreamingResponse
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.message_service_interface import IMessageService
@@ -24,6 +26,43 @@ async def create_message(
     result = await message_service.create_message(message_data)
     return ApiResponse(
         success=True, message="Message created successfully", data=result
+    )
+
+
+@router.post("/stream", status_code=status.HTTP_200_OK)
+@AppAutoInjector.auto_inject()
+async def create_message_stream(
+    message_data: MessageCreate,
+    message_service: IMessageService,
+):
+    """Create a new message and stream the bot response"""
+
+    async def event_generator():
+        """Generate Server-Sent Events (SSE) from the message stream"""
+        try:
+            async for event in message_service.create_message_stream(message_data):
+                event_type = event.get("type")
+
+                # Format as SSE: data: {json}\n\n
+                event_json = json.dumps(event)
+                yield f"data: {event_json}\n\n"
+
+                if event_type in ["complete", "error"]:
+                    break
+
+        except Exception as exc:
+            # Send error event
+            error_event = {"type": "error", "error": str(exc)}
+            yield f"data: {json.dumps(error_event)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable buffering in nginx
+        },
     )
 
 
