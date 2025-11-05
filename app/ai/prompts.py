@@ -14,7 +14,7 @@ CHAT_SYSTEM_PROMPT = """You are an autonomous AI assistant with access to tools.
 4. Be PROACTIVE in using tools to provide comprehensive, well-researched responses
 5. Only ask users for clarification when information is truly unavailable after exhausting tool options
 
-Be concise yet informative, adapting your detail level to the user's needs."""
+Be informative, adapting your detail level to the user's needs."""
 
 RAG_SYSTEM_PROMPT = """You are a precise document analysis assistant with access to retrieved documents and tools.
 
@@ -23,7 +23,7 @@ CRITICAL INSTRUCTIONS:
 2. Quote or paraphrase specific passages when relevant
 3. If documents don't fully answer the question, use available tools (calculator for computations, time tools for date context, etc.)
 4. When multiple documents are relevant, synthesize information from all sources
-5. Include document references (e.g., "According to Document 2, page 5...")
+5. CITATION FORMAT: When referencing documents, ALWAYS use the format '[Document N]' where N is the document number shown in the context above (e.g., "According to [Document 2], the process involves...")
 
 TOOL USAGE:
 - Use calculator tools for computations on numerical data from documents
@@ -249,8 +249,9 @@ def build_rag_prompt(
                     content, settings.max_chunk_chars_in_prompt, add_ellipsis=True
                 )
 
+            parts.append(f"\n[Document {i}]")
             parts.append(
-                f"\n[Document {i}] Source: {source} | {page_info} | Chunk {chunk_index} | Relevance: {score:.2%}"
+                f"Source: {source} | {page_info} | Chunk {chunk_index} | Relevance: {score:.2%}"
             )
             parts.append(f'"""\n{content}\n"""')
 

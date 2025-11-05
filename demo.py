@@ -923,6 +923,48 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
     return response_data
 
 
+def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
+    """
+    Make a streaming API request using Server-Sent Events (SSE).
+    Yields parsed JSON events from the stream.
+    """
+    url = f"{API_BASE_URL}{endpoint}"
+    headers = {}
+    if st.session_state.get("auth_token"):
+        headers["Authorization"] = f"Bearer {st.session_state.auth_token}"
+
+    try:
+        response = requests.post(
+            url, json=data, headers=headers, stream=True, timeout=60
+        )
+        response.raise_for_status()
+
+        # Parse SSE stream
+        for line in response.iter_lines(decode_unicode=True):
+            if line:
+                # SSE format: "data: {json}"
+                if line.startswith("data: "):
+                    event_data = line[6:]  # Remove "data: " prefix
+                    try:
+                        event = json.loads(event_data)
+                        yield event
+                    except json.JSONDecodeError:
+                        continue
+
+    except requests.exceptions.HTTPError as http_error:
+        st.toast(f"HTTP error {http_error.response.status_code}", icon="❌")
+        yield {"type": "error", "error": f"HTTP {http_error.response.status_code}"}
+    except requests.exceptions.ConnectionError:
+        st.toast("Cannot connect to API", icon="❌")
+        yield {"type": "error", "error": "Connection error"}
+    except requests.exceptions.Timeout:
+        st.toast("Request timed out", icon="⏱️")
+        yield {"type": "error", "error": "Timeout"}
+    except Exception as exc:
+        st.toast(f"Error: {exc}", icon="❌")
+        yield {"type": "error", "error": str(exc)}
+
+
 def get_user(user_id: str) -> Dict[str, Any]:
     response = make_api_request("GET", f"/users/{user_id}")
     return response.get("data", {})
@@ -1509,6 +1551,73 @@ def render_agent_images(message_metadata: dict):
         render_attachment_gallery(gallery_items, align="left")
 
 
+def render_tool_artifacts(tool_artifacts: List[Dict[str, Any]]):
+    """
+    Render tool execution artifacts as collapsible sections.
+    Shows tool name, status, arguments, and results.
+    """
+    if not tool_artifacts:
+        return
+
+    st.markdown("#### 🔧 Tool Executions", unsafe_allow_html=True)
+
+    for idx, artifact in enumerate(tool_artifacts, start=1):
+        tool_name = artifact.get("tool", "unknown_tool")
+        has_error = artifact.get("error") is not None
+
+        # Status badge styling
+        if has_error:
+            status_badge = "🔴 Error"
+            badge_color = COLORS["error"]
+        else:
+            status_badge = "🟢 Success"
+            badge_color = COLORS["success"]
+
+        # Create expander for each tool
+        with st.expander(f"**[{idx}] {tool_name}** - {status_badge}", expanded=False):
+            # Show execution status
+            st.markdown(
+                f'<div style="background-color: {badge_color}15; padding: 8px; border-radius: 4px; margin-bottom: 8px;">'
+                f'<strong style="color: {badge_color};">Status:</strong> {status_badge}'
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+            # Show arguments if present
+            args = artifact.get("args", {})
+            if args and isinstance(args, dict):
+                st.markdown("**Arguments:**")
+                # Display arguments in a nice format
+                for key, value in args.items():
+                    st.code(f"{key}: {value}", language="text")
+
+            # Show output/result if present
+            output = artifact.get("output")
+            if output is not None:
+                st.markdown("**Output:**")
+                if isinstance(output, (dict, list)):
+                    st.json(output)
+                else:
+                    st.code(str(output), language="text")
+
+            # Show error if present
+            if has_error:
+                error_msg = artifact.get("error", "Unknown error")
+                st.markdown("**Error:**")
+                st.error(error_msg)
+
+                # Show recovery hint if available
+                hint = artifact.get("hint")
+                if hint:
+                    st.markdown("**Recovery Hint:**")
+                    st.info(hint)
+
+            # Show execution time if available
+            execution_time = artifact.get("execution_time")
+            if execution_time:
+                st.caption(f"⏱️ Execution time: {execution_time:.2f}s")
+
+
 def render_message_bubble(msg: Dict[str, Any], is_user: bool):
     bubble_class = "user-bubble" if is_user else "assistant-bubble"
     avatar_class = "user-avatar" if is_user else "assistant-avatar"
@@ -1549,6 +1658,13 @@ def render_message_bubble(msg: Dict[str, Any], is_user: bool):
     if not is_user:
         render_agent_images(msg.get("messageMetadata", {}))
 
+    # Show tool artifacts for assistant messages
+    if not is_user:
+        message_metadata = msg.get("messageMetadata", {})
+        tool_artifacts = message_metadata.get("tool_artifacts")
+        if tool_artifacts:
+            render_tool_artifacts(tool_artifacts)
+
     # Show feedback for assistant messages
     if not is_user:
         render_message_feedback_inline(msg)
@@ -1580,7 +1696,7 @@ def render_message_feedback_inline(msg: Dict[str, Any]):
                     comment = st.text_area(
                         "Comment (optional)",
                         value=feedback.get("comment", ""),
-                        height=60,
+                        height=68,
                     )
 
                     if st.form_submit_button(
@@ -1596,7 +1712,7 @@ def render_message_feedback_inline(msg: Dict[str, Any]):
                         )
                         if response:
                             st.session_state.conversation_messages_page = 0
-                            st.toast("✅ Feedback updated!", icon="✅")
+                            st.toast("Feedback updated!", icon="✅")
                             st.rerun()
     else:
         # Show add feedback popover
@@ -1619,7 +1735,7 @@ def render_message_feedback_inline(msg: Dict[str, Any]):
                     )
                     if response:
                         st.session_state.conversation_messages_page = 0
-                        st.toast("✅ Feedback submitted!", icon="✅")
+                        st.toast("Feedback submitted!", icon="✅")
                         st.rerun()
 
 
@@ -1857,28 +1973,10 @@ def render_tools_tab():
                                 server_name = server_config.get("name", "unknown")
 
                                 with st.spinner(f"Adding server '{server_name}'..."):
-                                    # Show what we're sending for debugging
-                                    with st.expander(
-                                        f"Request for '{server_name}' (debug)",
-                                        expanded=False,
-                                    ):
-                                        st.json(server_config)
-
                                     # Make API request
                                     response = make_api_request(
                                         "POST", "/mcp/servers", server_config
                                     )
-
-                                    # Show response for debugging
-                                    with st.expander(
-                                        f"Response for '{server_name}' (debug)",
-                                        expanded=False,
-                                    ):
-                                        st.json(
-                                            response
-                                            if response
-                                            else {"error": "No response"}
-                                        )
 
                                     if response and response.get("success"):
                                         success_count += 1
@@ -2498,18 +2596,68 @@ def render_chat_view():
                     if pending_attachments:
                         message_data["attachments"] = pending_attachments
 
-                    with st.status("Thinking...", expanded=True) as status:
-                        response = make_api_request("POST", "/messages/", message_data)
-                        if response and response.get("data"):
+                    # Use streaming endpoint for real-time response
+                    with st.status("Sending message...", expanded=True) as status:
+                        # Create placeholder for streaming response
+                        response_placeholder = st.empty()
+                        accumulated_content = ""
+                        final_message = None
+
+                        # Stream the response
+                        for event in make_streaming_request(
+                            "/messages/stream", message_data
+                        ):
+                            event_type = event.get("type")
+
+                            if event_type == "user_message_created":
+                                status.update(
+                                    label="Generating response...", state="running"
+                                )
+
+                            elif event_type == "token":
+                                # Accumulate and display tokens in real-time
+                                content = event.get("content", "")
+                                accumulated_content = (
+                                    content  # Full content from response
+                                )
+                                response_placeholder.markdown(
+                                    f"**Assistant:** {accumulated_content}"
+                                )
+
+                            elif event_type == "tool":
+                                # Show tool execution
+                                tool_name = event.get("name", "unknown")
+                                tool_status = event.get("status", "running")
+                                status_icon = "✓" if tool_status == "success" else "⚠"
+                                status.update(
+                                    label=f"Tool: {tool_name} {status_icon}",
+                                    state="running",
+                                )
+
+                            elif event_type == "complete":
+                                # Store final message and complete
+                                final_message = event.get("message")
+                                status.update(label="Message sent!", state="complete")
+
+                            elif event_type == "error":
+                                # Handle error
+                                error_msg = event.get("error", "Unknown error")
+                                status.update(
+                                    label=f"Error: {error_msg}", state="error"
+                                )
+                                st.toast(f"Error: {error_msg}", icon="❌")
+                                break
+
+                        # If successful, update UI
+                        if final_message:
                             st.session_state.pending_image_attachments = []
                             refresh_conversations_list()
                             reset_conversation_state()
                             st.session_state.show_attachment_uploader = False
                             load_messages_page(1)
-                            status.update(label="Message sent!", state="complete")
                             st.toast("Message sent!", icon="✅")
                             st.rerun()
-                        else:
+                        elif event_type != "error":
                             st.toast("Failed to send message", icon="❌")
 
 

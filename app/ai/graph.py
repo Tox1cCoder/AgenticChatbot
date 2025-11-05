@@ -58,7 +58,12 @@ class MultiAgentWorkflow:
             f"Multi-agent workflow initialized (checkpointing: {'enabled' if checkpointer else 'disabled'})"
         )
 
-        self._cleanup_agents = [self.chat_agent, self.search_agent, self.rag_agent, self.image_generator_agent]
+        self._cleanup_agents = [
+            self.chat_agent,
+            self.search_agent,
+            self.rag_agent,
+            self.image_generator_agent,
+        ]
 
     def _build_graph(self) -> StateGraph:
         workflow = StateGraph(GraphState)
@@ -115,7 +120,7 @@ class MultiAgentWorkflow:
         agent_msg = AgentMessage(
             role=MessageRole.USER, content=content, metadata={"persona": persona}
         )
-        
+
         selected_agent = await self.router.route_message(
             agent_msg, list(self.agents.keys()), has_documents=has_documents
         )
@@ -411,6 +416,79 @@ class MultiAgentWorkflow:
 
         result = await self.graph.ainvoke(initial_state, config=config)
         return result.get("response")
+
+    async def execute_stream(
+        self,
+        message: str,
+        conversation_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        persona: Optional[str] = None,
+        attachments: Optional[list] = None,
+    ):
+        """
+        Execute the workflow with streaming support.
+        Yields events for each node execution and state update.
+        """
+        initial_state: GraphState = {
+            "messages": [HumanMessage(content=message)],
+            "context": {},
+        }
+
+        if conversation_id is not None:
+            initial_state["conversation_id"] = conversation_id
+        if user_id is not None:
+            initial_state["user_id"] = user_id
+        initial_state["selected_agent"] = None
+        initial_state["response"] = None
+        initial_state["persona"] = persona
+        initial_state["reasoning_steps"] = None
+        initial_state["tool_results"] = None
+        initial_state["iteration_count"] = None
+
+        # Store attachments in context for agent access
+        if attachments:
+            initial_state["context"]["attachments"] = attachments
+
+        config = None
+        if self.checkpointer and thread_id:
+            config = {"configurable": {"thread_id": thread_id}}
+
+        # Use astream for streaming execution
+        final_response = None
+        async for event in self.graph.astream(initial_state, config=config):
+            # Event is a dict with node name as key and state as value
+            for node_name, node_state in event.items():
+                logger.debug(f"Stream event from node: {node_name}")
+
+                # Yield node execution event
+                yield {"type": "node", "node": node_name, "state": node_state}
+
+                # Check if we have a response
+                if isinstance(node_state, dict) and "response" in node_state:
+                    response = node_state.get("response")
+                    if response:
+                        final_response = response
+
+                        # Yield response content as tokens (for display purposes)
+                        if hasattr(response, "message") and hasattr(
+                            response.message, "content"
+                        ):
+                            yield {
+                                "type": "content",
+                                "content": response.message.content,
+                            }
+
+                        # Yield tool execution info if available
+                        if hasattr(response, "metadata") and response.metadata:
+                            if "tool_artifacts" in response.metadata:
+                                yield {
+                                    "type": "tool_artifacts",
+                                    "artifacts": response.metadata["tool_artifacts"],
+                                }
+
+        # Yield final complete event
+        yield {"type": "complete", "response": final_response}
 
     async def cleanup(self):
         """Cleanup resources from agents that use MCP tools"""
