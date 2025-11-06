@@ -40,7 +40,7 @@ class MCPManager:
         self.config: Dict[str, Any] = {}
         self.client: Optional[MultiServerMCPClient] = None
         self._tools: List[BaseTool] = []
-        self._sessions: Dict[str, Any] = {}
+        self._session_contexts: Dict[str, Any] = {}  # Store context managers
         self._server_tools: Dict[str, List[BaseTool]] = {}
         self._tool_index: Dict[str, List[BaseTool]] = {}
         self._tool_server_map: Dict[int, str] = {}
@@ -185,28 +185,29 @@ class MCPManager:
             return self._server_tools[server_name]
 
         try:
+            # Create and enter session context
             session_context = self.client.session(server_name)
-        except ValueError as exc:
-            raise ServerNotFoundError(server_name) from exc
-
-        try:
             session = await session_context.__aenter__()
-            tools = list(await load_mcp_tools(session))
 
+            tools = list(await load_mcp_tools(session))
             cleaned_tools = self._clean_tool_schemas(tools)
 
-            self._sessions[server_name] = {
+            # Store context and session for proper cleanup
+            self._session_contexts[server_name] = {
                 "context": session_context,
                 "session": session,
             }
             self._index_server_tools(server_name, cleaned_tools)
 
             logger.info(
-                "Loaded %d tools from server '%s' (session kept open)",
+                "Loaded %d tools from server '%s' (session active)",
                 len(cleaned_tools),
                 server_name,
             )
             return cleaned_tools
+
+        except ValueError as exc:
+            raise ServerNotFoundError(server_name) from exc
         except Exception as exc:
             logger.error(
                 "Failed to load tools from server '%s': %s",
@@ -214,8 +215,6 @@ class MCPManager:
                 exc,
                 exc_info=True,
             )
-            await session_context.__aexit__(*([None] * 3))
-
             return []
 
     def _index_server_tools(self, server_name: str, tools: Iterable[BaseTool]) -> None:
@@ -231,20 +230,29 @@ class MCPManager:
 
     def _filter_schema_recursively(self, schema: Any) -> Any:
         unsupported_keys = {"$schema", "additionalProperties"}
-        
+
         if isinstance(schema, dict):
             filtered = {}
             for key, value in schema.items():
                 if key in unsupported_keys:
                     continue
-                    
+
                 # Recursively filter nested structures
-                if key in ("properties", "items", "anyOf", "allOf", "oneOf", "definitions"):
+                if key in (
+                    "properties",
+                    "items",
+                    "anyOf",
+                    "allOf",
+                    "oneOf",
+                    "definitions",
+                ):
                     filtered[key] = self._filter_schema_recursively(value)
                 elif isinstance(value, dict):
                     filtered[key] = self._filter_schema_recursively(value)
                 elif isinstance(value, list):
-                    filtered[key] = [self._filter_schema_recursively(item) for item in value]
+                    filtered[key] = [
+                        self._filter_schema_recursively(item) for item in value
+                    ]
                 else:
                     filtered[key] = value
             return filtered
@@ -346,16 +354,18 @@ class MCPManager:
         return servers
 
     async def cleanup(self) -> None:
-        """Cleanup MCP client resources and close all active sessions"""
-        # Close all active sessions
-        for server_name, session_info in self._sessions.items():
+        """Cleanup MCP client resources and properly close all sessions"""
+        # Properly close all session contexts in this task
+        for server_name, session_info in list(self._session_contexts.items()):
             try:
                 context = session_info["context"]
+                # Call __aexit__ in the SAME async task where we are now
                 await context.__aexit__(None, None, None)
+                logger.debug(f"Closed session for server: {server_name}")
             except Exception as e:
-                logger.error(f"Error closing session for {server_name}: {e}")
+                logger.warning(f"Error closing session for {server_name}: {e}")
 
-        self._sessions.clear()
+        self._session_contexts.clear()
         self._tools = []
         self._server_tools.clear()
         self._tool_index.clear()
@@ -389,15 +399,17 @@ class MCPManager:
         if server_name in self.DEFAULT_SERVERS:
             raise ServerConfigurationError(f"Cannot remove core server '{server_name}'")
 
-        # Cleanup session if active
-        if server_name in self._sessions:
+        # Properly close session context if it exists
+        if server_name in self._session_contexts:
             try:
-                context = self._sessions[server_name]["context"]
+                context = self._session_contexts[server_name]["context"]
                 await context.__aexit__(None, None, None)
-                del self._sessions[server_name]
+                logger.debug(f"Closed session for server: {server_name}")
             except Exception as e:
-                logger.error(f"Error cleaning up session for {server_name}: {e}")
+                logger.warning(f"Error closing session for {server_name}: {e}")
+            del self._session_contexts[server_name]
 
+        # Remove cached tools
         removed_tools = self._server_tools.pop(server_name, [])
         for tool in removed_tools:
             self._tool_server_map.pop(id(tool), None)
@@ -427,13 +439,15 @@ class MCPManager:
         if server_name not in self.config.get("mcp_servers", {}):
             raise ServerNotFoundError(server_name)
 
-        if server_name in self._sessions:
+        # Properly close session context if it exists
+        if server_name in self._session_contexts:
             try:
-                context = self._sessions[server_name]["context"]
+                context = self._session_contexts[server_name]["context"]
                 await context.__aexit__(None, None, None)
-                del self._sessions[server_name]
+                logger.debug(f"Closed session for server: {server_name}")
             except Exception as e:
-                logger.error(f"Error closing session for {server_name}: {e}")
+                logger.warning(f"Error closing session for {server_name}: {e}")
+            del self._session_contexts[server_name]
 
         # Remove tools from caches
         removed_tools = self._server_tools.pop(server_name, [])
