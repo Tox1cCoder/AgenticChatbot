@@ -1,12 +1,26 @@
+import asyncio
+import io
 import logging
 import os
 import time
 import uuid
+import subprocess
+import shutil
+import re
+import mimetypes
+import unicodedata
+from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 
-from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
+from PIL import Image
+from google import genai
+from google.genai import types, errors as genai_errors
+from app.repositories.document_image import DocumentImageRepository
+from app.schemas.document_image import DocumentImageCreate
+
+from langchain_community.document_loaders import TextLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
@@ -18,9 +32,6 @@ from app.core.events import get_event_bus, DocumentEvent, DocumentEventData
 
 logger = logging.getLogger(__name__)
 
-import pdfplumber
-from tabulate import tabulate
-
 
 class DocumentProcessingService:
 
@@ -30,14 +41,36 @@ class DocumentProcessingService:
         celery_app,
         qdrant_client: QdrantClient,
         embedding_model: SentenceTransformer,
+        document_image_repository: DocumentImageRepository,
     ):
         self.settings = settings
         self.celery_app = celery_app
         self.qdrant_client = qdrant_client
         self.embedding_model = embedding_model
+        self.document_image_repository = document_image_repository
         self.collection_name = settings.qdrant_collection_name
         self.embedding_dimension = settings.embedding_dimension
         self._event_bus = get_event_bus()
+        self._mineru_output_path = None
+        self.gemini_client = None
+        self._init_gemini()
+
+    def _init_gemini(self):
+        api_key = self.settings.gemini_api_key
+        if not api_key:
+            logger.error("Gemini API key not configured - image captioning will be skipped")
+            self.gemini_client = None
+            return
+            
+        if api_key.startswith("GEMINI_API_KEY="):
+            api_key = api_key.split("=", 1)[-1].strip()
+            
+        try:
+            self.gemini_client = genai.Client(api_key=api_key)
+            logger.info("Gemini client initialized successfully for image captioning")
+        except Exception as e:
+            logger.error(f"Failed to initialize Gemini client: {e}", exc_info=True)
+            self.gemini_client = None
 
     async def validate_upload_file(
         self, filename: str, file_size: int
@@ -80,8 +113,6 @@ class DocumentProcessingService:
                     "interval_max": 180,
                 },
             )
-
-            logger.info(f"Started processing task {task.id} for document {document_id}")
 
             # Emit PROCESSING_STARTED event
             try:
@@ -149,10 +180,10 @@ class DocumentProcessingService:
         document_id: str,
         conversation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Process a document file and store its chunks in the vector database"""
         start_time = time.time()
 
         chunks_with_metadata = []
+        self._extracted_images = []
 
         # Load documents
         if filename.lower().endswith(".txt"):
@@ -164,7 +195,9 @@ class DocumentProcessingService:
             ]
 
         elif filename.lower().endswith(".pdf"):
-            chunks_with_metadata = await self._process_pdf_with_tables(file_path)
+            chunks_with_metadata = await self._process_pdf_with_mineru(
+                file_path, document_id
+            )
 
         elif filename.lower().endswith(".docx"):
             loader = Docx2txtLoader(file_path)
@@ -177,108 +210,195 @@ class DocumentProcessingService:
         else:
             raise ValueError(f"Unsupported file type: {filename}")
 
-        stored_chunks = await self._store_chunks(
+        store_result = await self._store_chunks(
             chunks_with_metadata, filename, document_id, conversation_id
         )
 
-        processing_time = time.time() - start_time
+        # Store images if extracted
+        images_stored = 0
+        if hasattr(self, "_extracted_images") and self._extracted_images:
+            images_stored = await self._store_images(
+                self._extracted_images,
+                document_id,
+                store_result.get("chunk_id_mapping", {}),
+                chunks_with_metadata,
+            )
 
-        logger.info(
-            f"Processed document {filename}: {len(chunks_with_metadata)} chunks in {processing_time:.2f}s"
-        )
+            # Update chunks with image metadata in Qdrant
+            await self._update_chunks_with_images(
+                document_id, store_result.get("chunk_id_mapping", {})
+            )
+
+        processing_time = time.time() - start_time
 
         return {
             "chunks_created": len(chunks_with_metadata),
-            "chunks_stored": stored_chunks,
+            "chunks_stored": store_result.get("chunks_stored", 0),
+            "images_stored": images_stored,
             "processing_time": processing_time,
             "filename": filename,
         }
 
-    async def _process_pdf_with_tables(self, file_path: str) -> List[Dict[str, Any]]:
-        """Extract text and tables from PDF, preserving table structure"""
+    async def _process_pdf_with_mineru(
+        self, file_path: str, document_id: str
+    ) -> List[Dict[str, Any]]:
+        try:
+            temp_dir = Path(self.settings.temp_storage_path)
+            output_dir = temp_dir / f"mineru_output_{document_id}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            self._mineru_output_path = str(output_dir)
 
-        chunks_with_metadata = []
+            result = subprocess.run(
+                [
+                    "mineru",
+                    "-p",
+                    file_path,
+                    "-o",
+                    str(output_dir),
+                    "-f",
+                    "false",
+                    "-t",
+                    "false",
+                ],
+                timeout=self.settings.mineru_timeout,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
-        with pdfplumber.open(file_path) as pdf:
-            for page_num, page in enumerate(pdf.pages, 1):
-                # Extract tables from the page
-                tables = page.extract_tables()
-                table_texts = []
+            filename_without_ext = Path(file_path).stem
+            base_output_dir = self._resolve_mineru_output_dir(
+                output_dir, filename_without_ext
+            )
 
-                for table_idx, table in enumerate(tables):
-                    if table and len(table) > 0:
-                        # Convert table to formatted text based on configuration
-                        table_format = self.settings.table_format
+            if base_output_dir is None or not base_output_dir.exists():
+                logger.warning(
+                    "MinerU output directory missing for %s. Searching entire output tree.",
+                    filename_without_ext,
+                )
+                search_root = output_dir
+            else:
+                search_root = base_output_dir
 
-                        if table_format == "markdown":
-                            table_md = tabulate(
-                                table, headers="firstrow", tablefmt="pipe"
-                            )
-                            table_texts.append(
-                                f"\n[TABLE {table_idx + 1} on PAGE {page_num}]\n{table_md}\n"
-                            )
-                        elif table_format == "grid":
-                            table_grid = tabulate(
-                                table, headers="firstrow", tablefmt="grid"
-                            )
-                            table_texts.append(
-                                f"\n[TABLE {table_idx + 1} on PAGE {page_num}]\n{table_grid}\n"
-                            )
-                        else:  # plain
-                            table_plain = tabulate(
-                                table, headers="firstrow", tablefmt="plain"
-                            )
-                            table_texts.append(
-                                f"\n[TABLE {table_idx + 1} on PAGE {page_num}]\n{table_plain}\n"
-                            )
+            markdown_file = self._resolve_markdown_file(
+                search_root, filename_without_ext
+            )
+            images_dir = markdown_file.parent / "images"
 
-                # Extract text from the page
-                page_text = page.extract_text() or ""
+            # Read markdown content
+            with open(markdown_file, "r", encoding="utf-8") as f:
+                markdown_content = f.read()
 
-                # Combine text and tables
-                full_text = page_text
-                for table_text in table_texts:
-                    full_text += table_text
+            # Extract images metadata
+            images_data = []
+            page_to_images = {}
+            images_without_page = []
+            if images_dir.exists():
+                for img_file in images_dir.iterdir():
+                    if img_file.is_file() and img_file.suffix.lower() in [
+                        ".png",
+                        ".jpg",
+                        ".jpeg",
+                    ]:
+                        # Extract page number from filename (e.g., page_1_img_0.png)
+                        page_match = re.search(r"page_(\d+)", img_file.name)
+                        page_number = int(page_match.group(1)) if page_match else None
 
-                # Store page information with table metadata
-                if self.settings.preserve_cross_page_context:
-                    full_text = f"\n[PAGE {page_num}]\n{full_text}"
-                    chunks_with_metadata.append(
-                        {
-                            "text": full_text,
-                            "page_number": page_num,
-                            "has_tables": len(tables) > 0,
-                            "table_count": len(tables),
-                        }
-                    )
-                else:
-                    # Chunk per page
-                    page_chunks = self._create_chunks(
-                        [
-                            type(
-                                "Document",
-                                (),
-                                {"page_content": full_text, "metadata": {}},
-                            )()
-                        ]
-                    )
-                    for chunk in page_chunks:
-                        chunks_with_metadata.append(
-                            {
-                                "text": chunk,
-                                "page_number": page_num,
-                                "has_tables": len(tables) > 0,
-                                "table_count": len(tables),
-                            }
+                        mime_type, _ = mimetypes.guess_type(str(img_file))
+                        if not mime_type:
+                            suffix = img_file.suffix.lower()
+                            if suffix in {".jpg", ".jpeg"}:
+                                mime_type = "image/jpeg"
+                            elif suffix == ".png":
+                                mime_type = "image/png"
+                            elif suffix == ".gif":
+                                mime_type = "image/gif"
+                        mime_type = (
+                            mime_type or f"image/{img_file.suffix.lstrip('.').lower()}"
                         )
 
-        logger.info(
-            f"Extracted {len(chunks_with_metadata)} chunks from PDF with table detection"
-        )
-        return chunks_with_metadata
+                        image_entry = {
+                            "path": str(img_file),
+                            "page_number": page_number,
+                            "mime_type": mime_type,
+                        }
+                        images_data.append(image_entry)
+
+                        if page_number is None:
+                            images_without_page.append(image_entry)
+                        else:
+                            page_to_images.setdefault(page_number, []).append(
+                                image_entry
+                            )
+
+            # Create chunks from markdown with page markers preserved
+            documents = [
+                type(
+                    "Document", (), {"page_content": markdown_content, "metadata": {}}
+                )()
+            ]
+            chunks = self._create_chunks(documents, preserve_page_markers=True)
+
+            # Build chunks with metadata and page ranges
+            chunks_with_metadata = []
+            last_page_start: Optional[int] = None
+            last_page_end: Optional[int] = None
+            for chunk in chunks:
+                page_start, page_end = extract_page_range(chunk)
+
+                if page_start is None and page_end is None:
+                    page_start, page_end = last_page_start, last_page_end
+                else:
+                    last_page_start, last_page_end = page_start, page_end
+
+                related_images: List[Dict[str, Any]] = []
+                if page_start is not None and page_end is not None:
+                    for page_num in range(page_start, page_end + 1):
+                        related_images.extend(page_to_images.get(page_num, []))
+                elif images_without_page:
+                    related_images = images_without_page.copy()
+
+                chunks_with_metadata.append(
+                    {
+                        "text": chunk,
+                        "page_start": page_start,
+                        "page_end": page_end,
+                        "has_images": bool(related_images),
+                        "image_count": len(related_images),
+                    }
+                )
+
+            # Store images data for later processing
+            self._extracted_images = images_data
+
+            return chunks_with_metadata
+
+        except subprocess.TimeoutExpired as exc:
+            logger.error(
+                "MinerU timed out after %ss while processing %s",
+                self.settings.mineru_timeout,
+                file_path,
+            )
+            raise RuntimeError(
+                f"MinerU timed out after {self.settings.mineru_timeout}s"
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            logger.error("MinerU failed while processing %s: %s", file_path, exc.stderr)
+            raise RuntimeError(f"MinerU failed with error: {exc.stderr}") from exc
+        except Exception as exc:
+            logger.error(
+                "Unexpected MinerU error while processing %s: %s", file_path, exc
+            )
+            raise RuntimeError(
+                f"Unexpected error in MinerU processing: {str(exc)}"
+            ) from exc
 
     def _create_chunks(
-        self, documents: List, max_chunk_size: int = None, overlap: int = None
+        self,
+        documents: List,
+        max_chunk_size: int = None,
+        overlap: int = None,
+        preserve_page_markers: bool = False,
     ) -> List[str]:
         # Use configured parameters if not specified
         if max_chunk_size is None:
@@ -287,16 +407,120 @@ class DocumentProcessingService:
             overlap = self.settings.document_chunk_overlap
 
         # Initialize text splitter
+        separators = ["\n\n", "\n", " ", ""]
+        if preserve_page_markers:
+            separators = ["\n\n\n", "\n\n", "\n", " ", ""]
+
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=max_chunk_size,
             chunk_overlap=overlap,
             length_function=len,
-            separators=["\n\n", "\n", " ", ""],
+            separators=separators,
         )
 
         # Split documents and extract text content
         split_docs = text_splitter.split_documents(documents)
         return [doc.page_content for doc in split_docs]
+
+    @staticmethod
+    def _normalize_filename_token(value: str) -> str:
+        normalized = unicodedata.normalize("NFKD", value or "")
+        normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+        normalized = normalized.lower()
+        normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
+        normalized = re.sub(r"-+", "-", normalized).strip("-")
+        return normalized
+
+    def _resolve_mineru_output_dir(
+        self, output_dir: Path, filename_without_ext: str
+    ) -> Optional[Path]:
+        expected_dir = output_dir / filename_without_ext
+        if expected_dir.exists():
+            return expected_dir
+
+        if not output_dir.exists():
+            return None
+
+        normalized_target = self._normalize_filename_token(filename_without_ext)
+        normalized_dir = output_dir / normalized_target
+        if normalized_dir.exists():
+            return normalized_dir
+
+        normalized_matches: List[Path] = []
+
+        for child in output_dir.iterdir():
+            if not child.is_dir():
+                continue
+            if self._normalize_filename_token(child.name) == normalized_target:
+                normalized_matches.append(child)
+
+        if normalized_matches:
+            chosen = sorted(
+                normalized_matches,
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )[0]
+            logger.warning(
+                "MinerU output folder name mismatch detected for %s, using %s",
+                filename_without_ext,
+                chosen.name,
+            )
+            return chosen
+
+        return None
+
+    def _resolve_markdown_file(
+        self, base_output_dir: Path, filename_without_ext: str
+    ) -> Path:
+        exact_matches = sorted(
+            base_output_dir.glob(f"**/{filename_without_ext}.md"),
+            key=lambda p: len(p.parts),
+        )
+        if exact_matches:
+            return exact_matches[0]
+
+        normalized_target = self._normalize_filename_token(filename_without_ext)
+        normalized_direct_matches = sorted(
+            base_output_dir.glob(f"**/{normalized_target}.md"),
+            key=lambda p: len(p.parts),
+        )
+        if normalized_direct_matches:
+            return normalized_direct_matches[0]
+        all_markdown = sorted(
+            base_output_dir.glob("**/*.md"),
+            key=lambda p: len(p.parts),
+        )
+
+        normalized_matches = [
+            path
+            for path in all_markdown
+            if self._normalize_filename_token(path.stem) == normalized_target
+        ]
+
+        if normalized_matches:
+            chosen = normalized_matches[0]
+            logger.warning(
+                "MinerU markdown filename mismatch detected for %s, using %s",
+                filename_without_ext,
+                chosen.name,
+            )
+            return chosen
+
+        if all_markdown:
+            chosen = all_markdown[0]
+            logger.warning(
+                "MinerU markdown fallback triggered for %s, defaulting to %s",
+                filename_without_ext,
+                chosen.name,
+            )
+            return chosen
+
+        logger.error(
+            "MinerU output missing markdown file for %s", filename_without_ext
+        )
+        raise RuntimeError(
+            f"MinerU output missing markdown file for {filename_without_ext}"
+        )
 
     async def _store_chunks(
         self,
@@ -304,10 +528,9 @@ class DocumentProcessingService:
         filename: str,
         document_id: str,
         conversation_id: Optional[str] = None,
-    ) -> int:
-        """Store document chunks in the vector database"""
-
+    ) -> Dict[str, Any]:
         points = []
+        chunk_id_mapping = {}
 
         for i, chunk_data in enumerate(chunks_with_metadata):
             chunk_text = (
@@ -330,6 +553,7 @@ class DocumentProcessingService:
             embedding = self.embedding_model.encode(chunk_text).tolist()
 
             safe_point_id = str(uuid.uuid4())
+            chunk_id_mapping[i] = safe_point_id  # Store mapping
 
             payload = {
                 "content": chunk_text,
@@ -386,12 +610,288 @@ class DocumentProcessingService:
             self.qdrant_client.upsert(
                 collection_name=self.collection_name, points=batch
             )
-            logger.debug(f"Upserted batch {i//batch_size + 1}: {len(batch)} points")
 
-        logger.info(
-            f"Stored {total_points} chunks in vector database using {(total_points + batch_size - 1) // batch_size} batches"
+        return {
+            "chunks_stored": total_points,
+            "chunk_id_mapping": chunk_id_mapping,
+        }
+
+    async def _store_images(
+        self,
+        images_data: List[Dict[str, Any]],
+        document_id: str,
+        chunk_id_mapping: Dict[int, str],
+        chunks_with_metadata: List[Dict[str, Any]] = None,
+    ) -> int:
+        stored_count = 0
+        captioned_count = 0
+
+        try:
+            # Create permanent storage directory
+            storage_path = Path(self.settings.document_images_storage_path)
+            if not storage_path.is_absolute():
+                storage_path = (Path.cwd() / storage_path).resolve()
+
+            doc_storage_path = storage_path / document_id
+            doc_storage_path.mkdir(parents=True, exist_ok=True)
+
+            for img_data in images_data:
+                source_path = Path(img_data["path"])
+                dest_path = doc_storage_path / source_path.name
+                shutil.copy2(source_path, dest_path)
+
+                caption = None
+                if self.gemini_client:
+                    try:
+                        with Image.open(dest_path) as img:
+                            rgb_img = img.convert("RGB")
+                            buffer = io.BytesIO()
+                            rgb_img.save(buffer, format="JPEG")
+                        image_bytes = buffer.getvalue()
+
+                        caption = await self._generate_image_caption_with_retry(
+                            image_bytes=image_bytes,
+                            image_name=dest_path.name,
+                        )
+
+                        if caption:
+                            logger.info(f"Generated caption for {dest_path.name}: {caption[:100]}")
+
+                    except Exception as e:
+                        logger.error(f"Failed to generate caption for {dest_path.name}: {str(e)}", exc_info=True)
+                        caption = None
+                else:
+                    logger.warning("Gemini client not initialized, skipping caption generation")
+
+                chunk_id = None
+                page_number = img_data.get("page_number")
+
+                if page_number and chunk_id_mapping and chunks_with_metadata:
+                    for chunk_idx, chunk_data in enumerate(chunks_with_metadata):
+                        page_start = chunk_data.get("page_start")
+                        page_end = chunk_data.get("page_end")
+
+                        if page_start and page_end:
+                            if page_start <= page_number <= page_end:
+                                chunk_id = chunk_id_mapping.get(chunk_idx)
+                                break
+
+                    if not chunk_id and chunk_id_mapping:
+                        chunk_id = chunk_id_mapping.get(0)
+                elif chunk_id_mapping:
+                    chunk_id = chunk_id_mapping.get(0)
+
+                try:
+                    relative_image_path = dest_path.relative_to(Path.cwd())
+                except ValueError:
+                    relative_image_path = dest_path
+
+                image_record_data = DocumentImageCreate(
+                    document_id=uuid.UUID(document_id),
+                    chunk_id=uuid.UUID(chunk_id) if chunk_id else None,
+                    image_path=str(relative_image_path),
+                    image_caption=caption,
+                    page_number=page_number,
+                    mime_type=img_data["mime_type"],
+                )
+                logger.debug(f"Creating image record with caption: {caption[:100] if caption else 'None'}")
+                self.document_image_repository.create(image_record_data)
+                stored_count += 1
+                if caption:
+                    captioned_count += 1
+
+            logger.info(f"Stored {stored_count} images for document {document_id}, {captioned_count} with captions")
+            return stored_count
+
+        except Exception as e:
+            logger.error(f"Failed to store images: {str(e)}")
+            return 0
+
+    async def _generate_image_caption_with_retry(
+        self, image_bytes: bytes, image_name: str
+    ) -> Optional[str]:
+        if not self.gemini_client:
+            return None
+
+        max_attempts = max(1, getattr(self.settings, "image_caption_max_retry_attempts", 1))
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self._request_image_caption(image_bytes, image_name)
+            except genai_errors.ClientError as e:
+                last_error = e
+                status = (e.status or "").upper() if isinstance(e.status, str) else ""
+                if e.code == 429 or status == "RESOURCE_EXHAUSTED":
+                    delay = self._determine_retry_delay_seconds(e, attempt)
+                    logger.warning(
+                        f"Gemini rate limit while captioning {image_name} "
+                        f"(attempt {attempt}/{max_attempts}). Waiting {delay:.2f}s before retry."
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                logger.error(
+                    f"Gemini client error while captioning {image_name}: {str(e)}",
+                    exc_info=True,
+                )
+                return None
+            except Exception as e:
+                last_error = e
+                logger.error(
+                    f"Unexpected error while captioning {image_name}: {str(e)}",
+                    exc_info=True,
+                )
+                break
+
+        if last_error:
+            logger.error(
+                f"Exhausted caption retries for {image_name} after {max_attempts} attempts: {last_error}"
+            )
+        return None
+
+    def _request_image_caption(self, image_bytes: bytes, image_name: str) -> Optional[str]:
+        prompt_parts = [
+            types.Part.from_text(text="Describe this image concisely in one sentence."),
+            types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+        ]
+
+        model_name = getattr(self.settings, "image_caption_model", "gemini-flash-latest")
+        response = self.gemini_client.models.generate_content(
+            model=model_name,
+            contents=prompt_parts,
         )
-        return total_points
+
+        if hasattr(response, "text") and response.text:
+            return response.text.strip()
+
+        logger.warning(f"No caption text in Gemini response for {image_name}")
+        return None
+
+    def _determine_retry_delay_seconds(
+        self, error: genai_errors.APIError, attempt: int
+    ) -> float:
+        hint = self._extract_retry_delay_seconds(error)
+        if hint is not None:
+            return max(hint, 0.5)
+
+        base_delay = max(
+            getattr(self.settings, "image_caption_retry_delay_seconds", 5.0),
+            0.5,
+        )
+        return base_delay * attempt
+
+    def _extract_retry_delay_seconds(
+        self, error: genai_errors.APIError
+    ) -> Optional[float]:
+        details = getattr(error, "details", None)
+        detail_entries = []
+
+        if isinstance(details, dict):
+            error_block = details.get("error")
+            if isinstance(error_block, dict):
+                detail_entries = error_block.get("details") or []
+            if not detail_entries:
+                detail_entries = details.get("details") or []
+        elif isinstance(details, list):
+            detail_entries = details
+
+        for entry in detail_entries or []:
+            if isinstance(entry, dict):
+                retry_delay_value = entry.get("retryDelay") or entry.get("retry_delay")
+                parsed = self._parse_retry_delay_value(retry_delay_value)
+                if parsed is not None:
+                    return parsed
+
+        message = getattr(error, "message", "")
+        if isinstance(message, str):
+            match = re.search(r"retry in\s+([\d\.]+)s", message, re.IGNORECASE)
+            if match:
+                try:
+                    return float(match.group(1))
+                except ValueError:
+                    pass
+
+        return None
+
+    def _parse_retry_delay_value(self, value: Any) -> Optional[float]:
+        if value is None:
+            return None
+
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        if isinstance(value, str):
+            match = re.match(r"([\d\.]+)\s*([a-zA-Z]*)", value.strip())
+            if match:
+                try:
+                    amount = float(match.group(1))
+                except ValueError:
+                    return None
+                unit = match.group(2).lower()
+                if unit in ("", "s", "sec", "secs", "second", "seconds"):
+                    return amount
+                if unit in ("ms", "millisecond", "milliseconds"):
+                    return amount / 1000.0
+                if unit in ("m", "min", "mins", "minute", "minutes"):
+                    return amount * 60.0
+
+        if isinstance(value, dict):
+            seconds = value.get("seconds")
+            nanos = value.get("nanos", 0)
+            if seconds is not None or nanos:
+                seconds = float(seconds or 0)
+                return seconds + float(nanos) / 1_000_000_000
+
+        return None
+
+    async def _update_chunks_with_images(
+        self, document_id: str, chunk_id_mapping: Dict[int, str]
+    ) -> None:
+        try:
+            images = self.document_image_repository.get_by_document_id(
+                UUID(document_id)
+            )
+
+            if not images:
+                logger.info(f"No images found for document {document_id}")
+                return
+
+            logger.info(f"Retrieved {len(images)} images from database for document {document_id}")
+            for img in images:
+                logger.debug(f"Image {img.id}: path={img.image_path}, caption={img.image_caption}, chunk_id={img.chunk_id}")
+
+            images_by_chunk = {}
+            for image in images:
+                if image.chunk_id:
+                    chunk_id_str = str(image.chunk_id)
+                    if chunk_id_str not in images_by_chunk:
+                        images_by_chunk[chunk_id_str] = []
+                    images_by_chunk[chunk_id_str].append(image)
+
+            updated_count = 0
+            for chunk_id_str, chunk_images in images_by_chunk.items():
+                image_ids = [str(img.id) for img in chunk_images]
+                image_paths = [img.image_path for img in chunk_images]
+                image_captions = [img.image_caption or "" for img in chunk_images]
+
+                logger.info(f"Updating chunk {chunk_id_str} with {len(chunk_images)} images, captions: {image_captions}")
+
+                self.qdrant_client.set_payload(
+                    collection_name=self.collection_name,
+                    payload={
+                        "image_ids": image_ids,
+                        "image_paths": image_paths,
+                        "image_captions": image_captions,
+                    },
+                    points=[chunk_id_str],
+                )
+                updated_count += 1
+
+        except Exception as e:
+            logger.error(
+                f"Failed to update chunks with image metadata for document {document_id}: {e}"
+            )
 
     async def cleanup_temp_files(self, older_than_hours: int = 24) -> Dict[str, Any]:
         try:
@@ -400,6 +900,7 @@ class DocumentProcessingService:
                 return {"files_removed": 0, "message": "Temp directory does not exist"}
 
             removed_count = 0
+            removed_folders = 0
             cutoff_time = datetime.now().timestamp() - (older_than_hours * 3600)
 
             for filename in os.listdir(temp_dir):
@@ -407,6 +908,8 @@ class DocumentProcessingService:
                     continue
 
                 file_path = os.path.join(temp_dir, filename)
+
+                # Handle regular files
                 if os.path.isfile(file_path):
                     file_mtime = os.path.getmtime(file_path)
                     if file_mtime < cutoff_time:
@@ -419,15 +922,40 @@ class DocumentProcessingService:
                                 f"Failed to remove temp file {filename}: {str(e)}"
                             )
 
+                # Handle MinerU output folders
+                elif os.path.isdir(file_path) and filename.startswith("mineru_output_"):
+                    dir_mtime = os.path.getmtime(file_path)
+                    if dir_mtime < cutoff_time:
+                        try:
+                            shutil.rmtree(file_path)
+                            removed_folders += 1
+                            logger.info(f"Removed old MinerU output folder: {filename}")
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to remove MinerU folder {filename}: {str(e)}"
+                            )
+
+            # Cleanup old document image folders
+            images_dir = Path(self.settings.document_images_storage_path)
+            if images_dir.exists():
+                for doc_folder in images_dir.iterdir():
+                    if doc_folder.is_dir():
+                        folder_mtime = doc_folder.stat().st_mtime
+                        if folder_mtime < cutoff_time:
+                            shutil.rmtree(doc_folder)
+                            removed_folders += 1
+
             return {
                 "files_removed": removed_count,
-                "message": f"Cleaned up {removed_count} temporary files older than {older_than_hours} hours",
+                "folders_removed": removed_folders,
+                "message": f"Cleaned up {removed_count} files and {removed_folders} folders older than {older_than_hours} hours",
             }
 
         except Exception as e:
             logger.error(f"Failed to cleanup temp files: {str(e)}")
             return {
                 "files_removed": 0,
+                "folders_removed": 0,
                 "error": str(e),
                 "message": "Temp file cleanup failed",
             }

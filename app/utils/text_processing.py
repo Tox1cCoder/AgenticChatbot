@@ -7,7 +7,7 @@ text truncation, and page range extraction.
 
 import re
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ def truncate_text(text: str, max_chars: int, add_ellipsis: bool = True) -> str:
     return truncated
 
 
-def extract_page_range(text: str) -> Tuple[int, int]:
+def extract_page_range(text: str) -> Tuple[Optional[int], Optional[int]]:
     """
     Extract page range from text containing [PAGE X] markers.
 
@@ -72,14 +72,14 @@ def extract_page_range(text: str) -> Tuple[int, int]:
         text: The text containing page markers
 
     Returns:
-        Tuple of (first_page, last_page). Returns (1, 1) if no markers found.
+        Tuple of (first_page, last_page). Returns (None, None) if no markers found.
     """
     # Find all page markers in format [PAGE X]
     page_pattern = r"\[PAGE\s+(\d+)\]"
     matches = re.findall(page_pattern, text)
 
     if not matches:
-        return (1, 1)
+        return (None, None)
 
     page_numbers = [int(m) for m in matches]
     return (min(page_numbers), max(page_numbers))

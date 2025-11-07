@@ -24,6 +24,7 @@ from app.services.mcp_service import MCPService
 
 from app.ai.checkpoint import CheckpointManager
 from app.ai.mcp_integration import MCPManager
+from app.repositories.document_image import DocumentImageRepository
 
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
@@ -122,6 +123,11 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    document_image_repository = providers.Factory(
+        DocumentImageRepository,
+        session_factory=db.provided.session,
+    )
+
     # Validation utils
     user_validation_utils = providers.Factory(
         UserValidationUtils,
@@ -210,6 +216,7 @@ class Container(containers.DeclarativeContainer):
         celery_app=providers.Object(celery_app),
         qdrant_client=qdrant_client,
         embedding_model=embedding_model,
+        document_image_repository=document_image_repository,
     )
 
     document_service: providers.Provider[IDocumentService] = providers.Factory(
