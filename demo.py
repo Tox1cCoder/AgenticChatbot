@@ -1899,18 +1899,6 @@ def render_tools_tab():
         # Add Server Section
         st.markdown("#### Add New Server")
 
-        # Quick test button
-        col_test1, col_test2 = st.columns([1, 3])
-        with col_test1:
-            if st.button("🔍 Test API", help="Test if the MCP API is responding"):
-                test_response = make_api_request("GET", "/mcp/servers")
-                if test_response and test_response.get("success"):
-                    st.success("✅ API is working!")
-                else:
-                    st.error("❌ API connection issue")
-                    if test_response:
-                        st.json(test_response)
-
         tab1, tab2 = st.tabs(["JSON Config", "Form"])
 
         with tab1:
@@ -2131,7 +2119,7 @@ def render_tools_tab():
                             st.error(f"Error: {e}")
 
         st.markdown("---")
-        st.markdown("#### 📋 Configured Servers")
+        st.markdown("####Configured Servers")
 
         if not servers:
             st.info("No MCP servers configured.")

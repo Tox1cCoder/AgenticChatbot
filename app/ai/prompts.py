@@ -24,6 +24,7 @@ CRITICAL INSTRUCTIONS:
 3. If documents don't fully answer the question, use available tools (calculator for computations, time tools for date context, etc.)
 4. When multiple documents are relevant, synthesize information from all sources
 5. CITATION FORMAT: When referencing documents, ALWAYS use the format '[Document N]' where N is the document number shown in the context above (e.g., "According to [Document 2], the process involves...")
+6. When document sections include images, their descriptions are provided in the context. Reference these visual elements when relevant to the user's question.
 
 TOOL USAGE:
 - Use calculator tools for computations on numerical data from documents
@@ -254,6 +255,18 @@ def build_rag_prompt(
                 f"Source: {source} | {page_info} | Chunk {chunk_index} | Relevance: {score:.2%}"
             )
             parts.append(f'"""\n{content}\n"""')
+
+            # Add image caption information if available
+            image_captions = doc.get("image_captions", [])
+            if image_captions and len(image_captions) > 0:
+                # Filter out empty captions
+                valid_captions = [cap for cap in image_captions if cap]
+                if valid_captions:
+                    parts.append(f"\nImage Context:")
+                    parts.append(
+                        f"- This document section contains {len(valid_captions)} image(s)"
+                    )
+                    parts.append(f"- Image descriptions: {', '.join(valid_captions)}")
 
             total_tokens += chunk_tokens
             chunks_used += 1

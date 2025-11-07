@@ -95,6 +95,20 @@ class Settings(BaseSettings):
         description="Maximum number of images to request per generation",
     )
 
+    # Image Captioning Configuration
+    image_caption_model: str = Field(
+        default="gemini-flash-latest",
+        description="Gemini model identifier for document image captioning",
+    )
+    image_caption_max_retry_attempts: int = Field(
+        default=5,
+        description="Maximum retry attempts when captioning document images",
+    )
+    image_caption_retry_delay_seconds: float = Field(
+        default=5.0,
+        description="Base delay (seconds) to wait before retrying caption requests when no retry hint is provided",
+    )
+
     # Qdrant Configuration
     qdrant_url: str = Field(
         default="http://localhost:6333",
@@ -164,6 +178,18 @@ class Settings(BaseSettings):
     document_chunk_overlap: int = Field(
         default=200,
         description="Overlap between chunks in characters",
+    )
+    mineru_enabled: bool = Field(
+        default=True,
+        description="Enable MinerU for PDF parsing",
+    )
+    mineru_timeout: int = Field(
+        default=300,
+        description="Timeout for MinerU subprocess in seconds",
+    )
+    document_images_storage_path: str = Field(
+        default="app/storage/document_images",
+        description="Storage path for extracted document images",
     )
 
     # RAG Retrieval Configuration
