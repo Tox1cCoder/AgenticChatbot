@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class Router:
     def __init__(self):
-        self.model_name = "gemini-2.5-flash"
+        self.model_name = "gemini-flash-latest"
         self.gemini_client = None
         self._init_gemini()
 

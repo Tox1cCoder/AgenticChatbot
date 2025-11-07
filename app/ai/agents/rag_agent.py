@@ -1,8 +1,13 @@
+import json
 import logging
 import re
+import base64
 from typing import Optional, List, Dict, Any
+from uuid import UUID
+from pathlib import Path
 
 from google import genai
+from google.genai import types
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Filter,
@@ -27,6 +32,8 @@ from ..utils import (
     extract_agent_execution_info,
     get_error_recovery_hint,
 )
+from ...repositories.document_image import DocumentImageRepository
+from ...database.session import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +53,7 @@ class RAGAgent:
 
         self.collection_name = collection_name
         self.embedding_dimension = settings.embedding_dimension
-        self.model_name = "gemini-2.5-flash"
+        self.model_name = "gemini-flash-latest"
         self.gemini_client = None
         self.langchain_model = None
         self.mcp_manager = None
@@ -76,7 +83,7 @@ class RAGAgent:
         self.gemini_client = genai.Client(api_key=api_key)
 
         self.langchain_model = ChatGoogleGenerativeAI(
-            model=self.model_name, google_api_key=api_key, temperature=0.7
+            model=self.model_name, google_api_key=api_key, temperature=0.2
         )
 
     def _init_reranker(self):
@@ -179,6 +186,11 @@ class RAGAgent:
 
         retrieved_docs = await self._search(query, conversation_id=conversation_id)
 
+        has_images = any(doc.get("image_ids") for doc in retrieved_docs)
+        images = []
+        if has_images:
+            images = await self._fetch_images_for_chunks(retrieved_docs)
+
         prompt = build_rag_prompt(
             query, retrieved_docs, conversation_history, persona=persona
         )
@@ -189,11 +201,28 @@ class RAGAgent:
         error_message: Optional[str] = None
 
         try:
-            if self.tools and self.langchain_model:
+            if images and self.tools and self.langchain_model:
+                (
+                    tool_response_text,
+                    tools_used,
+                    tool_artifacts,
+                ) = await self._generate_with_tools(prompt)
+
+                multimodal_prompt = self._augment_prompt_with_tool_context(
+                    prompt, tool_response_text, tool_artifacts
+                )
+                response_text = await self._generate_with_vision(
+                    multimodal_prompt, images
+                )
+            elif images:
+                response_text = await self._generate_with_vision(prompt, images)
+            elif self.tools and self.langchain_model:
+                # Use tools without images
                 response_text, tools_used, tool_artifacts = (
                     await self._generate_with_tools(prompt)
                 )
             else:
+                # Regular text-only generation
                 response_text = await self._generate(prompt)
         except Exception as exc:
             logger.error("Error generating RAG response: %s", exc, exc_info=True)
@@ -268,6 +297,8 @@ class RAGAgent:
             "tools_available": len(self.tools),
             "citation_verification_enabled": citation_verification_enabled,
             "citation_coverage": citation_coverage,
+            "has_images": bool(images),
+            "images_count": len(images) if images else 0,
         }
 
         # Add tool usage metadata if tools were used
@@ -413,6 +444,41 @@ class RAGAgent:
             logger.error("Error in RAGAgent tool calling flow: %s", exc, exc_info=True)
             raise
 
+    def _augment_prompt_with_tool_context(
+        self,
+        base_prompt: str,
+        tool_response_text: str,
+        tool_artifacts: List[Dict[str, Any]],
+    ) -> str:
+        """Combine tool outputs with the base prompt for multimodal generation."""
+        sections: List[str] = [base_prompt.rstrip()]
+
+        context_chunks: List[str] = []
+
+        if tool_response_text:
+            context_chunks.append(
+                "Tool-assisted analysis:\n" + tool_response_text.strip()
+            )
+
+        if tool_artifacts:
+            try:
+                artifacts_dump = json.dumps(tool_artifacts, indent=2, default=str)
+            except TypeError:
+                artifacts_dump = str(tool_artifacts)
+            context_chunks.append(f"Tool call details:\n{artifacts_dump}")
+
+        if context_chunks:
+            sections.append(
+                "-----\nLeverage the following tool outputs alongside the attached document images:\n"
+                + "\n\n".join(context_chunks)
+            )
+
+        sections.append(
+            "When responding, cite document evidence and reference images by index where relevant."
+        )
+
+        return "\n\n".join(sections)
+
     async def _search(
         self, query: str, top_k: int = None, conversation_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
@@ -464,6 +530,9 @@ class RAGAgent:
                     "chunk_index": result.payload.get("chunk_index", 0),
                     "has_tables": result.payload.get("has_tables", False),
                     "table_count": result.payload.get("table_count", 0),
+                    "image_ids": result.payload.get("image_ids", []),
+                    "image_paths": result.payload.get("image_paths", []),
+                    "image_captions": result.payload.get("image_captions", []),
                 }
             )
 
@@ -496,6 +565,89 @@ class RAGAgent:
         results = results[: self.settings.rerank_top_k]
 
         return results
+
+    async def _fetch_images_for_chunks(
+        self, retrieved_docs: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        images = []
+        seen_image_ids = set()
+
+        for doc in retrieved_docs:
+            image_ids = doc.get("image_ids", [])
+            if not image_ids:
+                continue
+
+            for image_id in image_ids:
+                if image_id and image_id not in seen_image_ids:
+                    seen_image_ids.add(image_id)
+
+        if not seen_image_ids:
+            return images
+
+        image_repo = DocumentImageRepository(SessionLocal)
+
+        for image_id in seen_image_ids:
+            try:
+                image_uuid = UUID(str(image_id))
+            except Exception:
+                continue
+
+            image = image_repo.get_by_id(image_uuid)
+            if not image:
+                continue
+
+            image_path = Path(image.image_path)
+            if not image_path.is_absolute():
+                image_path = Path.cwd() / image_path
+
+            if not image_path.exists():
+                continue
+
+            with open(image_path, "rb") as f:
+                image_bytes = f.read()
+
+            base64_data = base64.b64encode(image_bytes).decode("utf-8")
+
+            images.append(
+                {
+                    "id": str(image.id),
+                    "data": base64_data,
+                    "mime_type": image.mime_type,
+                    "caption": image.image_caption,
+                    "page_number": image.page_number,
+                    "source_path": str(image_path),
+                }
+            )
+
+        return images
+
+    async def _generate_with_vision(
+        self, prompt: str, images: List[Dict[str, Any]]
+    ) -> str:
+        try:
+            parts = []
+
+            parts.append(types.Part(text=prompt))
+
+            for index, image in enumerate(images, start=1):
+                image_data = base64.b64decode(image["data"])
+
+                mime_type = (image.get("mime_type") or "image/jpeg").strip()
+                if mime_type.lower() == "image/jpg":
+                    mime_type = "image/jpeg"
+                parts.append(
+                    types.Part.from_bytes(data=image_data, mime_type=mime_type)
+                )
+
+            response = self.gemini_client.models.generate_content(
+                model=self.model_name, contents=parts
+            )
+
+            return response.text if hasattr(response, "text") else str(response)
+
+        except Exception as exc:
+            logger.error(f"Error in vision generation: {exc}", exc_info=True)
+            raise
 
     async def _generate(self, prompt: str) -> str:
         try:
@@ -553,9 +705,33 @@ class RAGAgent:
 
     async def delete_document_vectors(self, document_id: str) -> dict:
         """
-        Delete all vectors associated with a document ID.
+        Delete all vectors associated with a document ID and cleanup associated images.
         """
         try:
+            # Delete associated images from database and filesystem
+            images_deleted = 0
+
+            image_repo = DocumentImageRepository(SessionLocal)
+
+            # Get image paths before deletion
+            image_paths = image_repo.get_image_paths_by_document_id(UUID(document_id))
+
+            # Delete from database
+            images_deleted = image_repo.delete_by_document_id(UUID(document_id))
+
+            # Delete image files from filesystem
+            for image_path in image_paths:
+                full_path = Path(image_path)
+                if full_path.exists():
+                    full_path.unlink()
+
+            # Delete document image folder if empty
+            doc_image_folder = Path(settings.document_images_storage_path) / document_id
+            if doc_image_folder.exists() and not any(doc_image_folder.iterdir()):
+                doc_image_folder.rmdir()
+                logger.debug(f"Deleted empty image folder: {doc_image_folder}")
+
+            # Delete vectors from Qdrant
             delete_filter = Filter(
                 must=[
                     FieldCondition(
@@ -572,7 +748,8 @@ class RAGAgent:
             return {
                 "success": True,
                 "document_id": document_id,
-                "message": f"Vectors deleted for document {document_id}",
+                "images_deleted": images_deleted,
+                "message": f"Vectors and {images_deleted} images deleted for document {document_id}",
                 "operation_result": str(result),
             }
         except Exception as e:
