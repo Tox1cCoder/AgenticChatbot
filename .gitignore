@@ -37,6 +37,9 @@ Desktop.ini
 *.bak
 *.tmp
 
+# Storage (user uploaded content)
+app/storage/document_images/
+
 # Test output
 .pytest_cache/
 .coverage

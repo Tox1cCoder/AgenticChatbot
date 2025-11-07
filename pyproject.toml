@@ -41,7 +41,6 @@ dependencies = [
     "langgraph-checkpoint>=2.0.0",
     "langgraph-checkpoint-postgres>=2.0.25",
     "langsmith>=0.0.80",
-    "google-generativeai>=0.3.0",
     "langchain-google-genai>=2.0.0",
     "tavily-python>=0.3.0",
     "langchain-mcp-adapters>=0.1.0",

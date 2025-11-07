@@ -1,4 +1,4 @@
-import streamlit as st
+import streamlit as st # type: ignore
 import requests
 import time
 from typing import Dict, Any, Optional

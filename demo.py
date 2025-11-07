@@ -3,7 +3,7 @@ import mimetypes
 import uuid
 import json
 
-import streamlit as st
+import streamlit as st # type: ignore
 import requests
 import html
 import re
@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from upload_support import delete_document, get_uploaded_documents, upload_document
 from datetime import datetime, timedelta
 from dateutil import parser
-import markdown as _markdown
+import markdown as _markdown # type: ignore
 
 API_BASE_URL = "http://localhost:8000"
 
