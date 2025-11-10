@@ -45,7 +45,26 @@ class MessageRead(BaseModel):
     sender: int = Field(..., description="Message sender: 1=user, 2=assistant")
     content: str = Field(..., min_length=1, description="Message content")
     message_metadata: Optional[Dict[str, Any]] = Field(
-        default_factory=dict, description="Message metadata including persona used"
+        default_factory=dict,
+        description="""Message metadata including persona used and RAG citations.
+        
+        For RAG responses, includes:
+        - documents_cited: List of documents referenced, grouped by source file
+          [
+            {
+              "document_id": "uuid",
+              "source": "report.pdf",
+              "document_number": 1,
+              "chunks": [{"chunk_index": 0, "page_start": 1, "page_end": 2, "score": 0.85}],
+              "total_chunks": 1,
+              "avg_score": 0.85,
+              "page_range": "1-2"
+            }
+          ]
+        - chunks_retrieved: Total number of chunks retrieved
+        - documents_found: Number of unique documents found
+        - citations: Legacy flat list of all chunk citations (backward compatibility)
+        """
     )
     feedback: Optional[FeedbackRead] = Field(
         default=None, description="Feedback for this message (when requested)"

@@ -186,13 +186,43 @@ class RAGAgent:
 
         retrieved_docs = await self._search(query, conversation_id=conversation_id)
 
+        # Create document grouping structure
+        doc_grouping = {}
+        doc_id_to_num = {}
+        next_doc_num = 1
+        
+        for doc in retrieved_docs:
+            # Use document_id as primary key, fallback to source
+            doc_key = doc.get("document_id") or doc.get("source", "unknown")
+            
+            if doc_key not in doc_grouping:
+                doc_grouping[doc_key] = {
+                    "document_id": doc.get("document_id"),
+                    "source": doc.get("source", "unknown"),
+                    "document_number": next_doc_num,
+                    "chunks": []
+                }
+                doc_id_to_num[doc_key] = next_doc_num
+                next_doc_num += 1
+            
+            # Add chunk details to document group
+            chunk_details = {
+                "chunk_index": doc.get("chunk_index", 0),
+                "page_number": doc.get("page_number"),
+                "page_start": doc.get("page_start"),
+                "page_end": doc.get("page_end"),
+                "score": doc.get("score", 0.0),
+                "character_count": len(doc.get("content", "")),
+            }
+            doc_grouping[doc_key]["chunks"].append(chunk_details)
+
         has_images = any(doc.get("image_ids") for doc in retrieved_docs)
         images = []
         if has_images:
             images = await self._fetch_images_for_chunks(retrieved_docs)
 
         prompt = build_rag_prompt(
-            query, retrieved_docs, conversation_history, persona=persona
+            query, retrieved_docs, conversation_history, persona=persona, document_grouping=doc_grouping
         )
 
         response_text: str = ""
@@ -243,7 +273,44 @@ class RAGAgent:
             role=MessageRole.ASSISTANT, content=response_text
         )
 
-        # Build initial citations from all retrieved documents
+        # Build grouped citations structure (documents_cited)
+        documents_cited = []
+        for doc_key, doc_info in doc_grouping.items():
+            # Calculate aggregate stats for this document
+            chunks = doc_info["chunks"]
+            total_chunks = len(chunks)
+            avg_score = sum(c["score"] for c in chunks) / total_chunks if total_chunks > 0 else 0.0
+            
+            # Determine page range
+            page_range = "unknown"
+            page_numbers = []
+            for chunk in chunks:
+                if chunk.get("page_start") and chunk.get("page_end"):
+                    page_numbers.extend(range(chunk["page_start"], chunk["page_end"] + 1))
+                elif chunk.get("page_number"):
+                    page_numbers.append(chunk["page_number"])
+            
+            if page_numbers:
+                page_numbers = sorted(set(page_numbers))
+                if len(page_numbers) == 1:
+                    page_range = str(page_numbers[0])
+                else:
+                    page_range = f"{page_numbers[0]}-{page_numbers[-1]}"
+            
+            document_entry = {
+                "document_id": doc_info["document_id"],
+                "source": doc_info["source"],
+                "document_number": doc_info["document_number"],
+                "chunks": chunks,
+                "total_chunks": total_chunks,
+                "avg_score": avg_score,
+                "page_range": page_range,
+            }
+            documents_cited.append(document_entry)
+        
+        # Sort by document number for consistency
+        documents_cited.sort(key=lambda x: x["document_number"])
+
         all_citations = [
             {
                 "source": doc.get("source", "unknown"),
@@ -264,7 +331,7 @@ class RAGAgent:
 
         if self.settings.enable_citation_verification and retrieved_docs:
             verified_citations = self._verify_citations(
-                response_text, retrieved_docs, all_citations
+                response_text, retrieved_docs, all_citations, doc_grouping
             )
             if verified_citations is not None:
                 citations = verified_citations
@@ -286,7 +353,9 @@ class RAGAgent:
         metadata = {
             "model": self.model_name,
             "conversation_id": conversation_id,
-            "documents_found": len(retrieved_docs),
+            "documents_found": len(doc_grouping),  # Number of unique documents
+            "chunks_retrieved": len(retrieved_docs),  # Total number of chunks
+            "documents_cited": documents_cited,
             "citations": citations,
             "context_messages": len(conversation_history),
             "retrieval_stats": {
@@ -333,6 +402,7 @@ class RAGAgent:
         response_text: str,
         retrieved_docs: List[Dict[str, Any]],
         all_citations: List[Dict[str, Any]],
+        doc_grouping: Dict[str, Any],
     ) -> Optional[List[Dict[str, Any]]]:
         try:
             citation_patterns = [
@@ -343,7 +413,7 @@ class RAGAgent:
                 r"\((\d+)\)",  # (1)
             ]
 
-            referenced_indices = set()
+            referenced_doc_numbers = set()
 
             # Try each pattern to find document references
             for pattern in citation_patterns:
@@ -351,13 +421,13 @@ class RAGAgent:
                 for match in matches:
                     try:
                         doc_num = int(match.group(1))
-                        # Document numbers are 1-indexed in text, convert to 0-indexed
-                        if 1 <= doc_num <= len(retrieved_docs):
-                            referenced_indices.add(doc_num - 1)
+                        # Document numbers are 1-indexed in text
+                        if 1 <= doc_num <= len(doc_grouping):
+                            referenced_doc_numbers.add(doc_num)
                     except (ValueError, IndexError):
                         continue
 
-            if not referenced_indices:
+            if not referenced_doc_numbers:
                 if self.settings.min_citation_coverage > 0:
                     for citation in all_citations:
                         citation["potentially_relevant"] = True
@@ -365,17 +435,19 @@ class RAGAgent:
                 else:
                     return []
 
-            # Filter citations to only include referenced documents
+            # Filter citations to only include chunks from referenced documents
             verified_citations = []
-            for idx in sorted(referenced_indices):
-                if idx < len(all_citations):
-                    citation = all_citations[idx].copy()
-                    citation["referenced"] = True
-                    verified_citations.append(citation)
+            for citation in all_citations:
+                # Find which document this chunk belongs to
+                source = citation.get("source", "unknown")
+                for doc_key, doc_info in doc_grouping.items():
+                    if doc_info["source"] == source:
+                        if doc_info["document_number"] in referenced_doc_numbers:
+                            citation_copy = citation.copy()
+                            citation_copy["referenced"] = True
+                            verified_citations.append(citation_copy)
+                        break
 
-            logger.info(
-                f"Citation verification: {len(verified_citations)}/{len(all_citations)} documents were referenced"
-            )
 
             return verified_citations
 

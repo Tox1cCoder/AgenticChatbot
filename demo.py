@@ -3,7 +3,7 @@ import mimetypes
 import uuid
 import json
 
-import streamlit as st # type: ignore
+import streamlit as st  # type: ignore
 import requests
 import html
 import re
@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from upload_support import delete_document, get_uploaded_documents, upload_document
 from datetime import datetime, timedelta
 from dateutil import parser
-import markdown as _markdown # type: ignore
+import markdown as _markdown  # type: ignore
 
 API_BASE_URL = "http://localhost:8000"
 
@@ -72,6 +72,8 @@ _ALLOWED_TAGS = {
     "th",
     "td",
     "a",
+    "span",
+    "div",
 }.union(_SELF_CLOSING_TAGS)
 
 APP_STYLE = """
@@ -182,6 +184,76 @@ APP_STYLE = """
     
     .user-bubble code {
         background: rgba(255,255,255,0.2);
+    }
+    
+    /* Paragraphs and Lists */
+    .message-bubble p {
+        margin: 0.5em 0;
+        line-height: 1.6;
+    }
+    
+    .message-bubble p:first-child {
+        margin-top: 0;
+    }
+    
+    .message-bubble p:last-child {
+        margin-bottom: 0;
+    }
+    
+    .message-bubble ul,
+    .message-bubble ol {
+        margin: 0.75em 0;
+        padding-left: 1.5em;
+        line-height: 1.6;
+    }
+    
+    .message-bubble ul:first-child,
+    .message-bubble ol:first-child {
+        margin-top: 0;
+    }
+    
+    .message-bubble ul:last-child,
+    .message-bubble ol:last-child {
+        margin-bottom: 0;
+    }
+    
+    .message-bubble li {
+        margin: 0.35em 0;
+        line-height: 1.6;
+    }
+    
+    .message-bubble li > p {
+        margin: 0.25em 0;
+    }
+    
+    .message-bubble pre {
+        background: rgba(0,0,0,0.05);
+        padding: 12px;
+        border-radius: 6px;
+        overflow-x: auto;
+        margin: 0.75em 0;
+        line-height: 1.5;
+    }
+    
+    .user-bubble pre {
+        background: rgba(255,255,255,0.15);
+    }
+    
+    .message-bubble pre code {
+        background: transparent;
+        padding: 0;
+    }
+    
+    .message-bubble blockquote {
+        border-left: 3px solid #cbd5e1;
+        padding-left: 1em;
+        margin: 0.75em 0;
+        color: #64748b;
+    }
+    
+    .user-bubble blockquote {
+        border-left-color: rgba(255,255,255,0.5);
+        color: rgba(255,255,255,0.9);
     }
     
     /* Links */
@@ -402,6 +474,40 @@ APP_STYLE = """
     
     ::-webkit-scrollbar-thumb:hover {
         background: #94a3b8;
+    }
+    
+    /* Citation styling */
+    .citation-document {
+        margin-bottom: 12px;
+        padding: 12px;
+        border-radius: 8px;
+        background-color: rgba(59, 130, 246, 0.1);
+        border: 2px solid rgba(59, 130, 246, 0.3);
+    }
+    
+    .citation-chunk {
+        margin-left: 20px;
+        margin-bottom: 6px;
+        padding: 6px;
+        border-radius: 4px;
+        font-size: 0.9em;
+    }
+    
+    .citation-score-high {
+        color: #22c55e;
+    }
+    
+    .citation-score-medium {
+        color: #f59e0b;
+    }
+    
+    .citation-score-low {
+        color: #ef4444;
+    }
+    
+    .citation-page-ref {
+        color: #64748b;
+        font-size: 0.85em;
     }
 </style>
 """
@@ -724,6 +830,22 @@ class _SafeHTMLRenderer(HTMLParser):
             else:
                 # No href, skip the tag but keep the text content
                 return
+        # Handle span and div tags with class attribute (for math rendering)
+        elif tag in ("span", "div"):
+            class_attr = None
+            for attr_name, attr_value in attrs:
+                if attr_name.lower() == "class":
+                    class_attr = attr_value
+                    break
+            
+            # Allow math-related classes
+            if class_attr and ("katex" in class_attr.lower() or "math" in class_attr.lower()):
+                escaped_class = html.escape(class_attr, quote=True)
+                self.result.append(f'<{tag} class="{escaped_class}">')
+                self._tag_stack.append(tag)
+            else:
+                self.result.append(f"<{tag}>")
+                self._tag_stack.append(tag)
         else:
             self.result.append(f"<{tag}>")
             self._tag_stack.append(tag)
@@ -776,20 +898,55 @@ def sanitize_message_content(content: str) -> str:
     if not normalized:
         return ""
 
+    # Preserve LaTeX delimiters by temporarily replacing them with placeholders
+    math_expressions = {}
+    math_counter = 0
+    
+    # Preserve display math ($$...$$)
+    def replace_display_math(match):
+        nonlocal math_counter
+        placeholder = f"__DISPLAY_MATH_{math_counter}__"
+        math_expressions[placeholder] = match.group(0)
+        math_counter += 1
+        return placeholder
+    
+    normalized = re.sub(r'\$\$(.+?)\$\$', replace_display_math, normalized, flags=re.DOTALL)
+    
+    # Preserve inline math ($...$)
+    def replace_inline_math(match):
+        nonlocal math_counter
+        placeholder = f"__INLINE_MATH_{math_counter}__"
+        math_expressions[placeholder] = match.group(0)
+        math_counter += 1
+        return placeholder
+    
+    normalized = re.sub(r'\$(.+?)\$', replace_inline_math, normalized)
+
+    # Remove image markdown (convert to text links)
     normalized = re.sub(
         r"!\[([^\]]*)\]\(([^)]+)\)", r"\1 (\2)", normalized, flags=re.MULTILINE
     )
 
+    # Render markdown to HTML
     rendered = _markdown.markdown(
         normalized,
-        extensions=["extra", "sane_lists"],
+        extensions=["extra", "sane_lists", "nl2br"],
         output_format="html5",
     )
 
+    # Sanitize HTML
     safe_html = _sanitize_rendered_html(rendered)
-    safe_html = safe_html.replace("<p></p>", "").replace("<p><br></p>", "<br>")
-    safe_html = re.sub(r"(?:<br>\s*){3,}", "<br><br>", safe_html)
-    safe_html = re.sub(r"\s*(</?p>)\s*", r"\1", safe_html)
+    
+    # Restore LaTeX delimiters
+    for placeholder, math_expr in math_expressions.items():
+        safe_html = safe_html.replace(placeholder, math_expr)
+
+    safe_html = safe_html.replace("<p></p>", "")
+    safe_html = safe_html.replace("<p><br /></p>", "")
+    safe_html = safe_html.replace("<p><br></p>", "")
+
+    safe_html = re.sub(r"(<br\s*/?>[\s\n]*){3,}", "<br><br>", safe_html)
+
     safe_html = safe_html.strip()
 
     return safe_html
@@ -1618,6 +1775,125 @@ def render_tool_artifacts(tool_artifacts: List[Dict[str, Any]]):
                 st.caption(f"⏱️ Execution time: {execution_time:.2f}s")
 
 
+def render_citations(message_metadata: Dict[str, Any]):
+    """
+    Render citations from document metadata in a user-friendly format.
+    Shows documents cited with chunk and page information.
+    """
+    if not message_metadata:
+        return
+    
+    # Check for new grouped structure
+    documents_cited = message_metadata.get("documents_cited", [])
+    
+    if not documents_cited:
+        legacy_citations = message_metadata.get("citations", [])
+        if legacy_citations:
+            with st.expander(f"📚 Sources ({len(legacy_citations)} references)", expanded=False):
+                for idx, citation in enumerate(legacy_citations, start=1):
+                    source = citation.get("source", "unknown")
+                    score = citation.get("score", 0.0)
+                    
+                    # Determine relevance color
+                    if score >= 0.7:
+                        relevance_color = COLORS["success"]
+                        relevance_label = "High"
+                    elif score >= 0.5:
+                        relevance_color = COLORS["warning"]
+                        relevance_label = "Medium"
+                    else:
+                        relevance_color = COLORS["error"]
+                        relevance_label = "Low"
+                    
+                    # Format page info
+                    page_info = ""
+                    if citation.get("page_start") and citation.get("page_end"):
+                        if citation["page_start"] != citation["page_end"]:
+                            page_info = f" (Pages {citation['page_start']}-{citation['page_end']})"
+                        else:
+                            page_info = f" (Page {citation['page_start']})"
+                    elif citation.get("page_number"):
+                        page_info = f" (Page {citation['page_number']})"
+                    
+                    st.markdown(
+                        f'<div class="citation-chunk" style="margin-bottom: 8px; padding: 8px; border-left: 3px solid {relevance_color}; background-color: {relevance_color}15;">'
+                        f'<strong>[{idx}]</strong> {source}{page_info}<br>'
+                        f'<span style="color: {relevance_color}; font-size: 0.9em;">Relevance: {relevance_label} ({score:.1%})</span>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+        return
+    
+    # Render new grouped structure
+    with st.expander(f"Sources ({len(documents_cited)} documents)", expanded=False):
+        for doc_entry in documents_cited:
+            doc_num = doc_entry.get("document_number", "?")
+            source = doc_entry.get("source", "unknown")
+            total_chunks = doc_entry.get("total_chunks", 0)
+            avg_score = doc_entry.get("avg_score", 0.0)
+            page_range = doc_entry.get("page_range", "unknown")
+            chunks = doc_entry.get("chunks", [])
+            
+            # Determine overall document relevance color
+            if avg_score >= 0.7:
+                doc_relevance_color = COLORS["success"]
+                doc_relevance_label = "High"
+            elif avg_score >= 0.5:
+                doc_relevance_color = COLORS["warning"]
+                doc_relevance_label = "Medium"
+            else:
+                doc_relevance_color = COLORS["error"]
+                doc_relevance_label = "Low"
+            
+            # Document header
+            st.markdown(
+                f'<div class="citation-document" style="margin-bottom: 12px; padding: 12px; border: 2px solid {doc_relevance_color}; border-radius: 8px; background-color: {doc_relevance_color}10;">'
+                f'<strong style="font-size: 1.1em;">[Document {doc_num}] {source}</strong><br>'
+                f'<span style="color: {doc_relevance_color}; font-size: 0.9em;">Overall Relevance: {doc_relevance_label} ({avg_score:.1%})</span> | '
+                f'<span style="font-size: 0.9em;">{total_chunks} chunk(s) | Pages {page_range}</span>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+            
+            # Show individual chunks if more than one
+            if total_chunks > 1:
+                st.markdown("**Chunks:**")
+                for chunk in chunks:
+                    chunk_idx = chunk.get("chunk_index", "?")
+                    chunk_score = chunk.get("score", 0.0)
+                    
+                    # Chunk relevance color
+                    if chunk_score >= 0.7:
+                        chunk_color = COLORS["success"]
+                        chunk_label = "High"
+                    elif chunk_score >= 0.5:
+                        chunk_color = COLORS["warning"]
+                        chunk_label = "Medium"
+                    else:
+                        chunk_color = COLORS["error"]
+                        chunk_label = "Low"
+                    
+                    # Format chunk page info
+                    chunk_page_info = ""
+                    if chunk.get("page_start") and chunk.get("page_end"):
+                        if chunk["page_start"] != chunk["page_end"]:
+                            chunk_page_info = f"Pages {chunk['page_start']}-{chunk['page_end']}"
+                        else:
+                            chunk_page_info = f"Page {chunk['page_start']}"
+                    elif chunk.get("page_number"):
+                        chunk_page_info = f"Page {chunk['page_number']}"
+                    else:
+                        chunk_page_info = "Unknown page"
+                    
+                    st.markdown(
+                        f'<div class="citation-chunk" style="margin-left: 20px; margin-bottom: 6px; padding: 6px; border-left: 2px solid {chunk_color}; background-color: {chunk_color}08;">'
+                        f'<span style="font-size: 0.9em;">Chunk {chunk_idx} | {chunk_page_info} | '
+                        f'<span style="color: {chunk_color};">{chunk_label} ({chunk_score:.1%})</span></span>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+
+
 def render_message_bubble(msg: Dict[str, Any], is_user: bool):
     bubble_class = "user-bubble" if is_user else "assistant-bubble"
     avatar_class = "user-avatar" if is_user else "assistant-avatar"
@@ -1664,6 +1940,10 @@ def render_message_bubble(msg: Dict[str, Any], is_user: bool):
         tool_artifacts = message_metadata.get("tool_artifacts")
         if tool_artifacts:
             render_tool_artifacts(tool_artifacts)
+    
+    # Show citations for assistant messages
+    if not is_user:
+        render_citations(msg.get("messageMetadata", {}))
 
     # Show feedback for assistant messages
     if not is_user:
