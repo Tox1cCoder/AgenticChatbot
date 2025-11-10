@@ -18,11 +18,13 @@ class JwtService:
         self.access_token_expire_minutes = settings.access_token_expire_minutes
         self.refresh_token_expire_days = settings.refresh_token_expire_days
 
-    def _calculate_expiration_time(self, delta: Optional[timedelta] = None) -> datetime:
+    def _calculate_expiration_time(self, delta: Optional[timedelta] = None, now: Optional[datetime] = None) -> datetime:
         """Calculate token expiration time"""
+        if now is None:
+            now = datetime.now(timezone.utc)
         if delta:
-            return datetime.now(timezone.utc) + delta
-        return datetime.now(timezone.utc) + timedelta(
+            return now + delta
+        return now + timedelta(
             minutes=self.access_token_expire_minutes
         )
 
@@ -31,8 +33,8 @@ class JwtService:
     ) -> str:
         """Create JWT access token"""
         to_encode = data.copy()
-        expire = self._calculate_expiration_time(expires_delta)
         now = datetime.now(timezone.utc)
+        expire = self._calculate_expiration_time(expires_delta, now)
         to_encode.update({"exp": int(expire.timestamp()), "iat": int(now.timestamp())})
         return jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
 

@@ -272,7 +272,6 @@ class MCPManager:
 
             args_schema = tool.args_schema
 
-            # If args_schema is a Pydantic model class, we need to patch its schema method
             if isinstance(args_schema, type) and issubclass(
                 args_schema, PydanticBaseModel
             ):
@@ -359,7 +358,6 @@ class MCPManager:
         for server_name, session_info in list(self._session_contexts.items()):
             try:
                 context = session_info["context"]
-                # Call __aexit__ in the SAME async task where we are now
                 await context.__aexit__(None, None, None)
                 logger.debug(f"Closed session for server: {server_name}")
             except Exception as e:

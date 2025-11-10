@@ -334,10 +334,6 @@ class RAGAgent:
         retrieved_docs: List[Dict[str, Any]],
         all_citations: List[Dict[str, Any]],
     ) -> Optional[List[Dict[str, Any]]]:
-        """
-        Verify which documents were actually referenced in the response text.
-        Returns filtered citations list or None if verification fails.
-        """
         try:
             citation_patterns = [
                 r"\[Document\s+(\d+)\]",  # [Document 1]
@@ -361,23 +357,12 @@ class RAGAgent:
                     except (ValueError, IndexError):
                         continue
 
-            # If no references found, check if coverage threshold is met
             if not referenced_indices:
-                # No explicit citations found - could mean documents weren't used
-                # or citation format wasn't followed
-                logger.warning("No explicit document citations found in response")
-
-                # If minimum citation coverage is required and we have docs, mark all as potentially relevant
                 if self.settings.min_citation_coverage > 0:
-                    logger.info(
-                        "Marking all documents as potentially relevant due to no explicit citations"
-                    )
-                    # Mark all citations as "potentially relevant"
                     for citation in all_citations:
                         citation["potentially_relevant"] = True
                     return all_citations
                 else:
-                    # Return empty citations if no references found and no minimum coverage required
                     return []
 
             # Filter citations to only include referenced documents
@@ -400,10 +385,6 @@ class RAGAgent:
             return all_citations
 
     async def _generate_stream(self, prompt: str):
-        """
-        Generate streaming response from Gemini API.
-        Yields text chunks as they arrive.
-        """
         try:
             response_stream = self.gemini_client.models.generate_content_stream(
                 model=self.model_name,
@@ -721,15 +702,18 @@ class RAGAgent:
 
             # Delete image files from filesystem
             for image_path in image_paths:
-                full_path = Path(image_path)
-                if full_path.exists():
-                    full_path.unlink()
+                # Resolve relative paths to absolute paths
+                path_obj = Path(image_path)
+                if not path_obj.is_absolute():
+                    path_obj = Path.cwd() / path_obj
+                
+                if path_obj.exists():
+                    path_obj.unlink()
 
             # Delete document image folder if empty
             doc_image_folder = Path(settings.document_images_storage_path) / document_id
             if doc_image_folder.exists() and not any(doc_image_folder.iterdir()):
                 doc_image_folder.rmdir()
-                logger.debug(f"Deleted empty image folder: {doc_image_folder}")
 
             # Delete vectors from Qdrant
             delete_filter = Filter(

@@ -10,7 +10,7 @@ import re
 import mimetypes
 import unicodedata
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 
@@ -196,7 +196,7 @@ class DocumentProcessingService:
 
         elif filename.lower().endswith(".pdf"):
             chunks_with_metadata = await self._process_pdf_with_mineru(
-                file_path, document_id
+                file_path, document_id, filename
             )
 
         elif filename.lower().endswith(".docx"):
@@ -240,7 +240,7 @@ class DocumentProcessingService:
         }
 
     async def _process_pdf_with_mineru(
-        self, file_path: str, document_id: str
+        self, file_path: str, document_id: str, original_filename: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         try:
             temp_dir = Path(self.settings.temp_storage_path)
@@ -267,8 +267,11 @@ class DocumentProcessingService:
             )
 
             filename_without_ext = Path(file_path).stem
+            filename_aliases = self._build_filename_aliases(
+                filename_without_ext, original_filename
+            )
             base_output_dir = self._resolve_mineru_output_dir(
-                output_dir, filename_without_ext
+                output_dir, filename_aliases
             )
 
             if base_output_dir is None or not base_output_dir.exists():
@@ -281,7 +284,7 @@ class DocumentProcessingService:
                 search_root = base_output_dir
 
             markdown_file = self._resolve_markdown_file(
-                search_root, filename_without_ext
+                search_root, filename_aliases
             )
             images_dir = markdown_file.parent / "images"
 
@@ -300,7 +303,7 @@ class DocumentProcessingService:
                         ".jpg",
                         ".jpeg",
                     ]:
-                        # Extract page number from filename (e.g., page_1_img_0.png)
+                        # Extract page number from filename
                         page_match = re.search(r"page_(\d+)", img_file.name)
                         page_number = int(page_match.group(1)) if page_match else None
 
@@ -431,27 +434,76 @@ class DocumentProcessingService:
         normalized = re.sub(r"-+", "-", normalized).strip("-")
         return normalized
 
-    def _resolve_mineru_output_dir(
-        self, output_dir: Path, filename_without_ext: str
-    ) -> Optional[Path]:
-        expected_dir = output_dir / filename_without_ext
-        if expected_dir.exists():
-            return expected_dir
+    def _build_filename_aliases(
+        self, sanitized_stem: str, original_filename: Optional[str] = None
+    ) -> List[str]:
+        aliases: List[str] = []
 
+        def _add_alias(value: Optional[str]) -> None:
+            if value is None:
+                return
+            candidate = value.strip()
+            if candidate and candidate not in aliases:
+                aliases.append(candidate)
+
+        _add_alias(sanitized_stem)
+        _add_alias(self._normalize_filename_token(sanitized_stem))
+
+        if sanitized_stem and "_" in sanitized_stem:
+            without_prefix = sanitized_stem.split("_", 1)[1]
+            _add_alias(without_prefix)
+            _add_alias(self._normalize_filename_token(without_prefix))
+
+        if original_filename:
+            original_stem = Path(original_filename).stem
+            _add_alias(original_stem)
+            _add_alias(self._normalize_filename_token(original_stem))
+
+        return aliases
+
+    def _resolve_mineru_output_dir(
+        self, output_dir: Path, filename_candidates: List[str]
+    ) -> Optional[Path]:
         if not output_dir.exists():
             return None
 
-        normalized_target = self._normalize_filename_token(filename_without_ext)
-        normalized_dir = output_dir / normalized_target
-        if normalized_dir.exists():
-            return normalized_dir
+        ordered_candidates: List[str] = []
+        for candidate in filename_candidates or []:
+            if candidate and candidate not in ordered_candidates:
+                ordered_candidates.append(candidate)
+
+        if not ordered_candidates:
+            return None
+
+        for candidate in ordered_candidates:
+            expected_dir = output_dir / candidate
+            if expected_dir.exists():
+                return expected_dir
+
+        normalized_targets = [
+            self._normalize_filename_token(candidate)
+            for candidate in ordered_candidates
+            if candidate
+        ]
+        normalized_targets = [token for token in normalized_targets if token]
+        normalized_target_set = set(normalized_targets)
 
         normalized_matches: List[Path] = []
 
         for child in output_dir.iterdir():
             if not child.is_dir():
                 continue
-            if self._normalize_filename_token(child.name) == normalized_target:
+            normalized_child = self._normalize_filename_token(child.name)
+            if not normalized_child:
+                continue
+            if (
+                normalized_child in normalized_target_set
+                or any(
+                    normalized_child.endswith(target)
+                    or target.endswith(normalized_child)
+                    for target in normalized_target_set
+                )
+            ):
                 normalized_matches.append(child)
 
         if normalized_matches:
@@ -462,7 +514,7 @@ class DocumentProcessingService:
             )[0]
             logger.warning(
                 "MinerU output folder name mismatch detected for %s, using %s",
-                filename_without_ext,
+                ordered_candidates[0],
                 chosen.name,
             )
             return chosen
@@ -470,56 +522,71 @@ class DocumentProcessingService:
         return None
 
     def _resolve_markdown_file(
-        self, base_output_dir: Path, filename_without_ext: str
+        self, base_output_dir: Path, filename_candidates: List[str]
     ) -> Path:
-        exact_matches = sorted(
-            base_output_dir.glob(f"**/{filename_without_ext}.md"),
-            key=lambda p: len(p.parts),
-        )
-        if exact_matches:
-            return exact_matches[0]
+        ordered_candidates: List[str] = []
+        for candidate in filename_candidates or []:
+            if candidate and candidate not in ordered_candidates:
+                ordered_candidates.append(candidate)
 
-        normalized_target = self._normalize_filename_token(filename_without_ext)
-        normalized_direct_matches = sorted(
-            base_output_dir.glob(f"**/{normalized_target}.md"),
-            key=lambda p: len(p.parts),
-        )
-        if normalized_direct_matches:
-            return normalized_direct_matches[0]
+        if not ordered_candidates:
+            logger.error("MinerU output missing filename hints for markdown resolution")
+            raise RuntimeError("MinerU output missing filename hints")
+
+        for candidate in ordered_candidates:
+            exact_matches = sorted(
+                base_output_dir.glob(f"**/{candidate}.md"),
+                key=lambda p: len(p.parts),
+            )
+            if exact_matches:
+                return exact_matches[0]
+
         all_markdown = sorted(
             base_output_dir.glob("**/*.md"),
-            key=lambda p: len(p.parts),
+            key=lambda p: (len(p.parts), p.stat().st_mtime),
         )
 
-        normalized_matches = [
-            path
-            for path in all_markdown
-            if self._normalize_filename_token(path.stem) == normalized_target
-        ]
+        normalized_map: Dict[str, Path] = {}
+        for path in all_markdown:
+            normalized_name = self._normalize_filename_token(path.stem)
+            if normalized_name and normalized_name not in normalized_map:
+                normalized_map[normalized_name] = path
 
-        if normalized_matches:
-            chosen = normalized_matches[0]
-            logger.warning(
-                "MinerU markdown filename mismatch detected for %s, using %s",
-                filename_without_ext,
-                chosen.name,
-            )
-            return chosen
+        for candidate in ordered_candidates:
+            normalized_candidate = self._normalize_filename_token(candidate)
+            if normalized_candidate and normalized_candidate in normalized_map:
+                chosen = normalized_map[normalized_candidate]
+                logger.warning(
+                    "MinerU markdown filename mismatch detected for %s, using %s",
+                    candidate,
+                    chosen.name,
+                )
+                return chosen
+
+        normalized_candidates = [
+            self._normalize_filename_token(candidate)
+            for candidate in ordered_candidates
+            if candidate
+        ]
+        normalized_candidates = [token for token in normalized_candidates if token]
+
+        for path in all_markdown:
+            normalized_name = self._normalize_filename_token(path.stem)
+            if not normalized_name:
+                continue
+            for normalized_candidate in normalized_candidates:
+                if normalized_candidate in normalized_name or normalized_name in normalized_candidate:
+                    return path
 
         if all_markdown:
             chosen = all_markdown[0]
-            logger.warning(
-                "MinerU markdown fallback triggered for %s, defaulting to %s",
-                filename_without_ext,
-                chosen.name,
-            )
             return chosen
 
         logger.error(
-            "MinerU output missing markdown file for %s", filename_without_ext
+            "MinerU output missing markdown file for %s", ordered_candidates[0]
         )
         raise RuntimeError(
-            f"MinerU output missing markdown file for {filename_without_ext}"
+            f"MinerU output missing markdown file for {ordered_candidates[0]}"
         )
 
     async def _store_chunks(
@@ -901,7 +968,7 @@ class DocumentProcessingService:
 
             removed_count = 0
             removed_folders = 0
-            cutoff_time = datetime.now().timestamp() - (older_than_hours * 3600)
+            cutoff_time = datetime.now(timezone.utc).timestamp() - (older_than_hours * 3600)
 
             for filename in os.listdir(temp_dir):
                 if filename.startswith("."):

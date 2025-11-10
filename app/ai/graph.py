@@ -464,7 +464,6 @@ class MultiAgentWorkflow:
                 # Yield node execution event
                 yield {"type": "node", "node": node_name, "state": node_state}
 
-                # Check if we have a response
                 if isinstance(node_state, dict) and "response" in node_state:
                     response = node_state.get("response")
                     if response:

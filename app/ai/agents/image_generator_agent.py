@@ -225,10 +225,6 @@ Provide ONLY the enhanced prompt text, nothing else."""
             tools_used = execution_info["tools_used"]
             tool_artifacts = execution_info["tool_artifacts"]
             
-            # Log tool usage
-            if tools_used:
-                logger.info(f"ImageGeneratorAgent enhanced prompt using {len(tools_used)} tool(s): {', '.join(tools_used)}")
-            
             return enhanced_prompt, tools_used, tool_artifacts
             
         except Exception as exc:
