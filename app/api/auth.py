@@ -7,6 +7,7 @@ from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.user_service_interface import IUserService
 from app.interfaces.auth_service_interface import IAuthService
 from app.core.security import create_access_token
+from app.services.jwt_service import JwtService
 from app.schemas.user import UserCreate, UserRead
 from app.schemas.responses.api_response import ApiResponse
 from app.schemas.responses.token_response import (
@@ -50,12 +51,13 @@ async def login(
 @AppAutoInjector.auto_inject()
 async def refresh_token(
     user_service: IUserService,
+    jwt_service: JwtService,
     refresh_user_id: UUID,
 ) -> ApiResponse[RefreshTokenResponse]:
     """Get new access token using refresh token"""
     user = user_service.get_by_id(refresh_user_id)
     token_data = {"sub": str(user.id)}
-    access_token = create_access_token(token_data)
+    access_token = create_access_token(token_data, jwt_service)
     return ApiResponse(
         success=True,
         message="Token refreshed successfully",

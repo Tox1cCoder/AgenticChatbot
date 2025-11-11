@@ -10,12 +10,15 @@ from app.schemas.responses.token_response import LoginRequest
 
 from app.interfaces.auth_service_interface import IAuthService
 from app.interfaces.user_service_interface import IUserService
+from app.services.jwt_service import JwtService
+
 
 class AuthService(IAuthService):
     """Service for authentication operations"""
 
-    def __init__(self, user_service: IUserService) -> None:
+    def __init__(self, user_service: IUserService, jwt_service: JwtService) -> None:
         self.user_service = user_service
+        self.jwt_service = jwt_service
 
     def authenticate_user(self, login_data: LoginRequest) -> dict:
         """Authenticate user and return token data"""
@@ -38,8 +41,8 @@ class AuthService(IAuthService):
 
         # Create tokens
         token_data = {"sub": str(user.id)}
-        access_token = create_access_token(token_data)
-        refresh_token = create_refresh_token(token_data)
+        access_token = create_access_token(token_data, self.jwt_service)
+        refresh_token = create_refresh_token(token_data, self.jwt_service)
 
         return {
             "access_token": access_token,

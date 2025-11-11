@@ -24,6 +24,7 @@ from app.repositories.feedback import FeedbackRepository
 from app.repositories.document import DocumentRepository
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.mcp_service import MCPService
+from app.services.jwt_service import JwtService
 from app.utils.validation.user_validation import UserValidationUtils
 from app.utils.validation.conversation_validation import (
     ConversationValidationUtils,
@@ -35,6 +36,7 @@ from app.utils.validation.document_validation import DocumentValidationUtils
 
 class AutoInjector:
     """Base class for auto-injection with wiring_map configuration."""
+
     wiring_map: Dict[Type, Any] = {}
 
     @classmethod
@@ -120,6 +122,7 @@ class AppAutoInjector(AutoInjector):
                 container_ref, "document_processing_service"
             ),
             MCPService: getattr(container_ref, "mcp_service"),
+            JwtService: getattr(container_ref, "jwt_service"),
         }
 
     @classmethod
@@ -220,6 +223,7 @@ class AppContainerInjector(ContainerInjector):
             DocumentProcessingService: getattr(
                 container_ref, "document_processing_service"
             ),
+            JwtService: getattr(container_ref, "jwt_service"),
             # Repositories
             UserRepository: getattr(container_ref, "user_repository"),
             ConversationRepository: getattr(container_ref, "conversation_repository"),

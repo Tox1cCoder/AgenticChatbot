@@ -21,6 +21,7 @@ from app.services.ai_service import AIService
 from app.services.document_service import DocumentService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.mcp_service import MCPService
+from app.services.jwt_service import JwtService
 
 from app.ai.checkpoint import CheckpointManager
 from app.ai.mcp_integration import MCPManager
@@ -83,6 +84,11 @@ class Container(containers.DeclarativeContainer):
     embedding_model = providers.Singleton(
         SentenceTransformer,
         "google/embeddinggemma-300m",
+    )
+
+    # JWT Service
+    jwt_service = providers.Factory(
+        JwtService,
     )
 
     # Checkpoint manager
@@ -208,6 +214,7 @@ class Container(containers.DeclarativeContainer):
     auth_service: providers.Provider[IAuthService] = providers.Factory(
         AuthService,
         user_service=user_service,
+        jwt_service=jwt_service,
     )
 
     document_processing_service = providers.Factory(
