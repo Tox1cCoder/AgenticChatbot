@@ -190,27 +190,24 @@ class RAGAgent:
         doc_grouping = {}
         doc_id_to_num = {}
         next_doc_num = 1
-        
+
         for doc in retrieved_docs:
             # Use document_id as primary key, fallback to source
             doc_key = doc.get("document_id") or doc.get("source", "unknown")
-            
+
             if doc_key not in doc_grouping:
                 doc_grouping[doc_key] = {
                     "document_id": doc.get("document_id"),
                     "source": doc.get("source", "unknown"),
                     "document_number": next_doc_num,
-                    "chunks": []
+                    "chunks": [],
                 }
                 doc_id_to_num[doc_key] = next_doc_num
                 next_doc_num += 1
-            
+
             # Add chunk details to document group
             chunk_details = {
                 "chunk_index": doc.get("chunk_index", 0),
-                "page_number": doc.get("page_number"),
-                "page_start": doc.get("page_start"),
-                "page_end": doc.get("page_end"),
                 "score": doc.get("score", 0.0),
                 "character_count": len(doc.get("content", "")),
             }
@@ -222,7 +219,11 @@ class RAGAgent:
             images = await self._fetch_images_for_chunks(retrieved_docs)
 
         prompt = build_rag_prompt(
-            query, retrieved_docs, conversation_history, persona=persona, document_grouping=doc_grouping
+            query,
+            retrieved_docs,
+            conversation_history,
+            persona=persona,
+            document_grouping=doc_grouping,
         )
 
         response_text: str = ""
@@ -279,24 +280,12 @@ class RAGAgent:
             # Calculate aggregate stats for this document
             chunks = doc_info["chunks"]
             total_chunks = len(chunks)
-            avg_score = sum(c["score"] for c in chunks) / total_chunks if total_chunks > 0 else 0.0
-            
-            # Determine page range
-            page_range = "unknown"
-            page_numbers = []
-            for chunk in chunks:
-                if chunk.get("page_start") and chunk.get("page_end"):
-                    page_numbers.extend(range(chunk["page_start"], chunk["page_end"] + 1))
-                elif chunk.get("page_number"):
-                    page_numbers.append(chunk["page_number"])
-            
-            if page_numbers:
-                page_numbers = sorted(set(page_numbers))
-                if len(page_numbers) == 1:
-                    page_range = str(page_numbers[0])
-                else:
-                    page_range = f"{page_numbers[0]}-{page_numbers[-1]}"
-            
+            avg_score = (
+                sum(c["score"] for c in chunks) / total_chunks
+                if total_chunks > 0
+                else 0.0
+            )
+
             document_entry = {
                 "document_id": doc_info["document_id"],
                 "source": doc_info["source"],
@@ -304,19 +293,16 @@ class RAGAgent:
                 "chunks": chunks,
                 "total_chunks": total_chunks,
                 "avg_score": avg_score,
-                "page_range": page_range,
             }
             documents_cited.append(document_entry)
-        
+
         # Sort by document number for consistency
         documents_cited.sort(key=lambda x: x["document_number"])
 
+        # Build legacy flat citations for backward compatibility
         all_citations = [
             {
                 "source": doc.get("source", "unknown"),
-                "page_number": doc.get("page_number"),
-                "page_start": doc.get("page_start"),
-                "page_end": doc.get("page_end"),
                 "score": doc.get("score", 0.0),
                 "chunk_index": doc.get("chunk_index", 0),
                 "character_count": len(doc.get("content", "")),
@@ -447,7 +433,6 @@ class RAGAgent:
                             citation_copy["referenced"] = True
                             verified_citations.append(citation_copy)
                         break
-
 
             return verified_citations
 
@@ -778,7 +763,7 @@ class RAGAgent:
                 path_obj = Path(image_path)
                 if not path_obj.is_absolute():
                     path_obj = Path.cwd() / path_obj
-                
+
                 if path_obj.exists():
                     path_obj.unlink()
 

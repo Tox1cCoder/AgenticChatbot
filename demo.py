@@ -504,11 +504,6 @@ APP_STYLE = """
     .citation-score-low {
         color: #ef4444;
     }
-    
-    .citation-page-ref {
-        color: #64748b;
-        font-size: 0.85em;
-    }
 </style>
 """
 
@@ -837,9 +832,11 @@ class _SafeHTMLRenderer(HTMLParser):
                 if attr_name.lower() == "class":
                     class_attr = attr_value
                     break
-            
+
             # Allow math-related classes
-            if class_attr and ("katex" in class_attr.lower() or "math" in class_attr.lower()):
+            if class_attr and (
+                "katex" in class_attr.lower() or "math" in class_attr.lower()
+            ):
                 escaped_class = html.escape(class_attr, quote=True)
                 self.result.append(f'<{tag} class="{escaped_class}">')
                 self._tag_stack.append(tag)
@@ -901,7 +898,7 @@ def sanitize_message_content(content: str) -> str:
     # Preserve LaTeX delimiters by temporarily replacing them with placeholders
     math_expressions = {}
     math_counter = 0
-    
+
     # Preserve display math ($$...$$)
     def replace_display_math(match):
         nonlocal math_counter
@@ -909,9 +906,11 @@ def sanitize_message_content(content: str) -> str:
         math_expressions[placeholder] = match.group(0)
         math_counter += 1
         return placeholder
-    
-    normalized = re.sub(r'\$\$(.+?)\$\$', replace_display_math, normalized, flags=re.DOTALL)
-    
+
+    normalized = re.sub(
+        r"\$\$(.+?)\$\$", replace_display_math, normalized, flags=re.DOTALL
+    )
+
     # Preserve inline math ($...$)
     def replace_inline_math(match):
         nonlocal math_counter
@@ -919,8 +918,8 @@ def sanitize_message_content(content: str) -> str:
         math_expressions[placeholder] = match.group(0)
         math_counter += 1
         return placeholder
-    
-    normalized = re.sub(r'\$(.+?)\$', replace_inline_math, normalized)
+
+    normalized = re.sub(r"\$([^$\n|]+?)\$", replace_inline_math, normalized)
 
     # Remove image markdown (convert to text links)
     normalized = re.sub(
@@ -936,7 +935,7 @@ def sanitize_message_content(content: str) -> str:
 
     # Sanitize HTML
     safe_html = _sanitize_rendered_html(rendered)
-    
+
     # Restore LaTeX delimiters
     for placeholder, math_expr in math_expressions.items():
         safe_html = safe_html.replace(placeholder, math_expr)
@@ -1782,48 +1781,37 @@ def render_citations(message_metadata: Dict[str, Any]):
     """
     if not message_metadata:
         return
-    
+
     # Check for new grouped structure
     documents_cited = message_metadata.get("documents_cited", [])
-    
+
     if not documents_cited:
         legacy_citations = message_metadata.get("citations", [])
         if legacy_citations:
-            with st.expander(f"📚 Sources ({len(legacy_citations)} references)", expanded=False):
+            with st.expander(
+                f"Sources ({len(legacy_citations)} references)", expanded=False
+            ):
                 for idx, citation in enumerate(legacy_citations, start=1):
                     source = citation.get("source", "unknown")
                     score = citation.get("score", 0.0)
-                    
+
                     # Determine relevance color
                     if score >= 0.7:
                         relevance_color = COLORS["success"]
-                        relevance_label = "High"
                     elif score >= 0.5:
                         relevance_color = COLORS["warning"]
-                        relevance_label = "Medium"
                     else:
                         relevance_color = COLORS["error"]
-                        relevance_label = "Low"
-                    
-                    # Format page info
-                    page_info = ""
-                    if citation.get("page_start") and citation.get("page_end"):
-                        if citation["page_start"] != citation["page_end"]:
-                            page_info = f" (Pages {citation['page_start']}-{citation['page_end']})"
-                        else:
-                            page_info = f" (Page {citation['page_start']})"
-                    elif citation.get("page_number"):
-                        page_info = f" (Page {citation['page_number']})"
-                    
+
                     st.markdown(
                         f'<div class="citation-chunk" style="margin-bottom: 8px; padding: 8px; border-left: 3px solid {relevance_color}; background-color: {relevance_color}15;">'
-                        f'<strong>[{idx}]</strong> {source}{page_info}<br>'
-                        f'<span style="color: {relevance_color}; font-size: 0.9em;">Relevance: {relevance_label} ({score:.1%})</span>'
-                        f'</div>',
-                        unsafe_allow_html=True
+                        f"<strong>[{idx}]</strong> {source}<br>"
+                        f'<span style="color: {relevance_color}; font-size: 0.9em;">Relevance: ({score:.1%})</span>'
+                        f"</div>",
+                        unsafe_allow_html=True,
                     )
         return
-    
+
     # Render new grouped structure
     with st.expander(f"Sources ({len(documents_cited)} documents)", expanded=False):
         for doc_entry in documents_cited:
@@ -1831,66 +1819,47 @@ def render_citations(message_metadata: Dict[str, Any]):
             source = doc_entry.get("source", "unknown")
             total_chunks = doc_entry.get("total_chunks", 0)
             avg_score = doc_entry.get("avg_score", 0.0)
-            page_range = doc_entry.get("page_range", "unknown")
             chunks = doc_entry.get("chunks", [])
-            
+
             # Determine overall document relevance color
             if avg_score >= 0.7:
                 doc_relevance_color = COLORS["success"]
-                doc_relevance_label = "High"
             elif avg_score >= 0.5:
                 doc_relevance_color = COLORS["warning"]
-                doc_relevance_label = "Medium"
             else:
                 doc_relevance_color = COLORS["error"]
-                doc_relevance_label = "Low"
-            
+
             # Document header
             st.markdown(
                 f'<div class="citation-document" style="margin-bottom: 12px; padding: 12px; border: 2px solid {doc_relevance_color}; border-radius: 8px; background-color: {doc_relevance_color}10;">'
                 f'<strong style="font-size: 1.1em;">[Document {doc_num}] {source}</strong><br>'
-                f'<span style="color: {doc_relevance_color}; font-size: 0.9em;">Overall Relevance: {doc_relevance_label} ({avg_score:.1%})</span> | '
-                f'<span style="font-size: 0.9em;">{total_chunks} chunk(s) | Pages {page_range}</span>'
-                f'</div>',
-                unsafe_allow_html=True
+                f'<span style="color: {doc_relevance_color}; font-size: 0.9em;">Overall Relevance: ({avg_score:.1%})</span> | '
+                f'<span style="font-size: 0.9em;">{total_chunks} chunk(s)</span>'
+                f"</div>",
+                unsafe_allow_html=True,
             )
-            
+
             # Show individual chunks if more than one
             if total_chunks > 1:
                 st.markdown("**Chunks:**")
                 for chunk in chunks:
                     chunk_idx = chunk.get("chunk_index", "?")
                     chunk_score = chunk.get("score", 0.0)
-                    
+
                     # Chunk relevance color
                     if chunk_score >= 0.7:
                         chunk_color = COLORS["success"]
-                        chunk_label = "High"
                     elif chunk_score >= 0.5:
                         chunk_color = COLORS["warning"]
-                        chunk_label = "Medium"
                     else:
                         chunk_color = COLORS["error"]
-                        chunk_label = "Low"
-                    
-                    # Format chunk page info
-                    chunk_page_info = ""
-                    if chunk.get("page_start") and chunk.get("page_end"):
-                        if chunk["page_start"] != chunk["page_end"]:
-                            chunk_page_info = f"Pages {chunk['page_start']}-{chunk['page_end']}"
-                        else:
-                            chunk_page_info = f"Page {chunk['page_start']}"
-                    elif chunk.get("page_number"):
-                        chunk_page_info = f"Page {chunk['page_number']}"
-                    else:
-                        chunk_page_info = "Unknown page"
-                    
+
                     st.markdown(
                         f'<div class="citation-chunk" style="margin-left: 20px; margin-bottom: 6px; padding: 6px; border-left: 2px solid {chunk_color}; background-color: {chunk_color}08;">'
-                        f'<span style="font-size: 0.9em;">Chunk {chunk_idx} | {chunk_page_info} | '
-                        f'<span style="color: {chunk_color};">{chunk_label} ({chunk_score:.1%})</span></span>'
-                        f'</div>',
-                        unsafe_allow_html=True
+                        f'<span style="font-size: 0.9em;">Chunk {chunk_idx} '
+                        f'<span style="color: {chunk_color};">({chunk_score:.1%})</span></span>'
+                        f"</div>",
+                        unsafe_allow_html=True,
                     )
 
 
@@ -1940,7 +1909,7 @@ def render_message_bubble(msg: Dict[str, Any], is_user: bool):
         tool_artifacts = message_metadata.get("tool_artifacts")
         if tool_artifacts:
             render_tool_artifacts(tool_artifacts)
-    
+
     # Show citations for assistant messages
     if not is_user:
         render_citations(msg.get("messageMetadata", {}))
@@ -2399,7 +2368,7 @@ def render_tools_tab():
                             st.error(f"Error: {e}")
 
         st.markdown("---")
-        st.markdown("####Configured Servers")
+        st.markdown("#### Configured Servers")
 
         if not servers:
             st.info("No MCP servers configured.")

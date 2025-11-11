@@ -55,16 +55,15 @@ class MessageRead(BaseModel):
               "document_id": "uuid",
               "source": "report.pdf",
               "document_number": 1,
-              "chunks": [{"chunk_index": 0, "page_start": 1, "page_end": 2, "score": 0.85}],
+              "chunks": [{"chunk_index": 0, "score": 0.85}],
               "total_chunks": 1,
-              "avg_score": 0.85,
-              "page_range": "1-2"
+              "avg_score": 0.85
             }
           ]
         - chunks_retrieved: Total number of chunks retrieved
         - documents_found: Number of unique documents found
         - citations: Legacy flat list of all chunk citations (backward compatibility)
-        """
+        """,
     )
     feedback: Optional[FeedbackRead] = Field(
         default=None, description="Feedback for this message (when requested)"

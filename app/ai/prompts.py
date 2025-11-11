@@ -203,21 +203,21 @@ def build_rag_prompt(
         doc_groups = {}
         doc_id_to_num = {}
         next_doc_num = 1
-        
+
         for doc in retrieved_docs[:max_chunks]:
             # Use document_id as primary key, fallback to source
             doc_key = doc.get("document_id") or doc.get("source", "unknown")
-            
+
             if doc_key not in doc_groups:
                 doc_groups[doc_key] = {
                     "source": doc.get("source", "unknown"),
                     "document_id": doc.get("document_id"),
                     "chunks": [],
-                    "doc_number": next_doc_num
+                    "doc_number": next_doc_num,
                 }
                 doc_id_to_num[doc_key] = next_doc_num
                 next_doc_num += 1
-            
+
             doc_groups[doc_key]["chunks"].append(doc)
 
         total_tokens = 0
@@ -225,29 +225,19 @@ def build_rag_prompt(
         num_documents = len(doc_groups)
 
         parts.append("\nDOCUMENT CONTEXT:")
-        
+
         # Iterate through document groups
         for doc_key, doc_group in doc_groups.items():
             doc_num = doc_group["doc_number"]
             source = doc_group["source"]
-            
+
             parts.append(f"\n[Document {doc_num}: {source}]")
-            
+
             # Process chunks for this document
             for doc in doc_group["chunks"]:
                 content = doc.get("content", "")
                 chunk_index = doc.get("chunk_index", "unknown")
                 score = doc.get("score", 0.0)
-
-                if doc.get("page_start") and doc.get("page_end"):
-                    if doc["page_start"] != doc["page_end"]:
-                        page_info = f"pages {doc['page_start']}-{doc['page_end']}"
-                    else:
-                        page_info = f"page {doc['page_start']}"
-                elif doc.get("page_number"):
-                    page_info = f"page {doc['page_number']}"
-                else:
-                    page_info = "unknown page"
 
                 chunk_tokens = estimate_tokens(content)
 
@@ -266,7 +256,6 @@ def build_rag_prompt(
                     content = truncate_text(content, max_chars, add_ellipsis=True)
                     chunk_tokens = estimate_tokens(content)
 
-
                 if (
                     settings.max_chunk_chars_in_prompt > 0
                     and len(content) > settings.max_chunk_chars_in_prompt
@@ -275,9 +264,7 @@ def build_rag_prompt(
                         content, settings.max_chunk_chars_in_prompt, add_ellipsis=True
                     )
 
-                parts.append(
-                    f"  Chunk {chunk_index} | {page_info} | Relevance: {score:.2%}"
-                )
+                parts.append(f"  Chunk {chunk_index} | Relevance: {score:.2%}")
                 parts.append(f'  """\n  {content}\n  """')
 
                 # Add image caption information if available
@@ -290,7 +277,9 @@ def build_rag_prompt(
                         parts.append(
                             f"  - This document section contains {len(valid_captions)} image(s)"
                         )
-                        parts.append(f"  - Image descriptions: {', '.join(valid_captions)}")
+                        parts.append(
+                            f"  - Image descriptions: {', '.join(valid_captions)}"
+                        )
 
                 total_tokens += chunk_tokens
                 chunks_used += 1
@@ -324,7 +313,9 @@ def build_rag_prompt(
             parts.append("")
 
     parts.append(f"USER QUESTION: {query}")
-    parts.append("\nYour response (cite sources as [Document N] where N is the document number shown above):")
+    parts.append(
+        "\nYour response (cite sources as [Document N] where N is the document number shown above):"
+    )
 
     return "\n".join(parts)
 

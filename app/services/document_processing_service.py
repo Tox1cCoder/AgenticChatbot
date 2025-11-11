@@ -27,7 +27,6 @@ from qdrant_client.models import PointStruct
 from sentence_transformers import SentenceTransformer
 
 from app.core.config import Settings
-from app.utils.text_processing import extract_page_range
 from app.core.events import get_event_bus, DocumentEvent, DocumentEventData
 
 logger = logging.getLogger(__name__)
@@ -58,13 +57,15 @@ class DocumentProcessingService:
     def _init_gemini(self):
         api_key = self.settings.gemini_api_key
         if not api_key:
-            logger.error("Gemini API key not configured - image captioning will be skipped")
+            logger.error(
+                "Gemini API key not configured - image captioning will be skipped"
+            )
             self.gemini_client = None
             return
-            
+
         if api_key.startswith("GEMINI_API_KEY="):
             api_key = api_key.split("=", 1)[-1].strip()
-            
+
         try:
             self.gemini_client = genai.Client(api_key=api_key)
             logger.info("Gemini client initialized successfully for image captioning")
@@ -190,9 +191,7 @@ class DocumentProcessingService:
             loader = TextLoader(file_path, encoding="utf-8")
             documents = loader.load()
             chunks = self._create_chunks(documents)
-            chunks_with_metadata = [
-                {"text": chunk, "page_number": None} for chunk in chunks
-            ]
+            chunks_with_metadata = [{"text": chunk} for chunk in chunks]
 
         elif filename.lower().endswith(".pdf"):
             chunks_with_metadata = await self._process_pdf_with_mineru(
@@ -203,9 +202,7 @@ class DocumentProcessingService:
             loader = Docx2txtLoader(file_path)
             documents = loader.load()
             chunks = self._create_chunks(documents)
-            chunks_with_metadata = [
-                {"text": chunk, "page_number": None} for chunk in chunks
-            ]
+            chunks_with_metadata = [{"text": chunk} for chunk in chunks]
 
         else:
             raise ValueError(f"Unsupported file type: {filename}")
@@ -283,9 +280,7 @@ class DocumentProcessingService:
             else:
                 search_root = base_output_dir
 
-            markdown_file = self._resolve_markdown_file(
-                search_root, filename_aliases
-            )
+            markdown_file = self._resolve_markdown_file(search_root, filename_aliases)
             images_dir = markdown_file.parent / "images"
 
             # Read markdown content
@@ -334,38 +329,25 @@ class DocumentProcessingService:
                                 image_entry
                             )
 
-            # Create chunks from markdown with page markers preserved
+            # Create chunks from markdown
             documents = [
                 type(
                     "Document", (), {"page_content": markdown_content, "metadata": {}}
                 )()
             ]
-            chunks = self._create_chunks(documents, preserve_page_markers=True)
+            chunks = self._create_chunks(documents)
 
-            # Build chunks with metadata and page ranges
+            # Build chunks with metadata
             chunks_with_metadata = []
-            last_page_start: Optional[int] = None
-            last_page_end: Optional[int] = None
             for chunk in chunks:
-                page_start, page_end = extract_page_range(chunk)
-
-                if page_start is None and page_end is None:
-                    page_start, page_end = last_page_start, last_page_end
-                else:
-                    last_page_start, last_page_end = page_start, page_end
-
                 related_images: List[Dict[str, Any]] = []
-                if page_start is not None and page_end is not None:
-                    for page_num in range(page_start, page_end + 1):
-                        related_images.extend(page_to_images.get(page_num, []))
-                elif images_without_page:
+                # Since we don't have page info, include all images without page numbers
+                if images_without_page:
                     related_images = images_without_page.copy()
 
                 chunks_with_metadata.append(
                     {
                         "text": chunk,
-                        "page_start": page_start,
-                        "page_end": page_end,
                         "has_images": bool(related_images),
                         "image_count": len(related_images),
                     }
@@ -401,7 +383,6 @@ class DocumentProcessingService:
         documents: List,
         max_chunk_size: int = None,
         overlap: int = None,
-        preserve_page_markers: bool = False,
     ) -> List[str]:
         # Use configured parameters if not specified
         if max_chunk_size is None:
@@ -411,8 +392,6 @@ class DocumentProcessingService:
 
         # Initialize text splitter
         separators = ["\n\n", "\n", " ", ""]
-        if preserve_page_markers:
-            separators = ["\n\n\n", "\n\n", "\n", " ", ""]
 
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=max_chunk_size,
@@ -496,13 +475,9 @@ class DocumentProcessingService:
             normalized_child = self._normalize_filename_token(child.name)
             if not normalized_child:
                 continue
-            if (
-                normalized_child in normalized_target_set
-                or any(
-                    normalized_child.endswith(target)
-                    or target.endswith(normalized_child)
-                    for target in normalized_target_set
-                )
+            if normalized_child in normalized_target_set or any(
+                normalized_child.endswith(target) or target.endswith(normalized_child)
+                for target in normalized_target_set
             ):
                 normalized_matches.append(child)
 
@@ -575,7 +550,10 @@ class DocumentProcessingService:
             if not normalized_name:
                 continue
             for normalized_candidate in normalized_candidates:
-                if normalized_candidate in normalized_name or normalized_name in normalized_candidate:
+                if (
+                    normalized_candidate in normalized_name
+                    or normalized_name in normalized_candidate
+                ):
                     return path
 
         if all_markdown:
@@ -604,17 +582,6 @@ class DocumentProcessingService:
                 chunk_data.get("text", chunk_data)
                 if isinstance(chunk_data, dict)
                 else chunk_data
-            )
-
-            # Handle both single page and page ranges
-            page_number = (
-                chunk_data.get("page_number") if isinstance(chunk_data, dict) else None
-            )
-            page_start = (
-                chunk_data.get("page_start") if isinstance(chunk_data, dict) else None
-            )
-            page_end = (
-                chunk_data.get("page_end") if isinstance(chunk_data, dict) else None
             )
 
             embedding = self.embedding_model.encode(chunk_text).tolist()
@@ -653,13 +620,6 @@ class DocumentProcessingService:
                     and chunk_data["table_count"] is not None
                 ):
                     payload["table_count"] = int(chunk_data["table_count"])
-
-            # Add page information
-            if page_start is not None and page_end is not None:
-                payload["page_start"] = page_start
-                payload["page_end"] = page_end
-            elif page_number is not None:
-                payload["page_number"] = page_number
 
             point = PointStruct(
                 id=safe_point_id,
@@ -722,13 +682,20 @@ class DocumentProcessingService:
                         )
 
                         if caption:
-                            logger.info(f"Generated caption for {dest_path.name}: {caption[:100]}")
+                            logger.info(
+                                f"Generated caption for {dest_path.name}: {caption[:100]}"
+                            )
 
                     except Exception as e:
-                        logger.error(f"Failed to generate caption for {dest_path.name}: {str(e)}", exc_info=True)
+                        logger.error(
+                            f"Failed to generate caption for {dest_path.name}: {str(e)}",
+                            exc_info=True,
+                        )
                         caption = None
                 else:
-                    logger.warning("Gemini client not initialized, skipping caption generation")
+                    logger.warning(
+                        "Gemini client not initialized, skipping caption generation"
+                    )
 
                 chunk_id = None
                 page_number = img_data.get("page_number")
@@ -761,13 +728,17 @@ class DocumentProcessingService:
                     page_number=page_number,
                     mime_type=img_data["mime_type"],
                 )
-                logger.debug(f"Creating image record with caption: {caption[:100] if caption else 'None'}")
+                logger.debug(
+                    f"Creating image record with caption: {caption[:100] if caption else 'None'}"
+                )
                 self.document_image_repository.create(image_record_data)
                 stored_count += 1
                 if caption:
                     captioned_count += 1
 
-            logger.info(f"Stored {stored_count} images for document {document_id}, {captioned_count} with captions")
+            logger.info(
+                f"Stored {stored_count} images for document {document_id}, {captioned_count} with captions"
+            )
             return stored_count
 
         except Exception as e:
@@ -780,7 +751,9 @@ class DocumentProcessingService:
         if not self.gemini_client:
             return None
 
-        max_attempts = max(1, getattr(self.settings, "image_caption_max_retry_attempts", 1))
+        max_attempts = max(
+            1, getattr(self.settings, "image_caption_max_retry_attempts", 1)
+        )
         last_error: Optional[Exception] = None
 
         for attempt in range(1, max_attempts + 1):
@@ -817,13 +790,17 @@ class DocumentProcessingService:
             )
         return None
 
-    def _request_image_caption(self, image_bytes: bytes, image_name: str) -> Optional[str]:
+    def _request_image_caption(
+        self, image_bytes: bytes, image_name: str
+    ) -> Optional[str]:
         prompt_parts = [
             types.Part.from_text(text="Describe this image concisely in one sentence."),
             types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
         ]
 
-        model_name = getattr(self.settings, "image_caption_model", "gemini-flash-latest")
+        model_name = getattr(
+            self.settings, "image_caption_model", "gemini-flash-latest"
+        )
         response = self.gemini_client.models.generate_content(
             model=model_name,
             contents=prompt_parts,
@@ -924,9 +901,13 @@ class DocumentProcessingService:
                 logger.info(f"No images found for document {document_id}")
                 return
 
-            logger.info(f"Retrieved {len(images)} images from database for document {document_id}")
+            logger.info(
+                f"Retrieved {len(images)} images from database for document {document_id}"
+            )
             for img in images:
-                logger.debug(f"Image {img.id}: path={img.image_path}, caption={img.image_caption}, chunk_id={img.chunk_id}")
+                logger.debug(
+                    f"Image {img.id}: path={img.image_path}, caption={img.image_caption}, chunk_id={img.chunk_id}"
+                )
 
             images_by_chunk = {}
             for image in images:
@@ -942,7 +923,9 @@ class DocumentProcessingService:
                 image_paths = [img.image_path for img in chunk_images]
                 image_captions = [img.image_caption or "" for img in chunk_images]
 
-                logger.info(f"Updating chunk {chunk_id_str} with {len(chunk_images)} images, captions: {image_captions}")
+                logger.info(
+                    f"Updating chunk {chunk_id_str} with {len(chunk_images)} images, captions: {image_captions}"
+                )
 
                 self.qdrant_client.set_payload(
                     collection_name=self.collection_name,
@@ -968,7 +951,9 @@ class DocumentProcessingService:
 
             removed_count = 0
             removed_folders = 0
-            cutoff_time = datetime.now(timezone.utc).timestamp() - (older_than_hours * 3600)
+            cutoff_time = datetime.now(timezone.utc).timestamp() - (
+                older_than_hours * 3600
+            )
 
             for filename in os.listdir(temp_dir):
                 if filename.startswith("."):
