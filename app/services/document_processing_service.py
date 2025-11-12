@@ -99,52 +99,43 @@ class DocumentProcessingService:
     async def start_processing_task(
         self, document_id: str, file_content: bytes, filename: str
     ) -> Dict[str, Any]:
+        validation = await self.validate_upload_file(filename, len(file_content))
+
+        task = self.celery_app.send_task(
+            "app.workers.document_processor.process_document_task",
+            args=[document_id, file_content, filename],
+            retry=True,
+            retry_policy={
+                "max_retries": 3,
+                "interval_start": 0,
+                "interval_step": 30,
+                "interval_max": 180,
+            },
+        )
+
         try:
-
-            validation = await self.validate_upload_file(filename, len(file_content))
-
-            task = self.celery_app.send_task(
-                "app.workers.document_processor.process_document_task",
-                args=[document_id, file_content, filename],
-                retry=True,
-                retry_policy={
-                    "max_retries": 3,
-                    "interval_start": 0,
-                    "interval_step": 30,
-                    "interval_max": 180,
-                },
-            )
-
-            # Emit PROCESSING_STARTED event
-            try:
-                await self._event_bus.emit(
-                    DocumentEvent.PROCESSING_STARTED,
-                    DocumentEventData(
-                        document_id=UUID(document_id),
-                        filename=filename,
-                        status="PROCESSING",
-                        metadata={"task_id": task.id},
-                    ),
-                )
-            except Exception as e:
-                logger.debug(f"Event emission failed for PROCESSING_STARTED: {e}")
-
-            return {
-                "success": True,
-                "task_id": task.id,
-                "document_id": document_id,
-                "file_info": validation,
-                "estimated_processing_time": self._estimate_processing_time(
-                    len(file_content)
+            await self._event_bus.emit(
+                DocumentEvent.PROCESSING_STARTED,
+                DocumentEventData(
+                    document_id=UUID(document_id),
+                    filename=filename,
+                    status="PROCESSING",
+                    metadata={"task_id": task.id},
                 ),
-                "message": f"Document '{filename}' queued for processing",
-            }
-
-        except Exception as e:
-            logger.error(
-                f"Failed to start processing task for document {document_id}: {str(e)}"
             )
-            raise
+        except Exception as e:
+            logger.debug(f"Event emission failed for PROCESSING_STARTED: {e}")
+
+        return {
+            "success": True,
+            "task_id": task.id,
+            "document_id": document_id,
+            "file_info": validation,
+            "estimated_processing_time": self._estimate_processing_time(
+                len(file_content)
+            ),
+            "message": f"Document '{filename}' queued for processing",
+        }
 
     def _estimate_processing_time(self, file_size_bytes: int) -> str:
         size_mb = file_size_bytes / (1024 * 1024)
@@ -255,7 +246,9 @@ class DocumentProcessingService:
                     "-f",
                     "false",
                     "-t",
-                    "false",
+                    "true",
+                    "-l",
+                    "japan",
                 ],
                 timeout=self.settings.mineru_timeout,
                 check=True,
@@ -271,16 +264,19 @@ class DocumentProcessingService:
                 output_dir, filename_aliases
             )
 
-            if base_output_dir is None or not base_output_dir.exists():
+            search_roots: List[Path] = []
+            if base_output_dir is not None and base_output_dir.exists():
+                search_roots.append(base_output_dir)
+            else:
                 logger.warning(
                     "MinerU output directory missing for %s. Searching entire output tree.",
                     filename_without_ext,
                 )
-                search_root = output_dir
-            else:
-                search_root = base_output_dir
 
-            markdown_file = self._resolve_markdown_file(search_root, filename_aliases)
+            if output_dir not in search_roots:
+                search_roots.append(output_dir)
+
+            markdown_file = self._resolve_markdown_file(search_roots, filename_aliases)
             images_dir = markdown_file.parent / "images"
 
             # Read markdown content
@@ -413,6 +409,11 @@ class DocumentProcessingService:
         normalized = re.sub(r"-+", "-", normalized).strip("-")
         return normalized
 
+    @staticmethod
+    def _collapse_filename_token(value: str) -> str:
+        normalized = DocumentProcessingService._normalize_filename_token(value)
+        return normalized.replace("-", "")
+
     def _build_filename_aliases(
         self, sanitized_stem: str, original_filename: Optional[str] = None
     ) -> List[str]:
@@ -437,6 +438,16 @@ class DocumentProcessingService:
             original_stem = Path(original_filename).stem
             _add_alias(original_stem)
             _add_alias(self._normalize_filename_token(original_stem))
+            original_suffix = Path(original_filename).suffix.lower()
+        else:
+            original_suffix = ""
+
+        if original_suffix:
+            existing_aliases = list(aliases)
+            for alias in existing_aliases:
+                alias_with_ext = f"{alias}{original_suffix}"
+                if alias_with_ext not in aliases:
+                    aliases.append(alias_with_ext)
 
         return aliases
 
@@ -459,26 +470,52 @@ class DocumentProcessingService:
             if expected_dir.exists():
                 return expected_dir
 
-        normalized_targets = [
-            self._normalize_filename_token(candidate)
-            for candidate in ordered_candidates
-            if candidate
-        ]
-        normalized_targets = [token for token in normalized_targets if token]
+        normalized_targets = list(
+            filter(
+                None,
+                (
+                    self._normalize_filename_token(candidate)
+                    for candidate in ordered_candidates
+                    if candidate
+                ),
+            )
+        )
         normalized_target_set = set(normalized_targets)
+        collapsed_target_set = set(
+            filter(
+                None,
+                (
+                    self._collapse_filename_token(candidate)
+                    for candidate in ordered_candidates
+                    if candidate
+                ),
+            )
+        )
 
         normalized_matches: List[Path] = []
 
-        for child in output_dir.iterdir():
-            if not child.is_dir():
-                continue
+        child_dirs = [child for child in output_dir.iterdir() if child.is_dir()]
+
+        for child in child_dirs:
             normalized_child = self._normalize_filename_token(child.name)
-            if not normalized_child:
-                continue
-            if normalized_child in normalized_target_set or any(
-                normalized_child.endswith(target) or target.endswith(normalized_child)
-                for target in normalized_target_set
-            ):
+            collapsed_child = self._collapse_filename_token(child.name)
+
+            def _matches_target(token: Optional[str], token_set: set[str]) -> bool:
+                if not token or not token_set:
+                    return False
+                if token in token_set:
+                    return True
+                return any(
+                    token.endswith(target)
+                    or token.startswith(target)
+                    or target.endswith(token)
+                    or target.startswith(token)
+                    for target in token_set
+                )
+
+            if _matches_target(
+                normalized_child, normalized_target_set
+            ) or _matches_target(collapsed_child, collapsed_target_set):
                 normalized_matches.append(child)
 
         if normalized_matches:
@@ -487,17 +524,20 @@ class DocumentProcessingService:
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )[0]
-            logger.warning(
-                "MinerU output folder name mismatch detected for %s, using %s",
-                ordered_candidates[0],
-                chosen.name,
-            )
+            return chosen
+
+        if child_dirs:
+            chosen = sorted(
+                child_dirs,
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )[0]
             return chosen
 
         return None
 
     def _resolve_markdown_file(
-        self, base_output_dir: Path, filename_candidates: List[str]
+        self, search_roots: List[Path], filename_candidates: List[str]
     ) -> Path:
         ordered_candidates: List[str] = []
         for candidate in filename_candidates or []:
@@ -505,64 +545,127 @@ class DocumentProcessingService:
                 ordered_candidates.append(candidate)
 
         if not ordered_candidates:
-            logger.error("MinerU output missing filename hints for markdown resolution")
             raise RuntimeError("MinerU output missing filename hints")
 
-        for candidate in ordered_candidates:
-            exact_matches = sorted(
-                base_output_dir.glob(f"**/{candidate}.md"),
-                key=lambda p: len(p.parts),
-            )
-            if exact_matches:
-                return exact_matches[0]
-
-        all_markdown = sorted(
-            base_output_dir.glob("**/*.md"),
-            key=lambda p: (len(p.parts), p.stat().st_mtime),
-        )
-
-        normalized_map: Dict[str, Path] = {}
-        for path in all_markdown:
-            normalized_name = self._normalize_filename_token(path.stem)
-            if normalized_name and normalized_name not in normalized_map:
-                normalized_map[normalized_name] = path
-
-        for candidate in ordered_candidates:
-            normalized_candidate = self._normalize_filename_token(candidate)
-            if normalized_candidate and normalized_candidate in normalized_map:
-                chosen = normalized_map[normalized_candidate]
-                logger.warning(
-                    "MinerU markdown filename mismatch detected for %s, using %s",
-                    candidate,
-                    chosen.name,
+        def _is_markdown_file(path: Path) -> bool:
+            suffixes = [suffix.lower() for suffix in path.suffixes]
+            if not suffixes:
+                lowered_name = path.name.lower()
+                return (
+                    lowered_name.endswith(".md")
+                    or lowered_name.endswith(".markdown")
+                    or lowered_name.endswith(".mdx")
                 )
-                return chosen
+            return any(suffix in {".md", ".markdown", ".mdx"} for suffix in suffixes)
 
-        normalized_candidates = [
-            self._normalize_filename_token(candidate)
-            for candidate in ordered_candidates
-            if candidate
-        ]
-        normalized_candidates = [token for token in normalized_candidates if token]
+        markdown_suffixes = {".md", ".markdown", ".mdx"}
 
-        for path in all_markdown:
-            normalized_name = self._normalize_filename_token(path.stem)
-            if not normalized_name:
-                continue
-            for normalized_candidate in normalized_candidates:
-                if (
-                    normalized_candidate in normalized_name
-                    or normalized_name in normalized_candidate
-                ):
-                    return path
+        def _search_in_root(root: Path) -> Optional[Path]:
+            if root is None or not root.exists():
+                return None
 
-        if all_markdown:
-            chosen = all_markdown[0]
-            return chosen
+            for candidate in ordered_candidates:
+                exact_matches = sorted(
+                    root.glob(f"**/{candidate}.md"),
+                    key=lambda p: len(p.parts),
+                )
+                if exact_matches:
+                    return exact_matches[0]
 
-        logger.error(
-            "MinerU output missing markdown file for %s", ordered_candidates[0]
-        )
+            all_markdown = sorted(
+                (
+                    path
+                    for path in root.rglob("*")
+                    if path.is_file()
+                    and (
+                        path.suffix.lower() in markdown_suffixes
+                        or _is_markdown_file(path)
+                    )
+                ),
+                key=lambda p: (len(p.parts), p.stat().st_mtime),
+            )
+
+            normalized_map: Dict[str, Path] = {}
+            collapsed_map: Dict[str, Path] = {}
+            for path in all_markdown:
+                normalized_name = self._normalize_filename_token(path.stem)
+                if normalized_name and normalized_name not in normalized_map:
+                    normalized_map[normalized_name] = path
+                collapsed_name = self._collapse_filename_token(path.stem)
+                if collapsed_name and collapsed_name not in collapsed_map:
+                    collapsed_map[collapsed_name] = path
+
+            for candidate in ordered_candidates:
+                normalized_candidate = self._normalize_filename_token(candidate)
+                if normalized_candidate and normalized_candidate in normalized_map:
+                    return normalized_map[normalized_candidate]
+                collapsed_candidate = self._collapse_filename_token(candidate)
+                if collapsed_candidate and collapsed_candidate in collapsed_map:
+                    return collapsed_map[collapsed_candidate]
+
+            normalized_candidates = [
+                self._normalize_filename_token(candidate)
+                for candidate in ordered_candidates
+                if candidate
+            ]
+            normalized_candidates = [token for token in normalized_candidates if token]
+            collapsed_candidates = [
+                self._collapse_filename_token(candidate)
+                for candidate in ordered_candidates
+                if candidate
+            ]
+            collapsed_candidates = [token for token in collapsed_candidates if token]
+
+            for path in all_markdown:
+                normalized_name = self._normalize_filename_token(path.stem) or ""
+                collapsed_name = self._collapse_filename_token(path.stem)
+                if not normalized_name and not collapsed_name:
+                    continue
+                for normalized_candidate in normalized_candidates:
+                    if (
+                        normalized_candidate in normalized_name
+                        or normalized_name in normalized_candidate
+                    ):
+                        return path
+                for collapsed_candidate in collapsed_candidates:
+                    if (
+                        collapsed_candidate in collapsed_name
+                        or collapsed_name in collapsed_candidate
+                    ):
+                        return path
+
+            if all_markdown:
+                return all_markdown[0]
+
+            return None
+
+        unique_roots: List[Path] = []
+        for root in search_roots or []:
+            if root and root not in unique_roots and root.exists():
+                unique_roots.append(root)
+
+        default_output_root = Path("output")
+        if default_output_root.exists() and default_output_root not in unique_roots:
+            unique_roots.append(default_output_root)
+
+        if not unique_roots:
+            raise RuntimeError(
+                f"MinerU output missing markdown file for {ordered_candidates[0]}"
+            )
+
+        searched_roots: List[Path] = []
+        for root in unique_roots:
+            searched_roots.append(root)
+            result = _search_in_root(root)
+            if result:
+                if root != unique_roots[0]:
+                    logger.warning(
+                        "MinerU markdown resolved via fallback root %s for %s",
+                        root,
+                        ordered_candidates[0],
+                    )
+                return result
+
         raise RuntimeError(
             f"MinerU output missing markdown file for {ordered_candidates[0]}"
         )
@@ -651,7 +754,6 @@ class DocumentProcessingService:
         chunks_with_metadata: List[Dict[str, Any]] = None,
     ) -> int:
         stored_count = 0
-        captioned_count = 0
 
         try:
             # Create permanent storage directory
@@ -681,21 +783,12 @@ class DocumentProcessingService:
                             image_name=dest_path.name,
                         )
 
-                        if caption:
-                            logger.info(
-                                f"Generated caption for {dest_path.name}: {caption[:100]}"
-                            )
-
                     except Exception as e:
                         logger.error(
                             f"Failed to generate caption for {dest_path.name}: {str(e)}",
                             exc_info=True,
                         )
                         caption = None
-                else:
-                    logger.warning(
-                        "Gemini client not initialized, skipping caption generation"
-                    )
 
                 chunk_id = None
                 page_number = img_data.get("page_number")
@@ -728,17 +821,8 @@ class DocumentProcessingService:
                     page_number=page_number,
                     mime_type=img_data["mime_type"],
                 )
-                logger.debug(
-                    f"Creating image record with caption: {caption[:100] if caption else 'None'}"
-                )
                 self.document_image_repository.create(image_record_data)
                 stored_count += 1
-                if caption:
-                    captioned_count += 1
-
-            logger.info(
-                f"Stored {stored_count} images for document {document_id}, {captioned_count} with captions"
-            )
             return stored_count
 
         except Exception as e:
@@ -763,7 +847,98 @@ class DocumentProcessingService:
                 last_error = e
                 status = (e.status or "").upper() if isinstance(e.status, str) else ""
                 if e.code == 429 or status == "RESOURCE_EXHAUSTED":
-                    delay = self._determine_retry_delay_seconds(e, attempt)
+                    delay_hint = None
+                    details = getattr(e, "details", None)
+                    detail_entries = []
+                    if isinstance(details, dict):
+                        error_block = details.get("error")
+                        if isinstance(error_block, dict):
+                            detail_entries = error_block.get("details") or []
+                        if not detail_entries:
+                            detail_entries = details.get("details") or []
+                    elif isinstance(details, list):
+                        detail_entries = details
+
+                    for entry in detail_entries or []:
+                        if not isinstance(entry, dict):
+                            continue
+                        retry_value = entry.get("retryDelay") or entry.get(
+                            "retry_delay"
+                        )
+                        if retry_value is None:
+                            continue
+
+                        parsed_value = None
+                        if isinstance(retry_value, (int, float)):
+                            parsed_value = float(retry_value)
+                        elif isinstance(retry_value, str):
+                            match = re.match(
+                                r"([\d\.]+)\s*([a-zA-Z]*)", retry_value.strip()
+                            )
+                            if match:
+                                amount_str, unit = match.groups()
+                                try:
+                                    amount = float(amount_str)
+                                except ValueError:
+                                    amount = None
+                                if amount is not None:
+                                    unit = unit.lower()
+                                    if unit in (
+                                        "",
+                                        "s",
+                                        "sec",
+                                        "secs",
+                                        "second",
+                                        "seconds",
+                                    ):
+                                        parsed_value = amount
+                                    elif unit in (
+                                        "ms",
+                                        "millisecond",
+                                        "milliseconds",
+                                    ):
+                                        parsed_value = amount / 1000.0
+                                    elif unit in (
+                                        "m",
+                                        "min",
+                                        "mins",
+                                        "minute",
+                                        "minutes",
+                                    ):
+                                        parsed_value = amount * 60.0
+                        elif isinstance(retry_value, dict):
+                            seconds = retry_value.get("seconds")
+                            nanos = retry_value.get("nanos", 0)
+                            if seconds is not None or nanos:
+                                seconds = float(seconds or 0)
+                                parsed_value = seconds + float(nanos) / 1_000_000_000
+
+                        if parsed_value is not None:
+                            delay_hint = parsed_value
+                            break
+
+                    if delay_hint is None:
+                        message = getattr(e, "message", "")
+                        if isinstance(message, str):
+                            match = re.search(
+                                r"retry in\s+([\d\.]+)s", message, re.IGNORECASE
+                            )
+                            if match:
+                                try:
+                                    delay_hint = float(match.group(1))
+                                except ValueError:
+                                    delay_hint = None
+
+                    if delay_hint is not None:
+                        delay = max(delay_hint, 0.5)
+                    else:
+                        base_delay = max(
+                            getattr(
+                                self.settings, "image_caption_retry_delay_seconds", 5.0
+                            ),
+                            0.5,
+                        )
+                        delay = base_delay * attempt
                     logger.warning(
                         f"Gemini rate limit while captioning {image_name} "
                         f"(attempt {attempt}/{max_attempts}). Waiting {delay:.2f}s before retry."
@@ -812,83 +987,6 @@ class DocumentProcessingService:
         logger.warning(f"No caption text in Gemini response for {image_name}")
         return None
 
-    def _determine_retry_delay_seconds(
-        self, error: genai_errors.APIError, attempt: int
-    ) -> float:
-        hint = self._extract_retry_delay_seconds(error)
-        if hint is not None:
-            return max(hint, 0.5)
-
-        base_delay = max(
-            getattr(self.settings, "image_caption_retry_delay_seconds", 5.0),
-            0.5,
-        )
-        return base_delay * attempt
-
-    def _extract_retry_delay_seconds(
-        self, error: genai_errors.APIError
-    ) -> Optional[float]:
-        details = getattr(error, "details", None)
-        detail_entries = []
-
-        if isinstance(details, dict):
-            error_block = details.get("error")
-            if isinstance(error_block, dict):
-                detail_entries = error_block.get("details") or []
-            if not detail_entries:
-                detail_entries = details.get("details") or []
-        elif isinstance(details, list):
-            detail_entries = details
-
-        for entry in detail_entries or []:
-            if isinstance(entry, dict):
-                retry_delay_value = entry.get("retryDelay") or entry.get("retry_delay")
-                parsed = self._parse_retry_delay_value(retry_delay_value)
-                if parsed is not None:
-                    return parsed
-
-        message = getattr(error, "message", "")
-        if isinstance(message, str):
-            match = re.search(r"retry in\s+([\d\.]+)s", message, re.IGNORECASE)
-            if match:
-                try:
-                    return float(match.group(1))
-                except ValueError:
-                    pass
-
-        return None
-
-    def _parse_retry_delay_value(self, value: Any) -> Optional[float]:
-        if value is None:
-            return None
-
-        if isinstance(value, (int, float)):
-            return float(value)
-
-        if isinstance(value, str):
-            match = re.match(r"([\d\.]+)\s*([a-zA-Z]*)", value.strip())
-            if match:
-                try:
-                    amount = float(match.group(1))
-                except ValueError:
-                    return None
-                unit = match.group(2).lower()
-                if unit in ("", "s", "sec", "secs", "second", "seconds"):
-                    return amount
-                if unit in ("ms", "millisecond", "milliseconds"):
-                    return amount / 1000.0
-                if unit in ("m", "min", "mins", "minute", "minutes"):
-                    return amount * 60.0
-
-        if isinstance(value, dict):
-            seconds = value.get("seconds")
-            nanos = value.get("nanos", 0)
-            if seconds is not None or nanos:
-                seconds = float(seconds or 0)
-                return seconds + float(nanos) / 1_000_000_000
-
-        return None
-
     async def _update_chunks_with_images(
         self, document_id: str, chunk_id_mapping: Dict[int, str]
     ) -> None:
@@ -898,16 +996,7 @@ class DocumentProcessingService:
             )
 
             if not images:
-                logger.info(f"No images found for document {document_id}")
                 return
-
-            logger.info(
-                f"Retrieved {len(images)} images from database for document {document_id}"
-            )
-            for img in images:
-                logger.debug(
-                    f"Image {img.id}: path={img.image_path}, caption={img.image_caption}, chunk_id={img.chunk_id}"
-                )
 
             images_by_chunk = {}
             for image in images:
@@ -922,10 +1011,6 @@ class DocumentProcessingService:
                 image_ids = [str(img.id) for img in chunk_images]
                 image_paths = [img.image_path for img in chunk_images]
                 image_captions = [img.image_caption or "" for img in chunk_images]
-
-                logger.info(
-                    f"Updating chunk {chunk_id_str} with {len(chunk_images)} images, captions: {image_captions}"
-                )
 
                 self.qdrant_client.set_payload(
                     collection_name=self.collection_name,
@@ -968,7 +1053,6 @@ class DocumentProcessingService:
                         try:
                             os.unlink(file_path)
                             removed_count += 1
-                            logger.info(f"Removed old temp file: {filename}")
                         except Exception as e:
                             logger.warning(
                                 f"Failed to remove temp file {filename}: {str(e)}"
@@ -981,7 +1065,6 @@ class DocumentProcessingService:
                         try:
                             shutil.rmtree(file_path)
                             removed_folders += 1
-                            logger.info(f"Removed old MinerU output folder: {filename}")
                         except Exception as e:
                             logger.warning(
                                 f"Failed to remove MinerU folder {filename}: {str(e)}"
