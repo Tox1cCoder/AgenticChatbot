@@ -16,7 +16,7 @@ import markdown as _markdown  # type: ignore
 
 API_BASE_URL = "http://localhost:8000"
 
-_MAX_PERSONA_LENGTH = 4000
+_MAX_PERSONA_LENGTH = 6000
 _MAX_IMAGE_ATTACHMENTS = 4
 
 PERSONA_TEMPLATES: Dict[str, str] = {
@@ -1089,9 +1089,10 @@ def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
     if st.session_state.get("auth_token"):
         headers["Authorization"] = f"Bearer {st.session_state.auth_token}"
 
+    stream_completed = False
     try:
         response = requests.post(
-            url, json=data, headers=headers, stream=True, timeout=60
+            url, json=data, headers=headers, stream=True, timeout=120
         )
         response.raise_for_status()
 
@@ -1103,16 +1104,20 @@ def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
                     event_data = line[6:]  # Remove "data: " prefix
                     try:
                         event = json.loads(event_data)
+                        event_type = event.get("type")
                         yield event
+                        if event_type in ["complete", "error"]:
+                            stream_completed = True
                     except json.JSONDecodeError:
                         continue
 
     except requests.exceptions.HTTPError as http_error:
         st.toast(f"HTTP error {http_error.response.status_code}", icon="❌")
         yield {"type": "error", "error": f"HTTP {http_error.response.status_code}"}
-    except requests.exceptions.ConnectionError:
-        st.toast("Cannot connect to API", icon="❌")
-        yield {"type": "error", "error": "Connection error"}
+    except requests.exceptions.ConnectionError as conn_error:
+        if not stream_completed:
+            st.toast("Cannot connect to API", icon="❌")
+            yield {"type": "error", "error": "Connection error"}
     except requests.exceptions.Timeout:
         st.toast("Request timed out", icon="⏱️")
         yield {"type": "error", "error": "Timeout"}
@@ -2837,7 +2842,7 @@ def render_chat_view():
                     with st.status("Sending message...", expanded=True) as status:
                         # Create placeholder for streaming response
                         response_placeholder = st.empty()
-                        accumulated_content = ""
+                        accumulated_content = ""  # Initialize empty for accumulation
                         final_message = None
 
                         # Stream the response
@@ -2854,8 +2859,8 @@ def render_chat_view():
                             elif event_type == "token":
                                 # Accumulate and display tokens in real-time
                                 content = event.get("content", "")
-                                accumulated_content = (
-                                    content  # Full content from response
+                                accumulated_content += (
+                                    content  # Append each token chunk
                                 )
                                 response_placeholder.markdown(
                                     f"**Assistant:** {accumulated_content}"

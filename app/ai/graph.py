@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Optional, TYPE_CHECKING
 from uuid import UUID
@@ -428,7 +429,7 @@ class MultiAgentWorkflow:
     ):
         """
         Execute the workflow with streaming support.
-        Yields events for each node execution and state update.
+        Yields token-level events by calling agent streaming methods directly.
         """
         initial_state: GraphState = {
             "messages": [HumanMessage(content=message)],
@@ -454,40 +455,122 @@ class MultiAgentWorkflow:
         if self.checkpointer and thread_id:
             config = {"configurable": {"thread_id": thread_id}}
 
-        # Use astream for streaming execution
+        # Route to determine which agent to use
+        route_state = await self._route_node(initial_state)
+        selected_agent_name = route_state.get("selected_agent")
+
+        if not selected_agent_name:
+            yield {
+                "type": "error",
+                "error": "No agent could be selected for this request",
+            }
+            return
+
+        # Yield node start event
+        yield {"type": "node", "node": selected_agent_name}
+
+        # Get the selected agent and prepare agent message
+        agent = self.agents.get(selected_agent_name)
+        if not agent:
+            yield {"type": "error", "error": f"Agent {selected_agent_name} not found"}
+            return
+
+        # Prepare conversation history and agent message
+        messages = route_state.get("messages", [])
+        last_message = messages[-1] if messages else None
+        content = (
+            last_message.content
+            if last_message and hasattr(last_message, "content")
+            else str(last_message) if last_message else message
+        )
+
+        conversation_history = []
+        memory_manager = get_memory_manager()
+
+        if conversation_id and user_id:
+            conv_id_uuid = UUID(conversation_id)
+            user_id_uuid = UUID(user_id)
+
+            conv_memory = await memory_manager.get_memory(
+                conv_id_uuid, user_id_uuid, force_refresh=True
+            )
+
+            # Apply history limits based on agent type
+            history_limit = None
+            if (
+                selected_agent_name == "chat_agent"
+                and settings.chat_history_max_messages > 0
+            ):
+                history_limit = settings.chat_history_max_messages
+            elif (
+                selected_agent_name == "rag_agent"
+                and settings.rag_history_max_messages > 0
+            ):
+                history_limit = settings.rag_history_max_messages
+            elif (
+                selected_agent_name == "search_agent"
+                and settings.search_history_max_messages > 0
+            ):
+                history_limit = settings.search_history_max_messages
+            elif (
+                selected_agent_name == "image_generator_agent"
+                and settings.image_history_max_messages > 0
+            ):
+                history_limit = settings.image_history_max_messages
+
+            conversation_history = conv_memory.get_recent_messages(
+                limit=history_limit, exclude_last=1
+            )
+
+        context = route_state.get("context", {})
+        attachments_from_context = context.get("attachments")
+
+        agent_msg = AgentMessage(
+            role=MessageRole.USER,
+            content=content,
+            metadata={"history": conversation_history, "persona": persona},
+            attachments=attachments_from_context,
+        )
+
+        # Stream from the agent
         final_response = None
-        async for event in self.graph.astream(initial_state, config=config):
-            # Event is a dict with node name as key and state as value
-            for node_name, node_state in event.items():
-                logger.debug(f"Stream event from node: {node_name}")
+        try:
+            async for event in agent.stream_message(agent_msg, conversation_id):
+                event_type = event.get("type")
 
-                # Yield node execution event
-                yield {"type": "node", "node": node_name, "state": node_state}
+                if event_type == "token":
+                    # Forward token events directly
+                    yield event
+                elif event_type in ["tool_start", "tool_end"]:
+                    # Forward tool events
+                    yield event
+                elif event_type == "complete":
+                    # Store final response
+                    final_response = event.get("response")
+        except Exception as e:
+            logger.error(
+                f"Error streaming from {selected_agent_name}: {e}", exc_info=True
+            )
+            yield {"type": "error", "error": f"Error: {e}"}
+            return
 
-                if isinstance(node_state, dict) and "response" in node_state:
-                    response = node_state.get("response")
-                    if response:
-                        final_response = response
-
-                        # Yield response content as tokens (for display purposes)
-                        if hasattr(response, "message") and hasattr(
-                            response.message, "content"
-                        ):
-                            yield {
-                                "type": "content",
-                                "content": response.message.content,
-                            }
-
-                        # Yield tool execution info if available
-                        if hasattr(response, "metadata") and response.metadata:
-                            if "tool_artifacts" in response.metadata:
-                                yield {
-                                    "type": "tool_artifacts",
-                                    "artifacts": response.metadata["tool_artifacts"],
-                                }
-
-        # Yield final complete event
-        yield {"type": "complete", "response": final_response}
+        if final_response:
+            yield {"type": "complete", "response": final_response}
+        
+        if final_response and self.checkpointer and thread_id:
+            async def update_checkpoint():
+                try:
+                    final_state = route_state.copy()
+                    final_state["response"] = final_response
+                    final_state.setdefault("messages", []).append(
+                        AIMessage(content=final_response.message.content)
+                    )
+                    await self.graph.ainvoke(final_state, config=config)
+                except Exception as e:
+                    logger.warning(f"Failed to update checkpoint: {e}")
+            
+            # Create background task for checkpoint update
+            asyncio.create_task(update_checkpoint())
 
     async def cleanup(self):
         """Cleanup resources from agents that use MCP tools"""

@@ -2,7 +2,7 @@ import json
 import logging
 import re
 import base64
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, AsyncIterator
 from uuid import UUID
 from pathlib import Path
 
@@ -382,6 +382,301 @@ class RAGAgent:
             tool_artifacts=tool_artifacts if tool_artifacts else None,
             error=error_message,
         )
+
+    async def stream_message(
+        self,
+        message: AgentMessage,
+        conversation_id: Optional[str] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Stream message processing with token-by-token generation.
+        Yields events as tokens are generated.
+        """
+        query = message.content
+        conversation_history = message.metadata.get("history", [])
+        persona = message.metadata.get("persona")
+
+        # Initialize tools if not done yet
+        if self.mcp_manager is None:
+            await self._init_tools()
+
+        retrieved_docs = await self._search(query, conversation_id=conversation_id)
+
+        # Create document grouping structure
+        doc_grouping = {}
+        doc_id_to_num = {}
+        next_doc_num = 1
+
+        for doc in retrieved_docs:
+            doc_key = doc.get("document_id") or doc.get("source", "unknown")
+
+            if doc_key not in doc_grouping:
+                doc_grouping[doc_key] = {
+                    "document_id": doc.get("document_id"),
+                    "source": doc.get("source", "unknown"),
+                    "document_number": next_doc_num,
+                    "chunks": [],
+                }
+                doc_id_to_num[doc_key] = next_doc_num
+                next_doc_num += 1
+
+            chunk_details = {
+                "chunk_index": doc.get("chunk_index", 0),
+                "score": doc.get("score", 0.0),
+                "character_count": len(doc.get("content", "")),
+            }
+            doc_grouping[doc_key]["chunks"].append(chunk_details)
+
+        has_images = any(doc.get("image_ids") for doc in retrieved_docs)
+        images = []
+        if has_images:
+            images = await self._fetch_images_for_chunks(retrieved_docs)
+
+        prompt = build_rag_prompt(
+            query,
+            retrieved_docs,
+            conversation_history,
+            persona=persona,
+            document_grouping=doc_grouping,
+        )
+
+        accumulated_content = ""
+        tools_used: List[str] = []
+        tool_artifacts: List[Dict[str, Any]] = []
+        error_message: Optional[str] = None
+
+        try:
+            if images and self.tools and self.langchain_model:
+                # Complex case: images + tools - use non-streaming fallback
+                (
+                    tool_response_text,
+                    tools_used,
+                    tool_artifacts,
+                ) = await self._generate_with_tools(prompt)
+
+                multimodal_prompt = self._augment_prompt_with_tool_context(
+                    prompt, tool_response_text, tool_artifacts
+                )
+                response_text = await self._generate_with_vision(
+                    multimodal_prompt, images
+                )
+                # Yield as single token
+                yield {"type": "token", "content": response_text}
+                accumulated_content = response_text
+            elif images:
+                # Vision only - non-streaming
+                response_text = await self._generate_with_vision(prompt, images)
+                yield {"type": "token", "content": response_text}
+                accumulated_content = response_text
+            elif self.tools and self.langchain_model:
+                # Tools only - stream
+                async for event in self._generate_with_tools_stream(prompt):
+                    if event["type"] == "token":
+                        accumulated_content += event["content"]
+                        yield event
+                    elif event["type"] in ["tool_start", "tool_end"]:
+                        yield event
+                    elif event["type"] == "result":
+                        accumulated_content = event["response_text"]
+                        tools_used = event["tools_used"]
+                        tool_artifacts = event["tool_artifacts"]
+            else:
+                # Text only - stream
+                async for chunk in self._generate_stream(prompt):
+                    accumulated_content += chunk
+                    yield {"type": "token", "content": chunk}
+
+        except Exception as exc:
+            logger.error("Error streaming RAG response: %s", exc, exc_info=True)
+            error_message = f"{type(exc).__name__}: {exc}"
+            tools_used = []
+            tool_artifacts = [
+                {
+                    "tool": "rag_agent",
+                    "args": {},
+                    "error": error_message,
+                    "hint": get_error_recovery_hint(exc, "rag_agent", {}),
+                }
+            ]
+
+        accumulated_content = coerce_response_text(accumulated_content)
+
+        response_message = AgentMessage(
+            role=MessageRole.ASSISTANT, content=accumulated_content
+        )
+
+        # Build grouped citations structure (documents_cited)
+        documents_cited = []
+        for doc_key, doc_info in doc_grouping.items():
+            chunks = doc_info["chunks"]
+            total_chunks = len(chunks)
+            avg_score = (
+                sum(c["score"] for c in chunks) / total_chunks
+                if total_chunks > 0
+                else 0.0
+            )
+
+            document_entry = {
+                "document_id": doc_info["document_id"],
+                "source": doc_info["source"],
+                "document_number": doc_info["document_number"],
+                "chunks": chunks,
+                "total_chunks": total_chunks,
+                "avg_score": avg_score,
+            }
+            documents_cited.append(document_entry)
+
+        documents_cited.sort(key=lambda x: x["document_number"])
+
+        # Build legacy flat citations
+        all_citations = [
+            {
+                "source": doc.get("source", "unknown"),
+                "score": doc.get("score", 0.0),
+                "chunk_index": doc.get("chunk_index", 0),
+                "character_count": len(doc.get("content", "")),
+            }
+            for doc in retrieved_docs
+        ]
+
+        citations = all_citations
+        citation_verification_enabled = False
+        citation_coverage = 100.0
+
+        if self.settings.enable_citation_verification and retrieved_docs:
+            verified_citations = self._verify_citations(
+                accumulated_content, retrieved_docs, all_citations, doc_grouping
+            )
+            if verified_citations is not None:
+                citations = verified_citations
+                citation_verification_enabled = True
+                citation_coverage = (
+                    (len(citations) / len(all_citations) * 100)
+                    if all_citations
+                    else 0.0
+                )
+
+        avg_score = (
+            sum(doc.get("score", 0.0) for doc in retrieved_docs) / len(retrieved_docs)
+            if retrieved_docs
+            else 0.0
+        )
+
+        # Build metadata
+        metadata = {
+            "model": self.model_name,
+            "conversation_id": conversation_id,
+            "documents_found": len(doc_grouping),
+            "chunks_retrieved": len(retrieved_docs),
+            "documents_cited": documents_cited,
+            "citations": citations,
+            "context_messages": len(conversation_history),
+            "retrieval_stats": {
+                "total_retrieved": len(retrieved_docs),
+                "avg_score": avg_score,
+            },
+            "persona_used": persona,
+            "tools_available": len(self.tools),
+            "citation_verification_enabled": citation_verification_enabled,
+            "citation_coverage": citation_coverage,
+            "has_images": bool(images),
+            "images_count": len(images) if images else 0,
+        }
+
+        if tools_used:
+            metadata["tools_used"] = tools_used
+            metadata["tool_calls_count"] = len(tools_used)
+        if tool_artifacts:
+            metadata["tool_artifacts"] = tool_artifacts
+            if not error_message:
+                error_entries = [
+                    artifact.get("error")
+                    for artifact in tool_artifacts
+                    if artifact.get("error")
+                ]
+                if error_entries:
+                    error_message = error_entries[0]
+                    metadata["error"] = error_message
+        elif error_message:
+            metadata["error"] = error_message
+
+        # Yield complete event
+        yield {
+            "type": "complete",
+            "response": AgentResponse(
+                agent_type=AgentType.RAG,
+                agent_id="rag_agent",
+                message=response_message,
+                metadata=metadata,
+                tool_artifacts=tool_artifacts if tool_artifacts else None,
+                error=error_message,
+            ),
+        }
+
+    async def _generate_with_tools_stream(
+        self, prompt: str
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Generate streaming response with tool calling support.
+        Yields token chunks and tool execution events.
+        """
+        try:
+            # Create agent executor
+            agent_executor = self._create_agent_executor(self.tools, prompt)
+
+            accumulated_text = ""
+
+            # Stream agent execution
+            async for event in agent_executor.astream_events(
+                {"messages": [HumanMessage(content=prompt)]}, version="v1"
+            ):
+                event_type = event.get("event")
+
+                # Extract tokens from LLM events
+                if event_type == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        # Handle both string and list content
+                        token = chunk.content
+                        if isinstance(token, list):
+                            # If it's a list, join the string parts
+                            token = "".join(str(item) for item in token if item)
+                        if token:  # Only yield non-empty tokens
+                            accumulated_text += token
+                            yield {"type": "token", "content": token}
+
+                # Track tool execution
+                elif event_type == "on_tool_start":
+                    tool_name = event.get("name", "unknown_tool")
+                    yield {"type": "tool_start", "name": tool_name}
+
+                elif event_type == "on_tool_end":
+                    tool_name = event.get("name", "unknown_tool")
+                    yield {"type": "tool_end", "name": tool_name}
+
+            # Get final response for complete extraction
+            agent_response = await agent_executor.ainvoke(
+                {"messages": [HumanMessage(content=prompt)]}
+            )
+
+            # Extract execution info
+            execution_info = extract_agent_execution_info(agent_response)
+
+            response_text = execution_info["response_text"]
+            tools_used = execution_info["tools_used"]
+            tool_artifacts = execution_info["tool_artifacts"]
+
+            # Yield result info
+            yield {
+                "type": "result",
+                "response_text": response_text,
+                "tools_used": tools_used,
+                "tool_artifacts": tool_artifacts,
+            }
+
+        except Exception as exc:
+            logger.error("Error in RAGAgent tool streaming: %s", exc, exc_info=True)
+            raise
 
     def _verify_citations(
         self,

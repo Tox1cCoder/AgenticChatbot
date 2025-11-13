@@ -127,7 +127,7 @@ class AIService:
     ):
         """
         Generate bot response with streaming support.
-        Yields chunks as they arrive from the workflow.
+        Yields incremental token chunks as they arrive from the workflow.
         """
         thread_id = (
             str(conversation_id) if conversation_id and self.checkpointer else None
@@ -139,8 +139,7 @@ class AIService:
             persona = self._load_persona(conversation_id)
             persona = sanitize_persona(persona)
 
-        # Track accumulated response
-        full_content = ""
+        # Track final response
         final_response = None
 
         try:
@@ -159,26 +158,29 @@ class AIService:
                     node_name = event.get("node")
                     yield {"type": "node", "node": node_name}
 
-                elif event_type == "content":
-                    # Yield content chunks
+                elif event_type == "token":
+                    # Yield incremental token chunks directly
                     content = event.get("content", "")
-                    full_content = content  # Store full content
                     yield {"type": "token", "content": content}
 
-                elif event_type == "tool_artifacts":
-                    # Yield tool execution information
-                    artifacts = event.get("artifacts", [])
-                    for artifact in artifacts:
-                        yield {
-                            "type": "tool",
-                            "name": artifact.get("tool", "unknown"),
-                            "status": "error" if artifact.get("error") else "success",
-                            "details": artifact,
-                        }
+                elif event_type == "tool_start":
+                    # Yield tool start event
+                    tool_name = event.get("name", "unknown")
+                    yield {"type": "tool", "name": tool_name, "status": "start"}
+
+                elif event_type == "tool_end":
+                    # Yield tool end event
+                    tool_name = event.get("name", "unknown")
+                    yield {"type": "tool", "name": tool_name, "status": "end"}
 
                 elif event_type == "complete":
                     # Store final response
                     final_response = event.get("response")
+
+                elif event_type == "error":
+                    # Yield error event
+                    error_msg = event.get("error", "Unknown error")
+                    yield {"type": "error", "error": error_msg}
 
             # Yield final complete event with full response
             if final_response:

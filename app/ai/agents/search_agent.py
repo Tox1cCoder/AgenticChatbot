@@ -1,6 +1,6 @@
 import logging
 import json
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, AsyncIterator
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
@@ -9,7 +9,11 @@ from langchain.agents import create_agent
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT
-from ..utils import coerce_response_text, extract_agent_execution_info, get_error_recovery_hint
+from ..utils import (
+    coerce_response_text,
+    extract_agent_execution_info,
+    get_error_recovery_hint,
+)
 from ...core.config import settings
 from ...core.exceptions.mcp import ServerNotFoundError
 from ..mcp_integration import MCPManager
@@ -47,9 +51,7 @@ class SearchAgent:
                 preferred_servers = ["tavily", "time"]
 
                 for server_name in preferred_servers:
-                    server_tools = await self.mcp_manager.get_server_tools(
-                        server_name
-                    )
+                    server_tools = await self.mcp_manager.get_server_tools(server_name)
 
                     for tool in server_tools:
                         combined_tools[tool.name] = tool
@@ -87,20 +89,22 @@ class SearchAgent:
         error_message: Optional[str] = None
         try:
             # Create agent executor
-            agent_executor = self._create_agent_executor(self.tools, SEARCH_SYSTEM_PROMPT)
-            
+            agent_executor = self._create_agent_executor(
+                self.tools, SEARCH_SYSTEM_PROMPT
+            )
+
             # Invoke agent with the user message
-            agent_response = await agent_executor.ainvoke({
-                "messages": [HumanMessage(content=prompt)]
-            })
-            
+            agent_response = await agent_executor.ainvoke(
+                {"messages": [HumanMessage(content=prompt)]}
+            )
+
             # Extract execution info
             execution_info = extract_agent_execution_info(agent_response)
-            
+
             response_text = execution_info["response_text"]
             tools_used = execution_info["tools_used"]
             tool_artifacts = execution_info["tool_artifacts"]
-            
+
             extracted_images = []
             for artifact in tool_artifacts:
                 if artifact.get("tool") == "tavily_search" and artifact.get("output"):
@@ -124,7 +128,7 @@ class SearchAgent:
             extracted_images = []
 
         response_text = coerce_response_text(response_text)
-        
+
         # Create response metadata
         search_metadata = {
             "model": self.model_name,
@@ -146,7 +150,9 @@ class SearchAgent:
         if tool_artifacts:
             search_metadata["tool_artifacts"] = tool_artifacts
             if not error_message:
-                error_entries = [art["error"] for art in tool_artifacts if art.get("error")]
+                error_entries = [
+                    art["error"] for art in tool_artifacts if art.get("error")
+                ]
                 if error_entries:
                     error_message = error_entries[0]
                     search_metadata["error"] = error_message
@@ -167,30 +173,182 @@ class SearchAgent:
             error=error_message,
         )
 
+    async def stream_message(
+        self,
+        message: AgentMessage,
+        conversation_id: Optional[str] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Stream message processing with token-by-token generation.
+        Yields events as tokens are generated and tools are executed.
+        """
+        # Initialize MCP tools if needed
+        if self.mcp_manager is None:
+            await self._init_mcp()
+
+        # Extract conversation history
+        conversation_history = message.metadata.get("history", [])
+        persona = message.metadata.get("persona")
+
+        # Build prompt
+        prompt = build_search_prompt(
+            message.content, conversation_history, persona=persona
+        )
+
+        accumulated_content = ""
+        tools_used: List[str] = []
+        tool_artifacts: List[Dict[str, Any]] = []
+        error_message: Optional[str] = None
+        extracted_images = []
+
+        try:
+            # Create agent executor
+            agent_executor = self._create_agent_executor(
+                self.tools, SEARCH_SYSTEM_PROMPT
+            )
+
+            # Stream agent execution
+            async for event in agent_executor.astream_events(
+                {"messages": [HumanMessage(content=prompt)]}, version="v1"
+            ):
+                event_type = event.get("event")
+
+                # Extract tokens from LLM events
+                if event_type == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        # Handle both string and list content
+                        token = chunk.content
+                        if isinstance(token, list):
+                            # If it's a list, join the string parts
+                            token = "".join(str(item) for item in token if item)
+                        if token:  # Only yield non-empty tokens
+                            accumulated_content += token
+                            yield {"type": "token", "content": token}
+
+                # Track tool execution
+                elif event_type == "on_tool_start":
+                    tool_name = event.get("name", "unknown_tool")
+                    yield {"type": "tool_start", "name": tool_name}
+
+                elif event_type == "on_tool_end":
+                    tool_name = event.get("name", "unknown_tool")
+                    yield {"type": "tool_end", "name": tool_name}
+
+            # Get final response for complete extraction
+            agent_response = await agent_executor.ainvoke(
+                {"messages": [HumanMessage(content=prompt)]}
+            )
+
+            # Extract execution info
+            execution_info = extract_agent_execution_info(agent_response)
+
+            accumulated_content = execution_info["response_text"]
+            tools_used = execution_info["tools_used"]
+            tool_artifacts = execution_info["tool_artifacts"]
+
+            # Extract images from Tavily results
+            for artifact in tool_artifacts:
+                if artifact.get("tool") == "tavily_search" and artifact.get("output"):
+                    images = self._extract_images_from_tavily(artifact["output"])
+                    if images:
+                        extracted_images.extend(images)
+
+        except Exception as e:
+            logger.error(f"Error streaming search agent: {e}", exc_info=True)
+            error_message = f"{type(e).__name__}: {e}"
+            recovery_hint = get_error_recovery_hint(e, "search_agent", {})
+            tools_used = []
+            tool_artifacts = [
+                {
+                    "tool": "search_agent",
+                    "args": {},
+                    "error": error_message,
+                    "hint": recovery_hint,
+                }
+            ]
+            extracted_images = []
+
+        accumulated_content = coerce_response_text(accumulated_content)
+
+        # Create response metadata
+        search_metadata = {
+            "model": self.model_name,
+            "conversation_id": conversation_id,
+            "context_messages": len(conversation_history),
+            "tools_available": len(self.tools),
+            "agent_type": "tool_calling",
+            "persona_used": persona,
+        }
+
+        # Add tool usage metadata
+        if tools_used:
+            search_metadata["tools_used"] = tools_used
+            search_metadata["tool_calls_count"] = len(tools_used)
+
+        # Add images to metadata if any were extracted
+        if extracted_images:
+            search_metadata["images"] = extracted_images
+        if tool_artifacts:
+            search_metadata["tool_artifacts"] = tool_artifacts
+            if not error_message:
+                error_entries = [
+                    art["error"] for art in tool_artifacts if art.get("error")
+                ]
+                if error_entries:
+                    error_message = error_entries[0]
+                    search_metadata["error"] = error_message
+        elif error_message:
+            search_metadata["error"] = error_message
+
+        # Create response message
+        response_message = AgentMessage(
+            role=MessageRole.ASSISTANT, content=accumulated_content
+        )
+
+        # Yield complete event
+        yield {
+            "type": "complete",
+            "response": AgentResponse(
+                agent_type=AgentType.SEARCH,
+                agent_id="search_agent",
+                message=response_message,
+                metadata=search_metadata,
+                tool_artifacts=tool_artifacts if tool_artifacts else None,
+                error=error_message,
+            ),
+        }
+
     def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
         """Create agent executor with proper tool binding configuration."""
         if not self.langchain_model:
             raise RuntimeError("SearchAgent language model not initialized")
 
         # Configure tool calling based on settings
-        tool_choice = settings.tool_choice_mode if hasattr(settings, 'tool_choice_mode') else "auto"
-        
+        tool_choice = (
+            settings.tool_choice_mode
+            if hasattr(settings, "tool_choice_mode")
+            else "auto"
+        )
+
         # Configure model with tool binding
         llm_with_tools = self.langchain_model.bind_tools(
-            tools, 
+            tools,
             tool_config={
                 "function_calling_config": {
-                    "mode": tool_choice.upper() if tool_choice in ["auto", "any", "none"] else "AUTO"
+                    "mode": (
+                        tool_choice.upper()
+                        if tool_choice in ["auto", "any", "none"]
+                        else "AUTO"
+                    )
                 }
-            }
+            },
         )
-        
+
         agent = create_agent(
-            model=llm_with_tools,
-            tools=tools,
-            system_prompt=system_prompt
+            model=llm_with_tools, tools=tools, system_prompt=system_prompt
         )
-        
+
         return agent
 
     def _extract_images_from_tavily(self, tool_result: Any) -> List[Dict[str, str]]:

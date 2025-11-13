@@ -179,12 +179,8 @@ class Settings(BaseSettings):
         default=200,
         description="Overlap between chunks in characters",
     )
-    mineru_enabled: bool = Field(
-        default=True,
-        description="Enable MinerU for PDF parsing",
-    )
     mineru_timeout: int = Field(
-        default=300,
+        default=30,
         description="Timeout for MinerU subprocess in seconds",
     )
     document_images_storage_path: str = Field(

@@ -84,7 +84,7 @@ class MessageService(IMessageService):
             if bot_response and bot_response.tool_artifacts:
                 bot_metadata.setdefault("tool_artifacts", bot_response.tool_artifacts)
 
-            # Extract images from bot response metadata (from Search or Image Generator agents)
+            # Extract images from bot response metadata
             if (
                 bot_response
                 and bot_response.metadata
@@ -180,6 +180,8 @@ class MessageService(IMessageService):
                             )
                         else:
                             bot_response_content = "Error: No response generated"
+                        
+                        break
 
                     elif event_type == "error":
                         # Handle error
@@ -194,6 +196,8 @@ class MessageService(IMessageService):
                             )
                         else:
                             bot_response_content = f"Error: {error_msg}"
+                        
+                        break
 
                 # Ensure content is valid (not empty)
                 if not bot_response_content or not bot_response_content.strip():
