@@ -246,7 +246,7 @@ class DocumentProcessingService:
                     "-f",
                     "false",
                     "-t",
-                    "true",
+                    "false",
                     "-l",
                     "japan",
                 ],

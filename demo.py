@@ -16,7 +16,7 @@ import markdown as _markdown  # type: ignore
 
 API_BASE_URL = "http://localhost:8000"
 
-_MAX_PERSONA_LENGTH = 2000
+_MAX_PERSONA_LENGTH = 4000
 _MAX_IMAGE_ATTACHMENTS = 4
 
 PERSONA_TEMPLATES: Dict[str, str] = {

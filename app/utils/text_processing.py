@@ -121,7 +121,7 @@ def clean_text(text: str) -> str:
     return text
 
 
-def validate_persona(persona: str | None, max_length: int = 2000) -> str | None:
+def validate_persona(persona: str | None, max_length: int = 4000) -> str | None:
     """
     Validate persona text.
 
@@ -160,8 +160,7 @@ def sanitize_persona(persona: str | None) -> str | None:
     # Clean the persona text
     cleaned = clean_text(persona)
 
-    # Truncate to max 2000 characters
-    if len(cleaned) > 2000:
-        cleaned = truncate_text(cleaned, 2000, add_ellipsis=False)
+    if len(cleaned) > 4000:
+        cleaned = truncate_text(cleaned, 4000, add_ellipsis=False)
 
     return cleaned if cleaned else None

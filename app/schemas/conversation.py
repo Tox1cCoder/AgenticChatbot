@@ -13,7 +13,7 @@ class ConversationCreate(BaseModel):
     )
     persona_prompt: Optional[str] = Field(
         None,
-        max_length=2000,
+        max_length=4000,
         description="Custom persona/system instruction for this conversation",
     )
 
@@ -26,7 +26,7 @@ class ConversationUpdate(BaseModel):
     )
     persona_prompt: Optional[str] = Field(
         None,
-        max_length=2000,
+        max_length=4000,
         description="Custom persona/system instruction for this conversation",
     )
 
@@ -48,7 +48,7 @@ class ConversationRead(BaseModel):
     )
     persona_prompt: Optional[str] = Field(
         None,
-        max_length=2000,
+        max_length=4000,
         description="Custom persona/system instruction for this conversation",
     )
     message_count: Optional[int] = Field(
@@ -74,7 +74,7 @@ class ConversationInDB(BaseModel):
     )
     persona_prompt: Optional[str] = Field(
         None,
-        max_length=2000,
+        max_length=4000,
         description="Custom persona/system instruction for this conversation",
     )
 
