@@ -16,7 +16,7 @@ import markdown as _markdown  # type: ignore
 
 API_BASE_URL = "http://localhost:8000"
 
-_MAX_PERSONA_LENGTH = 6000
+_MAX_PERSONA_LENGTH = 8000
 _MAX_IMAGE_ATTACHMENTS = 4
 
 PERSONA_TEMPLATES: Dict[str, str] = {
@@ -926,6 +926,38 @@ def sanitize_message_content(content: str) -> str:
         r"!\[([^\]]*)\]\(([^)]+)\)", r"\1 (\2)", normalized, flags=re.MULTILINE
     )
 
+    # Ensure proper list formatting for sane_lists extension
+    # Add blank lines before lists and between list type transitions
+    lines = normalized.split("\n")
+    processed_lines = []
+    prev_line_type = None  # 'blank', 'unordered', 'ordered', 'text'
+
+    unordered_pattern = re.compile(r"^\s*[-*+]\s+")
+    ordered_pattern = re.compile(r"^\s*\d+\.\s+")
+
+    for line in lines:
+        current_line_type = None
+
+        if not line.strip():
+            current_line_type = "blank"
+        elif unordered_pattern.match(line):
+            current_line_type = "unordered"
+        elif ordered_pattern.match(line):
+            current_line_type = "ordered"
+        else:
+            current_line_type = "text"
+
+        # Insert blank line when transitioning to a list from non-list content
+        # or when list type changes
+        if current_line_type in ("unordered", "ordered"):
+            if prev_line_type not in (None, "blank", current_line_type):
+                processed_lines.append("")
+
+        processed_lines.append(line)
+        prev_line_type = current_line_type
+
+    normalized = "\n".join(processed_lines)
+
     # Render markdown to HTML
     rendered = _markdown.markdown(
         normalized,
@@ -1381,13 +1413,45 @@ def execute_mcp_tool(
     return response.get("data") if response else None
 
 
+def render_json_output(
+    data: Any, label: str = "JSON Output", expanded: Optional[bool] = None
+) -> None:
+    """Render JSON data with syntax highlighting in an expandable section.
+
+    Args:
+        data: Dictionary or list to render as JSON
+        label: Label for the expander
+        expanded: Whether to expand by default (auto-determined if None)
+    """
+    try:
+        json_string = json.dumps(data, indent=2, ensure_ascii=False, sort_keys=False)
+    except (TypeError, ValueError):
+        # Fallback for non-serializable data
+        json_string = str(data)
+
+    # Auto-determine expanded state based on content size
+    if expanded is None:
+        expanded = len(json_string) < 500
+
+    # Add size caption
+    if isinstance(data, dict):
+        size_caption = f"{len(data)} keys"
+    elif isinstance(data, list):
+        size_caption = f"{len(data)} items"
+    else:
+        size_caption = f"{len(json_string)} characters"
+
+    with st.expander(f"{label} ({size_caption})", expanded=expanded):
+        st.code(json_string, language="json", line_numbers=False)
+
+
 def render_tool_result_payload(payload: Any) -> None:
     if payload is None:
         st.write("No data returned.")
         return
 
     if isinstance(payload, (dict, list)):
-        st.json(payload)
+        render_json_output(payload, label="Result Data", expanded=True)
         return
 
     if isinstance(payload, (bytes, bytearray)):
@@ -1407,7 +1471,7 @@ def render_tool_result_payload(payload: Any) -> None:
         st.code(text, language=language)
     else:
         if isinstance(parsed, (dict, list)):
-            st.json(parsed)
+            render_json_output(parsed, label="Result Data", expanded=True)
         else:
             st.code(json.dumps(parsed, ensure_ascii=False), language="json")
 
@@ -1757,7 +1821,9 @@ def render_tool_artifacts(tool_artifacts: List[Dict[str, Any]]):
             if output is not None:
                 st.markdown("**Output:**")
                 if isinstance(output, (dict, list)):
-                    st.json(output)
+                    render_json_output(
+                        output, label=f"{tool_name} Output", expanded=False
+                    )
                 else:
                     st.code(str(output), language="text")
 
