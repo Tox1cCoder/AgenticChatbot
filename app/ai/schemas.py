@@ -30,7 +30,7 @@ class AgentMessage(BaseModel):
 
 class AgentConfig(BaseModel):
     model: str
-    temperature: float = 0.7
+    temperature: float
     max_tokens: Optional[int] = None
     top_p: float = 1.0
     frequency_penalty: float = 0.0

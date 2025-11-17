@@ -45,7 +45,7 @@ class ImageGeneratorAgent:
         self.gemini_client = genai.Client(api_key=api_key)
 
         self.langchain_model = ChatGoogleGenerativeAI(
-            model="gemini-flash-latest", google_api_key=api_key, temperature=0.7
+            model="gemini-flash-latest", google_api_key=api_key, temperature=0.8
         )
 
     async def _init_tools(self):

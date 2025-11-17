@@ -36,7 +36,7 @@ class SearchAgent:
         if api_key.startswith("GEMINI_API_KEY="):
             api_key = api_key.split("=", 1)[-1].strip()
         self.langchain_model = ChatGoogleGenerativeAI(
-            model=self.model_name, google_api_key=api_key, temperature=0.0
+            model=self.model_name, google_api_key=api_key, temperature=0.12
         )
 
     async def _init_mcp(self):

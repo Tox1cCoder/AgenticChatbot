@@ -83,7 +83,7 @@ class RAGAgent:
         self.gemini_client = genai.Client(api_key=api_key)
 
         self.langchain_model = ChatGoogleGenerativeAI(
-            model=self.model_name, google_api_key=api_key, temperature=0.2
+            model=self.model_name, google_api_key=api_key, temperature=0.24
         )
 
     def _init_reranker(self):
