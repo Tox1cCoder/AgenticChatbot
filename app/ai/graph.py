@@ -1,21 +1,29 @@
 import asyncio
 import logging
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, List
 from uuid import UUID
 
 from langgraph.graph import StateGraph, END, START
+from langgraph.types import Command
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langchain_core.messages import HumanMessage, AIMessage
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 
-from .schemas import GraphState, AgentMessage, AgentResponse, MessageRole
+from .schemas import (
+    GraphState,
+    AgentMessage,
+    AgentResponse,
+    MessageRole,
+    InterruptDecision,
+)
 from .agents.router import Router
 from .agents.chat_agent import ChatAgent
 from .agents.rag_agent import RAGAgent
 from .agents.search_agent import SearchAgent
 from .agents.image_generator_agent import ImageGeneratorAgent
 from .memory import get_memory_manager
+from .hitl_config import build_interrupt_response
 from ..core.config import settings
 
 if TYPE_CHECKING:
@@ -416,6 +424,46 @@ class MultiAgentWorkflow:
             config = {"configurable": {"thread_id": thread_id}}
 
         result = await self.graph.ainvoke(initial_state, config=config)
+
+        agent_response = result.get("response")
+        if agent_response and isinstance(agent_response.metadata, dict):
+            if "interrupt" in agent_response.metadata:
+                logger.info("MultiAgentWorkflow detected interrupt in agent response")
+                return agent_response
+
+        return agent_response
+
+    async def resume_execution(
+        self,
+        thread_id: str,
+        decisions: List[InterruptDecision],
+    ) -> Optional[AgentResponse]:
+        """
+        Resume execution after handling interrupts.
+
+        Constructs decision payload matching the interrupt mechanism's expected format.
+        """
+        if not self.checkpointer:
+            raise RuntimeError("Checkpointing must be enabled for resume_execution")
+
+        config = {"configurable": {"thread_id": thread_id}}
+
+        # Build decision data in the format expected by HumanInTheLoopMiddleware/LangGraph
+        # Map task_id to decision type and args
+        decision_map = {}
+        for decision in decisions:
+            task_id = decision.task_id
+            if task_id:
+                decision_entry = {
+                    "type": decision.type.value,  # 'accept', 'edit', or 'respond'
+                }
+                if decision.args:
+                    decision_entry["args"] = decision.args
+                decision_map[task_id] = decision_entry
+
+        command = Command(resume=decision_map)
+        result = await self.graph.ainvoke(command, config=config)
+
         return result.get("response")
 
     async def execute_stream(
@@ -547,6 +595,10 @@ class MultiAgentWorkflow:
                 elif event_type == "complete":
                     # Store final response
                     final_response = event.get("response")
+                elif event_type == "interrupt":
+                    # Forward interrupt events
+                    yield event
+                    return  # Stop streaming when interrupted
         except Exception as e:
             logger.error(
                 f"Error streaming from {selected_agent_name}: {e}", exc_info=True
@@ -555,9 +607,18 @@ class MultiAgentWorkflow:
             return
 
         if final_response:
+            # Check if response contains interrupt metadata
+            if final_response.metadata and "interrupt" in final_response.metadata:
+                yield {
+                    "type": "interrupt",
+                    "interrupt": final_response.metadata["interrupt"],
+                }
+                return  # Stop streaming, wait for resume
+
             yield {"type": "complete", "response": final_response}
-        
+
         if final_response and self.checkpointer and thread_id:
+
             async def update_checkpoint():
                 try:
                     final_state = route_state.copy()
@@ -568,7 +629,7 @@ class MultiAgentWorkflow:
                     await self.graph.ainvoke(final_state, config=config)
                 except Exception as e:
                     logger.warning(f"Failed to update checkpoint: {e}")
-            
+
             # Create background task for checkpoint update
             asyncio.create_task(update_checkpoint())
 

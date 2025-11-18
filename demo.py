@@ -1189,7 +1189,7 @@ def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
                         event = json.loads(event_data)
                         event_type = event.get("type")
                         yield event
-                        if event_type in ["complete", "error"]:
+                        if event_type in ["complete", "error", "interrupt"]:
                             stream_completed = True
                     except json.JSONDecodeError:
                         continue
@@ -2655,6 +2655,172 @@ def render_tools_tab():
             st.rerun()
 
 
+def render_interrupt_approval_ui():
+    """Render the UI for approving/rejecting/editing tool executions"""
+    interrupt_info = st.session_state.get("pending_interrupt", {})
+
+    if not interrupt_info:
+        return
+
+    thread_id = interrupt_info.get("thread_id")
+    action_requests = interrupt_info.get("action_requests", [])
+
+    if not action_requests:
+        st.warning("No tool actions to approve")
+        if st.button("Cancel"):
+            st.session_state.pop("pending_interrupt", None)
+            st.rerun()
+        return
+
+    st.warning("🔔 **Tool Execution Requires Approval**", icon="⏸️")
+    st.markdown(
+        "The AI assistant wants to execute the following tool(s). Please review and approve:"
+    )
+
+    # Store decisions for each tool
+    decisions = []
+
+    for idx, action_request in enumerate(action_requests):
+        tool_name = action_request.get("action", "unknown")
+        tool_args = action_request.get("args", {})
+        description = action_request.get("description", "")
+        task_id = action_request.get("task_id") or action_request.get("tool_call_id")
+
+        st.markdown(f"### 🔧 Tool: `{tool_name}`")
+        if description:
+            st.markdown(f"**Description:** {description}")
+        if task_id:
+            st.caption(f"Task ID: `{task_id}`")
+
+        # Display tool arguments
+        with st.expander("📋 Tool Arguments", expanded=True):
+            st.json(tool_args)
+
+        # Decision options
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            if st.button(
+                f"✅ Accept",
+                key=f"accept_{idx}",
+                use_container_width=True,
+                type="primary",
+            ):
+                decisions.append({"type": "accept", "taskId": task_id, "args": None})
+
+        with col2:
+            if st.button(f"✏️ Edit Args", key=f"edit_{idx}", use_container_width=True):
+                st.session_state[f"editing_tool_{idx}"] = True
+                st.rerun()
+
+        with col3:
+            if st.button(f"❌ Reject", key=f"reject_{idx}", use_container_width=True):
+                decisions.append(
+                    {
+                        "type": "respond",
+                        "taskId": task_id,
+                        "args": {"message": f"User rejected execution of {tool_name}"},
+                    }
+                )
+
+        # Show edit form if editing
+        if st.session_state.get(f"editing_tool_{idx}"):
+            st.markdown("**Edit Arguments:**")
+            with st.form(f"edit_form_{idx}"):
+                edited_args_text = st.text_area(
+                    "Arguments (JSON format)",
+                    value=json.dumps(tool_args, indent=2),
+                    height=200,
+                )
+
+                col_save, col_cancel = st.columns(2)
+                with col_save:
+                    if st.form_submit_button(
+                        "💾 Save & Accept", use_container_width=True, type="primary"
+                    ):
+                        try:
+                            edited_args = json.loads(edited_args_text)
+                            decisions.append(
+                                {"type": "edit", "taskId": task_id, "args": edited_args}
+                            )
+                            st.session_state.pop(f"editing_tool_{idx}", None)
+                        except json.JSONDecodeError:
+                            st.error("Invalid JSON format")
+                            return
+
+                with col_cancel:
+                    if st.form_submit_button("Cancel", use_container_width=True):
+                        st.session_state.pop(f"editing_tool_{idx}", None)
+                        st.rerun()
+
+        if idx < len(action_requests) - 1:
+            st.divider()
+
+    # Submit decisions
+    if decisions and len(decisions) == len(action_requests):
+        # All tools have been decided, submit resume request
+        conversation_id = st.session_state.get("interrupt_conversation_id")
+
+        resume_payload = {
+            "threadId": thread_id,
+            "conversationId": conversation_id,
+            "decisions": decisions,
+        }
+
+        with st.spinner("Resuming execution..."):
+            response = make_api_request(
+                "POST", "/messages/resume-interrupt", resume_payload
+            )
+
+            if response and response.get("success"):
+                # Clear interrupt state
+                st.session_state.pop("pending_interrupt", None)
+                st.session_state.pop("interrupt_conversation_id", None)
+
+                # Clear editing states
+                for idx in range(len(action_requests)):
+                    st.session_state.pop(f"editing_tool_{idx}", None)
+
+                # Refresh messages
+                st.toast("Tool execution completed!", icon="✅")
+                st.session_state.conversation_messages_page = 0
+                st.rerun()
+            else:
+                st.error("Failed to resume execution")
+
+    # Cancel button
+    st.divider()
+    if st.button("🚫 Cancel All", use_container_width=True):
+        # Reject all tools with their task IDs
+        all_reject_decisions = [
+            {
+                "type": "respond",
+                "taskId": req.get("task_id") or req.get("tool_call_id"),
+                "args": {"message": f"User cancelled all tool executions"},
+            }
+            for req in action_requests
+        ]
+
+        conversation_id = st.session_state.get("interrupt_conversation_id")
+        resume_payload = {
+            "threadId": thread_id,
+            "conversationId": conversation_id,
+            "decisions": all_reject_decisions,
+        }
+
+        with st.spinner("Cancelling..."):
+            response = make_api_request(
+                "POST", "/messages/resume-interrupt", resume_payload
+            )
+
+            if response and response.get("success"):
+                st.session_state.pop("pending_interrupt", None)
+                st.session_state.pop("interrupt_conversation_id", None)
+                st.toast("Cancelled", icon="🚫")
+                st.session_state.conversation_messages_page = 0
+                st.rerun()
+
+
 def render_chat_view():
     """Main chat interface"""
     conversation_id = st.session_state.get("current_conversation_id")
@@ -2806,6 +2972,11 @@ def render_chat_view():
 
     st.divider()
 
+    # Show interrupt approval UI if there's a pending interrupt
+    if st.session_state.get("pending_interrupt"):
+        render_interrupt_approval_ui()
+        return  # Don't show input area while interrupt is pending
+
     # Input area
     if conversation_id:
         # Show pending attachments
@@ -2944,6 +3115,7 @@ def render_chat_view():
                         response_placeholder = st.empty()
                         accumulated_content = ""  # Initialize empty for accumulation
                         final_message = None
+                        interrupt_data = None
 
                         # Stream the response
                         for event in make_streaming_request(
@@ -2975,6 +3147,14 @@ def render_chat_view():
                                     state="running",
                                 )
 
+                            elif event_type == "interrupt":
+                                # Handle tool approval interrupt
+                                interrupt_data = event.get("interrupt")
+                                status.update(
+                                    label="⏸️ Waiting for approval...", state="running"
+                                )
+                                break
+
                             elif event_type == "complete":
                                 # Store final message and complete
                                 final_message = event.get("message")
@@ -2989,6 +3169,12 @@ def render_chat_view():
                                 st.toast(f"Error: {error_msg}", icon="❌")
                                 break
 
+                        # Handle interrupt - show approval UI
+                        if interrupt_data:
+                            st.session_state.pending_interrupt = interrupt_data
+                            st.session_state.interrupt_conversation_id = conversation_id
+                            st.rerun()
+
                         # If successful, update UI
                         if final_message:
                             st.session_state.pending_image_attachments = []
@@ -2998,7 +3184,7 @@ def render_chat_view():
                             load_messages_page(1)
                             st.toast("Message sent!", icon="✅")
                             st.rerun()
-                        elif event_type != "error":
+                        elif event_type != "error" and not interrupt_data:
                             st.toast("Failed to send message", icon="❌")
 
 

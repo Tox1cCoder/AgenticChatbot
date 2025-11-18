@@ -1,10 +1,13 @@
 from functools import lru_cache
 from typing import List
-from pydantic import Field
+import logging
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 from pathlib import Path
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # Load .env from the workspace root
 dotenv_path = Path(__file__).parent.parent.parent / ".env"
@@ -341,6 +344,24 @@ class Settings(BaseSettings):
     app_description: str = Field(
         default="A sample chatbot application with FastAPI and PostgreSQL",
         description="Application description",
+    )
+
+    # Human-in-the-Loop Configuration
+    enable_human_in_the_loop: bool = Field(
+        default=True,
+        description="Toggle to enable/disable human-in-the-loop globally",
+    )
+    hitl_tools_require_approval: List[str] = Field(
+        default=["calculator", "tavily_search"],
+        description="List of tool names that require human approval before execution",
+    )
+    hitl_default_allow_edit: bool = Field(
+        default=True,
+        description="Whether to allow editing tool arguments by default",
+    )
+    hitl_default_allow_respond: bool = Field(
+        default=True,
+        description="Whether to allow responding with feedback by default",
     )
 
 

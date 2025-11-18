@@ -6,6 +6,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
 from langchain.agents import create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT
@@ -13,6 +14,13 @@ from ..utils import (
     coerce_response_text,
     extract_agent_execution_info,
     get_error_recovery_hint,
+)
+from ..hitl_config import (
+    get_hitl_middleware_config,
+    should_enable_hitl,
+    is_agent_response_interrupted,
+    extract_interrupt_data_from_agent_response,
+    build_interrupt_response,
 )
 from ...core.config import settings
 from ...core.exceptions.mcp import ServerNotFoundError
@@ -97,6 +105,29 @@ class SearchAgent:
             agent_response = await agent_executor.ainvoke(
                 {"messages": [HumanMessage(content=prompt)]}
             )
+
+            # Check for interrupts from HumanInTheLoopMiddleware
+            if is_agent_response_interrupted(agent_response):
+                logger.info(
+                    "SearchAgent detected interrupt from HumanInTheLoopMiddleware"
+                )
+                interrupt_data = extract_interrupt_data_from_agent_response(
+                    agent_response
+                )
+                interrupt_response = build_interrupt_response(
+                    interrupt_data, conversation_id or "", conversation_id or ""
+                )
+
+                # Return minimal AgentResponse with interrupt metadata
+                return AgentResponse(
+                    agent_type=AgentType.SEARCH,
+                    agent_id="search_agent",
+                    message=AgentMessage(
+                        role=MessageRole.ASSISTANT,
+                        content="Tool execution requires approval",
+                    ),
+                    metadata={"interrupt": interrupt_response},
+                )
 
             # Extract execution info
             execution_info = extract_agent_execution_info(agent_response)
@@ -240,6 +271,35 @@ class SearchAgent:
                 {"messages": [HumanMessage(content=prompt)]}
             )
 
+            # Check for interrupts before extracting normal execution info
+            if is_agent_response_interrupted(agent_response):
+                logger.info("SearchAgent detected interrupt during streaming")
+                interrupt_data = extract_interrupt_data_from_agent_response(
+                    agent_response
+                )
+                interrupt_response = build_interrupt_response(
+                    interrupt_data, conversation_id or "", conversation_id or ""
+                )
+                # Yield interrupt event
+                yield {
+                    "type": "interrupt",
+                    "interrupt": interrupt_response,
+                }
+                # Also yield complete with interrupt in metadata for consistency
+                yield {
+                    "type": "complete",
+                    "response": AgentResponse(
+                        agent_type=AgentType.SEARCH,
+                        agent_id="search_agent",
+                        message=AgentMessage(
+                            role=MessageRole.ASSISTANT,
+                            content="Tool execution requires approval",
+                        ),
+                        metadata={"interrupt": interrupt_response},
+                    ),
+                }
+                return
+
             # Extract execution info
             execution_info = extract_agent_execution_info(agent_response)
 
@@ -345,8 +405,26 @@ class SearchAgent:
             },
         )
 
+        # Configure human-in-the-loop middleware if enabled
+        middleware = []
+        if should_enable_hitl():
+            tool_names = [tool.name for tool in tools]
+            interrupt_config = get_hitl_middleware_config(tool_names)
+            if interrupt_config:
+                hitl_middleware = HumanInTheLoopMiddleware(
+                    interrupt_on=interrupt_config,
+                    description_prefix="Search tool execution pending approval",
+                )
+                middleware.append(hitl_middleware)
+                logger.info(
+                    f"SearchAgent HITL enabled for tools: {list(interrupt_config.keys())}"
+                )
+
         agent = create_agent(
-            model=llm_with_tools, tools=tools, system_prompt=system_prompt
+            model=llm_with_tools,
+            tools=tools,
+            system_prompt=system_prompt,
+            middleware=middleware if middleware else None,
         )
 
         return agent

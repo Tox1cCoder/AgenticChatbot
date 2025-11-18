@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, List
 from uuid import UUID
 
 from app.repositories.message import MessageRepository
@@ -12,6 +12,7 @@ from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.pagination_validation import validate_pagination_params
 from app.interfaces.message_service_interface import IMessageService
 from app.services.ai_service import AIService
+from app.ai.schemas import InterruptDecision
 from app.utils.text_processing import sanitize_persona
 import logging
 
@@ -69,6 +70,16 @@ class MessageService(IMessageService):
                 user_id=user_id,
                 attachments=attachments,
             )
+
+            # Check if response contains interrupt information
+            if (
+                bot_response
+                and bot_response.metadata
+                and "interrupt" in bot_response.metadata
+            ):
+                user_message_read = MessageRead.model_validate(created_message)
+                user_message_read.interrupt = bot_response.metadata["interrupt"]
+                return user_message_read
 
             bot_response_content = (
                 bot_response.message.content
@@ -167,6 +178,11 @@ class MessageService(IMessageService):
                             "status": event.get("status"),
                         }
 
+                    elif event_type == "interrupt":
+                        # Yield interrupt event to client
+                        yield {"type": "interrupt", "interrupt": event.get("interrupt")}
+                        return  # Stop streaming, wait for resume
+
                     elif event_type == "complete":
                         # Store final response
                         bot_response = event.get("response")
@@ -180,7 +196,7 @@ class MessageService(IMessageService):
                             )
                         else:
                             bot_response_content = "Error: No response generated"
-                        
+
                         break
 
                     elif event_type == "error":
@@ -196,7 +212,7 @@ class MessageService(IMessageService):
                             )
                         else:
                             bot_response_content = f"Error: {error_msg}"
-                        
+
                         break
 
                 # Ensure content is valid (not empty)
@@ -260,6 +276,67 @@ class MessageService(IMessageService):
                         mode="json"
                     ),
                 }
+
+    async def resume_message_creation(
+        self, thread_id: str, conversation_id: UUID, decisions: List[InterruptDecision]
+    ) -> MessageRead:
+        """
+        Resume message creation after handling interrupts.
+
+        Args:
+            thread_id: Thread ID from the interrupt response
+            conversation_id: Conversation ID
+            decisions: List of approval/rejection/edit decisions
+
+        Returns:
+            MessageRead of the created bot response message
+        """
+        self.conversation_validation_utils.validate_conversation_exists(conversation_id)
+
+        # Get the conversation to retrieve user_id and persona
+        conversation = (
+            self.conversation_validation_utils.conversation_repository.get_by_id(
+                conversation_id
+            )
+        )
+        user_id = conversation.owner_id if conversation else None
+        persona = conversation.persona_prompt if conversation else None
+        sanitized_persona = sanitize_persona(persona)
+
+        # Resume execution via AI service
+        bot_response = await self.ai_service.resume_interrupted_execution(
+            thread_id=thread_id,
+            conversation_id=conversation_id,
+            decisions=decisions,
+        )
+
+        bot_response_content = (
+            bot_response.message.content
+            if bot_response and bot_response.message
+            else "Error: No response after resuming"
+        )
+
+        # Create metadata for bot response
+        bot_metadata = dict(bot_response.metadata) if bot_response else {}
+        if sanitized_persona:
+            bot_metadata.setdefault("persona_used", sanitized_persona)
+
+        if bot_response and bot_response.tool_artifacts:
+            bot_metadata.setdefault("tool_artifacts", bot_response.tool_artifacts)
+
+        # Extract images from bot response metadata
+        if bot_response and bot_response.metadata and "images" in bot_response.metadata:
+            bot_metadata["images"] = bot_response.metadata["images"]
+
+        # Create and persist bot response message
+        bot_response_entity = MessageFactory.create_bot_response(
+            conversation_id=conversation_id,
+            content=bot_response_content,
+            message_metadata=bot_metadata,
+        )
+        bot_message = self.repository.create(bot_response_entity)
+
+        return MessageRead.model_validate(bot_message)
 
     def get_by_id(self, message_id: UUID, user_id: UUID) -> MessageRead:
         self.message_validation_utils.validate_message_access(user_id, message_id)

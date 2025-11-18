@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from typing import Optional
+from typing import Optional, List
 from uuid import UUID
 
 from ..ai.graph import create_workflow
@@ -9,6 +9,7 @@ from ..ai.schemas import (
     AgentResponse,
     AgentType,
     MessageRole,
+    InterruptDecision,
 )
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from qdrant_client import QdrantClient
@@ -86,6 +87,8 @@ class AIService:
         )
 
         if response:
+            if response.metadata and "interrupt" in response.metadata:
+                return response
             return response
 
         return self._build_error_response("Error: No response generated")
@@ -117,6 +120,39 @@ class AIService:
             message=user_message,
             attachments=attachments,
         )
+
+    async def resume_interrupted_execution(
+        self, thread_id: str, conversation_id: UUID, decisions: List[InterruptDecision]
+    ) -> AgentResponse:
+        """
+        Resume execution after handling interrupts.
+
+        Args:
+            thread_id: Thread ID from the interrupt response
+            conversation_id: Conversation ID
+            decisions: List of approval/rejection/edit decisions
+
+        Returns:
+            AgentResponse after resuming execution
+        """
+        if not self.checkpointer:
+            return self._build_error_response(
+                "Error: Checkpointing must be enabled to resume interrupted execution"
+            )
+
+        # Load persona from conversation
+        persona = self._load_persona(conversation_id)
+        persona = sanitize_persona(persona)
+
+        response = await self.workflow.resume_execution(
+            thread_id=thread_id,
+            decisions=decisions,
+        )
+
+        if response:
+            return response
+
+        return self._build_error_response("Error: No response after resuming")
 
     async def generate_bot_response_stream(
         self,
@@ -172,6 +208,12 @@ class AIService:
                     # Yield tool end event
                     tool_name = event.get("name", "unknown")
                     yield {"type": "tool", "name": tool_name, "status": "end"}
+
+                elif event_type == "interrupt":
+                    # Yield interrupt event
+                    interrupt_info = event.get("interrupt")
+                    yield {"type": "interrupt", "interrupt": interrupt_info}
+                    return  # Stop streaming
 
                 elif event_type == "complete":
                     # Store final response

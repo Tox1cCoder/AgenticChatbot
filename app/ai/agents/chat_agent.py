@@ -8,6 +8,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
 from langchain.agents import create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_chat_prompt
@@ -15,6 +16,13 @@ from ..utils import (
     coerce_response_text,
     extract_agent_execution_info,
     get_error_recovery_hint,
+)
+from ..hitl_config import (
+    get_hitl_middleware_config,
+    should_enable_hitl,
+    is_agent_response_interrupted,
+    extract_interrupt_data_from_agent_response,
+    build_interrupt_response,
 )
 from ...core.config import settings
 from ...core.exceptions.mcp import ServerNotFoundError
@@ -132,6 +140,30 @@ class ChatAgent:
                     response_text, tools_used, tool_artifacts = (
                         await self._generate_with_tools(prompt)
                     )
+
+                    # Check if interrupted
+                    if response_text == "__INTERRUPT__" and tool_artifacts:
+                        interrupt_artifact = tool_artifacts[0]
+                        if "interrupt_data" in interrupt_artifact:
+                            logger.info("ChatAgent returning interrupt response")
+                            # Build interrupt response structure
+                            interrupt_data = interrupt_artifact["interrupt_data"]
+                            interrupt_response = build_interrupt_response(
+                                interrupt_data,
+                                conversation_id or "",
+                                conversation_id or "",
+                            )
+
+                            # Return minimal AgentResponse with interrupt metadata
+                            return AgentResponse(
+                                agent_type=AgentType.CHAT,
+                                agent_id="chat_agent",
+                                message=AgentMessage(
+                                    role=MessageRole.ASSISTANT,
+                                    content="Tool execution requires approval",
+                                ),
+                                metadata={"interrupt": interrupt_response},
+                            )
                 else:
                     response_text = await self._generate(prompt)
         except Exception as exc:
@@ -232,6 +264,33 @@ class ChatAgent:
                             yield event
                         elif event["type"] in ["tool_start", "tool_end"]:
                             yield event
+                        elif event["type"] == "interrupt":
+                            # Handle interrupt during streaming
+                            interrupt_data = event.get("interrupt_data")
+                            interrupt_response = build_interrupt_response(
+                                interrupt_data,
+                                conversation_id or "",
+                                conversation_id or "",
+                            )
+                            # Yield interrupt event with structured response
+                            yield {
+                                "type": "interrupt",
+                                "interrupt": interrupt_response,
+                            }
+                            # Also yield complete with interrupt in metadata for consistency
+                            yield {
+                                "type": "complete",
+                                "response": AgentResponse(
+                                    agent_type=AgentType.CHAT,
+                                    agent_id="chat_agent",
+                                    message=AgentMessage(
+                                        role=MessageRole.ASSISTANT,
+                                        content="Tool execution requires approval",
+                                    ),
+                                    metadata={"interrupt": interrupt_response},
+                                ),
+                            }
+                            return
                         elif event["type"] == "result":
                             # Extract final result info
                             accumulated_content = event["response_text"]
@@ -350,6 +409,19 @@ class ChatAgent:
                 {"messages": [HumanMessage(content=prompt)]}
             )
 
+            # Check for interrupts before extracting normal execution info
+            if is_agent_response_interrupted(agent_response):
+                logger.info("ChatAgent detected interrupt during streaming")
+                interrupt_data = extract_interrupt_data_from_agent_response(
+                    agent_response
+                )
+                # Yield interrupt event and stop
+                yield {
+                    "type": "interrupt",
+                    "interrupt_data": interrupt_data,
+                }
+                return
+
             # Extract execution info
             execution_info = extract_agent_execution_info(agent_response)
 
@@ -466,6 +538,19 @@ class ChatAgent:
                     {"messages": [HumanMessage(content=prompt)]}
                 )
 
+            # Check for interrupts from HumanInTheLoopMiddleware
+            if is_agent_response_interrupted(agent_response):
+                logger.info(
+                    "ChatAgent detected interrupt from HumanInTheLoopMiddleware"
+                )
+                # Extract interrupt data and build structured response
+                interrupt_data = extract_interrupt_data_from_agent_response(
+                    agent_response
+                )
+                # Return minimal response with interrupt marker
+                # Return empty strings/lists with interrupt marker that will be handled upstream
+                return ("__INTERRUPT__", [], [{"interrupt_data": interrupt_data}])
+
             # Extract execution info
             execution_info = extract_agent_execution_info(agent_response)
 
@@ -508,8 +593,26 @@ class ChatAgent:
             },
         )
 
+        # Configure human-in-the-loop middleware if enabled
+        middleware = []
+        if should_enable_hitl():
+            tool_names = [tool.name for tool in tools]
+            interrupt_config = get_hitl_middleware_config(tool_names)
+            if interrupt_config:
+                hitl_middleware = HumanInTheLoopMiddleware(
+                    interrupt_on=interrupt_config,
+                    description_prefix="Tool execution pending approval",
+                )
+                middleware.append(hitl_middleware)
+                logger.info(
+                    f"ChatAgent HITL enabled for tools: {list(interrupt_config.keys())}"
+                )
+
         agent = create_agent(
-            model=llm_with_tools, tools=tools, system_prompt=system_prompt
+            model=llm_with_tools,
+            tools=tools,
+            system_prompt=system_prompt,
+            middleware=middleware if middleware else None,
         )
 
         return agent

@@ -26,6 +26,23 @@
         "app/ai/mcp_servers/time_server.py"
       ],
       "description": "Current time lookup utility with timezone support"
+    },
+    "postgres": {
+      "transport": "stdio",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@smithery/cli@latest",
+        "run",
+        "@smithery-ai/postgres",
+        "--key",
+        "83ba8c64-cf9d-4033-ab36-91366e89f9c8",
+        "--profile",
+        "defiant-lemur-ec1B32"
+      ],
+      "enabled": true
     }
   }
 }

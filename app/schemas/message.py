@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from app.models.enums import MessageRole
 from app.utils.case_conversion import to_camel_case as to_camel
 from app.schemas.feedback import FeedbackRead
+from app.ai.schemas import InterruptResponse, InterruptDecision
 
 
 class MessageCreate(BaseModel):
@@ -68,6 +69,22 @@ class MessageRead(BaseModel):
     feedback: Optional[FeedbackRead] = Field(
         default=None, description="Feedback for this message (when requested)"
     )
+    interrupt: Optional[InterruptResponse] = Field(
+        default=None,
+        description="Interrupt information when tool execution requires human approval",
+    )
+
+
+class InterruptResumeRequest(BaseModel):
+    """Request to resume execution after handling interrupts."""
+
+    thread_id: str = Field(..., description="Thread ID from the interrupt response")
+    conversation_id: UUID = Field(..., description="Conversation ID")
+    decisions: List[InterruptDecision] = Field(
+        ..., description="Approval/rejection/edit decisions"
+    )
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class MessageInDB(BaseModel):
