@@ -174,6 +174,29 @@ APP_STYLE = """
         margin-left: auto;
     }
     
+    /* Message content wrapper - contains the markdown rendered content */
+    .message-content-wrapper {
+        line-height: 1.6;
+    }
+    
+    .message-content-wrapper > div[data-testid="stMarkdownContainer"] {
+        margin: 0;
+        padding: 0;
+    }
+    
+    .message-content-wrapper p {
+        margin: 0.5em 0;
+        line-height: 1.6;
+    }
+    
+    .message-content-wrapper p:first-child {
+        margin-top: 0;
+    }
+    
+    .message-content-wrapper p:last-child {
+        margin-bottom: 0;
+    }
+    
     /* Code blocks */
     .message-bubble code {
         background: rgba(0,0,0,0.05);
@@ -875,6 +898,11 @@ class _SafeHTMLRenderer(HTMLParser):
     def handle_charref(self, name: str):
         self.result.append(f"&#{name};")
 
+    def handle_comment(self, data: str):
+        # Preserve comments that contain math placeholders
+        if data.startswith("MATH_"):
+            self.result.append(f"<!--{data}-->")
+
 
 def _sanitize_rendered_html(html_fragment: str) -> str:
     parser = _SafeHTMLRenderer()
@@ -895,15 +923,20 @@ def sanitize_message_content(content: str) -> str:
     if not normalized:
         return ""
 
-    # Preserve LaTeX delimiters by temporarily replacing them with placeholders
+    # Preserve LaTeX delimiters by temporarily replacing them with unique markers
     math_expressions = {}
     math_counter = 0
 
     # Preserve display math ($$...$$)
     def replace_display_math(match):
         nonlocal math_counter
-        placeholder = f"__DISPLAY_MATH_{math_counter}__"
-        math_expressions[placeholder] = match.group(0)
+        # Use a unique marker that won't be in normal text
+        placeholder = f"ӍӐҬҤ_DISPLAY_{math_counter}_ӍӐҬҤ"
+        # Store the math content with markers for later rendering
+        math_expressions[placeholder] = {
+            "type": "display",
+            "content": match.group(1).strip(),  # Extract content between $$
+        }
         math_counter += 1
         return placeholder
 
@@ -914,8 +947,13 @@ def sanitize_message_content(content: str) -> str:
     # Preserve inline math ($...$)
     def replace_inline_math(match):
         nonlocal math_counter
-        placeholder = f"__INLINE_MATH_{math_counter}__"
-        math_expressions[placeholder] = match.group(0)
+        # Use a unique marker that won't be in normal text
+        placeholder = f"ӍӐҬҤ_INLINE_{math_counter}_ӍӐҬҤ"
+        # Store the math content with markers for later rendering
+        math_expressions[placeholder] = {
+            "type": "inline",
+            "content": match.group(1).strip(),  # Extract content between $
+        }
         math_counter += 1
         return placeholder
 
@@ -968,9 +1006,22 @@ def sanitize_message_content(content: str) -> str:
     # Sanitize HTML
     safe_html = _sanitize_rendered_html(rendered)
 
-    # Restore LaTeX delimiters
-    for placeholder, math_expr in math_expressions.items():
-        safe_html = safe_html.replace(placeholder, math_expr)
+    # Restore LaTeX with proper KaTeX delimiters
+    # KaTeX will render content between \( \) for inline and \[ \] for display
+    for placeholder, math_info in math_expressions.items():
+        latex_content = math_info["content"]
+        if math_info["type"] == "display":
+            # Display math: use \[ \] delimiters
+            latex_html = f"\\[{latex_content}\\]"
+        else:  # inline
+            # Inline math: use \( \) delimiters
+            latex_html = f"\\({latex_content}\\)"
+
+        # Replace both the original placeholder and any HTML-escaped version
+        safe_html = safe_html.replace(placeholder, latex_html)
+        escaped_placeholder = html.escape(placeholder)
+        if escaped_placeholder != placeholder:
+            safe_html = safe_html.replace(escaped_placeholder, latex_html)
 
     safe_html = safe_html.replace("<p></p>", "")
     safe_html = safe_html.replace("<p><br /></p>", "")
@@ -1935,32 +1986,15 @@ def render_citations(message_metadata: Dict[str, Any]):
 
 
 def render_message_bubble(msg: Dict[str, Any], is_user: bool):
-    bubble_class = "user-bubble" if is_user else "assistant-bubble"
-    avatar_class = "user-avatar" if is_user else "assistant-avatar"
-    avatar_text = "U" if is_user else "AI"
-    sender_name = "You" if is_user else "Assistant"
-
-    content_html = sanitize_message_content(msg.get("content", ""))
+    content_text = msg.get("content", "")
     timestamp = format_time(msg.get("createdAt", ""))
 
-    # Determine if message is short (less than 50 chars)
-    content_text = msg.get("content", "")
-    is_short = len(content_text) < 50
-    size_class = "message-bubble-short" if is_short else ""
+    # Use Streamlit's native chat_message which supports LaTeX
+    avatar = "user" if is_user else "assistant"
 
-    # Build message HTML
-    message_html = f"""
-    <div class="message-bubble {bubble_class} {size_class}">
-        <div class="message-header">
-            <div class="message-avatar {avatar_class}">{avatar_text}</div>
-            <strong>{sender_name}</strong>
-            <span class="message-time">{timestamp}</span>
-        </div>
-        <div>{content_html}</div>
-    </div>
-    """
-
-    st.markdown(message_html, unsafe_allow_html=True)
+    with st.chat_message(avatar):
+        st.markdown(content_text)  # Native markdown with LaTeX support
+        st.caption(timestamp)
 
     # Show attachments if user message
     if is_user:
@@ -2928,9 +2962,8 @@ def render_chat_view():
                                 accumulated_content += (
                                     content  # Append each token chunk
                                 )
-                                response_placeholder.markdown(
-                                    f"**Assistant:** {accumulated_content}"
-                                )
+                                # Display with native markdown for LaTeX support
+                                response_placeholder.markdown(accumulated_content)
 
                             elif event_type == "tool":
                                 # Show tool execution
