@@ -604,9 +604,6 @@ class ChatAgent:
                     description_prefix="Tool execution pending approval",
                 )
                 middleware.append(hitl_middleware)
-                logger.info(
-                    f"ChatAgent HITL enabled for tools: {list(interrupt_config.keys())}"
-                )
 
         agent = create_agent(
             model=llm_with_tools,

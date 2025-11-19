@@ -416,9 +416,6 @@ class SearchAgent:
                     description_prefix="Search tool execution pending approval",
                 )
                 middleware.append(hitl_middleware)
-                logger.info(
-                    f"SearchAgent HITL enabled for tools: {list(interrupt_config.keys())}"
-                )
 
         agent = create_agent(
             model=llm_with_tools,

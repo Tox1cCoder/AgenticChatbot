@@ -22,11 +22,18 @@ def get_hitl_middleware_config(tool_names: List[str]) -> Dict[str, Any]:
 
     for tool_name in tool_names:
         if tool_name in tools_requiring_approval:
-            interrupt_config[tool_name] = {
-                "allow_accept": True,
-                "allow_edit": allow_edit,
-                "allow_respond": allow_respond,
-            }
+            # Build allowed decisions list
+            allowed = ["approve"]  # Always allow approval
+            if allow_edit:
+                allowed.append("edit")
+            if allow_respond:
+                allowed.append("reject")  # reject is the decision type for responding
+
+            # Use True for all decisions, otherwise use explicit config
+            if len(allowed) == 3:
+                interrupt_config[tool_name] = True
+            else:
+                interrupt_config[tool_name] = {"allowed_decisions": allowed}
 
     return interrupt_config
 
