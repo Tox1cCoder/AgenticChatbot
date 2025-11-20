@@ -22,8 +22,10 @@ class InterruptDecisionType(str, Enum):
     """Type of decision for handling a tool interrupt."""
 
     ACCEPT = "accept"
+    APPROVE = "approve"
     EDIT = "edit"
     RESPOND = "respond"
+    REJECT = "reject"
 
 
 class ToolInterruptRequest(BaseModel):
@@ -40,6 +42,9 @@ class ToolInterruptRequest(BaseModel):
     tool_call_id: Optional[str] = Field(
         None, description="Tool call identifier for resume mapping"
     )
+    allowed_decisions: Optional[List[str]] = Field(
+        None, description="Which decision types are permitted for this tool"
+    )
 
 
 class InterruptDecision(BaseModel):
@@ -48,6 +53,9 @@ class InterruptDecision(BaseModel):
     type: InterruptDecisionType = Field(..., description="Type of decision")
     task_id: Optional[str] = Field(
         None, description="Task ID to apply this decision to"
+    )
+    action: Optional[str] = Field(
+        None, description="Name of the tool/action this decision applies to"
     )
     args: Optional[Dict[str, Any]] = Field(
         None,

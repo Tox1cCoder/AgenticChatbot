@@ -79,6 +79,9 @@ class InterruptResumeRequest(BaseModel):
     """Request to resume execution after handling interrupts."""
 
     thread_id: str = Field(..., description="Thread ID from the interrupt response")
+    interrupt_id: Optional[str] = Field(
+        default=None, description="Interrupt ID returned from the HITL middleware"
+    )
     conversation_id: UUID = Field(..., description="Conversation ID")
     decisions: List[InterruptDecision] = Field(
         ..., description="Approval/rejection/edit decisions"

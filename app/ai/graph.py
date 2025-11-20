@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Optional, TYPE_CHECKING, List
+from typing import Any, Optional, TYPE_CHECKING, List
 from uuid import UUID
 
 from langgraph.graph import StateGraph, END, START
@@ -436,32 +436,39 @@ class MultiAgentWorkflow:
     async def resume_execution(
         self,
         thread_id: str,
-        decisions: List[InterruptDecision],
+        resume_value: Any,
     ) -> Optional[AgentResponse]:
         """
         Resume execution after handling interrupts.
 
-        Constructs decision payload matching the interrupt mechanism's expected format.
+        Accepts either a fully-formed LangGraph resume payload or the legacy
+        list of InterruptDecision instances for backward compatibility.
         """
         if not self.checkpointer:
             raise RuntimeError("Checkpointing must be enabled for resume_execution")
 
         config = {"configurable": {"thread_id": thread_id}}
+        resume_payload = resume_value
 
-        # Build decision data in the format expected by HumanInTheLoopMiddleware/LangGraph
-        # Map task_id to decision type and args
-        decision_map = {}
-        for decision in decisions:
-            task_id = decision.task_id
-            if task_id:
-                decision_entry = {
-                    "type": decision.type.value,  # 'accept', 'edit', or 'respond'
-                }
-                if decision.args:
-                    decision_entry["args"] = decision.args
-                decision_map[task_id] = decision_entry
+        # Backward compatibility: allow passing InterruptDecision objects directly
+        if (
+            isinstance(resume_value, list)
+            and resume_value
+            and all(isinstance(item, InterruptDecision) for item in resume_value)
+        ):
+            decision_map = {}
+            for decision in resume_value:
+                task_id = decision.task_id
+                if task_id:
+                    decision_entry = {
+                        "type": decision.type.value,
+                    }
+                    if decision.args:
+                        decision_entry["args"] = decision.args
+                    decision_map[task_id] = decision_entry
+            resume_payload = decision_map
 
-        command = Command(resume=decision_map)
+        command = Command(resume=resume_payload)
         result = await self.graph.ainvoke(command, config=config)
 
         return result.get("response")

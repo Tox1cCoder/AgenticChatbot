@@ -126,6 +126,7 @@ async def resume_interrupt(
     result = await message_service.resume_message_creation(
         thread_id=resume_request.thread_id,
         conversation_id=resume_request.conversation_id,
+        interrupt_id=resume_request.interrupt_id,
         decisions=resume_request.decisions,
     )
     return ApiResponse(

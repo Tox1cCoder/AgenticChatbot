@@ -2663,6 +2663,7 @@ def render_interrupt_approval_ui():
         return
 
     thread_id = interrupt_info.get("thread_id")
+    interrupt_id = interrupt_info.get("interrupt_id")
     action_requests = interrupt_info.get("action_requests", [])
 
     if not action_requests:
@@ -2706,7 +2707,14 @@ def render_interrupt_approval_ui():
                 use_container_width=True,
                 type="primary",
             ):
-                decisions.append({"type": "accept", "taskId": task_id, "args": None})
+                decisions.append(
+                    {
+                        "type": "accept",
+                        "taskId": task_id,
+                        "action": tool_name,
+                        "args": None,
+                    }
+                )
 
         with col2:
             if st.button(f"✏️ Edit Args", key=f"edit_{idx}", use_container_width=True):
@@ -2719,6 +2727,7 @@ def render_interrupt_approval_ui():
                     {
                         "type": "respond",
                         "taskId": task_id,
+                        "action": tool_name,
                         "args": {"message": f"User rejected execution of {tool_name}"},
                     }
                 )
@@ -2741,7 +2750,12 @@ def render_interrupt_approval_ui():
                         try:
                             edited_args = json.loads(edited_args_text)
                             decisions.append(
-                                {"type": "edit", "taskId": task_id, "args": edited_args}
+                                {
+                                    "type": "edit",
+                                    "taskId": task_id,
+                                    "action": tool_name,
+                                    "args": edited_args,
+                                }
                             )
                             st.session_state.pop(f"editing_tool_{idx}", None)
                         except json.JSONDecodeError:
@@ -2764,6 +2778,7 @@ def render_interrupt_approval_ui():
         resume_payload = {
             "threadId": thread_id,
             "conversationId": conversation_id,
+            "interruptId": interrupt_id,
             "decisions": decisions,
         }
 
@@ -2796,6 +2811,7 @@ def render_interrupt_approval_ui():
             {
                 "type": "respond",
                 "taskId": req.get("task_id") or req.get("tool_call_id"),
+                "action": req.get("action"),
                 "args": {"message": f"User cancelled all tool executions"},
             }
             for req in action_requests
@@ -2805,6 +2821,7 @@ def render_interrupt_approval_ui():
         resume_payload = {
             "threadId": thread_id,
             "conversationId": conversation_id,
+            "interruptId": interrupt_id,
             "decisions": all_reject_decisions,
         }
 

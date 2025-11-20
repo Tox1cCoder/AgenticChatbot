@@ -278,7 +278,11 @@ class MessageService(IMessageService):
                 }
 
     async def resume_message_creation(
-        self, thread_id: str, conversation_id: UUID, decisions: List[InterruptDecision]
+        self,
+        thread_id: str,
+        conversation_id: UUID,
+        decisions: List[InterruptDecision],
+        interrupt_id: Optional[str] = None,
     ) -> MessageRead:
         """
         Resume message creation after handling interrupts.
@@ -287,6 +291,7 @@ class MessageService(IMessageService):
             thread_id: Thread ID from the interrupt response
             conversation_id: Conversation ID
             decisions: List of approval/rejection/edit decisions
+            interrupt_id: LangGraph interrupt identifier for targeted resume
 
         Returns:
             MessageRead of the created bot response message
@@ -308,6 +313,7 @@ class MessageService(IMessageService):
             thread_id=thread_id,
             conversation_id=conversation_id,
             decisions=decisions,
+            interrupt_id=interrupt_id,
         )
 
         bot_response_content = (

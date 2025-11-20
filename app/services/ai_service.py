@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from typing import Optional, List
+from typing import Any, Optional, List
 from uuid import UUID
 
 from ..ai.graph import create_workflow
@@ -10,6 +10,7 @@ from ..ai.schemas import (
     AgentType,
     MessageRole,
     InterruptDecision,
+    InterruptDecisionType,
 )
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from qdrant_client import QdrantClient
@@ -122,7 +123,11 @@ class AIService:
         )
 
     async def resume_interrupted_execution(
-        self, thread_id: str, conversation_id: UUID, decisions: List[InterruptDecision]
+        self,
+        thread_id: str,
+        conversation_id: UUID,
+        decisions: List[InterruptDecision],
+        interrupt_id: Optional[str] = None,
     ) -> AgentResponse:
         """
         Resume execution after handling interrupts.
@@ -131,6 +136,7 @@ class AIService:
             thread_id: Thread ID from the interrupt response
             conversation_id: Conversation ID
             decisions: List of approval/rejection/edit decisions
+            interrupt_id: LangGraph interrupt identifier (when available)
 
         Returns:
             AgentResponse after resuming execution
@@ -144,9 +150,43 @@ class AIService:
         persona = self._load_persona(conversation_id)
         persona = sanitize_persona(persona)
 
+        # Convert UI decisions into LangGraph HITL response format
+        translated_decisions: List[dict[str, Any]] = []
+        for decision in decisions:
+            if decision.type in {
+                InterruptDecisionType.ACCEPT,
+                InterruptDecisionType.APPROVE,
+            }:
+                translated_decisions.append({"type": "approve"})
+            elif decision.type == InterruptDecisionType.EDIT:
+                translated_decisions.append(
+                    {
+                        "type": "edit",
+                        "edited_action": {
+                            "name": decision.action
+                            or decision.task_id
+                            or "unspecified_action",
+                            "args": decision.args or {},
+                        },
+                    }
+                )
+            else:
+                # respond / reject
+                message = None
+                if decision.args:
+                    message = decision.args.get("message") or decision.args.get(
+                        "reason"
+                    )
+                translated_decisions.append(
+                    {"type": "reject", "message": message or "User rejected the tool"}
+                )
+
+        resume_value: Any = {"decisions": translated_decisions}
+        if interrupt_id:
+            resume_value = {interrupt_id: resume_value}
+
         response = await self.workflow.resume_execution(
-            thread_id=thread_id,
-            decisions=decisions,
+            thread_id=thread_id, resume_value=resume_value
         )
 
         if response:
