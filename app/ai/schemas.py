@@ -26,6 +26,10 @@ class AgentMessage(BaseModel):
         default=None,
         description="Optional image attachments with structure {name: str, mime: str, data: str (base64)}",
     )
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Optional list of tool calls to be executed",
+    )
 
 
 class AgentConfig(BaseModel):
@@ -59,3 +63,4 @@ class GraphState(TypedDict):
     reasoning_steps: NotRequired[Optional[List[Dict[str, Any]]]]
     tool_results: NotRequired[Optional[Dict[str, Any]]]
     iteration_count: NotRequired[Optional[int]]
+    pending_tool_calls: NotRequired[Optional[List[Any]]]

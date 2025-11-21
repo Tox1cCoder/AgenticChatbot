@@ -35,7 +35,26 @@ async def create_message_stream(
     message_data: MessageCreate,
     message_service: IMessageService,
 ):
-    """Create a new message and stream the bot response"""
+    """
+    Create a new message and stream the bot response.
+
+    This endpoint uses Server-Sent Events (SSE) to stream the response in real-time.
+
+    Event types:
+    - user_message_created: The user message was created
+    - token: Incremental content tokens from the bot
+    - tool: Tool execution status (start/end)
+    - interrupt: Workflow paused for human approval (requires calling /conversations/{id}/resume)
+    - complete: Final bot message
+    - error: An error occurred
+
+    When an 'interrupt' event is received, the client should:
+    1. Display the pending tool calls to the user
+    2. Allow the user to approve/reject the tool execution
+    3. Call POST /conversations/{conversation_id}/resume with the user's decision
+
+    Future enhancement: Add auto_approve_tools query parameter for trusted users.
+    """
 
     async def event_generator():
         """Generate Server-Sent Events (SSE) from the message stream"""

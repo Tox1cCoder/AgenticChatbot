@@ -70,6 +70,20 @@ class MessageRead(BaseModel):
     )
 
 
+class MessageResumeRequest(BaseModel):
+    """Schema for resuming a workflow after human approval"""
+
+    approved: bool = Field(..., description="Whether the tool execution is approved")
+    user_input: Optional[str] = Field(
+        default=None, description="Any additional input or modifications from the user"
+    )
+    rejection_reason: Optional[str] = Field(
+        default=None, description="Reason for rejection if not approved"
+    )
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
 class MessageInDB(BaseModel):
     model_config = ConfigDict(
         from_attributes=True, alias_generator=to_camel, populate_by_name=True

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, List
 from uuid import UUID
 
 from app.repositories.message import MessageRepository
@@ -167,6 +167,19 @@ class MessageService(IMessageService):
                             "status": event.get("status"),
                         }
 
+                    elif event_type == "interrupt":
+                        # Yield interrupt event - workflow paused for human approval
+                        yield {
+                            "type": "interrupt",
+                            "thread_id": str(message_create_data.conversation_id),
+                            "next": event.get("next"),
+                            "pending_tool_calls": event.get("pending_tool_calls"),
+                            "message": "Workflow paused - awaiting human approval for tool execution",
+                        }
+                        # Workflow is paused - don't create a bot message yet
+                        # The resume endpoint will handle that
+                        return
+
                     elif event_type == "complete":
                         # Store final response
                         bot_response = event.get("response")
@@ -180,7 +193,7 @@ class MessageService(IMessageService):
                             )
                         else:
                             bot_response_content = "Error: No response generated"
-                        
+
                         break
 
                     elif event_type == "error":
@@ -196,7 +209,7 @@ class MessageService(IMessageService):
                             )
                         else:
                             bot_response_content = f"Error: {error_msg}"
-                        
+
                         break
 
                 # Ensure content is valid (not empty)
@@ -350,3 +363,60 @@ class MessageService(IMessageService):
     def delete_message(self, message_id: UUID, user_id: UUID) -> bool:
         self.message_validation_utils.validate_message_access(user_id, message_id)
         return self.repository.delete(message_id)
+
+    async def resume_workflow(
+        self, 
+        conversation_id: UUID, 
+        user_id: UUID, 
+        user_input: Optional[str] = None,
+        rejection_messages: Optional[List] = None,
+    ) -> MessageRead:
+        """
+        Resume a paused workflow and return the bot's response message.
+        
+        Args:
+            conversation_id: The conversation ID
+            user_id: The user ID
+            user_input: Optional user input (not currently used)
+            rejection_messages: Optional list of ToolMessages indicating tool rejection
+        """
+        # Validate conversation access
+        self.conversation_validation_utils.validate_conversation_access(
+            user_id, conversation_id
+        )
+
+        # Resume the workflow through AI service
+        bot_response = await self.ai_service.resume_workflow(
+            conversation_id=conversation_id, 
+            user_id=user_id, 
+            user_input=user_input,
+            rejection_messages=rejection_messages,
+        )
+
+        # Extract response content
+        bot_response_content = (
+            bot_response.message.content
+            if bot_response and bot_response.message
+            else "Error: No response generated after resume"
+        )
+
+        # Create metadata for bot response
+        bot_metadata = dict(bot_response.metadata) if bot_response else {}
+        if bot_response and bot_response.tool_artifacts:
+            bot_metadata.setdefault("tool_artifacts", bot_response.tool_artifacts)
+
+        # Extract images from bot response metadata
+        if bot_response and bot_response.metadata and "images" in bot_response.metadata:
+            bot_metadata["images"] = bot_response.metadata["images"]
+
+        # Save the bot response as a message in the database
+        bot_response_entity = MessageFactory.create_bot_response(
+            conversation_id=conversation_id,
+            content=bot_response_content,
+            message_metadata=bot_metadata,
+        )
+
+        # Create the message
+        bot_message = self.repository.create(bot_response_entity)
+
+        return MessageRead.model_validate(bot_message)

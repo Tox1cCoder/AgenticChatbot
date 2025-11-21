@@ -321,10 +321,23 @@ def build_rag_prompt(
 
 
 def build_search_prompt(
-    user_message: str, conversation_history: list, persona: Optional[str] = None
+    user_message: str,
+    conversation_history: list,
+    persona: Optional[str] = None,
+    has_tool_results: bool = False,
 ) -> str:
     """Build a prompt for the search agent including conversation history."""
-    parts = [SEARCH_SYSTEM_PROMPT]
+    # Use different system prompt if tool results are present
+    if has_tool_results:
+        system_prompt = """You are an autonomous web research assistant. You have received tool results in the user's message.
+
+IMPORTANT: The tool results are already provided in the message below. DO NOT request additional tool calls.
+Use the provided tool results to synthesize a comprehensive, well-formatted answer with source citations in markdown: [Source Name](URL).
+
+Provide a direct, thorough answer based on the tool results provided."""
+        parts = [system_prompt]
+    else:
+        parts = [SEARCH_SYSTEM_PROMPT]
 
     if persona is not None and persona.strip():
         parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")

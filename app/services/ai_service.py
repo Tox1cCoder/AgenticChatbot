@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from typing import Optional
+from typing import Optional, List
 from uuid import UUID
 
 from ..ai.graph import create_workflow
@@ -118,6 +118,60 @@ class AIService:
             attachments=attachments,
         )
 
+    async def resume_workflow(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        user_input: Optional[str] = None,
+        rejection_messages: Optional[List] = None,
+    ) -> AgentResponse:
+        """
+        Resume a workflow that was interrupted (e.g. for human approval).
+        
+        Args:
+            conversation_id: The conversation ID
+            user_id: The user ID
+            user_input: Optional user input (not currently used)
+            rejection_messages: Optional list of ToolMessages indicating tool rejection
+        """
+        thread_id = (
+            str(conversation_id) if conversation_id and self.checkpointer else None
+        )
+
+        if not thread_id:
+            return self._build_error_response(
+                "Cannot resume: Checkpointing not enabled or conversation ID missing"
+            )
+
+        try:
+            # Check state before resume
+            state_info = await self.workflow.get_state(thread_id)
+            logger.info(
+                f"Resuming workflow - interrupted: {state_info.get('interrupted')}, next: {state_info.get('next')}"
+            )
+
+            response = await self.workflow.resume(
+                thread_id=thread_id, user_input=user_input, rejection_messages=rejection_messages
+            )
+
+            if response:
+                return response
+
+            # If no response, check state again
+            logger.warning("No response after resume, checking state...")
+            final_state = await self.workflow.get_state(thread_id)
+            logger.error(
+                f"Final state after resume - next: {final_state.get('next')}, has response: {final_state.get('values', {}).get('response') is not None}"
+            )
+
+            return self._build_error_response(
+                "Error: No response generated after resume"
+            )
+
+        except Exception as e:
+            logger.error(f"Error resuming workflow: {e}", exc_info=True)
+            return self._build_error_response(f"Error resuming workflow: {str(e)}")
+
     async def generate_bot_response_stream(
         self,
         user_message: str,
@@ -181,6 +235,22 @@ class AIService:
                     # Yield error event
                     error_msg = event.get("error", "Unknown error")
                     yield {"type": "error", "error": error_msg}
+
+                elif event_type == "interrupt":
+                    # Yield interrupt event with complete information
+                    # This signals the frontend that the workflow is paused for human input
+                    next_nodes = event.get("next", [])
+                    pending_tool_calls = event.get("pending_tool_calls")
+                    logger.info(
+                        f"Workflow interrupted before nodes: {next_nodes}, tool_calls: {pending_tool_calls}"
+                    )
+                    yield {
+                        "type": "interrupt",
+                        "next": next_nodes,
+                        "thread_id": thread_id,
+                        "pending_tool_calls": pending_tool_calls,
+                        "message": "Workflow paused - awaiting approval for tool execution",
+                    }
 
             # Yield final complete event with full response
             if final_response:

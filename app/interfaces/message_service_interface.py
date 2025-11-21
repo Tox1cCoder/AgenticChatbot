@@ -61,3 +61,10 @@ class IMessageService(ABC):
     def delete_message(self, message_id: UUID, user_id: UUID) -> bool:
         """Delete message with ownership validation"""
         pass
+
+    @abstractmethod
+    async def resume_workflow(
+        self, conversation_id: UUID, user_id: UUID, user_input: Optional[str] = None
+    ) -> MessageRead:
+        """Resume a paused workflow and return the bot's response message"""
+        pass

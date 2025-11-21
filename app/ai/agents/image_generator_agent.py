@@ -5,15 +5,13 @@ from typing import Optional, List, Dict, Any, AsyncIterator
 from google import genai
 from google.genai import types
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
 from langchain.agents import create_agent
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import build_image_generator_prompt
 from ...core.config import settings
 from ..mcp_integration import MCPManager
-from ..utils import extract_agent_execution_info
+from ..utils import coerce_response_text
 
 logger = logging.getLogger(__name__)
 
@@ -105,25 +103,18 @@ class ImageGeneratorAgent:
 
         return agent
 
-    async def process_message(
+    async def invoke_model(
         self,
         message: AgentMessage,
         conversation_id: Optional[str] = None,
     ) -> AgentResponse:
-        """Generate an image for the provided prompt."""
-
+        """
+        Invoke the model directly, potentially returning tool calls.
+        This replaces the internal AgentExecutor loop.
+        """
         if not self.enabled:
-            logger.warning("Image generation requested but disabled")
             return self._build_error_response(
-                "Image generation is currently disabled. Please contact the administrator.",
-                conversation_id,
-            )
-
-        if not self.gemini_client:
-            logger.error("Gemini client not initialized for image generation")
-            return self._build_error_response(
-                "Unable to generate images because the Gemini client is not configured.",
-                conversation_id,
+                "Image generation is currently disabled.", conversation_id
             )
 
         # Initialize tools if not done yet
@@ -133,71 +124,127 @@ class ImageGeneratorAgent:
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
 
-        enhanced_content = message.content
-        tools_used = []
-        tool_artifacts = []
+        # Check if this invocation includes tool results (post-tool-execution)
+        has_tool_results = "Tool results:" in message.content
 
-        if self.tools:
-            try:
-                enhanced_content, tools_used, tool_artifacts = (
-                    await self._enhance_prompt_with_tools(
-                        message.content, conversation_history, persona
-                    )
-                )
-            except Exception as e:
-                enhanced_content = message.content
+        # If tool results are present, skip tool calling and go straight to image generation
+        if has_tool_results:
+            # Extract the enhanced prompt from the content
+            # The message content should contain the original request + tool results
+            enhanced_prompt = message.content
 
-        prompt = build_image_generator_prompt(
-            enhanced_content,
-            conversation_history,
-            persona=persona,
+            # Generate the image directly
+            images, narrative = await self._generate_images(
+                enhanced_prompt, message.content
+            )
+
+            response_metadata = {
+                "model": self.model_name,
+                "conversation_id": conversation_id,
+                "images": images,
+                "tools_used": True,
+            }
+
+            return AgentResponse(
+                agent_type=AgentType.IMAGE_GENERATOR,
+                agent_id="image_generator_agent",
+                message=AgentMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=narrative
+                    or "Here is the image I created based on the enhanced context.",
+                ),
+                metadata=response_metadata,
+            )
+
+        # Configure tool calling (only if no tool results yet)
+        tool_choice = (
+            settings.tool_choice_mode
+            if hasattr(settings, "tool_choice_mode")
+            else "auto"
         )
+
+        llm_with_tools = self.langchain_model.bind_tools(
+            self.tools,
+            tool_config={
+                "function_calling_config": {
+                    "mode": (
+                        tool_choice.upper()
+                        if tool_choice in ["auto", "any", "none"]
+                        else "AUTO"
+                    )
+                }
+            },
+        )
+
+        # Build prompt for the enhancement model
+        system_prompt = """You are an expert image generation prompt engineer.
+Your goal is to create a detailed, descriptive prompt for an image generator based on the user's request.
+You have access to external tools to fetch real-time context (like weather, time, news) if relevant to the image.
+If the user asks for "a picture of the current weather in NY", use the weather tool first.
+Once you have sufficient information, output the FINAL detailed prompt for the image generator.
+Do not output anything else, just the prompt."""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": message.content},
+        ]
 
         try:
-            images, narrative = await self._generate_images(prompt, enhanced_content)
-        except Exception as err:
-            logger.error("Image generation failed: %s", err, exc_info=True)
-            return self._build_error_response(
-                f"An error occurred while generating the image: {err}",
-                conversation_id,
+            response = await llm_with_tools.ainvoke(messages)
+
+            tool_calls = []
+            if hasattr(response, "tool_calls") and response.tool_calls:
+                tool_calls = response.tool_calls
+                # Return tool calls to the graph
+                return AgentResponse(
+                    agent_type=AgentType.IMAGE_GENERATOR,
+                    agent_id="image_generator_agent",
+                    message=AgentMessage(
+                        role=MessageRole.ASSISTANT,
+                        content=coerce_response_text(response.content),
+                        tool_calls=tool_calls,
+                    ),
+                    metadata={"tools_available": len(self.tools)},
+                )
+
+            # If no tool calls, the content is the Enhanced Prompt.
+            enhanced_prompt = coerce_response_text(response.content)
+
+            # Now generate the image
+            images, narrative = await self._generate_images(
+                enhanced_prompt, message.content
             )
 
-        if not images:
-            logger.warning("No images generated for prompt: %s", prompt)
-            return self._build_error_response(
-                "No image was generated for your request. Please try refining your description.",
-                conversation_id,
+            response_metadata = {
+                "model": self.model_name,
+                "conversation_id": conversation_id,
+                "images": images,
+                "tools_available": len(self.tools),
+            }
+
+            return AgentResponse(
+                agent_type=AgentType.IMAGE_GENERATOR,
+                agent_id="image_generator_agent",
+                message=AgentMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=narrative or "Here is the image I created.",
+                ),
+                metadata=response_metadata,
             )
 
-        response_message = AgentMessage(
-            role=MessageRole.ASSISTANT,
-            content=narrative
-            or "Here is the image I created based on your description.",
-        )
+        except Exception as e:
+            logger.error(f"Error in image generator agent: {e}", exc_info=True)
+            return self._build_error_response(str(e), conversation_id)
 
-        response_metadata = {
-            "model": self.model_name,
-            "conversation_id": conversation_id,
-            "context_messages": len(conversation_history),
-            "persona_used": persona,
-            "images": images,
-            "tools_available": len(self.tools),
-        }
-
-        # Add tool usage metadata if tools were used
-        if tools_used:
-            response_metadata["tools_used"] = tools_used
-            response_metadata["tool_calls_count"] = len(tools_used)
-        if tool_artifacts:
-            response_metadata["tool_artifacts"] = tool_artifacts
-
-        return AgentResponse(
-            agent_type=AgentType.IMAGE_GENERATOR,
-            agent_id="image_generator_agent",
-            message=response_message,
-            metadata=response_metadata,
-            tool_artifacts=tool_artifacts if tool_artifacts else None,
-        )
+    async def process_message(
+        self,
+        message: AgentMessage,
+        conversation_id: Optional[str] = None,
+    ) -> AgentResponse:
+        """
+        Process image generation request.
+        """
+        return await self.invoke_model(message, conversation_id)
 
     async def stream_message(
         self,
@@ -205,173 +252,25 @@ class ImageGeneratorAgent:
         conversation_id: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
-        Stream message processing for image generation.
-        Yields status updates and final result.
+        Stream message processing.
         """
-        if not self.enabled:
-            logger.warning("Image generation requested but disabled")
-            error_msg = "Image generation is currently disabled. Please contact the administrator."
-            yield {"type": "token", "content": error_msg}
-            yield {
-                "type": "complete",
-                "response": self._build_error_response(error_msg, conversation_id),
-            }
+        # For now, just await the result and yield it, as image gen is mostly atomic
+        # unless we want to stream the enhancement tokens.
+        result = await self.invoke_model(message, conversation_id)
+
+        if result.error:
+            yield {"type": "error", "error": result.error}
             return
 
-        if not self.gemini_client:
-            logger.error("Gemini client not initialized for image generation")
-            error_msg = (
-                "Unable to generate images because the Gemini client is not configured."
-            )
-            yield {"type": "token", "content": error_msg}
-            yield {
-                "type": "complete",
-                "response": self._build_error_response(error_msg, conversation_id),
-            }
-            return
-
-        # Initialize tools if not done yet
-        if self.mcp_manager is None:
-            await self._init_tools()
-
-        conversation_history = message.metadata.get("history", [])
-        persona = message.metadata.get("persona")
-
-        enhanced_content = message.content
-        tools_used = []
-        tool_artifacts = []
-
-        # Yield status update for prompt enhancement
-        if self.tools:
-            yield {"type": "token", "content": "Analyzing prompt..."}
-            try:
-                enhanced_content, tools_used, tool_artifacts = (
-                    await self._enhance_prompt_with_tools(
-                        message.content, conversation_history, persona
-                    )
-                )
-            except Exception as e:
-                enhanced_content = message.content
-
-        prompt = build_image_generator_prompt(
-            enhanced_content,
-            conversation_history,
-            persona=persona,
-        )
-
-        # Yield status update for image generation
-        yield {"type": "token", "content": " Generating image..."}
-
-        try:
-            images, narrative = await self._generate_images(prompt, enhanced_content)
-        except Exception as err:
-            logger.error("Image generation failed: %s", err, exc_info=True)
-            error_msg = f" Error: {err}"
-            yield {"type": "token", "content": error_msg}
-            yield {
-                "type": "complete",
-                "response": self._build_error_response(
-                    f"An error occurred while generating the image: {err}",
-                    conversation_id,
-                ),
-            }
-            return
-
-        if not images:
-            logger.warning("No images generated for prompt: %s", prompt)
-            error_msg = " No image was generated."
-            yield {"type": "token", "content": error_msg}
-            yield {
-                "type": "complete",
-                "response": self._build_error_response(
-                    "No image was generated for your request. Please try refining your description.",
-                    conversation_id,
-                ),
-            }
-            return
-
-        # Yield success status and narrative
-        success_msg = f" Done! {narrative or 'Here is the image I created based on your description.'}"
-        yield {"type": "token", "content": success_msg}
-
-        response_message = AgentMessage(
-            role=MessageRole.ASSISTANT,
-            content=narrative
-            or "Here is the image I created based on your description.",
-        )
-
-        response_metadata = {
-            "model": self.model_name,
-            "conversation_id": conversation_id,
-            "context_messages": len(conversation_history),
-            "persona_used": persona,
-            "images": images,
-            "tools_available": len(self.tools),
-        }
-
-        # Add tool usage metadata if tools were used
-        if tools_used:
-            response_metadata["tools_used"] = tools_used
-            response_metadata["tool_calls_count"] = len(tools_used)
-        if tool_artifacts:
-            response_metadata["tool_artifacts"] = tool_artifacts
-
-        # Yield complete event
-        yield {
-            "type": "complete",
-            "response": AgentResponse(
-                agent_type=AgentType.IMAGE_GENERATOR,
-                agent_id="image_generator_agent",
-                message=response_message,
-                metadata=response_metadata,
-                tool_artifacts=tool_artifacts if tool_artifacts else None,
-            ),
-        }
+        yield {"type": "complete", "response": result}
 
     async def _enhance_prompt_with_tools(
         self, original_prompt: str, conversation_history: List, persona: Optional[str]
     ) -> tuple[str, List[str], List[Dict[str, Any]]]:
         """
-        Enhance the image prompt with contextual information from tools.
+        Deprecated: Logic moved to invoke_model / graph loop.
         """
-        if not self.tools:
-            return original_prompt, [], []
-
-        try:
-            enhancement_system_prompt = f"""You are analyzing a user's image generation request to determine if external tools can provide useful context.
-
-User request: {original_prompt}
-
-Available tools: {', '.join(tool.name for tool in self.tools)}
-
-If tools can provide useful context (e.g., current date/time for "today", calculations for "show me 25% of 100 items"), use them and return an enhanced prompt with the additional information.
-
-If the request is self-contained (e.g., "draw a cat", "create a sunset scene"), return the original prompt unchanged.
-
-Provide ONLY the enhanced prompt text, nothing else."""
-
-            # Create agent executor
-            agent_executor = self._create_agent_executor(
-                self.tools, enhancement_system_prompt
-            )
-
-            # Invoke agent
-            agent_response = await agent_executor.ainvoke(
-                {"messages": [HumanMessage(content=original_prompt)]}
-            )
-
-            # Extract execution info
-            execution_info = extract_agent_execution_info(agent_response)
-
-            enhanced_prompt = execution_info["response_text"]
-            tools_used = execution_info["tools_used"]
-            tool_artifacts = execution_info["tool_artifacts"]
-
-            return enhanced_prompt, tools_used, tool_artifacts
-
-        except Exception as exc:
-            logger.warning("Failed to enhance prompt with tools: %s", exc)
-            return original_prompt, [], []
+        return original_prompt, [], []
 
     async def _generate_images(
         self, prepared_prompt: str, original_prompt: str

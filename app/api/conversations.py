@@ -2,6 +2,8 @@ from typing import Any, List
 from uuid import UUID
 from fastapi import APIRouter, status, Query
 
+from langchain_core.messages import ToolMessage
+
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.conversation_service_interface import IConversationService
 from app.schemas.conversation import (
@@ -10,7 +12,7 @@ from app.schemas.conversation import (
     ConversationRead,
 )
 from app.interfaces.message_service_interface import IMessageService
-from app.schemas.message import MessageRead
+from app.schemas.message import MessageRead, MessageResumeRequest
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.schemas.pagination import ConversationPaginationParams, MessagePaginationParams
@@ -136,3 +138,69 @@ async def delete_conversation(
     """Delete conversation (requires user ownership)"""
     conversation_service.delete_conversation(conversation_id, user_id)
     return ApiResponse(success=True, message="Conversation deleted successfully")
+
+
+@router.post("/{conversation_id}/resume", response_model=ApiResponse[MessageRead])
+@AppAutoInjector.auto_inject()
+async def resume_conversation_workflow(
+    conversation_id: UUID,
+    resume_data: MessageResumeRequest,
+    message_service: IMessageService,
+    user_id: UUID,
+) -> ApiResponse[MessageRead]:
+    """
+    Resume a workflow that was interrupted for human approval.
+
+    This endpoint is called after the workflow has been paused (e.g., for tool execution approval).
+    It resumes the workflow and returns the final bot response.
+    """
+    # Handle rejection
+    if not resume_data.approved:
+        # Get the current workflow state to extract pending tool calls
+        thread_id = str(conversation_id)
+        state_info = await message_service.ai_service.workflow.get_state(thread_id)
+        pending_tool_calls = state_info.get("pending_tool_calls", [])
+        
+        # Create rejection ToolMessages for each pending tool call
+        rejection_messages = []
+        rejection_reason = resume_data.rejection_reason or "User declined tool execution"
+        
+        for tool_call in pending_tool_calls:
+            tool_id = tool_call.get("id") if isinstance(tool_call, dict) else getattr(tool_call, "id", None)
+            tool_name = tool_call.get("name") if isinstance(tool_call, dict) else getattr(tool_call, "name", "unknown")
+            
+            # Create a ToolMessage indicating rejection
+            rejection_messages.append(
+                ToolMessage(
+                    content=f"Tool execution declined by user. Reason: {rejection_reason}",
+                    tool_call_id=tool_id,
+                    name=tool_name,
+                    status="error",
+                )
+            )
+        
+        # Resume workflow with rejection messages so LLM can generate appropriate response
+        bot_message = await message_service.resume_workflow(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            user_input=None,
+            rejection_messages=rejection_messages,
+        )
+        
+        return ApiResponse(
+            success=True,
+            message="Tool execution rejected, LLM generated response",
+            data=bot_message
+        )
+    
+    # Handle approval - resume the workflow
+    user_input = resume_data.user_input if resume_data.user_input else None
+
+    # Resume the workflow through message service
+    bot_message = await message_service.resume_workflow(
+        conversation_id=conversation_id, user_id=user_id, user_input=user_input
+    )
+
+    return ApiResponse(
+        success=True, message="Workflow resumed successfully", data=bot_message
+    )

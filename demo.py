@@ -2975,6 +2975,32 @@ def render_chat_view():
                                     state="running",
                                 )
 
+                            elif event_type == "interrupt":
+                                # Workflow paused for human approval
+                                thread_id = event.get("thread_id")
+                                pending_tool_calls = (
+                                    event.get("pending_tool_calls") or []
+                                )
+                                status.update(
+                                    label="⏸ Workflow paused - Tool approval required",
+                                    state="running",
+                                )
+
+                                # Store interrupt state in session
+                                st.session_state.pending_tool_approval = {
+                                    "thread_id": thread_id,
+                                    "tool_calls": pending_tool_calls,
+                                    "conversation_id": st.session_state.current_conversation_id,
+                                }
+
+                                # Display info message
+                                st.info(
+                                    "🔧 The assistant wants to use tools. Please review and approve below."
+                                )
+
+                                # Stop processing further events
+                                break
+
                             elif event_type == "complete":
                                 # Store final message and complete
                                 final_message = event.get("message")
@@ -3000,6 +3026,96 @@ def render_chat_view():
                             st.rerun()
                         elif event_type != "error":
                             st.toast("Failed to send message", icon="❌")
+
+    # Tool approval UI (outside the form)
+    if st.session_state.get("pending_tool_approval"):
+        approval_data = st.session_state.pending_tool_approval
+        thread_id = approval_data.get("thread_id")
+        tool_calls = approval_data.get("tool_calls", [])
+        conversation_id = approval_data.get("conversation_id")
+
+        st.divider()
+        st.warning("🔧 **Tool Approval Required**")
+        st.write("The assistant wants to use the following tools:")
+
+        if tool_calls:
+            for i, tool_call in enumerate(tool_calls):
+                tool_name = (
+                    tool_call.get("name", "Unknown")
+                    if isinstance(tool_call, dict)
+                    else getattr(tool_call, "name", "Unknown")
+                )
+                tool_args = (
+                    tool_call.get("args", {})
+                    if isinstance(tool_call, dict)
+                    else getattr(tool_call, "args", {})
+                )
+                with st.expander(f"🔧 Tool {i+1}: **{tool_name}**", expanded=True):
+                    st.json(tool_args)
+        else:
+            st.info("Tool details not available")
+
+        col1, col2, col3 = st.columns([2, 2, 6])
+
+        with col1:
+            if st.button(
+                "✅ Approve Tools",
+                key=f"approve_btn_{thread_id}",
+                type="primary",
+                use_container_width=True,
+            ):
+                with st.spinner("Approving and continuing..."):
+                    resume_data = {"approved": True}
+                    response = make_api_request(
+                        "POST",
+                        f"/conversations/{conversation_id}/resume",
+                        resume_data,
+                    )
+                    if response and response.get("success"):
+                        # Clear the pending approval
+                        st.session_state.pending_tool_approval = None
+                        # Reload messages to show the new bot response
+                        load_messages_page(1)
+                        st.success("✅ Tools approved! Response generated.")
+                        st.rerun()
+                    else:
+                        error_msg = (
+                            response.get("message", "Unknown error")
+                            if response
+                            else "No response"
+                        )
+                        st.error(f"❌ Failed to resume workflow: {error_msg}")
+
+        with col2:
+            if st.button(
+                "❌ Reject Tools",
+                key=f"reject_btn_{thread_id}",
+                use_container_width=True,
+            ):
+                with st.spinner("Rejecting..."):
+                    resume_data = {
+                        "approved": False,
+                        "rejectionReason": "User rejected tool execution",
+                    }
+                    response = make_api_request(
+                        "POST",
+                        f"/conversations/{conversation_id}/resume",
+                        resume_data,
+                    )
+                    if response and response.get("success"):
+                        # Clear the pending approval
+                        st.session_state.pending_tool_approval = None
+                        # Reload messages to show the rejection response
+                        load_messages_page(1)
+                        st.info("❌ Tools rejected. Response generated.")
+                        st.rerun()
+                    else:
+                        error_msg = (
+                            response.get("message", "Unknown error")
+                            if response
+                            else "No response"
+                        )
+                        st.error(f"❌ Failed to reject workflow: {error_msg}")
 
 
 def render_manage_modal():
