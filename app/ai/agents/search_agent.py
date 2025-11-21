@@ -6,6 +6,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
 from langchain.agents import create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_search_prompt
@@ -240,8 +241,23 @@ class SearchAgent:
             },
         )
 
+        # Configure human-in-the-loop middleware if enabled
+        middleware = []
+        if should_enable_hitl():
+            tool_names = [tool.name for tool in tools]
+            interrupt_config = get_hitl_middleware_config(tool_names)
+            if interrupt_config:
+                hitl_middleware = HumanInTheLoopMiddleware(
+                    interrupt_on=interrupt_config,
+                    description_prefix="Search tool execution pending approval",
+                )
+                middleware.append(hitl_middleware)
+
         agent = create_agent(
-            model=llm_with_tools, tools=tools, system_prompt=system_prompt
+            model=llm_with_tools,
+            tools=tools,
+            system_prompt=system_prompt,
+            middleware=middleware if middleware else None,
         )
 
         return agent

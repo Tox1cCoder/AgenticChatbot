@@ -4,12 +4,19 @@ from typing import Optional, TYPE_CHECKING, List
 from uuid import UUID
 
 from langgraph.graph import StateGraph, END, START
+from langgraph.types import Command
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 
-from .schemas import GraphState, AgentMessage, AgentResponse, MessageRole
+from .schemas import (
+    GraphState,
+    AgentMessage,
+    AgentResponse,
+    MessageRole,
+)
+from typing import Any
 from .agents.router import Router
 from .agents.chat_agent import ChatAgent
 from .agents.rag_agent import RAGAgent
@@ -659,6 +666,32 @@ class MultiAgentWorkflow:
             config = {"configurable": {"thread_id": thread_id}}
 
         result = await self.graph.ainvoke(initial_state, config=config)
+
+        agent_response = result.get("response")
+        if agent_response and isinstance(agent_response.metadata, dict):
+            if "interrupt" in agent_response.metadata:
+                logger.info("MultiAgentWorkflow detected interrupt in agent response")
+                return agent_response
+
+        return agent_response
+
+    async def resume_execution(
+        self,
+        thread_id: str,
+        resume_value: Any,
+    ) -> Optional[AgentResponse]:
+        """
+        Resume execution after handling interrupts.
+        """
+        if not self.checkpointer:
+            raise RuntimeError("Checkpointing must be enabled for resume_execution")
+
+        config = {"configurable": {"thread_id": thread_id}}
+        resume_payload = resume_value
+
+        command = Command(resume=resume_payload)
+        result = await self.graph.ainvoke(command, config=config)
+
         return result.get("response")
 
     async def resume(

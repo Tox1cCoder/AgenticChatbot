@@ -23,7 +23,6 @@ from app.utils.exception_handler import register_exception_handlers
 from app.workers.celery_app import celery_app
 from app.ai.agents.rag_agent import RAGAgent
 
-from fastapi_radar import Radar
 from app.core.events import get_event_bus, DocumentEvent
 from app.services.document_event_listener import DocumentEventLogger
 
@@ -117,10 +116,6 @@ def create_app() -> FastAPI:
 app = create_app()
 
 engine = get_engine()
-
-radar = Radar(app, db_engine=engine)
-radar.create_tables()
-
 
 @app.get("/")
 async def root():

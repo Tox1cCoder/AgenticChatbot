@@ -18,6 +18,62 @@ class MessageRole(str, Enum):
     SYSTEM = "system"
 
 
+class InterruptDecisionType(str, Enum):
+    """Type of decision for handling a tool interrupt."""
+
+    ACCEPT = "accept"
+    APPROVE = "approve"
+    EDIT = "edit"
+    RESPOND = "respond"
+    REJECT = "reject"
+
+
+class ToolInterruptRequest(BaseModel):
+    """Request details for a tool awaiting human approval."""
+
+    action: str = Field(..., description="Tool name")
+    args: Dict[str, Any] = Field(..., description="Tool arguments")
+    description: Optional[str] = Field(
+        None, description="Description of what the tool will do"
+    )
+    task_id: Optional[str] = Field(
+        None, description="Task identifier from interrupt mechanism"
+    )
+    tool_call_id: Optional[str] = Field(
+        None, description="Tool call identifier for resume mapping"
+    )
+    allowed_decisions: Optional[List[str]] = Field(
+        None, description="Which decision types are permitted for this tool"
+    )
+
+
+class InterruptDecision(BaseModel):
+    """Decision for handling a tool interrupt."""
+
+    type: InterruptDecisionType = Field(..., description="Type of decision")
+    task_id: Optional[str] = Field(
+        None, description="Task ID to apply this decision to"
+    )
+    action: Optional[str] = Field(
+        None, description="Name of the tool/action this decision applies to"
+    )
+    args: Optional[Dict[str, Any]] = Field(
+        None,
+        description="For EDIT: modified arguments. For RESPOND: feedback message",
+    )
+
+
+class InterruptResponse(BaseModel):
+    """Response containing interrupt information for human approval."""
+
+    interrupt_id: str = Field(..., description="Unique identifier for this interrupt")
+    action_requests: List[ToolInterruptRequest] = Field(
+        ..., description="List of tools awaiting approval"
+    )
+    thread_id: str = Field(..., description="Conversation thread ID for resuming")
+    conversation_id: str = Field(..., description="Conversation ID")
+
+
 class AgentMessage(BaseModel):
     role: MessageRole
     content: str
