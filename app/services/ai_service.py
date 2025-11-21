@@ -178,6 +178,62 @@ class AIService:
             logger.error(f"Error resuming workflow: {e}", exc_info=True)
             return self._build_error_response(f"Error resuming workflow: {str(e)}")
 
+    async def resume_interrupted_execution(
+        self,
+        thread_id: str,
+        conversation_id: UUID,
+        decisions: List[InterruptDecision],
+        interrupt_id: Optional[str] = None,
+    ) -> AgentResponse:
+        """
+        Resume execution after handling tool interrupts with user decisions.
+
+        Args:
+            thread_id: The thread ID to resume
+            conversation_id: Conversation ID
+            decisions: List of user decisions (accept/edit/reject) for each tool
+            interrupt_id: LangGraph interrupt identifier (optional)
+
+        Returns:
+            AgentResponse with the bot's response after handling decisions
+        """
+        if not self.checkpointer:
+            return self._build_error_response(
+                "Cannot resume: Checkpointing not enabled"
+            )
+
+        try:
+            logger.info(
+                f"Resuming interrupted execution for thread_id={thread_id} with {len(decisions)} decisions"
+            )
+
+            # Process decisions through the workflow
+            response = await self.workflow.resume_with_decisions(
+                thread_id=thread_id,
+                decisions=decisions,
+                interrupt_id=interrupt_id,
+            )
+
+            if response:
+                return response
+
+            # If no response, check state
+            logger.warning("No response after resume with decisions, checking state...")
+            final_state = await self.workflow.get_state(thread_id)
+            logger.error(
+                f"Final state - next: {final_state.get('next')}, has response: {final_state.get('values', {}).get('response') is not None}"
+            )
+
+            return self._build_error_response(
+                "Error: No response generated after resuming with decisions"
+            )
+
+        except Exception as e:
+            logger.error(f"Error resuming with decisions: {e}", exc_info=True)
+            return self._build_error_response(
+                f"Error resuming execution: {str(e)}"
+            )
+
     async def generate_bot_response_stream(
         self,
         user_message: str,
@@ -232,12 +288,6 @@ class AIService:
                     # Yield tool end event
                     tool_name = event.get("name", "unknown")
                     yield {"type": "tool", "name": tool_name, "status": "end"}
-
-                elif event_type == "interrupt":
-                    # Yield interrupt event
-                    interrupt_info = event.get("interrupt")
-                    yield {"type": "interrupt", "interrupt": interrupt_info}
-                    return  # Stop streaming
 
                 elif event_type == "complete":
                     # Store final response

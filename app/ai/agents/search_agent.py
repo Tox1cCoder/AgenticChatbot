@@ -243,16 +243,6 @@ class SearchAgent:
 
         # Configure human-in-the-loop middleware if enabled
         middleware = []
-        if should_enable_hitl():
-            tool_names = [tool.name for tool in tools]
-            interrupt_config = get_hitl_middleware_config(tool_names)
-            if interrupt_config:
-                hitl_middleware = HumanInTheLoopMiddleware(
-                    interrupt_on=interrupt_config,
-                    description_prefix="Search tool execution pending approval",
-                )
-                middleware.append(hitl_middleware)
-
         agent = create_agent(
             model=llm_with_tools,
             tools=tools,

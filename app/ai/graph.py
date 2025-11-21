@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Optional, TYPE_CHECKING, List
+from typing import Optional, TYPE_CHECKING, List, Dict, Any
 from uuid import UUID
 
 from langgraph.graph import StateGraph, END, START
@@ -15,6 +15,8 @@ from .schemas import (
     AgentMessage,
     AgentResponse,
     MessageRole,
+    InterruptDecision,
+    InterruptDecisionType,
 )
 from typing import Any
 from .agents.router import Router
@@ -723,14 +725,28 @@ class MultiAgentWorkflow:
             f"Current state - next nodes: {state_snapshot.next}, interrupted: {len(state_snapshot.next) > 0 if state_snapshot.next else False}"
         )
 
-        # If rejection messages provided, add them to state
-        input_state = None
-        if rejection_messages:
-            input_state = {"messages": rejection_messages}
-            logger.info(f"Adding {len(rejection_messages)} rejection messages to state")
+        # Get the selected agent from state
+        selected_agent = state_snapshot.values.get("selected_agent")
 
-        # Resume execution (will execute tools node and route back to agent)
-        result = await self.graph.ainvoke(input_state, config=config)
+        # If rejection messages provided, add them to state and route back to agent (skip tools)
+        if rejection_messages:
+            logger.info(
+                f"Rejection: Adding {len(rejection_messages)} rejection messages to state and routing to {selected_agent}"
+            )
+            # Update the state to add rejection messages
+            await self.graph.aupdate_state(
+                config=config,
+                values={"messages": rejection_messages},
+                as_node="tools",  # Pretend the tools node added these messages
+            )
+
+            # Now resume execution - it will route to the selected agent
+            logger.info(f"Resuming to route back to {selected_agent}")
+            result = await self.graph.ainvoke(None, config=config)
+        else:
+            # Approval: Resume execution normally (will execute tools node)
+            logger.info("Approval: Resuming workflow to execute tools")
+            result = await self.graph.ainvoke(None, config=config)
 
         # Check if response was generated
         response = result.get("response")
@@ -740,6 +756,228 @@ class MultiAgentWorkflow:
             logger.info(f"Final state - next nodes: {final_state.next}")
             response = final_state.values.get("response")
 
+        return response
+
+    async def resume_with_decisions(
+        self,
+        thread_id: str,
+        decisions: List[InterruptDecision],
+        interrupt_id: Optional[str] = None,
+    ) -> Optional[AgentResponse]:
+        """
+        Resume workflow execution with user decisions on tool execution.
+        
+        This method properly handles accept/edit/reject decisions:
+        - ACCEPT/APPROVE: Allow tool to execute with original args
+        - EDIT: Modify tool arguments before execution  
+        - REJECT/RESPOND: Skip tool execution and provide feedback to the agent
+        
+        Args:
+            thread_id: The thread ID to resume
+            decisions: List of decisions for each tool (accept/edit/reject)
+            interrupt_id: Optional interrupt identifier
+            
+        Returns:
+            AgentResponse with the bot's response after processing decisions
+        """
+        if not self.checkpointer:
+            raise ValueError("Checkpointing is not enabled, cannot resume.")
+
+        config = {"configurable": {"thread_id": thread_id}}
+        
+        logger.info(f"Resuming with decisions for thread_id={thread_id}")
+        
+        # Get current state to examine pending tool calls
+        state_snapshot = await self.graph.aget_state(config)
+        logger.info(
+            f"Current state - next nodes: {state_snapshot.next}, "
+            f"interrupted: {len(state_snapshot.next) > 0 if state_snapshot.next else False}"
+        )
+        
+        # Extract the last AI message with tool calls
+        messages = state_snapshot.values.get("messages", [])
+        if not messages:
+            logger.error("No messages in state, cannot resume")
+            return None
+            
+        last_message = messages[-1]
+        if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+            logger.error("Last message is not AIMessage with tool calls")
+            return None
+        
+        # Build a mapping of task_id to decision
+        decision_map: Dict[str, InterruptDecision] = {}
+        for decision in decisions:
+            task_id = decision.task_id
+            if task_id:
+                decision_map[task_id] = decision
+        
+        logger.info(f"Decision map has {len(decision_map)} entries")
+        
+        # Process each tool call based on decisions
+        tool_calls_to_execute = []
+        rejection_messages_list = []
+        modified_tool_calls = []
+        
+        for tool_call in last_message.tool_calls:
+            tool_call_id = tool_call.get("id")
+            tool_name = tool_call.get("name")
+            tool_args = tool_call.get("args", {})
+            
+            # Find the decision for this tool call
+            decision = decision_map.get(tool_call_id)
+            
+            if not decision:
+                logger.warning(f"No decision found for tool call {tool_call_id}, defaulting to reject")
+                # Default to rejection if no decision provided
+                rejection_messages_list.append(
+                    ToolMessage(
+                        content=f"Tool execution rejected: No decision provided",
+                        tool_call_id=tool_call_id,
+                        name=tool_name,
+                    )
+                )
+                continue
+            
+            decision_type = decision.type
+            
+            if decision_type in (InterruptDecisionType.ACCEPT, InterruptDecisionType.APPROVE):
+                # Accept: allow execution with original args
+                logger.info(f"Tool {tool_name} ({tool_call_id}) accepted for execution")
+                tool_calls_to_execute.append(tool_call)
+                
+            elif decision_type == InterruptDecisionType.EDIT:
+                # Edit: modify arguments before execution
+                logger.info(f"Tool {tool_name} ({tool_call_id}) modified with new args")
+                modified_args = decision.args or tool_args
+                modified_tool_call = {
+                    "name": tool_name,
+                    "args": modified_args,
+                    "id": tool_call_id,
+                }
+                tool_calls_to_execute.append(modified_tool_call)
+                modified_tool_calls.append(tool_call_id)
+                
+            elif decision_type in (InterruptDecisionType.REJECT, InterruptDecisionType.RESPOND):
+                # Reject: skip execution and provide feedback message
+                feedback_msg = "User rejected tool execution"
+                if decision.args and "message" in decision.args:
+                    feedback_msg = decision.args["message"]
+                    
+                logger.info(f"Tool {tool_name} ({tool_call_id}) rejected with message: {feedback_msg}")
+                rejection_messages_list.append(
+                    ToolMessage(
+                        content=feedback_msg,
+                        tool_call_id=tool_call_id,
+                        name=tool_name,
+                    )
+                )
+            else:
+                logger.warning(f"Unknown decision type {decision_type}, rejecting tool")
+                rejection_messages_list.append(
+                    ToolMessage(
+                        content=f"Tool execution rejected: Unknown decision type",
+                        tool_call_id=tool_call_id,
+                        name=tool_name,
+                    )
+                )
+        
+        # Now handle the resume based on what was decided
+        if rejection_messages_list and not tool_calls_to_execute:
+            # ALL tools were rejected - add rejection messages and route back to agent (skip tools node)
+            logger.info(f"All {len(rejection_messages_list)} tools rejected, routing back to agent")
+            
+            selected_agent = state_snapshot.values.get("selected_agent")
+            
+            # Update state with rejection messages as if tools node executed them
+            await self.graph.aupdate_state(
+                config=config,
+                values={"messages": rejection_messages_list},
+                as_node="tools",
+            )
+            
+            # Resume - will route back to the selected agent
+            result = await self.graph.ainvoke(None, config=config)
+            
+        elif tool_calls_to_execute and not rejection_messages_list:
+            # ALL tools were accepted/edited - proceed with execution
+            logger.info(f"All {len(tool_calls_to_execute)} tools approved for execution")
+            
+            # If any tools were edited, update the last message with modified tool calls
+            if modified_tool_calls:
+                logger.info(f"Updating {len(modified_tool_calls)} modified tool calls in state")
+                # Create a new AI message with the modified tool calls
+                new_ai_message = AIMessage(
+                    content=last_message.content,
+                    tool_calls=tool_calls_to_execute,
+                )
+                # Replace the last message
+                updated_messages = messages[:-1] + [new_ai_message]
+                await self.graph.aupdate_state(
+                    config=config,
+                    values={"messages": updated_messages},
+                    as_node=state_snapshot.values.get("selected_agent", "search_agent"),
+                )
+            
+            # Resume execution - will execute tools node
+            logger.info("Resuming to execute approved tools")
+            result = await self.graph.ainvoke(None, config=config)
+            
+        elif tool_calls_to_execute and rejection_messages_list:
+            # MIXED decisions - some approved, some rejected
+            logger.info(
+                f"Mixed decisions: {len(tool_calls_to_execute)} approved, "
+                f"{len(rejection_messages_list)} rejected"
+            )
+            
+            # Update the AI message to only include approved tool calls
+            new_ai_message = AIMessage(
+                content=last_message.content,
+                tool_calls=tool_calls_to_execute,
+            )
+            
+            # Replace the last message with modified version
+            updated_messages = messages[:-1] + [new_ai_message]
+            selected_agent = state_snapshot.values.get("selected_agent")
+            
+            await self.graph.aupdate_state(
+                config=config,
+                values={"messages": updated_messages},
+                as_node=selected_agent,
+            )
+            
+            # Resume to execute approved tools
+            logger.info("Executing approved tools...")
+            result = await self.graph.ainvoke(None, config=config)
+            
+            # After execution, add rejection messages for rejected tools
+            logger.info("Adding rejection messages for rejected tools...")
+            current_state = await self.graph.aget_state(config)
+            current_messages = current_state.values.get("messages", [])
+            
+            await self.graph.aupdate_state(
+                config=config,
+                values={"messages": current_messages + rejection_messages_list},
+                as_node="tools",
+            )
+            
+            # Continue execution to let agent process all tool results
+            logger.info("Resuming to process all tool results...")
+            result = await self.graph.ainvoke(None, config=config)
+            
+        else:
+            # No tools to execute at all (shouldn't happen)
+            logger.error("No tools to execute and no rejections - unexpected state")
+            return None
+        
+        # Extract response from result
+        response = result.get("response")
+        if not response:
+            logger.warning("No response after resume, checking final state...")
+            final_state = await self.graph.aget_state(config)
+            logger.info(f"Final state - next nodes: {final_state.next}")
+            response = final_state.values.get("response")
+        
         return response
 
     async def execute_stream(
