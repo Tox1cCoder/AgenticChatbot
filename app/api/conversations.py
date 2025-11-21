@@ -160,15 +160,25 @@ async def resume_conversation_workflow(
         thread_id = str(conversation_id)
         state_info = await message_service.ai_service.workflow.get_state(thread_id)
         pending_tool_calls = state_info.get("pending_tool_calls", [])
-        
+
         # Create rejection ToolMessages for each pending tool call
         rejection_messages = []
-        rejection_reason = resume_data.rejection_reason or "User declined tool execution"
-        
+        rejection_reason = (
+            resume_data.rejection_reason or "User declined tool execution"
+        )
+
         for tool_call in pending_tool_calls:
-            tool_id = tool_call.get("id") if isinstance(tool_call, dict) else getattr(tool_call, "id", None)
-            tool_name = tool_call.get("name") if isinstance(tool_call, dict) else getattr(tool_call, "name", "unknown")
-            
+            tool_id = (
+                tool_call.get("id")
+                if isinstance(tool_call, dict)
+                else getattr(tool_call, "id", None)
+            )
+            tool_name = (
+                tool_call.get("name")
+                if isinstance(tool_call, dict)
+                else getattr(tool_call, "name", "unknown")
+            )
+
             # Create a ToolMessage indicating rejection
             rejection_messages.append(
                 ToolMessage(
@@ -178,7 +188,7 @@ async def resume_conversation_workflow(
                     status="error",
                 )
             )
-        
+
         # Resume workflow with rejection messages so LLM can generate appropriate response
         bot_message = await message_service.resume_workflow(
             conversation_id=conversation_id,
@@ -186,13 +196,13 @@ async def resume_conversation_workflow(
             user_input=None,
             rejection_messages=rejection_messages,
         )
-        
+
         return ApiResponse(
             success=True,
             message="Tool execution rejected, LLM generated response",
-            data=bot_message
+            data=bot_message,
         )
-    
+
     # Handle approval - resume the workflow
     user_input = resume_data.user_input if resume_data.user_input else None
 

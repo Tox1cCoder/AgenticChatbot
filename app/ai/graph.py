@@ -257,10 +257,14 @@ class MultiAgentWorkflow:
 
         last_message = messages[-1]
         has_tool_calls = isinstance(last_message, AIMessage) and last_message.tool_calls
-        
-        logger.info(f"_should_call_tools: Last message type: {type(last_message)}, has tool_calls: {has_tool_calls}")
+
+        logger.info(
+            f"_should_call_tools: Last message type: {type(last_message)}, has tool_calls: {has_tool_calls}"
+        )
         if has_tool_calls:
-            logger.info(f"_should_call_tools: Tool calls found: {last_message.tool_calls}")
+            logger.info(
+                f"_should_call_tools: Tool calls found: {last_message.tool_calls}"
+            )
             return "tools"
 
         return "end"
@@ -518,15 +522,19 @@ class MultiAgentWorkflow:
 
         response = await self.search_agent.process_message(agent_msg, conversation_id)
 
-        logger.info(f"Search agent response - has tool_calls: {response.message.tool_calls is not None}")
+        logger.info(
+            f"Search agent response - has tool_calls: {response.message.tool_calls is not None}"
+        )
         if response.message.tool_calls:
             logger.info(f"Search agent tool calls: {response.message.tool_calls}")
-        
+
         state["response"] = response
         ai_message_kwargs = {"content": response.message.content}
         if response.message.tool_calls:
             ai_message_kwargs["tool_calls"] = response.message.tool_calls
-            logger.info(f"Adding tool_calls to AIMessage: {response.message.tool_calls}")
+            logger.info(
+                f"Adding tool_calls to AIMessage: {response.message.tool_calls}"
+            )
 
         state.setdefault("messages", []).append(AIMessage(**ai_message_kwargs))
 
@@ -657,11 +665,13 @@ class MultiAgentWorkflow:
         self,
         thread_id: str,
         user_input: Optional[str] = None,  # Approval or rejection or modification
-        rejection_messages: Optional[List] = None,  # Tool rejection messages to add to state
+        rejection_messages: Optional[
+            List
+        ] = None,  # Tool rejection messages to add to state
     ) -> Optional[AgentResponse]:
         """
         Resume the workflow from an interrupt.
-        
+
         Args:
             thread_id: The thread ID to resume
             user_input: Optional user input (not currently used)
@@ -712,8 +722,10 @@ class MultiAgentWorkflow:
         Execute the workflow with streaming support.
         Yields token-level events by calling agent streaming methods directly.
         """
-        logger.info(f"execute_stream started - thread_id: {thread_id}, checkpointer enabled: {self.checkpointer is not None}")
-        
+        logger.info(
+            f"execute_stream started - thread_id: {thread_id}, checkpointer enabled: {self.checkpointer is not None}"
+        )
+
         initial_state: GraphState = {
             "messages": [HumanMessage(content=message)],
             "context": {},
@@ -845,11 +857,15 @@ class MultiAgentWorkflow:
                 else:
                     # No response - this is an error
                     logger.error("Workflow completed without generating a response")
-                    logger.error(f"Final state values keys: {list(snapshot.values.keys())}")
+                    logger.error(
+                        f"Final state values keys: {list(snapshot.values.keys())}"
+                    )
                     yield {"type": "error", "error": "No response generated"}
         else:
             # If no checkpointer, we can't detect interrupts
-            logger.error(f"No checkpointer or thread_id - checkpointer: {self.checkpointer is not None}, thread_id: {thread_id}")
+            logger.error(
+                f"No checkpointer or thread_id - checkpointer: {self.checkpointer is not None}, thread_id: {thread_id}"
+            )
             yield {"type": "error", "error": "Checkpointing not configured"}
 
     async def get_state(self, thread_id: str) -> dict:

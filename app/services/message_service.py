@@ -365,15 +365,15 @@ class MessageService(IMessageService):
         return self.repository.delete(message_id)
 
     async def resume_workflow(
-        self, 
-        conversation_id: UUID, 
-        user_id: UUID, 
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
         user_input: Optional[str] = None,
         rejection_messages: Optional[List] = None,
     ) -> MessageRead:
         """
         Resume a paused workflow and return the bot's response message.
-        
+
         Args:
             conversation_id: The conversation ID
             user_id: The user ID
@@ -387,8 +387,8 @@ class MessageService(IMessageService):
 
         # Resume the workflow through AI service
         bot_response = await self.ai_service.resume_workflow(
-            conversation_id=conversation_id, 
-            user_id=user_id, 
+            conversation_id=conversation_id,
+            user_id=user_id,
             user_input=user_input,
             rejection_messages=rejection_messages,
         )

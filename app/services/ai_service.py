@@ -127,7 +127,7 @@ class AIService:
     ) -> AgentResponse:
         """
         Resume a workflow that was interrupted (e.g. for human approval).
-        
+
         Args:
             conversation_id: The conversation ID
             user_id: The user ID
@@ -151,7 +151,9 @@ class AIService:
             )
 
             response = await self.workflow.resume(
-                thread_id=thread_id, user_input=user_input, rejection_messages=rejection_messages
+                thread_id=thread_id,
+                user_input=user_input,
+                rejection_messages=rejection_messages,
             )
 
             if response:
