@@ -1,9 +1,4 @@
-"""
-Human-in-the-loop configuration utilities for LangGraph agents.
-
-This module provides centralized configuration for human approval workflows,
-including middleware settings and interrupt response handling.
-"""
+"""Human-in-the-loop configuration utilities for LangGraph agents."""
 
 import uuid
 from typing import Dict, Any, List, Optional
@@ -13,52 +8,19 @@ from app.ai.schemas import InterruptResponse, ToolInterruptRequest
 
 try:
     from langgraph.types import Interrupt as LangGraphInterrupt
-except Exception:  # pragma: no cover - defensive import for older runtimes
+except Exception:
     LangGraphInterrupt = None
 
 
-def get_hitl_middleware_config(tool_names: List[str]) -> Dict[str, Any]:
-    if not should_enable_hitl():
-        return {}
-
-    interrupt_config = {}
-    tools_requiring_approval = getattr(settings, "hitl_tools_require_approval", [])
-    allow_edit = getattr(settings, "hitl_default_allow_edit", True)
-    allow_respond = getattr(settings, "hitl_default_allow_respond", True)
-
-    for tool_name in tool_names:
-        if tool_name in tools_requiring_approval:
-            # Build allowed decisions list
-            allowed = ["approve"]  # Always allow approval
-            if allow_edit:
-                allowed.append("edit")
-            if allow_respond:
-                allowed.append("reject")  # reject is the decision type for responding
-
-            # Use True for all decisions, otherwise use explicit config
-            if len(allowed) == 3:
-                interrupt_config[tool_name] = True
-            else:
-                interrupt_config[tool_name] = {"allowed_decisions": allowed}
-
-    return interrupt_config
-
-
 def should_enable_hitl() -> bool:
-    enabled = getattr(settings, "enable_human_in_the_loop", True)
-
-    return enabled
+    """Check if human-in-the-loop is enabled in settings."""
+    return getattr(settings, "enable_human_in_the_loop", True)
 
 
 def build_interrupt_response(
     interrupt_data: Any, thread_id: str, conversation_id: str
 ) -> Dict[str, Any]:
-    """
-    Build a structured InterruptResponse from raw interrupt data.
-
-    Extracts task IDs and tool call IDs from the interrupt mechanism
-    to enable proper resume functionality.
-    """
+    """Build a structured InterruptResponse from raw interrupt data."""
     action_requests: List[ToolInterruptRequest] = []
     interrupt_id: Optional[str] = None
 
@@ -84,10 +46,7 @@ def build_interrupt_response(
                 or f"{default_prefix}:{idx}"
             )
             tool_name = (
-                task.get("action")
-                or task.get("tool")
-                or task.get("name")
-                or "unknown"
+                task.get("action") or task.get("tool") or task.get("name") or "unknown"
             )
             tool_args = (
                 task.get("args")
@@ -108,7 +67,7 @@ def build_interrupt_response(
                 )
             )
 
-    # Normalize interrupt_data to a list of payloads we can inspect
+    # Normalize interrupt_data to a list of payloads
     payloads: List[Any] = []
     if LangGraphInterrupt and isinstance(interrupt_data, LangGraphInterrupt):
         interrupt_id = interrupt_data.id or interrupt_id
@@ -130,14 +89,13 @@ def build_interrupt_response(
         if not interrupt_id:
             interrupt_id = payload.get("interrupt_id")
 
-        # New LangChain/ LangGraph HITL payload shape
+        # New LangGraph HITL payload shape
         if "action_requests" in payload:
             allowed_map = _parse_review_configs(payload.get("review_configs", []))
             _add_requests(payload.get("action_requests", []), allowed_map)
-            # No need to inspect fallback keys once action_requests are handled
             continue
 
-        # Fallback support for older/alternative interrupt shapes
+        # Fallback support for older interrupt shapes
         tasks = (
             payload.get("tasks")
             or payload.get("__interrupt__")
@@ -157,61 +115,3 @@ def build_interrupt_response(
     )
 
     return response.model_dump()
-
-
-def is_agent_response_interrupted(agent_response: Dict[str, Any]) -> bool:
-    if not isinstance(agent_response, dict):
-        return False
-
-    # Check for common interrupt indicators
-    messages = agent_response.get("messages", [])
-    if messages:
-        last_message = messages[-1] if isinstance(messages, list) else messages
-        if hasattr(last_message, "type") and last_message.type == "interrupt":
-            return True
-        if isinstance(last_message, dict):
-            if last_message.get("type") == "interrupt":
-                return True
-            # Check for tool_calls with pending status
-            tool_calls = last_message.get("tool_calls", [])
-            if tool_calls and any(
-                tc.get("status") == "pending"
-                for tc in tool_calls
-                if isinstance(tc, dict)
-            ):
-                return True
-
-    # Check for interrupt marker in response metadata
-    if agent_response.get("__interrupt__"):
-        return True
-
-    return False
-
-
-def extract_interrupt_data_from_agent_response(agent_response: Dict[str, Any]) -> Any:
-    """
-    Extract interrupt data from an agent response for building InterruptResponse.
-    """
-    # Try __interrupt__ key first
-    if "__interrupt__" in agent_response:
-        return agent_response["__interrupt__"]
-
-    # Extract from messages with tool_calls
-    messages = agent_response.get("messages", [])
-    if messages:
-        last_message = messages[-1] if isinstance(messages, list) else messages
-        if isinstance(last_message, dict):
-            tool_calls = last_message.get("tool_calls", [])
-            if tool_calls:
-                # Filter pending tool calls
-                pending_calls = [
-                    tc
-                    for tc in tool_calls
-                    if isinstance(tc, dict) and tc.get("status") == "pending"
-                ]
-                if pending_calls:
-                    return {"tool_calls": pending_calls}
-        elif hasattr(last_message, "tool_calls"):
-            return {"tool_calls": last_message.tool_calls}
-
-    return None

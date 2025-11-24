@@ -8,7 +8,6 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
 from langchain.agents import create_agent
-from langchain.agents.middleware import HumanInTheLoopMiddleware
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_chat_prompt
@@ -17,13 +16,7 @@ from ..utils import (
     extract_agent_execution_info,
     get_error_recovery_hint,
 )
-from ..hitl_config import (
-    get_hitl_middleware_config,
-    should_enable_hitl,
-    is_agent_response_interrupted,
-    extract_interrupt_data_from_agent_response,
-    build_interrupt_response,
-)
+from ..hitl_config import build_interrupt_response
 from ...core.config import settings
 from ...core.exceptions.mcp import ServerNotFoundError
 from ..mcp_integration import MCPManager
@@ -110,7 +103,7 @@ class ChatAgent:
         message: AgentMessage,
         conversation_id: Optional[str] = None,
     ) -> AgentResponse:
-
+        """Process message and return response with potential tool calls."""
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
 
@@ -124,328 +117,168 @@ class ChatAgent:
             else None
         )
 
-        response_text: str = ""
-        tools_used: List[str] = []
-        tool_artifacts: List[Dict[str, Any]] = []
-
         try:
             if attachments:
+                # Vision mode - no tools
                 response_text = await self._generate_with_vision(prompt, attachments)
+
+                return AgentResponse(
+                    agent_type=AgentType.CHAT,
+                    agent_id="chat_agent",
+                    message=AgentMessage(
+                        role=MessageRole.ASSISTANT,
+                        content=coerce_response_text(response_text),
+                    ),
+                    metadata={
+                        "model": self.model_name,
+                        "conversation_id": conversation_id,
+                        "context_messages": len(conversation_history),
+                        "persona_used": persona,
+                        "has_images": True,
+                    },
+                )
             else:
                 # Initialize tools if not done yet
                 if self.mcp_manager is None:
                     await self._init_tools()
 
                 if self.tools and self.langchain_model:
-                    response_text, tools_used, tool_artifacts = (
-                        await self._generate_with_tools(prompt)
-                    )
-
-                    # Check if interrupted
-                    if response_text == "__INTERRUPT__" and tool_artifacts:
-                        interrupt_artifact = tool_artifacts[0]
-                        if "interrupt_data" in interrupt_artifact:
-                            logger.info("ChatAgent returning interrupt response")
-                            # Build interrupt response structure
-                            interrupt_data = interrupt_artifact["interrupt_data"]
-                            interrupt_response = build_interrupt_response(
-                                interrupt_data,
-                                conversation_id or "",
-                                conversation_id or "",
-                            )
-
-                            # Return minimal AgentResponse with interrupt metadata
-                            return AgentResponse(
-                                agent_type=AgentType.CHAT,
-                                agent_id="chat_agent",
-                                message=AgentMessage(
-                                    role=MessageRole.ASSISTANT,
-                                    content="Tool execution requires approval",
-                                ),
-                                metadata={"interrupt": interrupt_response},
-                            )
+                    # Use invoke_model to return tool calls without executing
+                    return await self.invoke_model(message, conversation_id)
                 else:
+                    # No tools available, generate directly
                     response_text = await self._generate(prompt)
+
+                    return AgentResponse(
+                        agent_type=AgentType.CHAT,
+                        agent_id="chat_agent",
+                        message=AgentMessage(
+                            role=MessageRole.ASSISTANT,
+                            content=coerce_response_text(response_text),
+                        ),
+                        metadata={
+                            "model": self.model_name,
+                            "conversation_id": conversation_id,
+                            "context_messages": len(conversation_history),
+                            "persona_used": persona,
+                        },
+                    )
         except Exception as exc:
             logger.error(
                 "Error while processing message in ChatAgent: %s", exc, exc_info=True
             )
             response_text = await self._handle_generation_error(prompt, exc)
-            error_description = f"{type(exc).__name__}: {exc}"
-            tool_artifacts.append(
-                {
-                    "tool": "chat_agent",
-                    "args": {},
-                    "error": error_description,
-                }
+
+            return AgentResponse(
+                agent_type=AgentType.CHAT,
+                agent_id="chat_agent",
+                message=AgentMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=coerce_response_text(response_text),
+                ),
+                metadata={
+                    "model": self.model_name,
+                    "conversation_id": conversation_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
             )
-            # Signal that the normal tool flow failed
-            tools_used = []
 
-        response_text = coerce_response_text(response_text)
-
-        response_message = AgentMessage(
-            role=MessageRole.ASSISTANT, content=response_text
-        )
-
-        # Build metadata
-        metadata = {
-            "model": self.model_name,
-            "conversation_id": conversation_id,
-            "context_messages": len(conversation_history),
-            "persona_used": persona,
-            "has_images": bool(attachments),
-            "tools_available": len(self.tools),
-        }
-
-        # Add tool usage metadata if tools were used
-        if tools_used:
-            metadata["tools_used"] = tools_used
-            metadata["tool_calls_count"] = len(tools_used)
-        if tool_artifacts:
-            metadata["tool_artifacts"] = tool_artifacts
-            error_artifacts = [
-                artifact for artifact in tool_artifacts if artifact.get("error")
-            ]
-            if error_artifacts:
-                metadata["error"] = error_artifacts[0]["error"]
-
-        return AgentResponse(
-            agent_type=AgentType.CHAT,
-            agent_id="chat_agent",
-            message=response_message,
-            metadata=metadata,
-            tool_artifacts=tool_artifacts if tool_artifacts else None,
-        )
-
-    async def stream_message(
+    async def invoke_model(
         self,
         message: AgentMessage,
         conversation_id: Optional[str] = None,
-    ) -> AsyncIterator[Dict[str, Any]]:
+    ) -> AgentResponse:
         """
-        Stream message processing with token-by-token generation.
-        Yields events as tokens are generated.
+        Invoke the model directly, potentially returning tool calls.
+        This allows the graph to handle tool execution with HITL.
         """
+        # Initialize MCP tools if needed
+        if self.mcp_manager is None:
+            await self._init_tools()
+
+        # Extract conversation history
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
 
+        # Check if this invocation includes tool results (post-tool-execution)
+        has_tool_results = "Tool results:" in message.content
+
+        # Build prompt
         prompt = build_chat_prompt(
-            message.content, conversation_history, persona=persona
+            message.content,
+            conversation_history,
+            persona=persona,
         )
 
-        attachments = (
-            message.attachments
-            if hasattr(message, "attachments") and message.attachments
-            else None
+        # Configure tool calling
+        # If we already have tool results, force the model to NOT call more tools
+        tool_choice = (
+            "none"
+            if has_tool_results
+            else (
+                settings.tool_choice_mode
+                if hasattr(settings, "tool_choice_mode")
+                else "auto"
+            )
         )
 
-        accumulated_content = ""
-        tools_used: List[str] = []
-        tool_artifacts: List[Dict[str, Any]] = []
+        llm_with_tools = self.langchain_model.bind_tools(
+            self.tools,
+            tool_config={
+                "function_calling_config": {
+                    "mode": (
+                        tool_choice.upper()
+                        if tool_choice in ["auto", "any", "none"]
+                        else "AUTO"
+                    )
+                }
+            },
+        )
 
         try:
-            if attachments:
-                # Vision with attachments - non-streaming fallback
-                response_text = await self._generate_with_vision(prompt, attachments)
-                # Yield as single token
-                yield {"type": "token", "content": response_text}
-                accumulated_content = response_text
-            else:
-                # Initialize tools if not done yet
-                if self.mcp_manager is None:
-                    await self._init_tools()
+            # Invoke model
+            response = await llm_with_tools.ainvoke([HumanMessage(content=prompt)])
 
-                if self.tools and self.langchain_model:
-                    # Stream with tools
-                    async for event in self._generate_with_tools_stream(prompt):
-                        if event["type"] == "token":
-                            accumulated_content += event["content"]
-                            yield event
-                        elif event["type"] in ["tool_start", "tool_end"]:
-                            yield event
-                        elif event["type"] == "interrupt":
-                            # Handle interrupt during streaming
-                            interrupt_data = event.get("interrupt_data")
-                            interrupt_response = build_interrupt_response(
-                                interrupt_data,
-                                conversation_id or "",
-                                conversation_id or "",
-                            )
-                            # Yield interrupt event with structured response
-                            yield {
-                                "type": "interrupt",
-                                "interrupt": interrupt_response,
-                            }
-                            # Also yield complete with interrupt in metadata for consistency
-                            yield {
-                                "type": "complete",
-                                "response": AgentResponse(
-                                    agent_type=AgentType.CHAT,
-                                    agent_id="chat_agent",
-                                    message=AgentMessage(
-                                        role=MessageRole.ASSISTANT,
-                                        content="Tool execution requires approval",
-                                    ),
-                                    metadata={"interrupt": interrupt_response},
-                                ),
-                            }
-                            return
-                        elif event["type"] == "result":
-                            # Extract final result info
-                            accumulated_content = event["response_text"]
-                            tools_used = event["tools_used"]
-                            tool_artifacts = event["tool_artifacts"]
-                else:
-                    # Stream without tools
-                    async for chunk in self._generate_stream(prompt):
-                        accumulated_content += chunk
-                        yield {"type": "token", "content": chunk}
+            tool_calls = []
+            if hasattr(response, "tool_calls") and response.tool_calls:
+                tool_calls = response.tool_calls
 
-        except Exception as exc:
-            logger.error(
-                "Error while streaming message in ChatAgent: %s", exc, exc_info=True
-            )
-            error_text = await self._handle_generation_error(prompt, exc)
-            yield {"type": "token", "content": error_text}
-            accumulated_content = error_text
-
-            error_description = f"{type(exc).__name__}: {exc}"
-            tool_artifacts.append(
-                {
-                    "tool": "chat_agent",
-                    "args": {},
-                    "error": error_description,
-                }
-            )
-            tools_used = []
-
-        # Coerce final response
-        accumulated_content = coerce_response_text(accumulated_content)
-
-        response_message = AgentMessage(
-            role=MessageRole.ASSISTANT, content=accumulated_content
-        )
-
-        # Build metadata
-        metadata = {
-            "model": self.model_name,
-            "conversation_id": conversation_id,
-            "context_messages": len(conversation_history),
-            "persona_used": persona,
-            "has_images": bool(attachments),
-            "tools_available": len(self.tools),
-        }
-
-        # Add tool usage metadata if tools were used
-        if tools_used:
-            metadata["tools_used"] = tools_used
-            metadata["tool_calls_count"] = len(tools_used)
-        if tool_artifacts:
-            metadata["tool_artifacts"] = tool_artifacts
-            error_artifacts = [
-                artifact for artifact in tool_artifacts if artifact.get("error")
-            ]
-            if error_artifacts:
-                metadata["error"] = error_artifacts[0]["error"]
-
-        # Yield complete event with full response
-        yield {
-            "type": "complete",
-            "response": AgentResponse(
-                agent_type=AgentType.CHAT,
-                agent_id="chat_agent",
-                message=response_message,
-                metadata=metadata,
-                tool_artifacts=tool_artifacts if tool_artifacts else None,
-            ),
-        }
-
-    async def _generate_with_tools_stream(
-        self, prompt: str
-    ) -> AsyncIterator[Dict[str, Any]]:
-        """
-        Generate streaming response with tool calling support.
-        Yields token chunks and tool execution events.
-        """
-        try:
-            # Create agent executor
-            agent_executor = self._create_agent_executor(self.tools, prompt)
-
-            accumulated_text = ""
-            tools_used: List[str] = []
-
-            # Stream agent execution
-            async for event in agent_executor.astream_events(
-                {"messages": [HumanMessage(content=prompt)]}, version="v1"
-            ):
-                event_type = event.get("event")
-
-                # Extract tokens from LLM events
-                if event_type == "on_chat_model_stream":
-                    chunk = event.get("data", {}).get("chunk")
-                    if chunk and hasattr(chunk, "content") and chunk.content:
-                        # Handle both string and list content
-                        token = chunk.content
-                        if isinstance(token, list):
-                            # If it's a list, join the string parts
-                            token = "".join(str(item) for item in token if item)
-                        if token:  # Only yield non-empty tokens
-                            accumulated_text += token
-                            yield {"type": "token", "content": token}
-
-                # Track tool execution start
-                elif event_type == "on_tool_start":
-                    tool_name = event.get("name", "unknown_tool")
-                    yield {"type": "tool_start", "name": tool_name}
-
-                # Track tool execution end
-                elif event_type == "on_tool_end":
-                    tool_name = event.get("name", "unknown_tool")
-                    yield {"type": "tool_end", "name": tool_name}
-
-            # Get final response for complete extraction
-            agent_response = await agent_executor.ainvoke(
-                {"messages": [HumanMessage(content=prompt)]}
-            )
-
-            # Check for interrupts before extracting normal execution info
-            if is_agent_response_interrupted(agent_response):
-                logger.info("ChatAgent detected interrupt during streaming")
-                interrupt_data = extract_interrupt_data_from_agent_response(
-                    agent_response
-                )
-                # Yield interrupt event and stop
-                yield {
-                    "type": "interrupt",
-                    "interrupt_data": interrupt_data,
-                }
-                return
-
-            # Extract execution info
-            execution_info = extract_agent_execution_info(agent_response)
-
-            response_text = execution_info["response_text"]
-            tools_used = execution_info["tools_used"]
-            tool_artifacts = execution_info["tool_artifacts"]
-
-            # Log parallel tool execution summary
-            if tools_used:
-                logger.info(
-                    f"ChatAgent executed {len(tools_used)} tool(s): {', '.join(tools_used)}"
-                )
-
-            # Yield result info
-            yield {
-                "type": "result",
-                "response_text": response_text,
-                "tools_used": tools_used,
-                "tool_artifacts": tool_artifacts,
+            # Create response metadata
+            metadata = {
+                "model": self.model_name,
+                "conversation_id": conversation_id,
+                "context_messages": len(conversation_history),
+                "tools_available": len(self.tools),
+                "persona_used": persona,
             }
 
-        except Exception as exc:
-            logger.error("Error in tool calling streaming: %s", exc, exc_info=True)
-            raise
+            return AgentResponse(
+                agent_type=AgentType.CHAT,
+                agent_id="chat_agent",
+                message=AgentMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=coerce_response_text(response.content),
+                    tool_calls=tool_calls if tool_calls else None,
+                ),
+                metadata=metadata,
+            )
+
+        except Exception as e:
+            logger.error(f"Error invoking chat agent model: {e}", exc_info=True)
+            error_text = await self._handle_generation_error(prompt, e)
+            return AgentResponse(
+                agent_type=AgentType.CHAT,
+                agent_id="chat_agent",
+                message=AgentMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=coerce_response_text(error_text),
+                ),
+                metadata={
+                    "model": self.model_name,
+                    "conversation_id": conversation_id,
+                    "error": f"{type(e).__name__}: {e}",
+                },
+            )
 
     async def _generate(self, prompt: str) -> str:
         if not self.gemini_client:
@@ -458,28 +291,6 @@ class ChatAgent:
             return response.text if hasattr(response, "text") else str(response)
         except Exception as exc:
             raise RuntimeError(f"Gemini API error: {exc}") from exc
-
-    async def _generate_stream(self, prompt: str):
-        """
-        Generate streaming response from Gemini API.
-        Yields text chunks as they arrive.
-        """
-        if not self.gemini_client:
-            raise RuntimeError("Gemini client not initialized")
-
-        try:
-            response_stream = self.gemini_client.models.generate_content_stream(
-                model=self.model_name,
-                contents=prompt,
-            )
-
-            for chunk in response_stream:
-                if hasattr(chunk, "text"):
-                    yield chunk.text
-
-        except Exception as exc:
-            logger.error(f"Error in streaming generation: {exc}", exc_info=True)
-            raise RuntimeError(f"Gemini streaming API error: {exc}") from exc
 
     async def _handle_generation_error(self, prompt: str, error: Exception) -> str:
         """Ask the base LLM to craft a user-facing reply that acknowledges an internal error."""
@@ -497,122 +308,6 @@ class ChatAgent:
 
         fallback_response = await self._generate(fallback_prompt)
         return coerce_response_text(fallback_response)
-
-    async def _generate_with_tools(
-        self, prompt: str, streaming_callback=None
-    ) -> tuple[str, List[str], List[Dict[str, Any]]]:
-        """Generate response with tool calling support"""
-        try:
-            # Create agent executor
-            agent_executor = self._create_agent_executor(self.tools, prompt)
-
-            # If streaming callback provided, use streaming mode
-            if streaming_callback:
-                # Stream agent execution
-                full_response = ""
-                async for event in agent_executor.astream_events(
-                    {"messages": [HumanMessage(content=prompt)]}, version="v1"
-                ):
-                    # Extract tokens from LLM events
-                    if event.get("event") == "on_chat_model_stream":
-                        chunk = event.get("data", {}).get("chunk")
-                        if chunk and hasattr(chunk, "content"):
-                            token = chunk.content
-                            if token:
-                                full_response += token
-                                await streaming_callback(token)
-                    # Notify about tool executions
-                    elif event.get("event") == "on_tool_start":
-                        tool_name = event.get("name", "unknown_tool")
-                        await streaming_callback(
-                            f"\n[Executing tool: {tool_name}]\n", is_tool_event=True
-                        )
-
-                # Get final response for extraction
-                agent_response = await agent_executor.ainvoke(
-                    {"messages": [HumanMessage(content=prompt)]}
-                )
-            else:
-                # Invoke agent with the user message (non-streaming)
-                agent_response = await agent_executor.ainvoke(
-                    {"messages": [HumanMessage(content=prompt)]}
-                )
-
-            # Check for interrupts from HumanInTheLoopMiddleware
-            if is_agent_response_interrupted(agent_response):
-                logger.info(
-                    "ChatAgent detected interrupt from HumanInTheLoopMiddleware"
-                )
-                # Extract interrupt data and build structured response
-                interrupt_data = extract_interrupt_data_from_agent_response(
-                    agent_response
-                )
-                # Return minimal response with interrupt marker
-                # Return empty strings/lists with interrupt marker that will be handled upstream
-                return ("__INTERRUPT__", [], [{"interrupt_data": interrupt_data}])
-
-            # Extract execution info
-            execution_info = extract_agent_execution_info(agent_response)
-
-            response_text = execution_info["response_text"]
-            tools_used = execution_info["tools_used"]
-            tool_artifacts = execution_info["tool_artifacts"]
-
-            # Log parallel tool execution summary
-            if tools_used:
-                logger.info(
-                    f"ChatAgent executed {len(tools_used)} tool(s): {', '.join(tools_used)}"
-                )
-
-            return response_text, tools_used, tool_artifacts
-
-        except Exception as exc:
-            logger.error("Error in tool calling flow: %s", exc, exc_info=True)
-            raise
-
-    def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
-        """Create agent executor with proper tool binding configuration."""
-        # Configure tool calling based on settings
-        tool_choice = (
-            settings.tool_choice_mode
-            if hasattr(settings, "tool_choice_mode")
-            else "auto"
-        )
-
-        # Configure model with tool binding
-        llm_with_tools = self.langchain_model.bind_tools(
-            tools,
-            tool_config={
-                "function_calling_config": {
-                    "mode": (
-                        tool_choice.upper()
-                        if tool_choice in ["auto", "any", "none"]
-                        else "AUTO"
-                    )
-                }
-            },
-        )
-
-        # Configure human-in-the-loop middleware if enabled
-        middleware = []
-        if should_enable_hitl():
-            tool_names = [tool.name for tool in tools]
-            interrupt_config = get_hitl_middleware_config(tool_names)
-            if interrupt_config:
-                hitl_middleware = HumanInTheLoopMiddleware(
-                    interrupt_on=interrupt_config,
-                    description_prefix="Tool execution pending approval",
-                )
-                middleware.append(hitl_middleware)
-
-        agent = create_agent(
-            model=llm_with_tools,
-            tools=tools,
-            system_prompt=system_prompt,
-            middleware=middleware if middleware else None,
-        )
-
-        return agent
 
     async def _generate_with_vision(self, prompt: str, attachments: List[dict]) -> str:
         """Generate response with vision support using multimodal content"""

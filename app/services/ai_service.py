@@ -88,7 +88,9 @@ class AIService:
         )
 
         if response:
+            # Check for interrupt in metadata
             if response.metadata and "interrupt" in response.metadata:
+                logger.info("AI Service detected interrupt in response metadata")
                 return response
             return response
 
@@ -230,9 +232,7 @@ class AIService:
 
         except Exception as e:
             logger.error(f"Error resuming with decisions: {e}", exc_info=True)
-            return self._build_error_response(
-                f"Error resuming execution: {str(e)}"
-            )
+            return self._build_error_response(f"Error resuming execution: {str(e)}")
 
     async def generate_bot_response_stream(
         self,

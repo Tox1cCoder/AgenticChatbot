@@ -3170,24 +3170,34 @@ def render_chat_view():
                                 pending_tool_calls = (
                                     event.get("pending_tool_calls") or []
                                 )
+                                # Extract the full interrupt response data
+                                interrupt_data = event.get("interrupt")
+
                                 status.update(
                                     label="⏸ Workflow paused - Tool approval required",
                                     state="running",
                                 )
 
-                                # Store interrupt state in session
-                                st.session_state.pending_tool_approval = {
-                                    "thread_id": thread_id,
-                                    "tool_calls": pending_tool_calls,
-                                    "conversation_id": st.session_state.current_conversation_id,
-                                }
+                                # Store interrupt state in session for the approval UI
+                                if interrupt_data:
+                                    st.session_state.pending_interrupt = interrupt_data
+                                    st.session_state.interrupt_conversation_id = (
+                                        conversation_id
+                                    )
+                                else:
+                                    # Fallback to old format
+                                    st.session_state.pending_tool_approval = {
+                                        "thread_id": thread_id,
+                                        "tool_calls": pending_tool_calls,
+                                        "conversation_id": st.session_state.current_conversation_id,
+                                    }
 
                                 # Display info message
                                 st.info(
                                     "🔧 The assistant wants to use tools. Please review and approve below."
                                 )
 
-                                # Stop processing further events
+                                # Stop processing further events and rerun to show approval UI
                                 break
 
                             elif event_type == "complete":
@@ -3205,9 +3215,7 @@ def render_chat_view():
                                 break
 
                         # Handle interrupt - show approval UI
-                        if interrupt_data:
-                            st.session_state.pending_interrupt = interrupt_data
-                            st.session_state.interrupt_conversation_id = conversation_id
+                        if st.session_state.get("pending_interrupt"):
                             st.rerun()
 
                         # If successful, update UI

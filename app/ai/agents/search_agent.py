@@ -5,8 +5,6 @@ from typing import Optional, List, Dict, Any, AsyncIterator
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
-from langchain.agents import create_agent
-from langchain.agents.middleware import HumanInTheLoopMiddleware
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_search_prompt

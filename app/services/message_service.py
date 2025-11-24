@@ -180,12 +180,13 @@ class MessageService(IMessageService):
 
                     elif event_type == "interrupt":
                         # Yield interrupt event - workflow paused for human approval
+                        interrupt_response = event.get("interrupt")
                         yield {
                             "type": "interrupt",
                             "thread_id": str(message_create_data.conversation_id),
                             "next": event.get("next"),
                             "pending_tool_calls": event.get("pending_tool_calls"),
-                            "message": "Workflow paused - awaiting human approval for tool execution",
+                            "interrupt": interrupt_response,
                         }
                         # Workflow is paused - don't create a bot message yet
                         # The resume endpoint will handle that
