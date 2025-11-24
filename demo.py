@@ -3412,9 +3412,8 @@ def render_manage_modal():
                         # Show stats
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            message_count = conv.get(
-                                "messageCount", len(conv.get("messages", []))
-                            )
+                            messages = conv.get("messages") or []
+                            message_count = conv.get("messageCount", len(messages))
                             st.metric("Messages", message_count)
                         with col2:
                             created = format_time(conv.get("createdAt", ""))
