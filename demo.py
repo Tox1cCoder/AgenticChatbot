@@ -2673,7 +2673,7 @@ def render_interrupt_approval_ui():
             st.rerun()
         return
 
-    st.warning("🔔 **Tool Execution Requires Approval**", icon="⏸️")
+    st.warning("**Tool Execution Requires Approval**", icon="⏸️")
     st.markdown(
         "The AI assistant wants to execute the following tool(s). Please review and approve:"
     )
@@ -2687,14 +2687,14 @@ def render_interrupt_approval_ui():
         description = action_request.get("description", "")
         task_id = action_request.get("task_id") or action_request.get("tool_call_id")
 
-        st.markdown(f"### 🔧 Tool: `{tool_name}`")
+        st.markdown(f"### Tool: `{tool_name}`")
         if description:
             st.markdown(f"**Description:** {description}")
         if task_id:
             st.caption(f"Task ID: `{task_id}`")
 
         # Display tool arguments
-        with st.expander("📋 Tool Arguments", expanded=True):
+        with st.expander("Tool Arguments", expanded=True):
             st.json(tool_args)
 
         # Decision options
@@ -2702,7 +2702,7 @@ def render_interrupt_approval_ui():
 
         with col1:
             if st.button(
-                f"✅ Accept",
+                f"Accept",
                 key=f"accept_{idx}",
                 use_container_width=True,
                 type="primary",
@@ -2717,12 +2717,12 @@ def render_interrupt_approval_ui():
                 )
 
         with col2:
-            if st.button(f"✏️ Edit Args", key=f"edit_{idx}", use_container_width=True):
+            if st.button(f"Edit Args", key=f"edit_{idx}", use_container_width=True):
                 st.session_state[f"editing_tool_{idx}"] = True
                 st.rerun()
 
         with col3:
-            if st.button(f"❌ Reject", key=f"reject_{idx}", use_container_width=True):
+            if st.button(f"Reject", key=f"reject_{idx}", use_container_width=True):
                 decisions.append(
                     {
                         "type": "respond",
@@ -2805,7 +2805,7 @@ def render_interrupt_approval_ui():
 
     # Cancel button
     st.divider()
-    if st.button("🚫 Cancel All", use_container_width=True):
+    if st.button("Cancel All", use_container_width=True):
         # Reject all tools with their task IDs
         all_reject_decisions = [
             {

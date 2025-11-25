@@ -311,6 +311,7 @@ class AIService:
                         "next": next_nodes,
                         "thread_id": thread_id,
                         "pending_tool_calls": pending_tool_calls,
+                        "interrupt": event.get("interrupt"),
                         "message": "Workflow paused - awaiting approval for tool execution",
                     }
 
