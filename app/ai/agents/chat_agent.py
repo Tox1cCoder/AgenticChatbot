@@ -188,10 +188,6 @@ class ChatAgent:
         message: AgentMessage,
         conversation_id: Optional[str] = None,
     ) -> AgentResponse:
-        """
-        Invoke the model directly, potentially returning tool calls.
-        This allows the graph to handle tool execution with HITL.
-        """
         # Initialize MCP tools if needed
         if self.mcp_manager is None:
             await self._init_tools()
