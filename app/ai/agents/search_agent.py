@@ -89,16 +89,11 @@ class SearchAgent:
             has_tool_results=has_tool_results,
         )
 
-        # Configure tool calling
-        # If we already have tool results, force the model to NOT call more tools
+        # Configure tool calling; allow follow-up tool planning when needed
         tool_choice = (
-            "none"
-            if has_tool_results
-            else (
-                settings.tool_choice_mode
-                if hasattr(settings, "tool_choice_mode")
-                else "auto"
-            )
+            settings.tool_choice_mode
+            if hasattr(settings, "tool_choice_mode")
+            else "auto"
         )
 
         llm_with_tools = self.langchain_model.bind_tools(

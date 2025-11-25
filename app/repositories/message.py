@@ -262,6 +262,19 @@ class MessageRepository:
         with self.session_factory() as session:
             return self._crud_strategy.delete(session, id)
 
+    def get_latest_by_conversation(
+        self, conversation_id: UUID
+    ) -> Optional[Message]:
+        """Retrieve the most recent message in a conversation."""
+        with self.session_factory() as session:
+            statement = (
+                select(Message)
+                .where(Message.conversation_id == conversation_id)
+                .order_by(Message.created_at.desc())
+                .limit(1)
+            )
+            return session.execute(statement).scalars().first()
+
     def exists(self, id: UUID) -> bool:
         """Check if message exists"""
         with self.session_factory() as session:

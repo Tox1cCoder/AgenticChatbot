@@ -394,7 +394,7 @@ class MultiAgentWorkflow:
             )
             user_content = (
                 f"{user_content}\n\nTool results:\n{tool_summaries}\n"
-                "Based on these tool results, provide a final comprehensive answer. Do NOT request additional tool calls."
+                "Use these results to continue reasoning. If additional information is required, you may call more tools before finalizing the answer."
             )
 
         agent_msg = AgentMessage(
@@ -517,7 +517,7 @@ class MultiAgentWorkflow:
             )
             user_content = (
                 f"{user_content}\n\nTool results:\n{tool_summaries}\n"
-                "Based on these tool results, provide a final comprehensive answer. Do NOT request additional tool calls."
+                "Leverage these results to improve your answer. Request additional tools if they are necessary to satisfy the user."
             )
 
         conversation_history = []
@@ -584,7 +584,7 @@ class MultiAgentWorkflow:
             )
             content = (
                 f"{content}\n\nTool results:\n{tool_summaries}\n"
-                "Use these results to enhance the image generation prompt. Generate the final image now."
+                "Use these results to refine the image generation plan. Call more tools if needed before producing the final image."
             )
 
         conversation_history = []
@@ -1061,6 +1061,69 @@ class MultiAgentWorkflow:
             # No tools to execute at all (shouldn't happen)
             logger.error("No tools to execute and no rejections - unexpected state")
             return None
+
+        # After executing, check if workflow paused again for additional tools
+        final_snapshot = await self.graph.aget_state(config)
+        if final_snapshot.next and len(final_snapshot.next) > 0:
+            messages = final_snapshot.values.get("messages", [])
+            if messages:
+                last_message = messages[-1]
+                if isinstance(last_message, AIMessage) and last_message.tool_calls:
+                    from .hitl_config import build_interrupt_response
+
+                    action_requests = []
+                    for tc in last_message.tool_calls:
+                        if isinstance(tc, dict):
+                            call_name = tc.get("name")
+                            call_args = tc.get("args", {})
+                            call_id = tc.get("id")
+                        else:
+                            call_name = getattr(tc, "name", "unknown")
+                            call_args = getattr(tc, "args", {})
+                            call_id = getattr(tc, "id", None)
+
+                        action_requests.append(
+                            {
+                                "name": call_name,
+                                "args": call_args,
+                                "id": call_id,
+                                "tool_call_id": call_id,
+                            }
+                        )
+
+                    interrupt_data = {"action_requests": action_requests}
+                    conversation_ref = final_snapshot.values.get("conversation_id") or ""
+                    interrupt_response = build_interrupt_response(
+                        interrupt_data,
+                        thread_id,
+                        conversation_ref,
+                    )
+
+                    selected_agent = final_snapshot.values.get(
+                        "selected_agent", "search_agent"
+                    )
+                    agent_type_map = {
+                        "chat_agent": AgentType.CHAT,
+                        "rag_agent": AgentType.RAG,
+                        "search_agent": AgentType.SEARCH,
+                        "image_generator_agent": AgentType.IMAGE_GENERATOR,
+                    }
+                    agent_type = agent_type_map.get(
+                        selected_agent, AgentType.SEARCH
+                    )
+
+                    logger.info(
+                        "Workflow paused again before tools; returning new interrupt response"
+                    )
+                    return AgentResponse(
+                        agent_type=agent_type,
+                        agent_id=selected_agent or "search_agent",
+                        message=AgentMessage(
+                            role=MessageRole.ASSISTANT,
+                            content="Tool execution requires approval",
+                        ),
+                        metadata={"interrupt": interrupt_response},
+                    )
 
         # Extract response from result
         response = result.get("response")

@@ -60,6 +60,14 @@ class MessageFactory:
         }
 
     @staticmethod
+    def _normalize_content(content: str) -> str:
+        """Ensure message content is not empty (Pydantic requires >=1 char)."""
+        if content is None:
+            return "[Empty message]"
+        trimmed = content.strip()
+        return trimmed if trimmed else "[Empty message]"
+
+    @staticmethod
     def create_bot_response(
         conversation_id: UUID,
         content: str,
@@ -71,7 +79,7 @@ class MessageFactory:
             "id": uuid4(),
             "conversation_id": conversation_id,
             "sender": MessageRole.assistant.value,
-            "content": content,
+            "content": MessageFactory._normalize_content(content),
             "message_metadata": metadata,
             "created_at": TimestampUtils.now(),
         }

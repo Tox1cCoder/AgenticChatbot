@@ -1,6 +1,7 @@
 from __future__ import annotations
+from datetime import datetime
 from typing import Optional, List
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.repositories.message import MessageRepository
 from app.repositories.utils.pagination import Paginator
@@ -12,7 +13,7 @@ from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.pagination_validation import validate_pagination_params
 from app.interfaces.message_service_interface import IMessageService
 from app.services.ai_service import AIService
-from app.ai.schemas import InterruptDecision
+from app.ai.schemas import InterruptDecision, InterruptResponse
 from app.utils.text_processing import sanitize_persona
 import logging
 
@@ -78,7 +79,12 @@ class MessageService(IMessageService):
                 and "interrupt" in bot_response.metadata
             ):
                 user_message_read = MessageRead.model_validate(created_message)
-                user_message_read.interrupt = bot_response.metadata["interrupt"]
+                interrupt_payload = bot_response.metadata["interrupt"]
+                if isinstance(interrupt_payload, dict):
+                    interrupt_payload = InterruptResponse.model_validate(
+                        interrupt_payload
+                    )
+                user_message_read.interrupt = interrupt_payload
                 return user_message_read
 
             bot_response_content = (
@@ -324,6 +330,35 @@ class MessageService(IMessageService):
             decisions=decisions,
             interrupt_id=interrupt_id,
         )
+
+        if (
+            bot_response
+            and bot_response.metadata
+            and "interrupt" in bot_response.metadata
+        ):
+            latest_message = self.repository.get_latest_by_conversation(
+                conversation_id
+            )
+            if latest_message:
+                message_read = MessageRead.model_validate(latest_message)
+            else:
+                message_read = MessageRead(
+                    id=uuid4(),
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                    deleted_at=None,
+                    conversation_id=conversation_id,
+                    sender=MessageRole.assistant.value,
+                    content="Tool execution requires approval",
+                    message_metadata={},
+                )
+            interrupt_payload = bot_response.metadata["interrupt"]
+            if isinstance(interrupt_payload, dict):
+                interrupt_payload = InterruptResponse.model_validate(
+                    interrupt_payload
+                )
+            message_read.interrupt = interrupt_payload
+            return message_read
 
         bot_response_content = (
             bot_response.message.content

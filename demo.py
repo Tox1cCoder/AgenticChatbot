@@ -1,4 +1,4 @@
-﻿import base64
+import base64
 import mimetypes
 import uuid
 import json
@@ -2685,7 +2685,16 @@ def render_interrupt_approval_ui():
         tool_name = action_request.get("action", "unknown")
         tool_args = action_request.get("args", {})
         description = action_request.get("description", "")
-        task_id = action_request.get("task_id") or action_request.get("tool_call_id")
+        tool_call_id = (
+            action_request.get("tool_call_id")
+            or action_request.get("toolCallId")
+            or action_request.get("id")
+        )
+        task_id = (
+            action_request.get("task_id")
+            or action_request.get("taskId")
+            or tool_call_id
+        )
 
         st.markdown(f"### Tool: `{tool_name}`")
         if description:
@@ -2710,7 +2719,7 @@ def render_interrupt_approval_ui():
                 decisions.append(
                     {
                         "type": "accept",
-                        "taskId": task_id,
+                        "task_id": task_id,
                         "action": tool_name,
                         "args": None,
                     }
@@ -2726,7 +2735,7 @@ def render_interrupt_approval_ui():
                 decisions.append(
                     {
                         "type": "respond",
-                        "taskId": task_id,
+                        "task_id": task_id,
                         "action": tool_name,
                         "args": {"message": f"User rejected execution of {tool_name}"},
                     }
@@ -2752,7 +2761,7 @@ def render_interrupt_approval_ui():
                             decisions.append(
                                 {
                                     "type": "edit",
-                                    "taskId": task_id,
+                                    "task_id": task_id,
                                     "action": tool_name,
                                     "args": edited_args,
                                 }
@@ -2788,18 +2797,33 @@ def render_interrupt_approval_ui():
             )
 
             if response and response.get("success"):
-                # Clear interrupt state
-                st.session_state.pop("pending_interrupt", None)
-                st.session_state.pop("interrupt_conversation_id", None)
+                response_data = (
+                    response.get("data") if isinstance(response, dict) else None
+                )
+                next_interrupt = (
+                    response_data.get("interrupt")
+                    if isinstance(response_data, dict)
+                    else None
+                )
 
-                # Clear editing states
-                for idx in range(len(action_requests)):
-                    st.session_state.pop(f"editing_tool_{idx}", None)
+                if next_interrupt:
+                    st.session_state.pending_interrupt = next_interrupt
+                    st.session_state.interrupt_conversation_id = conversation_id
+                    st.toast("Additional tool approval required.", icon="⚠️")
+                    st.rerun()
+                else:
+                    # Clear interrupt state
+                    st.session_state.pop("pending_interrupt", None)
+                    st.session_state.pop("interrupt_conversation_id", None)
 
-                # Refresh messages
-                st.toast("Tool execution completed!", icon="✅")
-                st.session_state.conversation_messages_page = 0
-                st.rerun()
+                    # Clear editing states
+                    for idx in range(len(action_requests)):
+                        st.session_state.pop(f"editing_tool_{idx}", None)
+
+                    # Refresh messages
+                    st.toast("Tool execution completed!", icon="✅")
+                    st.session_state.conversation_messages_page = 0
+                    st.rerun()
             else:
                 st.error("Failed to resume execution")
 
@@ -2810,7 +2834,10 @@ def render_interrupt_approval_ui():
         all_reject_decisions = [
             {
                 "type": "respond",
-                "taskId": req.get("task_id") or req.get("tool_call_id"),
+                "task_id": req.get("task_id")
+                or req.get("taskId")
+                or req.get("tool_call_id")
+                or req.get("toolCallId"),
                 "action": req.get("action"),
                 "args": {"message": f"User cancelled all tool executions"},
             }
@@ -2831,11 +2858,26 @@ def render_interrupt_approval_ui():
             )
 
             if response and response.get("success"):
-                st.session_state.pop("pending_interrupt", None)
-                st.session_state.pop("interrupt_conversation_id", None)
-                st.toast("Cancelled", icon="🚫")
-                st.session_state.conversation_messages_page = 0
-                st.rerun()
+                response_data = (
+                    response.get("data") if isinstance(response, dict) else None
+                )
+                next_interrupt = (
+                    response_data.get("interrupt")
+                    if isinstance(response_data, dict)
+                    else None
+                )
+
+                if next_interrupt:
+                    st.session_state.pending_interrupt = next_interrupt
+                    st.session_state.interrupt_conversation_id = conversation_id
+                    st.toast("Additional review still required.", icon="⚠️")
+                    st.rerun()
+                else:
+                    st.session_state.pop("pending_interrupt", None)
+                    st.session_state.pop("interrupt_conversation_id", None)
+                    st.toast("Cancelled", icon="🚫")
+                    st.session_state.conversation_messages_page = 0
+                    st.rerun()
 
 
 def render_chat_view():

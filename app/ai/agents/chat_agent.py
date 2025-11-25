@@ -206,16 +206,11 @@ class ChatAgent:
             persona=persona,
         )
 
-        # Configure tool calling
-        # If we already have tool results, force the model to NOT call more tools
+        # Configure tool calling based on global setting; allow the model to decide
         tool_choice = (
-            "none"
-            if has_tool_results
-            else (
-                settings.tool_choice_mode
-                if hasattr(settings, "tool_choice_mode")
-                else "auto"
-            )
+            settings.tool_choice_mode
+            if hasattr(settings, "tool_choice_mode")
+            else "auto"
         )
 
         llm_with_tools = self.langchain_model.bind_tools(
