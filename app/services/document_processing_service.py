@@ -236,7 +236,7 @@ class DocumentProcessingService:
             output_dir.mkdir(parents=True, exist_ok=True)
             self._mineru_output_path = str(output_dir)
 
-            result = subprocess.run(
+            subprocess.run(
                 [
                     "mineru",
                     "-p",
@@ -244,11 +244,9 @@ class DocumentProcessingService:
                     "-o",
                     str(output_dir),
                     "-f",
-                    "false",
+                    "true",
                     "-t",
-                    "false",
-                    "-l",
-                    "japan",
+                    "true"
                 ],
                 timeout=self.settings.mineru_timeout,
                 check=True,

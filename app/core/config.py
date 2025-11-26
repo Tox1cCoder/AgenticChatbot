@@ -183,7 +183,7 @@ class Settings(BaseSettings):
         description="Overlap between chunks in characters",
     )
     mineru_timeout: int = Field(
-        default=30,
+        default=300,
         description="Timeout for MinerU subprocess in seconds",
     )
     document_images_storage_path: str = Field(
@@ -350,10 +350,6 @@ class Settings(BaseSettings):
     enable_human_in_the_loop: bool = Field(
         default=True,
         description="Toggle to enable/disable human-in-the-loop globally",
-    )
-    hitl_tools_require_approval: List[str] = Field(
-        default=["calculator", "tavily_search"],
-        description="List of tool names that require human approval before execution",
     )
     hitl_default_allow_edit: bool = Field(
         default=True,

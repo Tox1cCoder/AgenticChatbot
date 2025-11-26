@@ -1065,65 +1065,10 @@ class MultiAgentWorkflow:
         # After executing, check if workflow paused again for additional tools
         final_snapshot = await self.graph.aget_state(config)
         if final_snapshot.next and len(final_snapshot.next) > 0:
-            messages = final_snapshot.values.get("messages", [])
-            if messages:
-                last_message = messages[-1]
-                if isinstance(last_message, AIMessage) and last_message.tool_calls:
-                    from .hitl_config import build_interrupt_response
-
-                    action_requests = []
-                    for tc in last_message.tool_calls:
-                        if isinstance(tc, dict):
-                            call_name = tc.get("name")
-                            call_args = tc.get("args", {})
-                            call_id = tc.get("id")
-                        else:
-                            call_name = getattr(tc, "name", "unknown")
-                            call_args = getattr(tc, "args", {})
-                            call_id = getattr(tc, "id", None)
-
-                        action_requests.append(
-                            {
-                                "name": call_name,
-                                "args": call_args,
-                                "id": call_id,
-                                "tool_call_id": call_id,
-                            }
-                        )
-
-                    interrupt_data = {"action_requests": action_requests}
-                    conversation_ref = final_snapshot.values.get("conversation_id") or ""
-                    interrupt_response = build_interrupt_response(
-                        interrupt_data,
-                        thread_id,
-                        conversation_ref,
-                    )
-
-                    selected_agent = final_snapshot.values.get(
-                        "selected_agent", "search_agent"
-                    )
-                    agent_type_map = {
-                        "chat_agent": AgentType.CHAT,
-                        "rag_agent": AgentType.RAG,
-                        "search_agent": AgentType.SEARCH,
-                        "image_generator_agent": AgentType.IMAGE_GENERATOR,
-                    }
-                    agent_type = agent_type_map.get(
-                        selected_agent, AgentType.SEARCH
-                    )
-
-                    logger.info(
-                        "Workflow paused again before tools; returning new interrupt response"
-                    )
-                    return AgentResponse(
-                        agent_type=agent_type,
-                        agent_id=selected_agent or "search_agent",
-                        message=AgentMessage(
-                            role=MessageRole.ASSISTANT,
-                            content="Tool execution requires approval",
-                        ),
-                        metadata={"interrupt": interrupt_response},
-                    )
+            logger.info(
+                "Workflow still has pending nodes after resume; rerunning to complete."
+            )
+            result = await self.graph.ainvoke(None, config=config)
 
         # Extract response from result
         response = result.get("response")
