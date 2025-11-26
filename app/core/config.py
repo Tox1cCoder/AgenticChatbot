@@ -359,6 +359,14 @@ class Settings(BaseSettings):
         default=True,
         description="Whether to allow responding with feedback by default",
     )
+    hitl_tools_require_approval: List[str] = Field(
+        default=[],
+        description="List of tool names that require human approval. Empty list means all tools require approval when HITL is enabled.",
+    )
+    hitl_approval_timeout_minutes: int = Field(
+        default=30,
+        description="Timeout in minutes for pending approval requests. After timeout, the workflow can be auto-rejected or cleaned up.",
+    )
 
 
 @lru_cache()

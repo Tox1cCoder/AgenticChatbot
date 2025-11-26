@@ -1,20 +1,24 @@
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List
 from uuid import UUID, uuid4
+import redis
 
 from app.repositories.message import MessageRepository
+from app.repositories.tool_approval import ToolApprovalRepository
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
 from app.models.enums import MessageRole
+from app.models.tool_approval import DecisionType
 from app.factories.message_factory import MessageFactory
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.pagination_validation import validate_pagination_params
 from app.interfaces.message_service_interface import IMessageService
 from app.services.ai_service import AIService
-from app.ai.schemas import InterruptDecision, InterruptResponse
+from app.ai.schemas import InterruptDecision, InterruptResponse, InterruptDecisionType
 from app.utils.text_processing import sanitize_persona
+from app.core.config import settings
 import logging
 
 
@@ -30,11 +34,22 @@ class MessageService(IMessageService):
         conversation_validation_utils: ConversationValidationUtils,
         message_validation_utils: MessageValidationUtils,
         ai_service: AIService,
+        tool_approval_repository: Optional[ToolApprovalRepository] = None,
     ):
         self.repository = message_repository
         self.conversation_validation_utils = conversation_validation_utils
         self.message_validation_utils = message_validation_utils
         self.ai_service = ai_service
+        self.tool_approval_repository = tool_approval_repository
+
+        # Initialize Redis connection for timeout tracking
+        try:
+            self.redis_client = redis.from_url(settings.redis_url)
+        except Exception as e:
+            logger.warning(
+                f"Failed to connect to Redis: {e}. Timeout tracking disabled."
+            )
+            self.redis_client = None
 
     async def create_message(self, message_create_data: MessageCreate) -> MessageRead:
         self.conversation_validation_utils.validate_conversation_exists(
@@ -187,6 +202,39 @@ class MessageService(IMessageService):
                     elif event_type == "interrupt":
                         # Yield interrupt event - workflow paused for human approval
                         interrupt_response = event.get("interrupt")
+
+                        # MEDIUM FIX #3: Store interrupt timestamp for timeout tracking
+                        if self.redis_client and interrupt_response:
+                            interrupt_id = interrupt_response.get("interrupt_id")
+                            if interrupt_id:
+                                key = f"interrupt:{message_create_data.conversation_id}:{interrupt_id}"
+                                timeout_seconds = (
+                                    settings.hitl_approval_timeout_minutes * 60
+                                )
+                                try:
+                                    # Store timestamp with TTL
+                                    self.redis_client.setex(
+                                        key,
+                                        timeout_seconds,
+                                        datetime.utcnow().isoformat(),
+                                    )
+                                    # Calculate deadline and add to metadata
+                                    deadline = datetime.utcnow() + timedelta(
+                                        minutes=settings.hitl_approval_timeout_minutes
+                                    )
+                                    if "metadata" not in interrupt_response:
+                                        interrupt_response["metadata"] = {}
+                                    interrupt_response["metadata"][
+                                        "timeout_deadline"
+                                    ] = deadline.isoformat()
+                                    logger.info(
+                                        f"Stored interrupt timeout for {interrupt_id}, deadline: {deadline}"
+                                    )
+                                except Exception as e:
+                                    logger.error(
+                                        f"Failed to store interrupt timeout: {e}"
+                                    )
+
                         yield {
                             "type": "interrupt",
                             "thread_id": str(message_create_data.conversation_id),
@@ -313,6 +361,35 @@ class MessageService(IMessageService):
         """
         self.conversation_validation_utils.validate_conversation_exists(conversation_id)
 
+        # MEDIUM FIX #3: Check if interrupt has expired
+        if self.redis_client and interrupt_id:
+            key = f"interrupt:{conversation_id}:{interrupt_id}"
+            try:
+                stored_timestamp = self.redis_client.get(key)
+                if stored_timestamp:
+                    stored_time = datetime.fromisoformat(
+                        stored_timestamp.decode("utf-8")
+                    )
+                    elapsed_minutes = (
+                        datetime.utcnow() - stored_time
+                    ).total_seconds() / 60
+                    if elapsed_minutes > settings.hitl_approval_timeout_minutes:
+                        raise TimeoutError(
+                            f"Interrupt approval timeout exceeded: {elapsed_minutes:.1f} minutes elapsed, "
+                            f"limit is {settings.hitl_approval_timeout_minutes} minutes"
+                        )
+                    logger.info(
+                        f"Interrupt timeout check passed: {elapsed_minutes:.1f}/{settings.hitl_approval_timeout_minutes} minutes"
+                    )
+                else:
+                    logger.warning(
+                        f"No timeout record found for interrupt {interrupt_id}"
+                    )
+            except TimeoutError:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to check interrupt timeout: {e}")
+
         # Get the conversation to retrieve user_id and persona
         conversation = (
             self.conversation_validation_utils.conversation_repository.get_by_id(
@@ -323,6 +400,43 @@ class MessageService(IMessageService):
         persona = conversation.persona_prompt if conversation else None
         sanitized_persona = sanitize_persona(persona)
 
+        # MINOR FIX #8: Log approval decisions to audit trail
+        if self.tool_approval_repository and user_id:
+            try:
+                for decision in decisions:
+                    # Map decision type to enum
+                    decision_type_map = {
+                        InterruptDecisionType.ACCEPT: DecisionType.ACCEPT,
+                        InterruptDecisionType.APPROVE: DecisionType.ACCEPT,
+                        InterruptDecisionType.EDIT: DecisionType.EDIT,
+                        InterruptDecisionType.REJECT: DecisionType.REJECT,
+                        InterruptDecisionType.RESPOND: DecisionType.REJECT,
+                    }
+
+                    approval_data = {
+                        "conversation_id": conversation_id,
+                        "user_id": user_id,
+                        "interrupt_id": interrupt_id or "unknown",
+                        "tool_name": decision.action or "unknown",
+                        "tool_call_id": decision.task_id or "unknown",
+                        "original_args": decision.original_args or {},
+                        "modified_args": (
+                            decision.modified_args
+                            if decision.decision in [InterruptDecisionType.EDIT]
+                            else None
+                        ),
+                        "decision": decision_type_map.get(
+                            decision.decision, DecisionType.REJECT
+                        ),
+                    }
+                    self.tool_approval_repository.create(approval_data)
+                    logger.info(
+                        f"Logged approval decision for tool {decision.action}: {decision.decision}"
+                    )
+            except Exception as e:
+                # Don't fail the resume operation if audit logging fails
+                logger.error(f"Failed to log approval decisions to audit trail: {e}")
+
         # Resume execution via AI service
         bot_response = await self.ai_service.resume_interrupted_execution(
             thread_id=thread_id,
@@ -331,14 +445,22 @@ class MessageService(IMessageService):
             interrupt_id=interrupt_id,
         )
 
+        # MEDIUM FIX #3: Clear the interrupt timeout after successful resume
+        if self.redis_client and interrupt_id:
+            key = f"interrupt:{conversation_id}:{interrupt_id}"
+            try:
+                self.redis_client.delete(key)
+                logger.info(f"Cleared interrupt timeout for {interrupt_id}")
+            except Exception as e:
+                logger.error(f"Failed to clear interrupt timeout: {e}")
+
         if (
             bot_response
             and bot_response.metadata
             and "interrupt" in bot_response.metadata
         ):
-            latest_message = self.repository.get_latest_by_conversation(
-                conversation_id
-            )
+            # MINOR FIX #11: Track interrupt depth for chained interrupts
+            latest_message = self.repository.get_latest_by_conversation(conversation_id)
             if latest_message:
                 message_read = MessageRead.model_validate(latest_message)
             else:
@@ -354,9 +476,38 @@ class MessageService(IMessageService):
                 )
             interrupt_payload = bot_response.metadata["interrupt"]
             if isinstance(interrupt_payload, dict):
-                interrupt_payload = InterruptResponse.model_validate(
-                    interrupt_payload
+                # Add interrupt counter for better UX
+                interrupt_count = (
+                    interrupt_payload.get("metadata", {}).get("interrupt_count", 0) + 1
                 )
+                if "metadata" not in interrupt_payload:
+                    interrupt_payload["metadata"] = {}
+                interrupt_payload["metadata"]["interrupt_count"] = interrupt_count
+
+                # Add user-friendly message
+                if interrupt_count > 1:
+                    interrupt_payload["metadata"][
+                        "message"
+                    ] = f"The assistant needs approval for additional tools (request {interrupt_count})"
+                else:
+                    interrupt_payload["metadata"][
+                        "message"
+                    ] = "The assistant wants to use tools that require approval"
+
+                # Add maximum depth check to prevent infinite loops
+                MAX_INTERRUPT_DEPTH = 5
+                if interrupt_count > MAX_INTERRUPT_DEPTH:
+                    logger.warning(
+                        f"Interrupt depth exceeded maximum ({MAX_INTERRUPT_DEPTH}), "
+                        f"preventing chained interrupt for conversation {conversation_id}"
+                    )
+                    # Could optionally auto-reject or provide fallback response here
+                else:
+                    logger.info(
+                        f"Chained interrupt detected (depth: {interrupt_count})"
+                    )
+
+                interrupt_payload = InterruptResponse.model_validate(interrupt_payload)
             message_read.interrupt = interrupt_payload
             return message_read
 

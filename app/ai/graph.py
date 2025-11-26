@@ -27,6 +27,8 @@ from .agents.search_agent import SearchAgent
 from .agents.image_generator_agent import ImageGeneratorAgent
 from .memory import get_memory_manager
 from ..core.config import settings
+from .hitl_config import build_interrupt_response
+from .utils import normalize_tool_call
 
 if TYPE_CHECKING:
     from ..repositories.document import DocumentRepository
@@ -145,7 +147,6 @@ class MultiAgentWorkflow:
         )
 
         # Compile with checkpointer and interrupts
-        # We interrupt BEFORE the "tools" node to allow human approval
         if self.checkpointer:
             return workflow.compile(
                 checkpointer=self.checkpointer, interrupt_before=["tools"]
@@ -258,6 +259,20 @@ class MultiAgentWorkflow:
         last_message = messages[-1]
         has_tool_calls = isinstance(last_message, AIMessage) and last_message.tool_calls
 
+        # Selective tool filtering based on settings
+        if has_tool_calls and settings.hitl_tools_require_approval is not None:
+            approval_list = settings.hitl_tools_require_approval
+
+            # If list is non-empty, check if any tool requires approval
+            if len(approval_list) > 0:
+                tool_calls = last_message.tool_calls
+                requires_approval = any(
+                    normalize_tool_call(tc).get("name") in approval_list
+                    for tc in tool_calls
+                )
+                if not requires_approval:
+                    return "tools"
+
         if has_tool_calls:
             return "tools"
 
@@ -266,6 +281,57 @@ class MultiAgentWorkflow:
     def _route_tool_output(self, state: GraphState) -> str:
         """Route back to the selected agent after tool execution."""
         return state.get("selected_agent", "end")
+
+    def _build_interrupt_agent_response(
+        self,
+        state_snapshot: Any,
+        thread_id: Optional[str],
+        fallback_conversation_id: Optional[str] = None,
+    ) -> Optional[AgentResponse]:
+        """Create an AgentResponse containing interrupt metadata from graph state."""
+        if not state_snapshot or not thread_id:
+            return None
+
+        values = getattr(state_snapshot, "values", {})
+        messages = values.get("messages", [])
+        if not messages:
+            return None
+
+        last_message = messages[-1]
+        if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+            return None
+
+        action_requests = [
+            normalize_tool_call(tool_call) for tool_call in last_message.tool_calls
+        ]
+
+        conversation_id = (
+            values.get("conversation_id") or fallback_conversation_id or ""
+        )
+        interrupt_response = build_interrupt_response(
+            {"action_requests": action_requests},
+            thread_id,
+            conversation_id,
+        )
+
+        selected_agent = values.get("selected_agent", "search_agent")
+        agent_type_map = {
+            "chat_agent": AgentType.CHAT,
+            "rag_agent": AgentType.RAG,
+            "search_agent": AgentType.SEARCH,
+            "image_generator_agent": AgentType.IMAGE_GENERATOR,
+        }
+        agent_type = agent_type_map.get(selected_agent, AgentType.SEARCH)
+
+        return AgentResponse(
+            agent_type=agent_type,
+            agent_id=selected_agent or "search_agent",
+            message=AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content="Tool execution requires approval",
+            ),
+            metadata={"interrupt": interrupt_response},
+        )
 
     async def _route_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
@@ -690,60 +756,11 @@ class MultiAgentWorkflow:
             if state_snapshot.next and len(state_snapshot.next) > 0:
                 logger.info(f"Workflow interrupted before nodes: {state_snapshot.next}")
 
-                # Extract pending tool calls from the last AI message
-                messages = state_snapshot.values.get("messages", [])
-                if messages:
-                    last_message = messages[-1]
-                    if isinstance(last_message, AIMessage) and last_message.tool_calls:
-                        logger.info(
-                            f"Found {len(last_message.tool_calls)} pending tool calls"
-                        )
-
-                        # Build interrupt response
-                        from .hitl_config import build_interrupt_response
-
-                        # Convert tool calls to action_requests format
-                        action_requests = []
-                        for tc in last_message.tool_calls:
-                            action_requests.append(
-                                {
-                                    "name": tc.get("name"),
-                                    "args": tc.get("args", {}),
-                                    "id": tc.get("id"),
-                                    "tool_call_id": tc.get("id"),
-                                }
-                            )
-
-                        interrupt_data = {"action_requests": action_requests}
-                        interrupt_response = build_interrupt_response(
-                            interrupt_data,
-                            thread_id,
-                            conversation_id or "",
-                        )
-
-                        # Return interrupt response wrapped in AgentResponse
-                        selected_agent = state_snapshot.values.get(
-                            "selected_agent", "search"
-                        )
-                        agent_type_map = {
-                            "chat_agent": AgentType.CHAT,
-                            "rag_agent": AgentType.RAG,
-                            "search_agent": AgentType.SEARCH,
-                            "image_generator_agent": AgentType.IMAGE_GENERATOR,
-                        }
-                        agent_type = agent_type_map.get(
-                            selected_agent, AgentType.SEARCH
-                        )
-
-                        return AgentResponse(
-                            agent_type=agent_type,
-                            agent_id=selected_agent or "search_agent",
-                            message=AgentMessage(
-                                role=MessageRole.ASSISTANT,
-                                content="Tool execution requires approval",
-                            ),
-                            metadata={"interrupt": interrupt_response},
-                        )
+                interrupt_agent_response = self._build_interrupt_agent_response(
+                    state_snapshot, thread_id, conversation_id
+                )
+                if interrupt_agent_response:
+                    return interrupt_agent_response
 
         agent_response = result.get("response")
         if agent_response and isinstance(agent_response.metadata, dict):
@@ -824,6 +841,21 @@ class MultiAgentWorkflow:
             logger.info("Approval: Resuming workflow to execute tools")
             result = await self.graph.ainvoke(None, config=config)
 
+        # After resuming, check if workflow paused again for more tools
+        final_snapshot = await self.graph.aget_state(config)
+        if final_snapshot.next and len(final_snapshot.next) > 0:
+            if "tools" in final_snapshot.next:
+                interrupt_agent_response = self._build_interrupt_agent_response(
+                    final_snapshot,
+                    thread_id,
+                    final_snapshot.values.get("conversation_id"),
+                )
+                if interrupt_agent_response:
+                    return interrupt_agent_response
+            else:
+                # Continue running pending nodes automatically
+                result = await self.graph.ainvoke(None, config=config)
+
         # Check if response was generated
         response = result.get("response")
         if not response:
@@ -869,6 +901,22 @@ class MultiAgentWorkflow:
             f"Current state - next nodes: {state_snapshot.next}, "
             f"interrupted: {len(state_snapshot.next) > 0 if state_snapshot.next else False}"
         )
+
+        if interrupt_id:
+            stored_interrupt_id = state_snapshot.values.get("metadata", {}).get(
+                "interrupt_id"
+            )
+            if stored_interrupt_id and interrupt_id != stored_interrupt_id:
+                raise ValueError(
+                    f"Interrupt ID mismatch: expected {stored_interrupt_id}, got {interrupt_id}"
+                )
+
+        if not state_snapshot.next or len(state_snapshot.next) == 0:
+            raise ValueError("Workflow is not in interrupted state")
+        if "tools" not in state_snapshot.next:
+            raise ValueError(
+                f"Unexpected interrupt state: next nodes are {state_snapshot.next}"
+            )
 
         # Extract the last AI message with tool calls
         messages = state_snapshot.values.get("messages", [])
@@ -1016,7 +1064,6 @@ class MultiAgentWorkflow:
             result = await self.graph.ainvoke(None, config=config)
 
         elif tool_calls_to_execute and rejection_messages_list:
-            # MIXED decisions - some approved, some rejected
             logger.info(
                 f"Mixed decisions: {len(tool_calls_to_execute)} approved, "
                 f"{len(rejection_messages_list)} rejected"
@@ -1038,44 +1085,43 @@ class MultiAgentWorkflow:
                 as_node=selected_agent,
             )
 
-            # Resume to execute approved tools
-            logger.info("Executing approved tools...")
-            result = await self.graph.ainvoke(None, config=config)
+            # Execute approved tools (first invoke)
+            await self.graph.ainvoke(None, config=config)
 
             # After execution, add rejection messages for rejected tools
-            logger.info("Adding rejection messages for rejected tools...")
             current_state = await self.graph.aget_state(config)
             current_messages = current_state.values.get("messages", [])
 
+            # Add all rejection messages to state
             await self.graph.aupdate_state(
                 config=config,
                 values={"messages": current_messages + rejection_messages_list},
                 as_node="tools",
             )
 
-            # Continue execution to let agent process all tool results
-            logger.info("Resuming to process all tool results...")
             result = await self.graph.ainvoke(None, config=config)
 
         else:
-            # No tools to execute at all (shouldn't happen)
-            logger.error("No tools to execute and no rejections - unexpected state")
             return None
 
         # After executing, check if workflow paused again for additional tools
         final_snapshot = await self.graph.aget_state(config)
         if final_snapshot.next and len(final_snapshot.next) > 0:
-            logger.info(
-                "Workflow still has pending nodes after resume; rerunning to complete."
-            )
-            result = await self.graph.ainvoke(None, config=config)
+            if "tools" in final_snapshot.next:
+                interrupt_agent_response = self._build_interrupt_agent_response(
+                    final_snapshot,
+                    thread_id,
+                    final_snapshot.values.get("conversation_id"),
+                )
+                if interrupt_agent_response:
+                    return interrupt_agent_response
+            else:
+                result = await self.graph.ainvoke(None, config=config)
 
         # Extract response from result
         response = result.get("response")
         if not response:
-            logger.warning("No response after resume, checking final state...")
             final_state = await self.graph.aget_state(config)
-            logger.info(f"Final state - next nodes: {final_state.next}")
             response = final_state.values.get("response")
 
         return response
@@ -1093,10 +1139,6 @@ class MultiAgentWorkflow:
         Execute the workflow with streaming support.
         Yields token-level events by calling agent streaming methods directly.
         """
-        logger.info(
-            f"execute_stream started - thread_id: {thread_id}, checkpointer enabled: {self.checkpointer is not None}"
-        )
-
         initial_state: GraphState = {
             "messages": [HumanMessage(content=message)],
             "context": {},
@@ -1150,82 +1192,35 @@ class MultiAgentWorkflow:
                     yield {"type": "tool_end", "name": event["name"]}
 
         except Exception as e:
-            logger.error(f"Streaming error: {e}", exc_info=True)
             yield {"type": "error", "error": str(e)}
 
         # Check final state for response or interrupt
         if self.checkpointer and thread_id:
             snapshot = await self.graph.aget_state(config)
-            logger.info(
-                f"Final state check - next: {snapshot.next}, has response: {snapshot.values.get('response') is not None}, messages count: {len(snapshot.values.get('messages', []))}"
-            )
 
-            # Check if interrupted (next nodes exist means we're paused)
             if snapshot.next and len(snapshot.next) > 0:
-                logger.info(f"Workflow interrupted before nodes: {snapshot.next}")
                 # Extract pending tool calls from the last AI message
                 messages = snapshot.values.get("messages", [])
-                logger.info(f"Number of messages in state: {len(messages)}")
 
                 pending_tool_calls = None
                 if messages:
                     last_msg = messages[-1]
-                    logger.info(
-                        f"Last message type: {type(last_msg)}, has tool_calls attr: {hasattr(last_msg, 'tool_calls')}"
-                    )
 
                     if isinstance(last_msg, AIMessage):
                         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
                             logger.info(
                                 f"Tool calls on last message: {last_msg.tool_calls}"
                             )
-                            # Convert tool calls to serializable dictionaries
+                            # Convert tool calls to serializable dictionaries using utility
                             pending_tool_calls = []
                             for tc in last_msg.tool_calls:
-                                if isinstance(tc, dict):
-                                    pending_tool_calls.append(tc)
-                                else:
-                                    # Convert object to dict
-                                    pending_tool_calls.append(
-                                        {
-                                            "name": getattr(tc, "name", "unknown"),
-                                            "args": getattr(tc, "args", {}),
-                                            "id": getattr(tc, "id", None),
-                                        }
-                                    )
-                            logger.info(
-                                f"Converted {len(pending_tool_calls)} tool calls to dicts"
-                            )
+                                normalized = normalize_tool_call(tc)
+                                pending_tool_calls.append(normalized)
 
                             # Build proper interrupt response with action_requests
-                            from .hitl_config import build_interrupt_response
-
                             action_requests = []
                             for tc in last_msg.tool_calls:
-                                action_requests.append(
-                                    {
-                                        "name": (
-                                            tc.get("name")
-                                            if isinstance(tc, dict)
-                                            else getattr(tc, "name", "unknown")
-                                        ),
-                                        "args": (
-                                            tc.get("args", {})
-                                            if isinstance(tc, dict)
-                                            else getattr(tc, "args", {})
-                                        ),
-                                        "id": (
-                                            tc.get("id")
-                                            if isinstance(tc, dict)
-                                            else getattr(tc, "id", None)
-                                        ),
-                                        "tool_call_id": (
-                                            tc.get("id")
-                                            if isinstance(tc, dict)
-                                            else getattr(tc, "id", None)
-                                        ),
-                                    }
-                                )
+                                action_requests.append(normalize_tool_call(tc))
 
                             interrupt_data = {"action_requests": action_requests}
                             interrupt_response = build_interrupt_response(
@@ -1246,24 +1241,14 @@ class MultiAgentWorkflow:
                 # Not interrupted, workflow completed
                 interrupted = False
 
-            # Only yield complete if we have a response and we're not interrupted
             if not interrupted:
                 response = snapshot.values.get("response")
                 if response:
-                    logger.info("Yielding complete event with response")
                     yield {"type": "complete", "response": response}
                 else:
-                    # No response - this is an error
-                    logger.error("Workflow completed without generating a response")
-                    logger.error(
-                        f"Final state values keys: {list(snapshot.values.keys())}"
-                    )
                     yield {"type": "error", "error": "No response generated"}
         else:
             # If no checkpointer, we can't detect interrupts
-            logger.error(
-                f"No checkpointer or thread_id - checkpointer: {self.checkpointer is not None}, thread_id: {thread_id}"
-            )
             yield {"type": "error", "error": "Checkpointing not configured"}
 
     async def get_state(self, thread_id: str) -> dict:
@@ -1308,7 +1293,6 @@ class MultiAgentWorkflow:
 
     async def cleanup(self):
         """Cleanup resources from agents that use MCP tools"""
-        logger.info("Cleaning up MultiAgentWorkflow resources...")
         for agent in self._cleanup_agents:
             if hasattr(agent, "cleanup"):
                 try:
@@ -1317,7 +1301,6 @@ class MultiAgentWorkflow:
                     logger.error(
                         f"Error cleaning up agent {agent.__class__.__name__}: {e}"
                     )
-        logger.info("MultiAgentWorkflow cleanup completed")
 
 
 def create_workflow(

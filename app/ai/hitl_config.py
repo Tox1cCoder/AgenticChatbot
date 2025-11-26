@@ -39,10 +39,11 @@ def build_interrupt_response(
         for idx, task in enumerate(tasks):
             if not isinstance(task, dict):
                 continue
+            # ID mapping priority: tool_call_id (primary) → id → task_id → generated ID
             task_id = (
-                task.get("id")
+                task.get("tool_call_id")
+                or task.get("id")
                 or task.get("task_id")
-                or task.get("tool_call_id")
                 or f"{default_prefix}:{idx}"
             )
             tool_name = (
@@ -115,3 +116,18 @@ def build_interrupt_response(
     )
 
     return response.model_dump()
+
+
+def store_interrupt_metadata(
+    state: Dict[str, Any], interrupt_id: str, timestamp: Any
+) -> Dict[str, Any]:
+    """
+    Store interrupt metadata in the graph state for validation and audit purposes.
+    """
+    if "metadata" not in state:
+        state["metadata"] = {}
+
+    state["metadata"]["interrupt_id"] = interrupt_id
+    state["metadata"]["interrupt_timestamp"] = timestamp
+
+    return state

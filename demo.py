@@ -1,3 +1,19 @@
+﻿"""
+Streamlit Demo Application for HITL Chatbot
+
+This demo application uses the modern HITL (Human-in-the-Loop) interrupt-based
+tool approval system. All deprecated endpoints and legacy approval mechanisms
+have been removed.
+
+Key Features:
+- Modern interrupt-based tool approval via /messages/resume-interrupt
+- Per-tool decision control (accept/edit/reject)
+- Chained interrupt support
+- No legacy /conversations/{id}/resume endpoint usage
+
+Last Updated: November 26, 2025
+"""
+
 import base64
 import mimetypes
 import uuid
@@ -3227,12 +3243,10 @@ def render_chat_view():
                                         conversation_id
                                     )
                                 else:
-                                    # Fallback to old format
-                                    st.session_state.pending_tool_approval = {
-                                        "thread_id": thread_id,
-                                        "tool_calls": pending_tool_calls,
-                                        "conversation_id": st.session_state.current_conversation_id,
-                                    }
+                                    # No interrupt data - this shouldn't happen with proper HITL setup
+                                    st.error(
+                                        "❌ Interrupt detected but no interrupt data provided. Check HITL configuration."
+                                    )
 
                                 # Display info message
                                 st.info(
@@ -3272,95 +3286,7 @@ def render_chat_view():
                         elif event_type != "error" and not interrupt_data:
                             st.toast("Failed to send message", icon="❌")
 
-    # Tool approval UI (outside the form)
-    if st.session_state.get("pending_tool_approval"):
-        approval_data = st.session_state.pending_tool_approval
-        thread_id = approval_data.get("thread_id")
-        tool_calls = approval_data.get("tool_calls", [])
-        conversation_id = approval_data.get("conversation_id")
-
-        st.divider()
-        st.warning("🔧 **Tool Approval Required**")
-        st.write("The assistant wants to use the following tools:")
-
-        if tool_calls:
-            for i, tool_call in enumerate(tool_calls):
-                tool_name = (
-                    tool_call.get("name", "Unknown")
-                    if isinstance(tool_call, dict)
-                    else getattr(tool_call, "name", "Unknown")
-                )
-                tool_args = (
-                    tool_call.get("args", {})
-                    if isinstance(tool_call, dict)
-                    else getattr(tool_call, "args", {})
-                )
-                with st.expander(f"🔧 Tool {i+1}: **{tool_name}**", expanded=True):
-                    st.json(tool_args)
-        else:
-            st.info("Tool details not available")
-
-        col1, col2, col3 = st.columns([2, 2, 6])
-
-        with col1:
-            if st.button(
-                "✅ Approve Tools",
-                key=f"approve_btn_{thread_id}",
-                type="primary",
-                use_container_width=True,
-            ):
-                with st.spinner("Approving and continuing..."):
-                    resume_data = {"approved": True}
-                    response = make_api_request(
-                        "POST",
-                        f"/conversations/{conversation_id}/resume",
-                        resume_data,
-                    )
-                    if response and response.get("success"):
-                        # Clear the pending approval
-                        st.session_state.pending_tool_approval = None
-                        # Reload messages to show the new bot response
-                        load_messages_page(1)
-                        st.success("✅ Tools approved! Response generated.")
-                        st.rerun()
-                    else:
-                        error_msg = (
-                            response.get("message", "Unknown error")
-                            if response
-                            else "No response"
-                        )
-                        st.error(f"❌ Failed to resume workflow: {error_msg}")
-
-        with col2:
-            if st.button(
-                "❌ Reject Tools",
-                key=f"reject_btn_{thread_id}",
-                use_container_width=True,
-            ):
-                with st.spinner("Rejecting..."):
-                    resume_data = {
-                        "approved": False,
-                        "rejectionReason": "User rejected tool execution",
-                    }
-                    response = make_api_request(
-                        "POST",
-                        f"/conversations/{conversation_id}/resume",
-                        resume_data,
-                    )
-                    if response and response.get("success"):
-                        # Clear the pending approval
-                        st.session_state.pending_tool_approval = None
-                        # Reload messages to show the rejection response
-                        load_messages_page(1)
-                        st.info("❌ Tools rejected. Response generated.")
-                        st.rerun()
-                    else:
-                        error_msg = (
-                            response.get("message", "Unknown error")
-                            if response
-                            else "No response"
-                        )
-                        st.error(f"❌ Failed to reject workflow: {error_msg}")
+    # Note: Legacy tool approval UI removed. Now using modern interrupt-based approval in render_interrupt_approval_ui()
 
 
 def render_manage_modal():
