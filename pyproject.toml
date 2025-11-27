@@ -4,8 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sample-chatbot"
-version = "0.1.0"
-description = "A RAG-powered chatbot with FastAPI, PostgreSQL, LangGraph, and Qdrant vector search"
+version = "1.0"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
