@@ -1,20 +1,4 @@
-﻿"""
-Streamlit Demo Application for HITL Chatbot
-
-This demo application uses the modern HITL (Human-in-the-Loop) interrupt-based
-tool approval system. All deprecated endpoints and legacy approval mechanisms
-have been removed.
-
-Key Features:
-- Modern interrupt-based tool approval via /messages/resume-interrupt
-- Per-tool decision control (accept/edit/reject)
-- Chained interrupt support
-- No legacy /conversations/{id}/resume endpoint usage
-
-Last Updated: November 26, 2025
-"""
-
-import base64
+﻿import base64
 import mimetypes
 import uuid
 import json
@@ -2770,7 +2754,7 @@ def render_interrupt_approval_ui():
                 col_save, col_cancel = st.columns(2)
                 with col_save:
                     if st.form_submit_button(
-                        "💾 Save & Accept", use_container_width=True, type="primary"
+                        "Save & Accept", use_container_width=True, type="primary"
                     ):
                         try:
                             edited_args = json.loads(edited_args_text)

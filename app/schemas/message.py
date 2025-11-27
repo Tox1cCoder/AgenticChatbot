@@ -89,57 +89,6 @@ class InterruptResumeRequest(BaseModel):
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
-
-class MessageResumeRequest(BaseModel):
-    """
-    Schema for resuming a workflow after human approval.
-
-    ⚠️ DEPRECATED: This schema is deprecated. Use InterruptResumeRequest instead
-    for full decision support (accept/edit/reject per tool).
-
-    Limitations:
-    - Only supports simple approve/reject for ALL tools at once
-    - Cannot edit tool arguments before execution
-    - Cannot provide per-tool decisions (accept some, reject others)
-    - No interrupt_id validation
-
-    Migration Path:
-    Use InterruptResumeRequest which provides:
-    - Per-tool decision control via List[InterruptDecision]
-    - Ability to modify tool arguments (edit decision)
-    - Interrupt tracking with interrupt_id validation
-    - Better audit logging and compliance
-
-    Example migration:
-    Old:
-        MessageResumeRequest(approved=True)
-
-    New:
-        InterruptResumeRequest(
-            thread_id="...",
-            conversation_id="...",
-            decisions=[
-                InterruptDecision(
-                    task_id="task1",
-                    decision=InterruptDecisionType.ACCEPT,
-                    action="search",
-                    original_args={...}
-                )
-            ]
-        )
-    """
-
-    approved: bool = Field(..., description="Whether the tool execution is approved")
-    user_input: Optional[str] = Field(
-        default=None, description="Any additional input or modifications from the user"
-    )
-    rejection_reason: Optional[str] = Field(
-        default=None, description="Reason for rejection if not approved"
-    )
-
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
-
-
 class MessageInDB(BaseModel):
     model_config = ConfigDict(
         from_attributes=True, alias_generator=to_camel, populate_by_name=True

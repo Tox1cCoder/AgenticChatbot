@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class SearchAgent:
 
     def __init__(self):
-        self.model_name = "gemini-flash-latest"
+        self.model_name = "gemini-3-pro-preview" # "gemini-flash-latest"
         self.langchain_model = None
         self.mcp_manager = None
         self.tools = []
@@ -40,25 +40,39 @@ class SearchAgent:
                 self.mcp_manager = MCPManager()
                 await self.mcp_manager.initialize()
 
-                combined_tools: Dict[str, BaseTool] = {}
-
-                preferred_servers = ["tavily", "time"]
-
-                for server_name in preferred_servers:
-                    server_tools = await self.mcp_manager.get_server_tools(server_name)
-
-                    for tool in server_tools:
-                        combined_tools[tool.name] = tool
-
-                if not combined_tools:
-                    for tool in await self.mcp_manager.get_tools():
-                        combined_tools[tool.name] = tool
-
-                self.tools = list(combined_tools.values())
-
             except Exception as e:
                 logger.error(f"Failed to initialize MCP manager: {e}", exc_info=True)
                 self.tools = []
+                return
+
+        try:
+            all_tools = await self.mcp_manager.get_tools()
+        except Exception as e:
+            logger.error(f"Failed to load MCP tools for SearchAgent: {e}", exc_info=True)
+            self.tools = []
+            return
+
+        self.tools = self._deduplicate_tools(all_tools)
+
+        server_status = self.mcp_manager.get_servers_status()
+        active_servers = [
+            name for name, status in server_status.items() if status.get("enabled")
+        ]
+        if self.tools:
+            logger.info(
+                "Loaded %d MCP tools for SearchAgent from %d servers",
+                len(self.tools),
+                len(active_servers),
+            )
+        else:
+            logger.warning("No MCP tools available for SearchAgent; running without tools")
+
+    def _deduplicate_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
+        """Ensure the tool list does not contain duplicate names."""
+        unique_tools: Dict[str, BaseTool] = {}
+        for tool in tools or []:
+            unique_tools.setdefault(tool.name, tool)
+        return list(unique_tools.values())
 
     async def invoke_model(
         self,

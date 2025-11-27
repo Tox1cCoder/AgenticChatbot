@@ -259,10 +259,7 @@ async def execute_tools_concurrently(
 ) -> List[Tuple[str, Dict[str, Any], Any, bool]]:
     """
     Execute multiple tool calls concurrently using asyncio.
-
-    This enables parallel tool execution when the LLM returns multiple tool calls,
-    leveraging Gemini's native parallel function calling capability.
-
+    
     Args:
         tool_calls: List of tool call dictionaries from ai_message.tool_calls
         tools: List of available BaseTool instances

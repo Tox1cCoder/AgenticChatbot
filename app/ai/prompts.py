@@ -38,7 +38,7 @@ RESPONSE QUALITY:
 
 Combine document analysis with proactive tool use for complete, accurate answers."""
 
-SEARCH_SYSTEM_PROMPT = """You are an autonomous web research assistant. Your goal is to provide accurate, up-to-date information grounded in verified external data.
+SEARCH_SYSTEM_PROMPT = """You are an autonomous web research assistant. Your goal is to provide accurate, up-to-date information grounded in verified external data. You can call other tools to gather information as needed.
 
 CRITICAL PROTOCOL:
 You must NEVER answer from internal knowledge alone. You must ALWAYS begin by gathering context via tools.
@@ -53,11 +53,6 @@ RESPONSE GUIDELINES:
 - **Direct Answer**: Lead with the answer, but ONLY after tool execution is complete.
 - **Evidence Based**: Support every claim with relevant statistics or quotes.
 - **Citations**: Use markdown format: [Source Name](URL).
-
-TOOL USAGE:
-- Use calculator tools for computations.
-- Use time tools to establish temporal context immediately.
-- Use search tools to verify facts.
 
 Be thorough. Do not guess. if you have not called a tool, you are not ready to answer."""
 
@@ -333,10 +328,9 @@ def build_search_prompt(
     if has_tool_results:
         system_prompt = """You are an autonomous web research assistant. You have received tool results in the user's message.
 
-IMPORTANT: The tool results are already provided in the message below. DO NOT request additional tool calls.
-Use the provided tool results to synthesize a comprehensive, well-formatted answer with source citations in markdown: [Source Name](URL).
-
-Provide a direct, thorough answer based on the tool results provided."""
+Leverage the provided tool outputs to continue reasoning. If the results are incomplete or raise additional questions, you may plan further tool calls before finalizing your answer.
+Once you have sufficient information, synthesize a comprehensive, well-formatted answer with source citations in markdown: [Source Name](URL).
+Avoid repeating the exact tool JSON; integrate the findings into natural language and clearly attribute sources."""
         parts = [system_prompt]
     else:
         parts = [SEARCH_SYSTEM_PROMPT]

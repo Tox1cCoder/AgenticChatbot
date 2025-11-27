@@ -86,7 +86,7 @@ class Settings(BaseSettings):
         description="Toggle for enabling or disabling the image generator agent",
     )
     image_generator_model: str = Field(
-        default="gemini-2.0-flash-preview-image-generation",
+        default="gemini-3-pro-image-preview",
         description="Gemini model identifier used for image generation",
     )
     image_generator_default_aspect_ratio: str = Field(
@@ -154,6 +154,10 @@ class Settings(BaseSettings):
     )
 
     # Redis Configuration
+    redis_url: str = Field(
+        default="",
+        description="Redis connection URL for optional timeout tracking (leave blank to disable)",
+    )
     celery_broker_url: str = Field(
         default="redis://localhost:6379/0",
         description="Celery broker URL",

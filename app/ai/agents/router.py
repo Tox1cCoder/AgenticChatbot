@@ -1,5 +1,7 @@
 import logging
-from typing import List
+import logging
+import re
+from typing import List, Optional
 
 from google import genai
 
@@ -12,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class Router:
     def __init__(self):
-        self.model_name = "gemini-flash-latest"
+        self.model_name = "gemini-3-pro-preview" # "gemini-flash-latest"
         self.gemini_client = None
         self._init_gemini()
 
@@ -55,15 +57,44 @@ class Router:
         )
 
         response_text = response.text if hasattr(response, "text") else str(response)
-        selected_agent = response_text.strip().lower()
+        selected_agent = self._extract_agent_name(response_text, available_agents)
 
-        # Validate the selected agent is available
-        if selected_agent in available_agents:
+        if selected_agent:
             logger.info(f"LLM routed to {selected_agent}: {content[:50]}...")
             return selected_agent
+
+        if has_documents and "rag_agent" in available_agents:
+            logger.debug(
+                "Router response ambiguous; defaulting to rag_agent due to available documents."
+            )
+            return "rag_agent"
 
         fallback_agent = (
             "chat_agent" if "chat_agent" in available_agents else available_agents[0]
         )
 
         return fallback_agent
+
+    def _extract_agent_name(
+        self, response_text: str, available_agents: List[str]
+    ) -> Optional[str]:
+        """Normalize LLM output into a valid agent name if possible."""
+        if not response_text:
+            return None
+
+        normalized_lines = [
+            line.strip() for line in response_text.splitlines() if line.strip()
+        ]
+        for line in normalized_lines:
+            cleaned_line = re.sub(r"[^a-z0-9_]+", " ", line.lower())
+            tokens = cleaned_line.replace("-", "_").split()
+            for token in tokens:
+                if token in available_agents:
+                    return token
+
+        lower_text = response_text.lower()
+        for agent in available_agents:
+            if agent in lower_text:
+                return agent
+
+        return None

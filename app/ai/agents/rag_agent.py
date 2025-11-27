@@ -25,7 +25,6 @@ from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_rag_prompt
 from ...core.config import Settings
 from ..mcp_integration import MCPManager
-from ...core.exceptions.mcp import ServerNotFoundError
 from ...core.config import settings
 from ..utils import (
     coerce_response_text,
@@ -53,7 +52,7 @@ class RAGAgent:
 
         self.collection_name = collection_name
         self.embedding_dimension = settings.embedding_dimension
-        self.model_name = "gemini-flash-latest"
+        self.model_name = "gemini-3-pro-preview" # "gemini-flash-latest"
         self.gemini_client = None
         self.langchain_model = None
         self.mcp_manager = None
@@ -97,49 +96,44 @@ class RAGAgent:
             try:
                 self.mcp_manager = MCPManager()
                 await self.mcp_manager.initialize()
-
-                combined_tools: Dict[str, BaseTool] = {}
-
-                preferred_servers = ["calculator", "time"]
-                for server_name in preferred_servers:
-                    try:
-                        server_tools = await self.mcp_manager.get_server_tools(
-                            server_name
-                        )
-                    except ServerNotFoundError:
-                        logger.debug(
-                            "Preferred MCP server '%s' not configured for RAGAgent",
-                            server_name,
-                        )
-                        continue
-
-                    for tool in server_tools:
-                        combined_tools[tool.name] = tool
-
-                # Add all other available tools
-                for tool in await self.mcp_manager.get_tools():
-                    combined_tools.setdefault(tool.name, tool)
-
-                self.tools = list(combined_tools.values())
-
-                server_status = self.mcp_manager.get_servers_status()
-                active_servers = [
-                    name
-                    for name, status in server_status.items()
-                    if status.get("enabled")
-                ]
-                logger.info(
-                    "Loaded %d MCP tools for RAGAgent from %d servers",
-                    len(self.tools),
-                    len(active_servers),
-                )
-
             except Exception as e:
                 logger.error(
                     f"Failed to initialize MCP manager for RAGAgent: {e}",
                     exc_info=True,
                 )
                 self.tools = []
+                return
+
+        try:
+            all_tools = await self.mcp_manager.get_tools()
+        except Exception as e:
+            logger.error(
+                "Failed to load MCP tools for RAGAgent: %s", e, exc_info=True
+            )
+            self.tools = []
+            return
+
+        self.tools = self._deduplicate_tools(all_tools)
+
+        server_status = self.mcp_manager.get_servers_status()
+        active_servers = [
+            name for name, status in server_status.items() if status.get("enabled")
+        ]
+        if self.tools:
+            logger.info(
+                "Loaded %d MCP tools for RAGAgent from %d servers",
+                len(self.tools),
+                len(active_servers),
+            )
+        else:
+            logger.warning("No MCP tools available for RAGAgent; running without tools")
+
+    def _deduplicate_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
+        """Ensure we only keep one instance of each tool by name."""
+        unique_tools: Dict[str, BaseTool] = {}
+        for tool in tools or []:
+            unique_tools.setdefault(tool.name, tool)
+        return list(unique_tools.values())
 
     def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
         """Create agent executor with proper tool binding configuration."""

@@ -95,15 +95,23 @@ def health_check_task():
 @celery_app.task(name="app.workers.cleanup_tasks.cleanup_abandoned_interrupts")
 def cleanup_abandoned_interrupts():
     """
-    MEDIUM FIX #4: Background task to clean up abandoned HITL interrupts.
-
-    This task runs periodically to detect interrupts that have exceeded the
-    timeout threshold and handles them appropriately (logging, notification,
-    optional auto-rejection).
+    Background task to clean up abandoned HITL interrupts.
     """
     try:
+        redis_url = getattr(settings, "redis_url", "") or ""
+        if not redis_url.strip():
+            message = "Redis URL not configured; skipping interrupt cleanup task."
+            logger.debug(message)
+            return {
+                "success": True,
+                "timestamp": datetime.utcnow().isoformat(),
+                "expired_interrupts_cleaned": 0,
+                "active_interrupts": 0,
+                "message": message,
+            }
+
         # Connect to Redis
-        redis_client = redis.from_url(settings.redis_url)
+        redis_client = redis.from_url(redis_url)
 
         # Scan for all interrupt keys
         interrupt_pattern = "interrupt:*"
@@ -131,23 +139,8 @@ def cleanup_abandoned_interrupts():
                     conversation_id = key_parts[1] if len(key_parts) > 1 else "unknown"
                     interrupt_id = key_parts[2] if len(key_parts) > 2 else "unknown"
 
-                    logger.warning(
-                        f"Found expired interrupt: {interrupt_id} "
-                        f"for conversation {conversation_id} "
-                        f"(elapsed: {elapsed_minutes:.1f} minutes)"
-                    )
-
                     # Delete the expired key
                     redis_client.delete(key)
-
-                    # TODO: Optional - Auto-reject the tools and resume workflow
-                    # This would require access to the workflow graph and decision handling
-                    # For now, we just log and clean up the Redis key
-
-                    # TODO: Optional - Send notification (webhook, email, etc.)
-                    # if settings.hitl_notification_enabled:
-                    #     send_timeout_notification(conversation_id, interrupt_id)
-
                 else:
                     active_count += 1
 

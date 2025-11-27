@@ -43,13 +43,22 @@ class MessageService(IMessageService):
         self.tool_approval_repository = tool_approval_repository
 
         # Initialize Redis connection for timeout tracking
+        self.redis_client = self._init_redis_client()
+
+    def _init_redis_client(self):
+        """Create a Redis client if configuration is provided."""
+        redis_url = getattr(settings, "redis_url", "") or ""
+        if not redis_url.strip():
+            logger.debug("Redis URL not configured; HITL timeout tracking disabled.")
+            return None
+
         try:
-            self.redis_client = redis.from_url(settings.redis_url)
+            return redis.from_url(redis_url)
         except Exception as e:
             logger.warning(
-                f"Failed to connect to Redis: {e}. Timeout tracking disabled."
+                f"Failed to connect to Redis at {redis_url}: {e}. Timeout tracking disabled."
             )
-            self.redis_client = None
+            return None
 
     async def create_message(self, message_create_data: MessageCreate) -> MessageRead:
         self.conversation_validation_utils.validate_conversation_exists(
@@ -203,7 +212,6 @@ class MessageService(IMessageService):
                         # Yield interrupt event - workflow paused for human approval
                         interrupt_response = event.get("interrupt")
 
-                        # MEDIUM FIX #3: Store interrupt timestamp for timeout tracking
                         if self.redis_client and interrupt_response:
                             interrupt_id = interrupt_response.get("interrupt_id")
                             if interrupt_id:
@@ -361,7 +369,6 @@ class MessageService(IMessageService):
         """
         self.conversation_validation_utils.validate_conversation_exists(conversation_id)
 
-        # MEDIUM FIX #3: Check if interrupt has expired
         if self.redis_client and interrupt_id:
             key = f"interrupt:{conversation_id}:{interrupt_id}"
             try:
@@ -400,7 +407,6 @@ class MessageService(IMessageService):
         persona = conversation.persona_prompt if conversation else None
         sanitized_persona = sanitize_persona(persona)
 
-        # MINOR FIX #8: Log approval decisions to audit trail
         if self.tool_approval_repository and user_id:
             try:
                 for decision in decisions:
@@ -445,7 +451,6 @@ class MessageService(IMessageService):
             interrupt_id=interrupt_id,
         )
 
-        # MEDIUM FIX #3: Clear the interrupt timeout after successful resume
         if self.redis_client and interrupt_id:
             key = f"interrupt:{conversation_id}:{interrupt_id}"
             try:
@@ -459,7 +464,6 @@ class MessageService(IMessageService):
             and bot_response.metadata
             and "interrupt" in bot_response.metadata
         ):
-            # MINOR FIX #11: Track interrupt depth for chained interrupts
             latest_message = self.repository.get_latest_by_conversation(conversation_id)
             if latest_message:
                 message_read = MessageRead.model_validate(latest_message)

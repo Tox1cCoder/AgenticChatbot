@@ -121,16 +121,11 @@ class ImageGeneratorAgent:
         if self.mcp_manager is None:
             await self._init_tools()
 
-        conversation_history = message.metadata.get("history", [])
-        persona = message.metadata.get("persona")
-
-        # Check if this invocation includes tool results (post-tool-execution)
+        # Check if this invocation includes tool results
         has_tool_results = "Tool results:" in message.content
 
-        # If tool results are present, skip tool calling and go straight to image generation
         if has_tool_results:
             # Extract the enhanced prompt from the content
-            # The message content should contain the original request + tool results
             enhanced_prompt = message.content
 
             # Generate the image directly
@@ -150,9 +145,7 @@ class ImageGeneratorAgent:
                 agent_id="image_generator_agent",
                 message=AgentMessage(
                     role=MessageRole.ASSISTANT,
-                    content=narrative
-                    or "Here is the image I created based on the enhanced context.",
-                ),
+                    content=narrative),
                 metadata=response_metadata,
             )
 
@@ -251,11 +244,6 @@ Do not output anything else, just the prompt."""
         message: AgentMessage,
         conversation_id: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """
-        Stream message processing.
-        """
-        # For now, just await the result and yield it, as image gen is mostly atomic
-        # unless we want to stream the enhancement tokens.
         result = await self.invoke_model(message, conversation_id)
 
         if result.error:
@@ -263,14 +251,6 @@ Do not output anything else, just the prompt."""
             return
 
         yield {"type": "complete", "response": result}
-
-    async def _enhance_prompt_with_tools(
-        self, original_prompt: str, conversation_history: List, persona: Optional[str]
-    ) -> tuple[str, List[str], List[Dict[str, Any]]]:
-        """
-        Deprecated: Logic moved to invoke_model / graph loop.
-        """
-        return original_prompt, [], []
 
     async def _generate_images(
         self, prepared_prompt: str, original_prompt: str

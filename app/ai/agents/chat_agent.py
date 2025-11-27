@@ -1,24 +1,20 @@
 ﻿import logging
 import base64
-from typing import Optional, List, Dict, Any, AsyncIterator
+from typing import Optional, List, Dict
 
 from google import genai
 from google.genai import types
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
-from langchain.agents import create_agent
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_chat_prompt
 from ..utils import (
     coerce_response_text,
-    extract_agent_execution_info,
     get_error_recovery_hint,
 )
-from ..hitl_config import build_interrupt_response
 from ...core.config import settings
-from ...core.exceptions.mcp import ServerNotFoundError
 from ..mcp_integration import MCPManager
 
 logger = logging.getLogger(__name__)
@@ -27,7 +23,7 @@ logger = logging.getLogger(__name__)
 class ChatAgent:
 
     def __init__(self):
-        self.model_name = "gemini-flash-latest"
+        self.model_name = "gemini-3-pro-preview" # "gemini-flash-latest"
         self.gemini_client = None
         self.langchain_model = None
         self.mcp_manager = None
@@ -55,48 +51,45 @@ class ChatAgent:
             try:
                 self.mcp_manager = MCPManager()
                 await self.mcp_manager.initialize()
-
-                combined_tools: Dict[str, BaseTool] = {}
-
-                preferred_servers = ["calculator", "time"]
-                for server_name in preferred_servers:
-                    try:
-                        server_tools = await self.mcp_manager.get_server_tools(
-                            server_name
-                        )
-                    except ServerNotFoundError:
-                        logger.debug(
-                            "Preferred MCP server '%s' not configured for ChatAgent",
-                            server_name,
-                        )
-                        continue
-
-                    for tool in server_tools:
-                        combined_tools[tool.name] = tool
-
-                for tool in await self.mcp_manager.get_tools():
-                    combined_tools.setdefault(tool.name, tool)
-
-                self.tools = list(combined_tools.values())
-
-                server_status = self.mcp_manager.get_servers_status()
-                active_servers = [
-                    name
-                    for name, status in server_status.items()
-                    if status.get("enabled")
-                ]
-                logger.info(
-                    "Loaded %d MCP tools for ChatAgent from %d servers",
-                    len(self.tools),
-                    len(active_servers),
-                )
-
             except Exception as e:
                 logger.error(
-                    f"Failed to initialize MCP manager for ChatAgent: {e}",
+                    "Failed to initialize MCP manager for ChatAgent: %s",
+                    e,
                     exc_info=True,
                 )
                 self.tools = []
+                return
+
+        try:
+            all_tools = await self.mcp_manager.get_tools()
+        except Exception as e:
+            logger.error(
+                "Failed to load MCP tools for ChatAgent: %s", e, exc_info=True
+            )
+            self.tools = []
+            return
+
+        self.tools = self._deduplicate_tools(all_tools)
+
+        server_status = self.mcp_manager.get_servers_status()
+        active_servers = [
+            name for name, status in server_status.items() if status.get("enabled")
+        ]
+        if self.tools:
+            logger.info(
+                "Loaded %d MCP tools for ChatAgent from %d servers",
+                len(self.tools),
+                len(active_servers),
+            )
+        else:
+            logger.warning("No MCP tools available for ChatAgent; running without tools")
+
+    def _deduplicate_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
+        """Ensure the tool list does not contain duplicates by name."""
+        unique_tools: Dict[str, BaseTool] = {}
+        for tool in tools or []:
+            unique_tools.setdefault(tool.name, tool)
+        return list(unique_tools.values())
 
     async def process_message(
         self,

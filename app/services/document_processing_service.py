@@ -213,9 +213,7 @@ class DocumentProcessingService:
             )
 
             # Update chunks with image metadata in Qdrant
-            await self._update_chunks_with_images(
-                document_id, store_result.get("chunk_id_mapping", {})
-            )
+            await self._update_chunks_with_images(document_id)
 
         processing_time = time.time() - start_time
 
@@ -985,9 +983,7 @@ class DocumentProcessingService:
         logger.warning(f"No caption text in Gemini response for {image_name}")
         return None
 
-    async def _update_chunks_with_images(
-        self, document_id: str, chunk_id_mapping: Dict[int, str]
-    ) -> None:
+    async def _update_chunks_with_images(self, document_id: str) -> None:
         try:
             images = self.document_image_repository.get_by_document_id(
                 UUID(document_id)

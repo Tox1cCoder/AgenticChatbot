@@ -136,10 +136,3 @@ async def delete_conversation(
     """Delete conversation (requires user ownership)"""
     conversation_service.delete_conversation(conversation_id, user_id)
     return ApiResponse(success=True, message="Conversation deleted successfully")
-
-
-# Note: Deprecated endpoint /conversations/{id}/resume has been removed.
-# Use POST /messages/resume-interrupt instead for modern interrupt-based tool approval.
-# This endpoint provided only simple approve/reject functionality and has been
-# replaced with the more powerful InterruptResumeRequest API that supports
-# per-tool decisions (accept/edit/reject) and argument modification.
