@@ -56,7 +56,15 @@ class MessageRead(BaseModel):
               "document_id": "uuid",
               "source": "report.pdf",
               "document_number": 1,
-              "chunks": [{"chunk_index": 0, "score": 0.85}],
+              "chunks": [
+                {
+                  "chunk_index": 0,
+                  "score": 0.85,
+                  "character_count": 1500,
+                  "content": "The actual chunk text content...",
+                  "page_number": 5
+                }
+              ],
               "total_chunks": 1,
               "avg_score": 0.85
             }
@@ -64,6 +72,18 @@ class MessageRead(BaseModel):
         - chunks_retrieved: Total number of chunks retrieved
         - documents_found: Number of unique documents found
         - citations: Legacy flat list of all chunk citations (backward compatibility)
+        - images: List of document images included in the response for visual reference
+          [
+            {
+              "data": "base64_encoded_image_data",
+              "mime": "image/jpeg",
+              "name": "Image description or caption",
+              "page_number": 5,
+              "caption": "Original image caption"
+            }
+          ]
+        - has_images: Boolean indicating if images were included
+        - images_count: Number of images included
         """,
     )
     feedback: Optional[FeedbackRead] = Field(
@@ -88,6 +108,7 @@ class InterruptResumeRequest(BaseModel):
     )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
 
 class MessageInDB(BaseModel):
     model_config = ConfigDict(

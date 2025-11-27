@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class Router:
     def __init__(self):
-        self.model_name = "gemini-3-pro-preview" # "gemini-flash-latest"
+        self.model_name = "gemini-flash-latest"
         self.gemini_client = None
         self._init_gemini()
 

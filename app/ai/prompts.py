@@ -24,7 +24,8 @@ CRITICAL INSTRUCTIONS:
 3. If documents don't fully answer the question, use available tools (calculator for computations, time tools for date context, etc.)
 4. When multiple documents are relevant, synthesize information from all sources
 5. CITATION FORMAT: When referencing documents, ALWAYS use the format '[Document N]' where N is the document number shown in the context above (e.g., "According to [Document 2], the process involves...")
-6. When document sections include images, their descriptions are provided in the context. Reference these visual elements when relevant to the user's question.
+6. VISUAL ANALYSIS: When images are attached to this message, you have access to the actual images for visual analysis. Examine them carefully and reference specific visual details in your response, not just the captions.
+7. Reference both textual content and visual elements when relevant to the user's question.
 
 TOOL USAGE:
 - Use calculator tools for computations on numerical data from documents
@@ -180,6 +181,7 @@ def build_rag_prompt(
     conversation_history: list,
     persona: Optional[str] = None,
     document_grouping: Optional[dict] = None,
+    has_images: bool = False,
 ) -> str:
     """Build a retrieval-augmented prompt."""
     parts = [RAG_SYSTEM_PROMPT]
@@ -286,6 +288,11 @@ def build_rag_prompt(
             f"Summary: {chunks_used} chunks from {num_documents} documents | ~{total_tokens} tokens"
         )
         parts.append("------------------------------\n")
+
+    if has_images:
+        parts.append(
+            "\n⚠️ IMPORTANT: Actual images from the documents are attached to this message for your visual analysis. You should examine these images directly and describe what you see, not just rely on the captions. Reference specific visual details when answering.\n"
+        )
 
     if conversation_history:
         max_messages = (

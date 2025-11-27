@@ -244,7 +244,7 @@ class DocumentProcessingService:
                     "-f",
                     "true",
                     "-t",
-                    "true"
+                    "false"
                 ],
                 timeout=self.settings.mineru_timeout,
                 check=True,
@@ -333,7 +333,6 @@ class DocumentProcessingService:
             chunks_with_metadata = []
             for chunk in chunks:
                 related_images: List[Dict[str, Any]] = []
-                # Since we don't have page info, include all images without page numbers
                 if images_without_page:
                     related_images = images_without_page.copy()
 

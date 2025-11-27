@@ -52,7 +52,7 @@ class RAGAgent:
 
         self.collection_name = collection_name
         self.embedding_dimension = settings.embedding_dimension
-        self.model_name = "gemini-3-pro-preview" # "gemini-flash-latest"
+        self.model_name = "gemini-flash-latest"
         self.gemini_client = None
         self.langchain_model = None
         self.mcp_manager = None
@@ -107,9 +107,7 @@ class RAGAgent:
         try:
             all_tools = await self.mcp_manager.get_tools()
         except Exception as e:
-            logger.error(
-                "Failed to load MCP tools for RAGAgent: %s", e, exc_info=True
-            )
+            logger.error("Failed to load MCP tools for RAGAgent: %s", e, exc_info=True)
             self.tools = []
             return
 
@@ -204,6 +202,8 @@ class RAGAgent:
                 "chunk_index": doc.get("chunk_index", 0),
                 "score": doc.get("score", 0.0),
                 "character_count": len(doc.get("content", "")),
+                "content": doc.get("content", ""),
+                "page_number": doc.get("page_number"),
             }
             doc_grouping[doc_key]["chunks"].append(chunk_details)
 
@@ -218,6 +218,7 @@ class RAGAgent:
             conversation_history,
             persona=persona,
             document_grouping=doc_grouping,
+            has_images=bool(images),
         )
 
         response_text: str = ""
@@ -350,6 +351,20 @@ class RAGAgent:
             "images_count": len(images) if images else 0,
         }
 
+        # Add image data to metadata for frontend display
+        if images:
+            metadata["images"] = [
+                {
+                    "data": img["data"],
+                    "mime": img["mime_type"],
+                    "name": img.get("caption")
+                    or f"Document Image (Page {img.get('page_number', '?')})",
+                    "page_number": img.get("page_number"),
+                    "caption": img.get("caption"),
+                }
+                for img in images
+            ]
+
         # Add tool usage metadata if tools were used
         if tools_used:
             metadata["tools_used"] = tools_used
@@ -418,6 +433,8 @@ class RAGAgent:
                 "chunk_index": doc.get("chunk_index", 0),
                 "score": doc.get("score", 0.0),
                 "character_count": len(doc.get("content", "")),
+                "content": doc.get("content", ""),
+                "page_number": doc.get("page_number"),
             }
             doc_grouping[doc_key]["chunks"].append(chunk_details)
 
@@ -432,6 +449,7 @@ class RAGAgent:
             conversation_history,
             persona=persona,
             document_grouping=doc_grouping,
+            has_images=bool(images),
         )
 
         accumulated_content = ""
@@ -576,6 +594,20 @@ class RAGAgent:
             "has_images": bool(images),
             "images_count": len(images) if images else 0,
         }
+
+        # Add image data to metadata for frontend display
+        if images:
+            metadata["images"] = [
+                {
+                    "data": img["data"],
+                    "mime": img["mime_type"],
+                    "name": img.get("caption")
+                    or f"Document Image (Page {img.get('page_number', '?')})",
+                    "page_number": img.get("page_number"),
+                    "caption": img.get("caption"),
+                }
+                for img in images
+            ]
 
         if tools_used:
             metadata["tools_used"] = tools_used

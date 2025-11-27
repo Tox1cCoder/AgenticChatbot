@@ -527,6 +527,31 @@ APP_STYLE = """
     .citation-score-low {
         color: #ef4444;
     }
+    
+    /* Clickable citation button styles */
+    .stButton button[data-testid*="cite_"] {
+        padding: 4px 8px;
+        font-size: 0.85em;
+        min-height: 32px;
+    }
+    
+    .stButton button[data-testid*="cite_"]:hover {
+        transform: scale(1.05);
+        transition: transform 0.2s ease-in-out;
+    }
+    
+    /* Image thumbnail styles in citations */
+    .citation-image-thumb {
+        width: 100%;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+    }
+    
+    .citation-image-thumb:hover {
+        transform: scale(1.05);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    }
 </style>
 """
 
@@ -786,6 +811,7 @@ SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
     "persona_editor_pending": lambda: False,
     "pending_image_attachments": list,
     "message_image_thumbnails": dict,
+    "message_chunks": dict,
     "show_attachment_uploader": lambda: False,
     "image_viewer_open": lambda: False,
     "image_viewer_payload": lambda: None,
@@ -795,6 +821,8 @@ SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
     "mcp_servers_list": lambda: None,
     "selected_tool": lambda: None,
     "tool_execution_result": lambda: None,
+    "selected_chunk_info": lambda: None,
+    "chunk_preview_dialog_key": lambda: False,
 }
 
 
@@ -1896,7 +1924,7 @@ def render_tool_artifacts(tool_artifacts: List[Dict[str, Any]]):
                 st.caption(f"⏱️ Execution time: {execution_time:.2f}s")
 
 
-def render_citations(message_metadata: Dict[str, Any]):
+def render_citations(message_metadata: Dict[str, Any], msg_id: Optional[str] = None):
     """
     Render citations from document metadata in a user-friendly format.
     Shows documents cited with chunk and page information.
@@ -1918,9 +1946,9 @@ def render_citations(message_metadata: Dict[str, Any]):
                     score = citation.get("score", 0.0)
 
                     # Determine relevance color
-                    if score >= 0.7:
+                    if score >= 0.3:
                         relevance_color = COLORS["success"]
-                    elif score >= 0.5:
+                    elif score >= 0.2:
                         relevance_color = COLORS["warning"]
                     else:
                         relevance_color = COLORS["error"]
@@ -1936,30 +1964,69 @@ def render_citations(message_metadata: Dict[str, Any]):
 
     # Render new grouped structure
     with st.expander(f"Sources ({len(documents_cited)} documents)", expanded=False):
+        # Get chunk data from session state
+        chunks_data = st.session_state.get("message_chunks", {}).get(msg_id, {})
+        chunks_map = chunks_data.get("chunks_map", {})
+
         for doc_entry in documents_cited:
             doc_num = doc_entry.get("document_number", "?")
+            doc_id = doc_entry.get("document_id")
             source = doc_entry.get("source", "unknown")
             total_chunks = doc_entry.get("total_chunks", 0)
             avg_score = doc_entry.get("avg_score", 0.0)
             chunks = doc_entry.get("chunks", [])
 
             # Determine overall document relevance color
-            if avg_score >= 0.7:
+            if avg_score >= 0.3:
                 doc_relevance_color = COLORS["success"]
-            elif avg_score >= 0.5:
+            elif avg_score >= 0.2:
                 doc_relevance_color = COLORS["warning"]
             else:
                 doc_relevance_color = COLORS["error"]
 
-            # Document header
-            st.markdown(
-                f'<div class="citation-document" style="margin-bottom: 12px; padding: 12px; border: 2px solid {doc_relevance_color}; border-radius: 8px; background-color: {doc_relevance_color}10;">'
-                f'<strong style="font-size: 1.1em;">[Document {doc_num}] {source}</strong><br>'
-                f'<span style="color: {doc_relevance_color}; font-size: 0.9em;">Overall Relevance: ({avg_score:.1%})</span> | '
-                f'<span style="font-size: 0.9em;">{total_chunks} chunk(s)</span>'
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+            # Document header - make it clickable if only one chunk
+            if total_chunks == 1 and chunks and msg_id:
+                chunk = chunks[0]
+                chunk_idx = chunk.get("chunk_index", 0)
+                chunk_data = chunks_map.get(doc_num, {}).get(chunk_idx, {})
+
+                col1, col2 = st.columns([0.85, 0.15])
+                with col1:
+                    st.markdown(
+                        f'<div class="citation-document" style="margin-bottom: 12px; padding: 12px; border: 2px solid {doc_relevance_color}; border-radius: 8px; background-color: {doc_relevance_color}10;">'
+                        f'<strong style="font-size: 1.1em;">[Document {doc_num}] {source}</strong><br>'
+                        f'<span style="color: {doc_relevance_color}; font-size: 0.9em;">Overall Relevance: ({avg_score:.1%})</span> | '
+                        f'<span style="font-size: 0.9em;">{total_chunks} chunk(s)</span>'
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                with col2:
+                    if st.button(
+                        "View",
+                        key=f"cite_doc_{msg_id}_{doc_num}",
+                        help="View chunk content",
+                        use_container_width=True,
+                    ):
+                        st.session_state["selected_chunk_info"] = {
+                            "source": source,
+                            "document_number": doc_num,
+                            "chunk_index": chunk_idx,
+                            "content": chunk_data.get("content", ""),
+                            "score": chunk_data.get("score", chunk.get("score", 0.0)),
+                            "page_number": chunk_data.get("page_number"),
+                            "character_count": chunk_data.get("character_count", 0),
+                        }
+                        st.session_state["chunk_preview_dialog_key"] = True
+                        st.rerun()
+            else:
+                st.markdown(
+                    f'<div class="citation-document" style="margin-bottom: 12px; padding: 12px; border: 2px solid {doc_relevance_color}; border-radius: 8px; background-color: {doc_relevance_color}10;">'
+                    f'<strong style="font-size: 1.1em;">[Document {doc_num}] {source}</strong><br>'
+                    f'<span style="color: {doc_relevance_color}; font-size: 0.9em;">Overall Relevance: ({avg_score:.1%})</span> | '
+                    f'<span style="font-size: 0.9em;">{total_chunks} chunk(s)</span>'
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
 
             # Show individual chunks if more than one
             if total_chunks > 1:
@@ -1969,20 +2036,97 @@ def render_citations(message_metadata: Dict[str, Any]):
                     chunk_score = chunk.get("score", 0.0)
 
                     # Chunk relevance color
-                    if chunk_score >= 0.7:
+                    if chunk_score >= 0.3:
                         chunk_color = COLORS["success"]
-                    elif chunk_score >= 0.5:
+                    elif chunk_score >= 0.2:
                         chunk_color = COLORS["warning"]
                     else:
                         chunk_color = COLORS["error"]
 
-                    st.markdown(
-                        f'<div class="citation-chunk" style="margin-left: 20px; margin-bottom: 6px; padding: 6px; border-left: 2px solid {chunk_color}; background-color: {chunk_color}08;">'
-                        f'<span style="font-size: 0.9em;">Chunk {chunk_idx} '
-                        f'<span style="color: {chunk_color};">({chunk_score:.1%})</span></span>'
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+                    # Make individual chunks clickable
+                    if msg_id:
+                        chunk_data = chunks_map.get(doc_num, {}).get(chunk_idx, {})
+                        col1, col2 = st.columns([0.85, 0.15])
+                        with col1:
+                            st.markdown(
+                                f'<div class="citation-chunk" style="margin-left: 20px; margin-bottom: 6px; padding: 6px; border-left: 2px solid {chunk_color}; background-color: {chunk_color}08;">'
+                                f'<span style="font-size: 0.9em;">Chunk {chunk_idx} '
+                                f'<span style="color: {chunk_color};">({chunk_score:.1%})</span></span>'
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+                        with col2:
+                            if st.button(
+                                "Details",
+                                key=f"cite_chunk_{msg_id}_{doc_num}_{chunk_idx}",
+                                help="View chunk content",
+                                use_container_width=True,
+                            ):
+                                st.session_state["selected_chunk_info"] = {
+                                    "source": source,
+                                    "document_number": doc_num,
+                                    "chunk_index": chunk_idx,
+                                    "content": chunk_data.get("content", ""),
+                                    "score": chunk_data.get(
+                                        "score", chunk_score
+                                    ),
+                                    "page_number": chunk_data.get("page_number"),
+                                    "character_count": chunk_data.get(
+                                        "character_count", 0
+                                    ),
+                                }
+                                st.session_state["chunk_preview_dialog_key"] = True
+                                st.rerun()
+                    else:
+                        st.markdown(
+                            f'<div class="citation-chunk" style="margin-left: 20px; margin-bottom: 6px; padding: 6px; border-left: 2px solid {chunk_color}; background-color: {chunk_color}08;">'
+                            f'<span style="font-size: 0.9em;">Chunk {chunk_idx} '
+                            f'<span style="color: {chunk_color};">({chunk_score:.1%})</span></span>'
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+
+            # Show images for this document
+            images = message_metadata.get("images", [])
+            if images:
+                # Filter images that belong to this document
+                doc_images = []
+                for img in images:
+                    # Match by document ID or source filename
+                    img_name = img.get("name", "")
+                    if doc_id and doc_id in img_name:
+                        doc_images.append(img)
+                    elif source and source in img_name:
+                        doc_images.append(img)
+
+                if doc_images:
+                    st.markdown("**Images:**")
+                    # Create image thumbnails
+                    img_cols = st.columns(min(len(doc_images), 4))
+                    for idx, img in enumerate(doc_images):
+                        with img_cols[idx % len(img_cols)]:
+                            data_b64 = img.get("data", "")
+                            mime = img.get("mime", "image/png")
+                            caption = img.get("caption") or img.get("name", "Image")
+                            page_num = img.get("page_number")
+
+                            if data_b64:
+                                # Create data URI
+                                data_uri = f"data:{mime};base64,{data_b64}"
+
+                                # Display thumbnail with caption
+                                caption_text = caption
+                                if page_num:
+                                    caption_text = f"{caption} (p. {page_num})"
+
+                                # Use HTML for clickable image
+                                st.markdown(
+                                    f'<a href="{data_uri}" target="_blank" rel="noopener noreferrer" style="text-decoration: none;">'
+                                    f'<img src="{data_uri}" style="width: 100%; border-radius: 4px; cursor: pointer;" alt="{caption}" />'
+                                    f'<div style="font-size: 0.85em; color: #666; margin-top: 4px; text-align: center;">{caption_text}</div>'
+                                    f"</a>",
+                                    unsafe_allow_html=True,
+                                )
 
 
 def render_message_bubble(msg: Dict[str, Any], is_user: bool):
@@ -2017,7 +2161,7 @@ def render_message_bubble(msg: Dict[str, Any], is_user: bool):
 
     # Show citations for assistant messages
     if not is_user:
-        render_citations(msg.get("messageMetadata", {}))
+        render_citations(msg.get("messageMetadata", {}), str(msg.get("id", "")))
 
     # Show feedback for assistant messages
     if not is_user:
@@ -2908,6 +3052,7 @@ def render_chat_view():
             attachments_state = st.session_state.setdefault(
                 "message_image_thumbnails", {}
             )
+            chunks_state = st.session_state.setdefault("message_chunks", {})
             existing_messages = {msg["id"]: msg for msg in st.session_state.messages}
 
             for item in items:
@@ -2951,6 +3096,32 @@ def render_chat_view():
                         attachments_state[key] = normalized_attachments
                     else:
                         attachments_state.pop(key, None)
+
+                    # Store chunk data for citation modals
+                    documents_cited = metadata.get("documents_cited", [])
+                    if documents_cited:
+                        chunks_map = {}
+                        for doc in documents_cited:
+                            doc_num = doc.get("document_number")
+                            if doc_num is not None:
+                                chunks_map[doc_num] = {}
+                                for chunk in doc.get("chunks", []):
+                                    chunk_idx = chunk.get("chunk_index")
+                                    if chunk_idx is not None:
+                                        chunks_map[doc_num][chunk_idx] = {
+                                            "content": chunk.get("content", ""),
+                                            "score": chunk.get("score", 0.0),
+                                            "page_number": chunk.get("page_number"),
+                                            "character_count": chunk.get(
+                                                "character_count", 0
+                                            ),
+                                        }
+                        chunks_state[key] = {
+                            "documents_cited": documents_cited,
+                            "chunks_map": chunks_map,
+                        }
+                    else:
+                        chunks_state.pop(key, None)
 
                     existing_messages[msg_id] = item
 
@@ -3455,6 +3626,95 @@ def render_manage_modal():
     st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = False
 
 
+def render_chunk_preview_modal():
+    """Chunk preview modal dialog for viewing retrieved document chunks"""
+    should_show = st.session_state.get("chunk_preview_dialog_key", False)
+
+    if not should_show:
+        return
+
+    @st.dialog("Document Chunk Preview", width="large")
+    def chunk_preview_dialog():
+        selected_info = st.session_state.get("selected_chunk_info")
+
+        if not selected_info:
+            st.warning("No chunk information available.")
+            if st.button("Close", use_container_width=True):
+                st.session_state["chunk_preview_dialog_key"] = False
+                st.rerun()
+            return
+
+        # Extract chunk information
+        doc_source = selected_info.get("source", "Unknown")
+        doc_num = selected_info.get("document_number", "?")
+        chunk_idx = selected_info.get("chunk_index")
+        content = selected_info.get("content", "")
+        score = selected_info.get("score", 0.0)
+        page_num = selected_info.get("page_number")
+        char_count = selected_info.get("character_count", len(content))
+
+        # Determine relevance color
+        if score >= 0.7:
+            relevance_color = COLORS["success"]
+        elif score >= 0.5:
+            relevance_color = COLORS["warning"]
+        else:
+            relevance_color = COLORS["error"]
+
+        # Header information
+        st.markdown(f"### [Document {doc_num}] {doc_source}")
+
+        # Metadata in columns
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if chunk_idx is not None:
+                st.metric("Chunk Index", f"#{chunk_idx}")
+            else:
+                st.metric("Chunk Index", "N/A")
+        with col2:
+            st.markdown(
+                f'<div style="padding: 10px; text-align: center;">'
+                f'<div style="color: {relevance_color}; font-size: 1.5em; font-weight: bold;">{score:.1%}</div>'
+                f'<div style="font-size: 0.9em; color: #888;">Relevance Score</div>'
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        with col3:
+            if page_num is not None:
+                st.metric("Page Number", page_num)
+            else:
+                st.metric("Page Number", "N/A")
+
+        st.divider()
+
+        # Content display
+        if content:
+            st.markdown("**Chunk Content:**")
+            st.text_area(
+                "Content",
+                value=content,
+                height=300,
+                disabled=True,
+                label_visibility="collapsed",
+            )
+            st.caption(f"📊 Character count: {char_count}")
+        else:
+            st.info(
+                "ℹ️ Chunk content is not available. This requires backend enhancement to include chunk content in message metadata."
+            )
+
+        st.divider()
+
+        # Close button
+        if st.button("Close", use_container_width=True):
+            st.session_state["chunk_preview_dialog_key"] = False
+            st.session_state["selected_chunk_info"] = None
+            st.rerun()
+
+    chunk_preview_dialog()
+    st.session_state["chunk_preview_dialog_key"] = False
+
+
 def render_documents_tab():
     """Documents management workspace (moved from the sidebar)."""
     st.markdown("# 📄 Documents")
@@ -3751,6 +4011,9 @@ def main():
 
     # Show manage modal if active
     render_manage_modal()
+
+    # Show chunk preview modal if active
+    render_chunk_preview_modal()
 
     # Tab-based navigation across primary workspaces
     tab_chat, tab_docs, tab_instructions, tab_mcp = st.tabs(

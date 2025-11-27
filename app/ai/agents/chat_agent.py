@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class ChatAgent:
 
     def __init__(self):
-        self.model_name = "gemini-3-pro-preview" # "gemini-flash-latest"
+        self.model_name = "gemini-flash-latest"
         self.gemini_client = None
         self.langchain_model = None
         self.mcp_manager = None
