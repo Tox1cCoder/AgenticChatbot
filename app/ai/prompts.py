@@ -1,10 +1,7 @@
-import logging
 from typing import Optional
 
 from app.core.config import settings
 from app.utils.text_processing import estimate_tokens, truncate_text
-
-logger = logging.getLogger(__name__)
 
 CHAT_SYSTEM_PROMPT = """You are an AI assistant with access to tools. When solving tasks:
 

@@ -1,4 +1,3 @@
-import logging
 from typing import Optional
 from fastapi import APIRouter, status, Query
 
@@ -15,8 +14,6 @@ from app.schemas.mcp import (
     MCPOperationResponse,
 )
 from app.schemas.responses import ApiResponse
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 

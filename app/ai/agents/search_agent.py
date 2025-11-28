@@ -1,5 +1,4 @@
 import logging
-import json
 from typing import Optional, List, Dict, Any, AsyncIterator
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -48,7 +47,9 @@ class SearchAgent:
         try:
             all_tools = await self.mcp_manager.get_tools()
         except Exception as e:
-            logger.error(f"Failed to load MCP tools for SearchAgent: {e}", exc_info=True)
+            logger.error(
+                f"Failed to load MCP tools for SearchAgent: {e}", exc_info=True
+            )
             self.tools = []
             return
 
@@ -65,7 +66,9 @@ class SearchAgent:
                 len(active_servers),
             )
         else:
-            logger.warning("No MCP tools available for SearchAgent; running without tools")
+            logger.warning(
+                "No MCP tools available for SearchAgent; running without tools"
+            )
 
     def _deduplicate_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
         """Ensure the tool list does not contain duplicate names."""
@@ -165,8 +168,6 @@ class SearchAgent:
                 metadata={"error": str(e)},
             )
 
-    # Legacy support / wrapper for graph compatibility if needed,
-    # but the graph should ideally call invoke_model now.
     async def process_message(
         self,
         message: AgentMessage,
@@ -174,7 +175,6 @@ class SearchAgent:
     ) -> AgentResponse:
         """
         Process a search query.
-        NOTE: This now just calls invoke_model. The graph is responsible for handling tool calls.
         """
         return await self.invoke_model(message, conversation_id)
 
@@ -221,65 +221,6 @@ class SearchAgent:
         except Exception as e:
             logger.error(f"Error streaming search agent: {e}", exc_info=True)
             yield {"type": "error", "error": str(e)}
-
-    def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
-        """Create agent executor with proper tool binding configuration."""
-        if not self.langchain_model:
-            raise RuntimeError("SearchAgent language model not initialized")
-
-        # Configure tool calling based on settings
-        tool_choice = (
-            settings.tool_choice_mode
-            if hasattr(settings, "tool_choice_mode")
-            else "auto"
-        )
-
-        # Configure model with tool binding
-        llm_with_tools = self.langchain_model.bind_tools(
-            tools,
-            tool_config={
-                "function_calling_config": {
-                    "mode": (
-                        tool_choice.upper()
-                        if tool_choice in ["auto", "any", "none"]
-                        else "AUTO"
-                    )
-                }
-            },
-        )
-
-        # Configure human-in-the-loop middleware if enabled
-        middleware = []
-        agent = create_agent(
-            model=llm_with_tools,
-            tools=tools,
-            system_prompt=system_prompt,
-            middleware=middleware if middleware else None,
-        )
-
-        return agent
-
-    def _extract_images_from_tavily(self, tool_result: Any) -> List[Dict[str, str]]:
-        """Extract images from Tavily search results"""
-        try:
-            # Parse tool result as JSON if it's a string
-            if isinstance(tool_result, str):
-                result_data = json.loads(tool_result)
-            else:
-                result_data = tool_result
-
-            # Extract images array from response
-            images = result_data.get("images", [])
-
-            # Return images with url and description
-            return [
-                {"url": img.get("url", ""), "description": img.get("description", "")}
-                for img in images
-                if img.get("url")
-            ]
-        except Exception as e:
-            logger.error(f"Failed to extract images from Tavily response: {e}")
-            return []
 
     async def cleanup(self):
         """Cleanup MCP resources"""

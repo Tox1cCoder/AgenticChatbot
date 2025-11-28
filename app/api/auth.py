@@ -1,7 +1,7 @@
-import logging
 from typing import Any
 from fastapi import APIRouter, status
 from uuid import UUID
+import logging
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.user_service_interface import IUserService

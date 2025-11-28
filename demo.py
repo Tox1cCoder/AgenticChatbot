@@ -2067,9 +2067,7 @@ def render_citations(message_metadata: Dict[str, Any], msg_id: Optional[str] = N
                                     "document_number": doc_num,
                                     "chunk_index": chunk_idx,
                                     "content": chunk_data.get("content", ""),
-                                    "score": chunk_data.get(
-                                        "score", chunk_score
-                                    ),
+                                    "score": chunk_data.get("score", chunk_score),
                                     "page_number": chunk_data.get("page_number"),
                                     "character_count": chunk_data.get(
                                         "character_count", 0
@@ -2891,7 +2889,7 @@ def render_interrupt_approval_ui():
             with st.form(f"edit_form_{idx}"):
                 edited_args_text = st.text_area(
                     "Arguments (JSON format)",
-                    value=json.dumps(tool_args, indent=2),
+                    value=json.dumps(tool_args, indent=2, ensure_ascii=False),
                     height=200,
                 )
 

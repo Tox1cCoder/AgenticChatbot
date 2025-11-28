@@ -6,7 +6,6 @@ from google import genai
 from google.genai import types
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import BaseTool
-from langchain.agents import create_agent
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ...core.config import settings
@@ -74,35 +73,6 @@ class ImageGeneratorAgent:
                 )
                 self.tools = []
 
-    def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
-        """Create agent executor with proper tool binding configuration."""
-        # Configure tool calling based on settings
-        tool_choice = (
-            settings.tool_choice_mode
-            if hasattr(settings, "tool_choice_mode")
-            else "auto"
-        )
-
-        # Configure model with tool binding
-        llm_with_tools = self.langchain_model.bind_tools(
-            tools,
-            tool_config={
-                "function_calling_config": {
-                    "mode": (
-                        tool_choice.upper()
-                        if tool_choice in ["auto", "any", "none"]
-                        else "AUTO"
-                    )
-                }
-            },
-        )
-
-        agent = create_agent(
-            model=llm_with_tools, tools=tools, system_prompt=system_prompt
-        )
-
-        return agent
-
     async def invoke_model(
         self,
         message: AgentMessage,
@@ -143,9 +113,7 @@ class ImageGeneratorAgent:
             return AgentResponse(
                 agent_type=AgentType.IMAGE_GENERATOR,
                 agent_id="image_generator_agent",
-                message=AgentMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=narrative),
+                message=AgentMessage(role=MessageRole.ASSISTANT, content=narrative),
                 metadata=response_metadata,
             )
 
