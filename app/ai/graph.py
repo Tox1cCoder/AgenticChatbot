@@ -29,6 +29,7 @@ from .memory import get_memory_manager
 from ..core.config import settings
 from .hitl_config import build_interrupt_response
 from .utils import normalize_tool_call
+import json
 
 if TYPE_CHECKING:
     from ..repositories.document import DocumentRepository
@@ -577,13 +578,34 @@ class MultiAgentWorkflow:
         has_tool_results = len(tool_messages) > 0
 
         if has_tool_results:
-            tool_summaries = "\n".join(
-                f"{getattr(tool_msg, 'name', 'tool')}: {tool_msg.content}"
-                for tool_msg in tool_messages
-            )
+            formatted_results = []
+            for tool_msg in tool_messages:
+                tool_name = getattr(tool_msg, "name", "tool")
+                content = tool_msg.content
+
+                try:
+                    if tool_name == "tavily_search":
+                        data = json.loads(content)
+                        results = data.get("results", [])
+                        formatted = f"{tool_name} results:\n"
+                        for idx, result in enumerate(results, 1):
+                            title = result.get("title", "Untitled")
+                            url = result.get("url", "")
+                            snippet = result.get("content", "")[:200]
+                            formatted += f"  [{idx}] {title}\n      URL: {url}\n      Content: {snippet}...\n\n"
+                        formatted_results.append(formatted)
+                    else:
+                        formatted_results.append(f"{tool_name}: {content}")
+                except Exception:
+                    # Fallback to original format if parsing fails
+                    formatted_results.append(f"{tool_name}: {content}")
+
+            tool_summaries = "\n".join(formatted_results)
             user_content = (
                 f"{user_content}\n\nTool results:\n{tool_summaries}\n"
-                "Leverage these results to improve your answer. Request additional tools if they are necessary to satisfy the user."
+                "Use the URLs provided above to create clickable citations in your response. "
+                "Format each citation as [Source Title](URL) and place them inline after relevant claims. "
+                "Leverage these results to improve your answer. Request additional tools if necessary."
             )
 
         conversation_history = []

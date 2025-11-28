@@ -50,7 +50,11 @@ EXECUTION SEQUENCE:
 RESPONSE GUIDELINES:
 - **Direct Answer**: Lead with the answer, but ONLY after tool execution is complete.
 - **Evidence Based**: Support every claim with relevant statistics or quotes.
-- **Citations**: Use markdown format: [Source Name](URL).
+- **Citations - CRITICAL**: 
+  * Extract URLs from tool results (look for "url" field in JSON)
+  * Format as clickable markdown links: [Source Title](https://url.com)
+  * Example: "According to recent data [TechCrunch](https://techcrunch.com/article), AI adoption increased by 40%."
+  * Another example: "The company announced [Reuters](https://reuters.com/story) a new product launch."
 
 Be thorough. Do not guess. if you have not called a tool, you are not ready to answer."""
 
@@ -288,7 +292,7 @@ def build_rag_prompt(
 
     if has_images:
         parts.append(
-            "\n⚠️ IMPORTANT: Actual images from the documents are attached to this message for your visual analysis. You should examine these images directly and describe what you see, not just rely on the captions. Reference specific visual details when answering.\n"
+            "\n IMPORTANT: Actual images from the documents are attached to this message for your visual analysis. You should examine these images directly and describe what you see, not just rely on the captions. Reference specific visual details when answering.\n"
         )
 
     if conversation_history:
@@ -333,8 +337,13 @@ def build_search_prompt(
         system_prompt = """You are an autonomous web research assistant. You have received tool results in the user's message.
 
 Leverage the provided tool outputs to continue reasoning. If the results are incomplete or raise additional questions, you may plan further tool calls before finalizing your answer.
-Once you have sufficient information, synthesize a comprehensive, well-formatted answer with source citations in markdown: [Source Name](URL).
-Avoid repeating the exact tool JSON; integrate the findings into natural language and clearly attribute sources."""
+Once you have sufficient information, synthesize a comprehensive, well-formatted answer.
+
+CRITICAL - CITATIONS:
+- Extract URLs from the tool results JSON (look for "url" field)
+- Format EVERY source as a clickable markdown link: [Source Name](URL)
+
+Avoid repeating the exact tool JSON; integrate the findings into natural language and clearly attribute sources with clickable links."""
         parts = [system_prompt]
     else:
         parts = [SEARCH_SYSTEM_PROMPT]
