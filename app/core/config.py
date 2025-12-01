@@ -80,6 +80,20 @@ class Settings(BaseSettings):
         description="Tavily API Key for web search",
     )
 
+    # Agent Model Configuration
+    rag_agent_model: str = Field(
+        default="gemini-2.5-flash",
+        description="Gemini model identifier for RAG agent (use gemini-2.5-flash or gemini-2.5-pro for thinking support)",
+    )
+    chat_agent_model: str = Field(
+        default="gemini-2.5-flash",
+        description="Gemini model identifier for chat agent (use gemini-2.5-flash or gemini-2.5-pro for thinking support)",
+    )
+    search_agent_model: str = Field(
+        default="gemini-2.5-flash",
+        description="Gemini model identifier for search agent (use gemini-2.5-flash or gemini-2.5-pro for thinking support)",
+    )
+
     # Image Generation Configuration
     enable_image_generation: bool = Field(
         default=True,
@@ -364,12 +378,26 @@ class Settings(BaseSettings):
         description="Whether to allow responding with feedback by default",
     )
     hitl_tools_require_approval: List[str] = Field(
-        default=[],
+        default=["tavily_search"],
         description="List of tool names that require human approval. Empty list means all tools require approval when HITL is enabled.",
     )
     hitl_approval_timeout_minutes: int = Field(
         default=30,
         description="Timeout in minutes for pending approval requests. After timeout, the workflow can be auto-rejected or cleaned up.",
+    )
+
+    # Gemini Thinking Configuration
+    enable_thinking: bool = Field(
+        default=True,
+        description="Enable Gemini thinking mode for models that support it (e.g., Gemini 2.5)",
+    )
+    include_thoughts_in_response: bool = Field(
+        default=True,
+        description="Include thought summaries in streaming responses when thinking mode is enabled",
+    )
+    thinking_budget: int = Field(
+        default=0,
+        description="Token budget for thinking (0 = model default). Higher values allow more reasoning tokens.",
     )
 
 

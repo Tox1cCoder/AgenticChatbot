@@ -88,9 +88,7 @@ class AIService:
         )
 
         if response:
-            # Check for interrupt in metadata
             if response.metadata and "interrupt" in response.metadata:
-                logger.info("AI Service detected interrupt in response metadata")
                 return response
             return response
 
@@ -150,11 +148,7 @@ class AIService:
             )
 
         try:
-            # Check state before resume
             state_info = await self.workflow.get_state(thread_id)
-            logger.info(
-                f"Resuming workflow - interrupted: {state_info.get('interrupted')}, next: {state_info.get('next')}"
-            )
 
             response = await self.workflow.resume(
                 thread_id=thread_id,
@@ -164,13 +158,6 @@ class AIService:
 
             if response:
                 return response
-
-            # If no response, check state again
-            logger.warning("No response after resume, checking state...")
-            final_state = await self.workflow.get_state(thread_id)
-            logger.error(
-                f"Final state after resume - next: {final_state.get('next')}, has response: {final_state.get('values', {}).get('response') is not None}"
-            )
 
             return self._build_error_response(
                 "Error: No response generated after resume"
@@ -205,11 +192,6 @@ class AIService:
             )
 
         try:
-            logger.info(
-                f"Resuming interrupted execution for thread_id={thread_id} with {len(decisions)} decisions"
-            )
-
-            # Process decisions through the workflow
             response = await self.workflow.resume_with_decisions(
                 thread_id=thread_id,
                 decisions=decisions,
@@ -218,13 +200,6 @@ class AIService:
 
             if response:
                 return response
-
-            # If no response, check state
-            logger.warning("No response after resume with decisions, checking state...")
-            final_state = await self.workflow.get_state(thread_id)
-            logger.error(
-                f"Final state - next: {final_state.get('next')}, has response: {final_state.get('values', {}).get('response') is not None}"
-            )
 
             return self._build_error_response(
                 "Error: No response generated after resuming with decisions"
@@ -269,10 +244,20 @@ class AIService:
             ):
                 event_type = event.get("type")
 
-                if event_type == "node":
+                if event_type == "agent_selected":
+                    # Yield agent selection notification
+                    agent_name = event.get("agent", "unknown")
+                    yield {"type": "agent_selected", "agent": agent_name}
+
+                elif event_type == "node":
                     # Yield node execution notification
                     node_name = event.get("node")
                     yield {"type": "node", "node": node_name}
+
+                elif event_type == "thinking":
+                    # Yield thinking/reasoning content from Gemini models
+                    content = event.get("content", "")
+                    yield {"type": "thinking", "content": content}
 
                 elif event_type == "token":
                     # Yield incremental token chunks directly
@@ -299,13 +284,8 @@ class AIService:
                     yield {"type": "error", "error": error_msg}
 
                 elif event_type == "interrupt":
-                    # Yield interrupt event with complete information
-                    # This signals the frontend that the workflow is paused for human input
                     next_nodes = event.get("next", [])
                     pending_tool_calls = event.get("pending_tool_calls")
-                    logger.info(
-                        f"Workflow interrupted before nodes: {next_nodes}, tool_calls: {pending_tool_calls}"
-                    )
                     yield {
                         "type": "interrupt",
                         "next": next_nodes,

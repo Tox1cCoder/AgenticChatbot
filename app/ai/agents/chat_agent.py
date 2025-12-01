@@ -1,15 +1,15 @@
 ﻿import logging
 import base64
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 from google import genai
 from google.genai import types
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 from langchain_core.tools import BaseTool
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import build_chat_prompt
+from ..prompts import build_chat_prompt, CHAT_SYSTEM_PROMPT
 from ..utils import (
     coerce_response_text,
     get_error_recovery_hint,
@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 class ChatAgent:
 
     def __init__(self):
-        self.model_name = "gemini-flash-latest"
+        # Use configurable model (gemini-2.5-flash for thinking support)
+        self.model_name = settings.chat_agent_model
         self.gemini_client = None
         self.langchain_model = None
         self.mcp_manager = None
@@ -41,9 +42,16 @@ class ChatAgent:
 
         self.gemini_client = genai.Client(api_key=api_key)
 
-        self.langchain_model = ChatGoogleGenerativeAI(
-            model=self.model_name, google_api_key=api_key, temperature=0.8
-        )
+        # Build LangChain model with optional thinking support
+        model_kwargs = {
+            "model": self.model_name,
+            "google_api_key": api_key,
+            "temperature": 0.8,
+        }
+        if settings.enable_thinking and settings.thinking_budget > 0:
+            model_kwargs["thinking_budget"] = settings.thinking_budget
+
+        self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
     async def _init_tools(self):
         """Initialize MCP manager and load general-purpose tools"""
@@ -63,9 +71,7 @@ class ChatAgent:
         try:
             all_tools = await self.mcp_manager.get_tools()
         except Exception as e:
-            logger.error(
-                "Failed to load MCP tools for ChatAgent: %s", e, exc_info=True
-            )
+            logger.error("Failed to load MCP tools for ChatAgent: %s", e, exc_info=True)
             self.tools = []
             return
 
@@ -82,7 +88,9 @@ class ChatAgent:
                 len(active_servers),
             )
         else:
-            logger.warning("No MCP tools available for ChatAgent; running without tools")
+            logger.warning(
+                "No MCP tools available for ChatAgent; running without tools"
+            )
 
     def _deduplicate_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
         """Ensure the tool list does not contain duplicates by name."""
@@ -200,24 +208,7 @@ class ChatAgent:
         )
 
         # Configure tool calling based on global setting; allow the model to decide
-        tool_choice = (
-            settings.tool_choice_mode
-            if hasattr(settings, "tool_choice_mode")
-            else "auto"
-        )
-
-        llm_with_tools = self.langchain_model.bind_tools(
-            self.tools,
-            tool_config={
-                "function_calling_config": {
-                    "mode": (
-                        tool_choice.upper()
-                        if tool_choice in ["auto", "any", "none"]
-                        else "AUTO"
-                    )
-                }
-            },
-        )
+        llm_with_tools = self._get_llm_with_tools()
 
         try:
             # Invoke model
@@ -263,6 +254,71 @@ class ChatAgent:
                     "error": f"{type(e).__name__}: {e}",
                 },
             )
+
+    async def invoke_model_with_history(
+        self,
+        messages: List[BaseMessage],
+        conversation_history: List[Any],
+        persona: Optional[str],
+        conversation_id: Optional[str] = None,
+    ) -> AgentResponse:
+        if self.mcp_manager is None:
+            await self._init_tools()
+
+        llm_with_tools = self._get_llm_with_tools()
+
+        system_prompt = CHAT_SYSTEM_PROMPT
+        if persona and persona.strip():
+            system_prompt = (
+                f"Custom Persona:\n{persona.strip()}\n\n---\n{system_prompt}"
+            )
+
+        langchain_messages: List[BaseMessage] = [SystemMessage(content=system_prompt)]
+        langchain_messages.extend(messages)
+
+        response = await llm_with_tools.ainvoke(langchain_messages)
+
+        tool_calls = (
+            response.tool_calls
+            if hasattr(response, "tool_calls") and response.tool_calls
+            else []
+        )
+
+        return AgentResponse(
+            agent_type=AgentType.CHAT,
+            agent_id="chat_agent",
+            message=AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content=coerce_response_text(response.content),
+                tool_calls=tool_calls if tool_calls else None,
+            ),
+            metadata={
+                "model": self.model_name,
+                "conversation_id": conversation_id,
+                "context_messages": len(conversation_history),
+                "tools_available": len(self.tools),
+                "persona_used": persona,
+            },
+        )
+
+    def _get_llm_with_tools(self):
+        tool_choice = (
+            settings.tool_choice_mode
+            if hasattr(settings, "tool_choice_mode")
+            else "auto"
+        )
+        return self.langchain_model.bind_tools(
+            self.tools,
+            tool_config={
+                "function_calling_config": {
+                    "mode": (
+                        tool_choice.upper()
+                        if tool_choice in ["auto", "any", "none"]
+                        else "AUTO"
+                    )
+                }
+            },
+        )
 
     async def _generate(self, prompt: str) -> str:
         if not self.gemini_client:

@@ -5,7 +5,7 @@ from typing import Optional, List, Dict, Any, AsyncIterator
 from google import genai
 from google.genai import types
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.tools import BaseTool
+from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ...core.config import settings
@@ -41,9 +41,16 @@ class ImageGeneratorAgent:
 
         self.gemini_client = genai.Client(api_key=api_key)
 
-        self.langchain_model = ChatGoogleGenerativeAI(
-            model="gemini-flash-latest", google_api_key=api_key, temperature=0.8
-        )
+        # Build LangChain model with optional thinking support
+        model_kwargs = {
+            "model": "gemini-flash-latest",
+            "google_api_key": api_key,
+            "temperature": 0.8,
+        }
+        if settings.enable_thinking and settings.thinking_budget > 0:
+            model_kwargs["thinking_budget"] = settings.thinking_budget
+
+        self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
     async def _init_tools(self):
         """Initialize MCP manager and load all available tools"""
@@ -118,35 +125,10 @@ class ImageGeneratorAgent:
             )
 
         # Configure tool calling (only if no tool results yet)
-        tool_choice = (
-            settings.tool_choice_mode
-            if hasattr(settings, "tool_choice_mode")
-            else "auto"
-        )
-
-        llm_with_tools = self.langchain_model.bind_tools(
-            self.tools,
-            tool_config={
-                "function_calling_config": {
-                    "mode": (
-                        tool_choice.upper()
-                        if tool_choice in ["auto", "any", "none"]
-                        else "AUTO"
-                    )
-                }
-            },
-        )
-
-        # Build prompt for the enhancement model
-        system_prompt = """You are an expert image generation prompt engineer.
-Your goal is to create a detailed, descriptive prompt for an image generator based on the user's request.
-You have access to external tools to fetch real-time context (like weather, time, news) if relevant to the image.
-If the user asks for "a picture of the current weather in NY", use the weather tool first.
-Once you have sufficient information, output the FINAL detailed prompt for the image generator.
-Do not output anything else, just the prompt."""
+        llm_with_tools = self._get_llm_with_tools()
 
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": self._get_system_prompt()},
             {"role": "user", "content": message.content},
         ]
 
@@ -196,6 +178,100 @@ Do not output anything else, just the prompt."""
         except Exception as e:
             logger.error(f"Error in image generator agent: {e}", exc_info=True)
             return self._build_error_response(str(e), conversation_id)
+
+    async def invoke_model_with_history(
+        self,
+        messages: List[BaseMessage],
+        conversation_history: List[Any],
+        persona: Optional[str],
+        conversation_id: Optional[str] = None,
+    ) -> AgentResponse:
+        if not self.enabled:
+            return self._build_error_response(
+                "Image generation is currently disabled.", conversation_id
+            )
+
+        if self.mcp_manager is None:
+            await self._init_tools()
+
+        llm_with_tools = self._get_llm_with_tools()
+
+        langchain_messages: List[BaseMessage] = [
+            SystemMessage(content=self._get_system_prompt())
+        ]
+        langchain_messages.extend(messages)
+
+        response = await llm_with_tools.ainvoke(langchain_messages)
+
+        tool_calls = (
+            response.tool_calls
+            if hasattr(response, "tool_calls") and response.tool_calls
+            else []
+        )
+        if tool_calls:
+            return AgentResponse(
+                agent_type=AgentType.IMAGE_GENERATOR,
+                agent_id="image_generator_agent",
+                message=AgentMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=coerce_response_text(response.content),
+                    tool_calls=tool_calls,
+                ),
+                metadata={"tools_available": len(self.tools)},
+            )
+
+        enhanced_prompt = coerce_response_text(response.content)
+
+        last_human_message = next(
+            (m for m in reversed(messages) if isinstance(m, HumanMessage)), None
+        )
+        original_prompt = last_human_message.content if last_human_message else ""
+
+        images, narrative = await self._generate_images(
+            enhanced_prompt, original_prompt
+        )
+
+        return AgentResponse(
+            agent_type=AgentType.IMAGE_GENERATOR,
+            agent_id="image_generator_agent",
+            message=AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content=narrative or "Here is the image I created.",
+            ),
+            metadata={
+                "model": self.model_name,
+                "conversation_id": conversation_id,
+                "images": images,
+                "tools_available": len(self.tools),
+            },
+        )
+
+    def _get_llm_with_tools(self):
+        tool_choice = (
+            settings.tool_choice_mode
+            if hasattr(settings, "tool_choice_mode")
+            else "auto"
+        )
+        return self.langchain_model.bind_tools(
+            self.tools,
+            tool_config={
+                "function_calling_config": {
+                    "mode": (
+                        tool_choice.upper()
+                        if tool_choice in ["auto", "any", "none"]
+                        else "AUTO"
+                    )
+                }
+            },
+        )
+
+    def _get_system_prompt(self) -> str:
+        return """You are an expert image generation prompt engineer.
+Your goal is to create a detailed, descriptive prompt for an image generator based on the user's request.
+You have access to external tools to fetch real-time context (like weather, time, news) if relevant to the image.
+If the user asks for "a picture of the current weather in NY", use the weather tool first.
+Once you have sufficient information, output the FINAL detailed prompt for the image generator.
+Do not output anything else, just the prompt."""
 
     async def process_message(
         self,

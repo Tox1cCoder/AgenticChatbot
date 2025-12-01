@@ -6,15 +6,95 @@ from typing import Dict, Any, List, Optional
 from app.core.config import settings
 from app.ai.schemas import InterruptResponse, ToolInterruptRequest
 
-try:
-    from langgraph.types import Interrupt as LangGraphInterrupt
-except Exception:
-    LangGraphInterrupt = None
+from langgraph.types import Interrupt as LangGraphInterrupt
 
 
-def should_enable_hitl() -> bool:
+def is_hitl_enabled() -> bool:
     """Check if human-in-the-loop is enabled in settings."""
     return getattr(settings, "enable_human_in_the_loop", True)
+
+
+def get_tools_requiring_approval() -> List[str]:
+    """Get the list of tool names that require human approval."""
+    return getattr(settings, "hitl_tools_require_approval", [])
+
+
+def requires_human_approval(tool_names: List[str]) -> bool:
+    """
+    Check if any of the given tool names require human approval.
+
+    Args:
+        tool_names: List of tool names to check
+
+    Returns:
+        True if HITL is enabled and any tool requires approval
+    """
+    if not is_hitl_enabled():
+        return False
+
+    approval_list = get_tools_requiring_approval()
+    if not approval_list:
+        # Empty list means no tools require approval
+        return False
+
+    return any(name in approval_list for name in tool_names if name)
+
+
+def _parse_review_configs(data: Optional[List[Dict[str, Any]]]) -> Dict[str, List[str]]:
+    """Parse review configurations into a mapping of action names to allowed decisions."""
+    review_configs: Dict[str, List[str]] = {}
+    for cfg in data or []:
+        if isinstance(cfg, dict):
+            action_name = cfg.get("action_name")
+            allowed = cfg.get("allowed_decisions")
+            if action_name and isinstance(allowed, list):
+                review_configs[action_name] = allowed
+    return review_configs
+
+
+def _build_tool_interrupt_request(
+    task: Dict[str, Any],
+    idx: int,
+    default_prefix: str,
+    allowed_map: Dict[str, List[str]],
+) -> ToolInterruptRequest:
+    """Build a single ToolInterruptRequest from a task dictionary."""
+    # ID mapping priority: tool_call_id (primary) → id → task_id → generated ID
+    task_id = (
+        task.get("tool_call_id")
+        or task.get("id")
+        or task.get("task_id")
+        or f"{default_prefix}:{idx}"
+    )
+    tool_name = task.get("action") or task.get("tool") or task.get("name") or "unknown"
+    tool_args = (
+        task.get("args") or task.get("tool_input") or task.get("arguments") or {}
+    )
+    allowed = allowed_map.get(tool_name)
+
+    return ToolInterruptRequest(
+        action=tool_name,
+        args=tool_args,
+        description=task.get("description"),
+        task_id=task_id,
+        tool_call_id=task.get("tool_call_id"),
+        allowed_decisions=allowed,
+    )
+
+
+def _extract_action_requests(
+    tasks: List[Dict[str, Any]],
+    allowed_map: Dict[str, List[str]],
+    default_prefix: str,
+) -> List[ToolInterruptRequest]:
+    """Extract ToolInterruptRequest objects from a list of tasks."""
+    action_requests: List[ToolInterruptRequest] = []
+    for idx, task in enumerate(tasks):
+        if not isinstance(task, dict):
+            continue
+        request = _build_tool_interrupt_request(task, idx, default_prefix, allowed_map)
+        action_requests.append(request)
+    return action_requests
 
 
 def build_interrupt_response(
@@ -24,58 +104,14 @@ def build_interrupt_response(
     action_requests: List[ToolInterruptRequest] = []
     interrupt_id: Optional[str] = None
 
-    def _parse_review_configs(data: Dict[str, Any]) -> Dict[str, List[str]]:
-        review_configs = {}
-        for cfg in data or []:
-            if isinstance(cfg, dict):
-                action_name = cfg.get("action_name")
-                allowed = cfg.get("allowed_decisions")
-                if action_name and isinstance(allowed, list):
-                    review_configs[action_name] = allowed
-        return review_configs
-
-    def _add_requests(tasks: List[Dict[str, Any]], allowed_map: Dict[str, List[str]]):
-        default_prefix = interrupt_id or "task"
-        for idx, task in enumerate(tasks):
-            if not isinstance(task, dict):
-                continue
-            # ID mapping priority: tool_call_id (primary) → id → task_id → generated ID
-            task_id = (
-                task.get("tool_call_id")
-                or task.get("id")
-                or task.get("task_id")
-                or f"{default_prefix}:{idx}"
-            )
-            tool_name = (
-                task.get("action") or task.get("tool") or task.get("name") or "unknown"
-            )
-            tool_args = (
-                task.get("args")
-                or task.get("tool_input")
-                or task.get("arguments")
-                or {}
-            )
-            allowed = allowed_map.get(tool_name)
-
-            action_requests.append(
-                ToolInterruptRequest(
-                    action=tool_name,
-                    args=tool_args,
-                    description=task.get("description"),
-                    task_id=task_id,
-                    tool_call_id=task.get("tool_call_id"),
-                    allowed_decisions=allowed,
-                )
-            )
-
     # Normalize interrupt_data to a list of payloads
     payloads: List[Any] = []
-    if LangGraphInterrupt and isinstance(interrupt_data, LangGraphInterrupt):
+    if isinstance(interrupt_data, LangGraphInterrupt):
         interrupt_id = interrupt_data.id or interrupt_id
         payloads.append(interrupt_data.value)
     elif isinstance(interrupt_data, (list, tuple)):
         for item in interrupt_data:
-            if LangGraphInterrupt and isinstance(item, LangGraphInterrupt):
+            if isinstance(item, LangGraphInterrupt):
                 interrupt_id = interrupt_id or item.id
                 payloads.append(item.value)
             else:
@@ -90,10 +126,15 @@ def build_interrupt_response(
         if not interrupt_id:
             interrupt_id = payload.get("interrupt_id")
 
+        default_prefix = interrupt_id or "task"
+
         # New LangGraph HITL payload shape
         if "action_requests" in payload:
             allowed_map = _parse_review_configs(payload.get("review_configs", []))
-            _add_requests(payload.get("action_requests", []), allowed_map)
+            requests = _extract_action_requests(
+                payload.get("action_requests", []), allowed_map, default_prefix
+            )
+            action_requests.extend(requests)
             continue
 
         # Fallback support for older interrupt shapes
@@ -104,7 +145,8 @@ def build_interrupt_response(
             or []
         )
         allowed_map = _parse_review_configs(payload.get("review_configs", []))
-        _add_requests(tasks, allowed_map)
+        requests = _extract_action_requests(tasks, allowed_map, default_prefix)
+        action_requests.extend(requests)
 
     interrupt_id = interrupt_id or str(uuid.uuid4())
 

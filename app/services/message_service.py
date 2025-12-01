@@ -196,9 +196,17 @@ class MessageService(IMessageService):
                 ):
                     event_type = event.get("type")
 
-                    if event_type == "token":
+                    if event_type == "agent_selected":
+                        # Yield agent selection notification to client
+                        yield {"type": "agent_selected", "agent": event.get("agent")}
+
+                    elif event_type == "token":
                         # Yield token to client
                         yield {"type": "token", "content": event.get("content", "")}
+
+                    elif event_type == "thinking":
+                        # Yield thinking/reasoning content to client
+                        yield {"type": "thinking", "content": event.get("content", "")}
 
                     elif event_type == "tool":
                         # Yield tool execution event
@@ -220,13 +228,11 @@ class MessageService(IMessageService):
                                     settings.hitl_approval_timeout_minutes * 60
                                 )
                                 try:
-                                    # Store timestamp with TTL
                                     self.redis_client.setex(
                                         key,
                                         timeout_seconds,
                                         datetime.utcnow().isoformat(),
                                     )
-                                    # Calculate deadline and add to metadata
                                     deadline = datetime.utcnow() + timedelta(
                                         minutes=settings.hitl_approval_timeout_minutes
                                     )
@@ -235,13 +241,8 @@ class MessageService(IMessageService):
                                     interrupt_response["metadata"][
                                         "timeout_deadline"
                                     ] = deadline.isoformat()
-                                    logger.info(
-                                        f"Stored interrupt timeout for {interrupt_id}, deadline: {deadline}"
-                                    )
-                                except Exception as e:
-                                    logger.error(
-                                        f"Failed to store interrupt timeout: {e}"
-                                    )
+                                except Exception:
+                                    pass
 
                         yield {
                             "type": "interrupt",
@@ -385,17 +386,10 @@ class MessageService(IMessageService):
                             f"Interrupt approval timeout exceeded: {elapsed_minutes:.1f} minutes elapsed, "
                             f"limit is {settings.hitl_approval_timeout_minutes} minutes"
                         )
-                    logger.info(
-                        f"Interrupt timeout check passed: {elapsed_minutes:.1f}/{settings.hitl_approval_timeout_minutes} minutes"
-                    )
-                else:
-                    logger.warning(
-                        f"No timeout record found for interrupt {interrupt_id}"
-                    )
             except TimeoutError:
                 raise
-            except Exception as e:
-                logger.error(f"Failed to check interrupt timeout: {e}")
+            except Exception:
+                pass
 
         # Get the conversation to retrieve user_id and persona
         conversation = (
@@ -436,14 +430,9 @@ class MessageService(IMessageService):
                         ),
                     }
                     self.tool_approval_repository.create(approval_data)
-                    logger.info(
-                        f"Logged approval decision for tool {decision.action}: {decision.decision}"
-                    )
-            except Exception as e:
-                # Don't fail the resume operation if audit logging fails
-                logger.error(f"Failed to log approval decisions to audit trail: {e}")
+            except Exception:
+                pass
 
-        # Resume execution via AI service
         bot_response = await self.ai_service.resume_interrupted_execution(
             thread_id=thread_id,
             conversation_id=conversation_id,
@@ -455,9 +444,8 @@ class MessageService(IMessageService):
             key = f"interrupt:{conversation_id}:{interrupt_id}"
             try:
                 self.redis_client.delete(key)
-                logger.info(f"Cleared interrupt timeout for {interrupt_id}")
-            except Exception as e:
-                logger.error(f"Failed to clear interrupt timeout: {e}")
+            except Exception:
+                pass
 
         if (
             bot_response
@@ -488,7 +476,6 @@ class MessageService(IMessageService):
                     interrupt_payload["metadata"] = {}
                 interrupt_payload["metadata"]["interrupt_count"] = interrupt_count
 
-                # Add user-friendly message
                 if interrupt_count > 1:
                     interrupt_payload["metadata"][
                         "message"
@@ -498,18 +485,9 @@ class MessageService(IMessageService):
                         "message"
                     ] = "The assistant wants to use tools that require approval"
 
-                # Add maximum depth check to prevent infinite loops
                 MAX_INTERRUPT_DEPTH = 5
                 if interrupt_count > MAX_INTERRUPT_DEPTH:
-                    logger.warning(
-                        f"Interrupt depth exceeded maximum ({MAX_INTERRUPT_DEPTH}), "
-                        f"preventing chained interrupt for conversation {conversation_id}"
-                    )
-                    # Could optionally auto-reject or provide fallback response here
-                else:
-                    logger.info(
-                        f"Chained interrupt detected (depth: {interrupt_count})"
-                    )
+                    pass  # Could auto-reject or provide fallback
 
                 interrupt_payload = InterruptResponse.model_validate(interrupt_payload)
             message_read.interrupt = interrupt_payload

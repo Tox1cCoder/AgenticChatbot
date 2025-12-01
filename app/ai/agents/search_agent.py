@@ -2,11 +2,11 @@ import logging
 from typing import Optional, List, Dict, Any, AsyncIterator
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 from langchain_core.tools import BaseTool
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import build_search_prompt
+from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT
 from ..utils import coerce_response_text
 from ...core.config import settings
 from ..mcp_integration import MCPManager
@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 class SearchAgent:
 
     def __init__(self):
-        self.model_name = "gemini-flash-latest"
+        # Use configurable model
+        self.model_name = settings.search_agent_model
         self.langchain_model = None
         self.mcp_manager = None
         self.tools = []
@@ -28,9 +29,17 @@ class SearchAgent:
 
         if api_key.startswith("GEMINI_API_KEY="):
             api_key = api_key.split("=", 1)[-1].strip()
-        self.langchain_model = ChatGoogleGenerativeAI(
-            model=self.model_name, google_api_key=api_key, temperature=0.12
-        )
+
+        # Build LangChain model with optional thinking support
+        model_kwargs = {
+            "model": self.model_name,
+            "google_api_key": api_key,
+            "temperature": 0.12,
+        }
+        if settings.enable_thinking and settings.thinking_budget > 0:
+            model_kwargs["thinking_budget"] = settings.thinking_budget
+
+        self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
     async def _init_mcp(self):
         """Initialize MCP manager and load external tool suites"""
@@ -107,24 +116,7 @@ class SearchAgent:
         )
 
         # Configure tool calling; allow follow-up tool planning when needed
-        tool_choice = (
-            settings.tool_choice_mode
-            if hasattr(settings, "tool_choice_mode")
-            else "auto"
-        )
-
-        llm_with_tools = self.langchain_model.bind_tools(
-            self.tools,
-            tool_config={
-                "function_calling_config": {
-                    "mode": (
-                        tool_choice.upper()
-                        if tool_choice in ["auto", "any", "none"]
-                        else "AUTO"
-                    )
-                }
-            },
-        )
+        llm_with_tools = self._get_llm_with_tools()
 
         try:
             # Invoke model
@@ -168,6 +160,72 @@ class SearchAgent:
                 metadata={"error": str(e)},
             )
 
+    async def invoke_model_with_history(
+        self,
+        messages: List[BaseMessage],
+        conversation_history: List[Any],
+        persona: Optional[str],
+        conversation_id: Optional[str] = None,
+    ) -> AgentResponse:
+        if self.mcp_manager is None:
+            await self._init_mcp()
+
+        llm_with_tools = self._get_llm_with_tools()
+
+        system_prompt = SEARCH_SYSTEM_PROMPT
+        if persona and persona.strip():
+            system_prompt = (
+                f"Custom Persona:\n{persona.strip()}\n\n---\n{system_prompt}"
+            )
+
+        langchain_messages: List[BaseMessage] = [SystemMessage(content=system_prompt)]
+        langchain_messages.extend(messages)
+
+        response = await llm_with_tools.ainvoke(langchain_messages)
+
+        tool_calls = (
+            response.tool_calls
+            if hasattr(response, "tool_calls") and response.tool_calls
+            else []
+        )
+
+        return AgentResponse(
+            agent_type=AgentType.SEARCH,
+            agent_id="search_agent",
+            message=AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content=coerce_response_text(response.content),
+                tool_calls=tool_calls if tool_calls else None,
+            ),
+            metadata={
+                "model": self.model_name,
+                "conversation_id": conversation_id,
+                "context_messages": len(conversation_history),
+                "tools_available": len(self.tools),
+                "agent_type": "tool_calling",
+                "persona_used": persona,
+            },
+        )
+
+    def _get_llm_with_tools(self):
+        tool_choice = (
+            settings.tool_choice_mode
+            if hasattr(settings, "tool_choice_mode")
+            else "auto"
+        )
+        return self.langchain_model.bind_tools(
+            self.tools,
+            tool_config={
+                "function_calling_config": {
+                    "mode": (
+                        tool_choice.upper()
+                        if tool_choice in ["auto", "any", "none"]
+                        else "AUTO"
+                    )
+                }
+            },
+        )
+
     async def process_message(
         self,
         message: AgentMessage,
@@ -210,9 +268,9 @@ class SearchAgent:
                 if event_type == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
-                        token = chunk.content
-                        if isinstance(token, list):
-                            token = "".join(str(item) for item in token if item)
+                        # Use coerce_response_text to handle various content formats
+                        # including Anthropic's content blocks
+                        token = coerce_response_text(chunk.content)
                         if token:
                             yield {"type": "token", "content": token}
 

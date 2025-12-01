@@ -52,7 +52,8 @@ class RAGAgent:
 
         self.collection_name = collection_name
         self.embedding_dimension = settings.embedding_dimension
-        self.model_name = "gemini-flash-latest"
+        # Use configurable model (gemini-2.5-flash for thinking support)
+        self.model_name = settings.rag_agent_model
         self.gemini_client = None
         self.langchain_model = None
         self.mcp_manager = None
@@ -63,6 +64,9 @@ class RAGAgent:
         self.score_threshold = settings.rag_score_threshold
         self.enable_reranking = settings.enable_reranking
         self.reranker = None
+
+        # Thinking support
+        self._last_thinking_summary = None
 
         self._init_gemini()
 
@@ -81,9 +85,16 @@ class RAGAgent:
 
         self.gemini_client = genai.Client(api_key=api_key)
 
-        self.langchain_model = ChatGoogleGenerativeAI(
-            model=self.model_name, google_api_key=api_key, temperature=0.24
-        )
+        # Build LangChain model with optional thinking support
+        model_kwargs = {
+            "model": self.model_name,
+            "google_api_key": api_key,
+            "temperature": 0.24,
+        }
+        if settings.enable_thinking and settings.thinking_budget > 0:
+            model_kwargs["thinking_budget"] = settings.thinking_budget
+
+        self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
     def _init_reranker(self):
         """Initialize the re-ranker model"""
@@ -383,6 +394,12 @@ class RAGAgent:
         elif error_message:
             metadata["error"] = error_message
 
+        # Add thinking summary if available
+        if self._last_thinking_summary:
+            metadata["thinking_summary"] = self._last_thinking_summary
+            # Clear after use
+            self._last_thinking_summary = None
+
         return AgentResponse(
             agent_type=AgentType.RAG,
             agent_id="rag_agent",
@@ -493,10 +510,14 @@ class RAGAgent:
                         tools_used = event["tools_used"]
                         tool_artifacts = event["tool_artifacts"]
             else:
-                # Text only - stream
-                async for chunk in self._generate_stream(prompt):
-                    accumulated_content += chunk
-                    yield {"type": "token", "content": chunk}
+                # Text only - stream with thinking support
+                async for event in self._generate_stream(prompt):
+                    if event["type"] == "thinking":
+                        # Forward thinking events to client
+                        yield event
+                    elif event["type"] == "token":
+                        accumulated_content += event["content"]
+                        yield event
 
         except Exception as exc:
             logger.error("Error streaming RAG response: %s", exc, exc_info=True)
@@ -662,11 +683,9 @@ class RAGAgent:
                 if event_type == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
-                        # Handle both string and list content
-                        token = chunk.content
-                        if isinstance(token, list):
-                            # If it's a list, join the string parts
-                            token = "".join(str(item) for item in token if item)
+                        # Use coerce_response_text to handle various content formats
+                        # including Anthropic's content blocks
+                        token = coerce_response_text(chunk.content)
                         if token:  # Only yield non-empty tokens
                             accumulated_text += token
                             yield {"type": "token", "content": token}
@@ -763,18 +782,86 @@ class RAGAgent:
             return all_citations
 
     async def _generate_stream(self, prompt: str):
+        """
+        Stream content generation with thinking support.
+        Yields events with type 'thinking' for thought content and 'token' for answer content.
+
+        Note: The Gemini client's generate_content_stream returns a sync iterator,
+        so we need to handle it carefully in async context.
+        """
+        import asyncio
+        import queue
+        import threading
+
         try:
-            response_stream = self.gemini_client.models.generate_content_stream(
-                model=self.model_name,
-                contents=prompt,
+            config_kwargs = {}
+            if settings.enable_thinking:
+                thinking_config_kwargs = {
+                    "include_thoughts": settings.include_thoughts_in_response
+                }
+                if settings.thinking_budget > 0:
+                    thinking_config_kwargs["thinking_budget"] = settings.thinking_budget
+                config_kwargs["thinking_config"] = types.ThinkingConfig(
+                    **thinking_config_kwargs
+                )
+
+            config = (
+                types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
             )
 
-            for chunk in response_stream:
-                if hasattr(chunk, "text"):
-                    yield chunk.text
+            chunk_queue = queue.Queue()
+
+            def stream_to_queue():
+                try:
+                    response_stream = self.gemini_client.models.generate_content_stream(
+                        model=self.model_name,
+                        contents=prompt,
+                        config=config,
+                    )
+                    for chunk in response_stream:
+                        chunk_queue.put(("chunk", chunk))
+                    chunk_queue.put(("done", None))
+                except Exception as e:
+                    chunk_queue.put(("error", e))
+
+            thread = threading.Thread(target=stream_to_queue, daemon=True)
+            thread.start()
+
+            chunk_count = 0
+            loop = asyncio.get_event_loop()
+
+            while True:
+                try:
+                    item = await loop.run_in_executor(
+                        None, lambda: chunk_queue.get(timeout=60)
+                    )
+                except Exception as e:
+                    raise RuntimeError(f"Timeout waiting for Gemini stream: {e}")
+
+                msg_type, data = item
+
+                if msg_type == "done":
+                    break
+                elif msg_type == "error":
+                    raise data
+                elif msg_type == "chunk":
+                    chunk = data
+                    chunk_count += 1
+
+                    if hasattr(chunk, "candidates") and chunk.candidates:
+                        candidate = chunk.candidates[0]
+                        if hasattr(candidate, "content") and candidate.content:
+                            for part in candidate.content.parts:
+                                if not hasattr(part, "text") or not part.text:
+                                    continue
+                                if hasattr(part, "thought") and part.thought:
+                                    yield {"type": "thinking", "content": part.text}
+                                else:
+                                    yield {"type": "token", "content": part.text}
+                    elif hasattr(chunk, "text") and chunk.text:
+                        yield {"type": "token", "content": chunk.text}
 
         except Exception as exc:
-            logger.error(f"Error in streaming generation: {exc}", exc_info=True)
             raise RuntimeError(f"Gemini streaming API error: {exc}") from exc
 
     async def _generate_with_tools(
@@ -1009,10 +1096,56 @@ class RAGAgent:
             raise
 
     async def _generate(self, prompt: str) -> str:
+        """
+        Generate content with optional thinking support.
+        Returns tuple of (response_text, thinking_summary) when thinking is enabled.
+        """
         try:
-            response = self.gemini_client.models.generate_content(
-                model=self.model_name, contents=prompt
+            # Build generation config with thinking support
+            config_kwargs = {}
+            if settings.enable_thinking:
+                thinking_config_kwargs = {
+                    "include_thoughts": settings.include_thoughts_in_response
+                }
+                if settings.thinking_budget > 0:
+                    thinking_config_kwargs["thinking_budget"] = settings.thinking_budget
+                config_kwargs["thinking_config"] = types.ThinkingConfig(
+                    **thinking_config_kwargs
+                )
+
+            config = (
+                types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
             )
+
+            response = self.gemini_client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=config,
+            )
+
+            # Extract thinking and answer parts if thinking is enabled
+            if settings.enable_thinking and settings.include_thoughts_in_response:
+                thinking_parts = []
+                answer_parts = []
+
+                if hasattr(response, "candidates") and response.candidates:
+                    for part in response.candidates[0].content.parts:
+                        if hasattr(part, "text") and part.text:
+                            if hasattr(part, "thought") and part.thought:
+                                thinking_parts.append(part.text)
+                            else:
+                                answer_parts.append(part.text)
+
+                # Store thinking in class attribute for later retrieval
+                self._last_thinking_summary = (
+                    "\n".join(thinking_parts) if thinking_parts else None
+                )
+                return (
+                    "".join(answer_parts)
+                    if answer_parts
+                    else (response.text if hasattr(response, "text") else str(response))
+                )
+
             return response.text if hasattr(response, "text") else str(response)
         except Exception as exc:
             raise RuntimeError(f"Gemini API error: {exc}") from exc

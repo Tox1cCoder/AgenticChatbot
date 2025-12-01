@@ -29,14 +29,23 @@ def coerce_response_text(content: Any) -> str:
         text_parts = []
         for item in content:
             if isinstance(item, dict):
-                if item.get("type") == "text":
+                if "text" in item:
+                    text_parts.append(item["text"])
+                elif item.get("type") == "text":
                     text_parts.append(item.get("text", ""))
                 else:
                     text_parts.append(str(item))
+            elif hasattr(item, "text"):
+                # Handle objects with text attribute
+                text_parts.append(item.text)
+            elif isinstance(item, str):
+                text_parts.append(item)
             else:
                 text_parts.append(str(item))
-        return " ".join(text_parts)
+        return "".join(text_parts)
     elif isinstance(content, dict):
+        if "text" in content:
+            return content["text"]
         if content.get("type") == "text":
             return content.get("text", "")
         return str(content)
@@ -259,7 +268,7 @@ async def execute_tools_concurrently(
 ) -> List[Tuple[str, Dict[str, Any], Any, bool]]:
     """
     Execute multiple tool calls concurrently using asyncio.
-    
+
     Args:
         tool_calls: List of tool call dictionaries from ai_message.tool_calls
         tools: List of available BaseTool instances
