@@ -27,18 +27,12 @@
       ],
       "description": "Current time lookup utility with timezone support"
     },
-    "desktop-commander": {
+    "mcp-server-code-runner": {
       "transport": "stdio",
-      "command": "cmd",
+      "command": "npx",
       "args": [
-        "/c",
-        "npx",
         "-y",
-        "@smithery/cli@latest",
-        "run",
-        "@wonderwhy-er/desktop-commander",
-        "--key",
-        "83ba8c64-cf9d-4033-ab36-91366e89f9c8"
+        "mcp-server-code-runner@latest"
       ],
       "enabled": true
     }

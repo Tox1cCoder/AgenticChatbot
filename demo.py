@@ -552,6 +552,80 @@ APP_STYLE = """
         transform: scale(1.05);
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     }
+    
+    /* Thinking/Reasoning UI Styles - Gemini/ChatGPT inspired */
+    .thinking-container {
+        border-left: 3px solid #8b5cf6;
+        padding: 12px 16px;
+        margin: 8px 0 16px 0;
+        background: linear-gradient(135deg, rgba(139, 92, 246, 0.08) 0%, rgba(139, 92, 246, 0.04) 100%);
+        border-radius: 0 8px 8px 0;
+        font-size: 0.9em;
+        color: #6b7280;
+    }
+    
+    .thinking-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+        color: #8b5cf6;
+        margin-bottom: 8px;
+    }
+    
+    .thinking-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+    }
+    
+    .thinking-dots {
+        display: inline-flex;
+        gap: 4px;
+    }
+    
+    .thinking-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background-color: #8b5cf6;
+        animation: thinking-pulse 1.4s infinite ease-in-out;
+    }
+    
+    .thinking-dot:nth-child(1) { animation-delay: -0.32s; }
+    .thinking-dot:nth-child(2) { animation-delay: -0.16s; }
+    .thinking-dot:nth-child(3) { animation-delay: 0s; }
+    
+    @keyframes thinking-pulse {
+        0%, 80%, 100% {
+            transform: scale(0.6);
+            opacity: 0.4;
+        }
+        40% {
+            transform: scale(1);
+            opacity: 1;
+        }
+    }
+    
+    .thinking-content {
+        line-height: 1.6;
+        white-space: pre-wrap;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    
+    /* Collapsed thinking expander styles */
+    .thinking-expander-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: #8b5cf6;
+        font-weight: 500;
+        cursor: pointer;
+    }
+    
+    .thinking-expander-header:hover {
+        color: #7c3aed;
+    }
 </style>
 """
 
@@ -1504,13 +1578,18 @@ def render_json_output(
         st.code(json_string, language="json", line_numbers=False)
 
 
-def render_tool_result_payload(payload: Any) -> None:
+def render_tool_result_payload(payload: Any, use_expander: bool = False) -> None:
     if payload is None:
         st.write("No data returned.")
         return
 
     if isinstance(payload, (dict, list)):
-        render_json_output(payload, label="Result Data", expanded=True)
+        if use_expander:
+            render_json_output(payload, label="Result Data", expanded=True)
+        else:
+            # Render directly without expander
+            json_string = json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+            st.code(json_string, language="json", line_numbers=False)
         return
 
     if isinstance(payload, (bytes, bytearray)):
@@ -1530,7 +1609,14 @@ def render_tool_result_payload(payload: Any) -> None:
         st.code(text, language=language)
     else:
         if isinstance(parsed, (dict, list)):
-            render_json_output(parsed, label="Result Data", expanded=True)
+            if use_expander:
+                render_json_output(parsed, label="Result Data", expanded=True)
+            else:
+                # Render directly without expander
+                json_string = json.dumps(
+                    parsed, indent=2, ensure_ascii=False, default=str
+                )
+                st.code(json_string, language="json", line_numbers=False)
         else:
             st.code(json.dumps(parsed, ensure_ascii=False), language="json")
 
@@ -2108,11 +2194,17 @@ def render_citations(message_metadata: Dict[str, Any], msg_id: Optional[str] = N
 
 
 def render_thinking_summary(message_metadata: Dict[str, Any]):
-    """Render thinking summary from message metadata in a collapsible section."""
+    """Render thinking summary from message metadata in a styled collapsible section."""
     thinking_summary = message_metadata.get("thinking_summary")
     if thinking_summary:
-        with st.expander("🧠 Thought Process", expanded=False):
-            st.markdown(thinking_summary)
+        with st.expander("Thought Process", expanded=False):
+            # Use custom styled container for thinking content
+            st.markdown(
+                f"""<div class="thinking-container">
+                    <div class="thinking-content">{html.escape(thinking_summary)}</div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
 
 
 def render_message_bubble(msg: Dict[str, Any], is_user: bool):
@@ -3399,12 +3491,29 @@ def render_chat_view():
                                 )
 
                             elif event_type == "thinking":
-                                # Accumulate and display thinking content in expander
+                                # Accumulate and display thinking content with animated indicator
                                 content = event.get("content", "")
                                 accumulated_thinking += content
                                 with thinking_placeholder.container():
-                                    with st.expander("Thinking...", expanded=True):
-                                        st.markdown(accumulated_thinking)
+                                    # Animated thinking header with dots
+                                    st.markdown(
+                                        """<div class="thinking-container">
+                                            <div class="thinking-header">
+                                                <span class="thinking-indicator">
+                                                    Thinking
+                                                    <span class="thinking-dots">
+                                                        <span class="thinking-dot"></span>
+                                                        <span class="thinking-dot"></span>
+                                                        <span class="thinking-dot"></span>
+                                                    </span>
+                                                </span>
+                                            </div>
+                                            <div class="thinking-content">"""
+                                        + html.escape(accumulated_thinking)
+                                        + """</div>
+                                        </div>""",
+                                        unsafe_allow_html=True,
+                                    )
                                 status.update(label="Thinking...", state="running")
 
                             elif event_type == "token":
@@ -3413,13 +3522,18 @@ def render_chat_view():
                                 accumulated_content += (
                                     content  # Append each token chunk
                                 )
-                                # Collapse thinking expander when answer starts
+                                # Collapse thinking to expander when answer starts
                                 if accumulated_thinking and accumulated_content:
                                     with thinking_placeholder.container():
                                         with st.expander(
                                             "Thought Process", expanded=False
                                         ):
-                                            st.markdown(accumulated_thinking)
+                                            st.markdown(
+                                                f"""<div class="thinking-container">
+                                                    <div class="thinking-content">{html.escape(accumulated_thinking)}</div>
+                                                </div>""",
+                                                unsafe_allow_html=True,
+                                            )
                                 # Display with native markdown for LaTeX support
                                 response_placeholder.markdown(accumulated_content)
 

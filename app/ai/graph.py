@@ -1030,6 +1030,7 @@ class MultiAgentWorkflow:
             return
 
         accumulated_content = ""
+        accumulated_thinking = ""  # Track thinking content for non-RAG agents
         try:
             async for event in self.graph.astream_events(
                 initial_state, config=config, version="v1"
@@ -1044,13 +1045,14 @@ class MultiAgentWorkflow:
                         content = coerce_response_text(chunk.content)
 
                         if content:
-                            accumulated_content += content
                             additional_kwargs = getattr(chunk, "additional_kwargs", {})
                             if additional_kwargs.get(
                                 "thought"
                             ) or additional_kwargs.get("thinking"):
+                                accumulated_thinking += content
                                 yield {"type": "thinking", "content": content}
                             else:
+                                accumulated_content += content
                                 yield {"type": "token", "content": content}
 
                 elif kind == "on_tool_start":
@@ -1094,8 +1096,23 @@ class MultiAgentWorkflow:
 
                 response = snapshot.values.get("response")
                 if response:
+                    if accumulated_thinking and not response.metadata.get(
+                        "thinking_summary"
+                    ):
+                        response.metadata["thinking_summary"] = accumulated_thinking
                     yield {"type": "complete", "response": response}
                 elif accumulated_content:
+                    metadata = {
+                        "model": (
+                            settings.chat_agent_model
+                            if selected_agent == "chat_agent"
+                            else settings.search_agent_model
+                        )
+                    }
+                    # Include thinking summary in metadata
+                    if accumulated_thinking:
+                        metadata["thinking_summary"] = accumulated_thinking
+
                     response = AgentResponse(
                         agent_type=(
                             AgentType.CHAT
@@ -1106,13 +1123,7 @@ class MultiAgentWorkflow:
                         message=AgentMessage(
                             role=MessageRole.ASSISTANT, content=accumulated_content
                         ),
-                        metadata={
-                            "model": (
-                                settings.chat_agent_model
-                                if selected_agent == "chat_agent"
-                                else settings.search_agent_model
-                            )
-                        },
+                        metadata=metadata,
                     )
                     yield {"type": "complete", "response": response}
                 else:
@@ -1121,6 +1132,11 @@ class MultiAgentWorkflow:
                 yield {"type": "error", "error": str(e)}
         else:
             if accumulated_content:
+                metadata = {}
+                # Include thinking summary in metadata
+                if accumulated_thinking:
+                    metadata["thinking_summary"] = accumulated_thinking
+
                 response = AgentResponse(
                     agent_type=(
                         AgentType.CHAT
@@ -1131,7 +1147,7 @@ class MultiAgentWorkflow:
                     message=AgentMessage(
                         role=MessageRole.ASSISTANT, content=accumulated_content
                     ),
-                    metadata={},
+                    metadata=metadata,
                 )
                 yield {"type": "complete", "response": response}
             else:

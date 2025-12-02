@@ -470,6 +470,7 @@ class RAGAgent:
         )
 
         accumulated_content = ""
+        accumulated_thinking = ""  # Accumulate thinking content for metadata
         tools_used: List[str] = []
         tool_artifacts: List[Dict[str, Any]] = []
         error_message: Optional[str] = None
@@ -513,7 +514,8 @@ class RAGAgent:
                 # Text only - stream with thinking support
                 async for event in self._generate_stream(prompt):
                     if event["type"] == "thinking":
-                        # Forward thinking events to client
+                        # Accumulate thinking content and forward to client
+                        accumulated_thinking += event["content"]
                         yield event
                     elif event["type"] == "token":
                         accumulated_content += event["content"]
@@ -646,6 +648,10 @@ class RAGAgent:
                     metadata["error"] = error_message
         elif error_message:
             metadata["error"] = error_message
+
+        # Include thinking summary in metadata if accumulated during streaming
+        if accumulated_thinking:
+            metadata["thinking_summary"] = accumulated_thinking
 
         # Yield complete event
         yield {
