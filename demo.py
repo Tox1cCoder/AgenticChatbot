@@ -877,6 +877,11 @@ SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
     "tool_execution_result": lambda: None,
     "selected_chunk_info": lambda: None,
     "chunk_preview_dialog_key": lambda: False,
+    # Planning mode state
+    "planning_status": lambda: None,
+    "task_plans_list": list,
+    "planning_generate_input": str,
+    "planning_manual_input": str,
 }
 
 
@@ -1843,44 +1848,70 @@ def _build_attachment_thumbnail(
 
 
 def render_attachment_gallery(attachments: List[Dict[str, str]], *, align: str) -> None:
-    """Render a row of attachment thumbnails aligned to the speaker."""
+    """Render a compact row of clickable image thumbnails."""
     if not attachments:
         return
 
-    fragments: List[str] = []
-
+    # Filter valid attachments (must have data or url)
+    valid_attachments = []
     for idx, attachment in enumerate(attachments, start=1):
-        name = attachment.get("name") or f"Attachment {idx}"
+        name = attachment.get("name") or f"Image {idx}"
         data_b64 = attachment.get("data")
         url_value = attachment.get("url")
 
         if isinstance(data_b64, str) and data_b64:
-            mime = attachment.get("mime", "image/png")
-            source = f"data:{mime};base64,{data_b64}"
-            download_name = attachment.get("download_name")
-            if not download_name:
-                download_name = (
-                    name if "." in name else f"{name}.{_guess_extension(mime)}"
-                )
-            fragments.append(
-                _build_attachment_thumbnail(source, name, download=download_name)
+            valid_attachments.append(
+                {
+                    "name": name,
+                    "data": data_b64,
+                    "mime": attachment.get("mime", "image/png"),
+                    "type": "base64",
+                }
             )
         elif isinstance(url_value, str) and url_value:
-            fragments.append(_build_attachment_thumbnail(url_value, name))
+            valid_attachments.append({"name": name, "url": url_value, "type": "url"})
 
-    if not fragments:
+    if not valid_attachments:
         return
 
-    wrapper_class = "align-right" if align == "right" else "align-left"
+    # Build compact HTML gallery with clickable thumbnails
+    gallery_html_parts = []
+    for att in valid_attachments:
+        if att["type"] == "base64":
+            src = f"data:{att.get('mime', 'image/png')};base64,{att['data']}"
+        else:
+            src = att["url"]
 
-    st.markdown(
-        (
-            f'<div class="message-attachments-wrapper {wrapper_class}">'
-            f'<div class="message-attachments">' + "".join(fragments) + "</div>"
-            "</div>"
-        ),
-        unsafe_allow_html=True,
+        # Truncate name for display (max 20 chars)
+        display_name = att["name"]
+        if len(display_name) > 20:
+            display_name = display_name[:17] + "..."
+
+        escaped_src = html.escape(src, quote=True)
+        escaped_name = html.escape(display_name, quote=True)
+        escaped_full_name = html.escape(att["name"], quote=True)
+
+        gallery_html_parts.append(
+            f'<a href="{escaped_src}" target="_blank" rel="noopener noreferrer" '
+            f'title="{escaped_full_name}" style="text-decoration: none;">'
+            f'<div style="display: inline-block; margin: 4px; text-align: center; vertical-align: top;">'
+            f'<img src="{escaped_src}" alt="{escaped_full_name}" '
+            f'style="width: 72px; height: 72px; object-fit: cover; border-radius: 8px; '
+            f'border: 1px solid #e2e8f0; cursor: pointer; transition: transform 0.15s ease;" '
+            f"onmouseover=\"this.style.transform='scale(1.05)'\" "
+            f"onmouseout=\"this.style.transform='scale(1)'\" />"
+            f'<div style="font-size: 10px; color: #64748b; max-width: 72px; overflow: hidden; '
+            f'text-overflow: ellipsis; white-space: nowrap; margin-top: 2px;">{escaped_name}</div>'
+            f"</div></a>"
+        )
+
+    wrapper_align = "flex-end" if align == "right" else "flex-start"
+    gallery_html = (
+        f'<div style="display: flex; flex-wrap: wrap; gap: 4px; justify-content: {wrapper_align}; '
+        f'margin: 8px 0;">' + "".join(gallery_html_parts) + "</div>"
     )
+
+    st.markdown(gallery_html, unsafe_allow_html=True)
 
 
 def render_agent_images(message_metadata: dict):
@@ -2165,32 +2196,48 @@ def render_citations(message_metadata: Dict[str, Any], msg_id: Optional[str] = N
 
                 if doc_images:
                     st.markdown("**Images:**")
-                    # Create image thumbnails
-                    img_cols = st.columns(min(len(doc_images), 4))
-                    for idx, img in enumerate(doc_images):
-                        with img_cols[idx % len(img_cols)]:
-                            data_b64 = img.get("data", "")
-                            mime = img.get("mime", "image/png")
-                            caption = img.get("caption") or img.get("name", "Image")
-                            page_num = img.get("page_number")
+                    # Build compact clickable gallery for document images
+                    gallery_parts = []
+                    for img in doc_images:
+                        data_b64 = img.get("data", "")
+                        mime = img.get("mime", "image/png")
+                        caption = img.get("caption") or img.get("name", "Image")
+                        page_num = img.get("page_number")
 
-                            if data_b64:
-                                # Create data URI
-                                data_uri = f"data:{mime};base64,{data_b64}"
+                        if data_b64:
+                            caption_text = caption
+                            if page_num:
+                                caption_text = f"{caption} (p. {page_num})"
 
-                                # Display thumbnail with caption
-                                caption_text = caption
-                                if page_num:
-                                    caption_text = f"{caption} (p. {page_num})"
+                            # Truncate caption for display
+                            display_caption = caption_text
+                            if len(display_caption) > 25:
+                                display_caption = display_caption[:22] + "..."
 
-                                # Use HTML for clickable image
-                                st.markdown(
-                                    f'<a href="{data_uri}" target="_blank" rel="noopener noreferrer" style="text-decoration: none;">'
-                                    f'<img src="{data_uri}" style="width: 100%; border-radius: 4px; cursor: pointer;" alt="{caption}" />'
-                                    f'<div style="font-size: 0.85em; color: #666; margin-top: 4px; text-align: center;">{caption_text}</div>'
-                                    f"</a>",
-                                    unsafe_allow_html=True,
-                                )
+                            src = f"data:{mime};base64,{data_b64}"
+                            escaped_src = html.escape(src, quote=True)
+                            escaped_caption = html.escape(display_caption, quote=True)
+                            escaped_full = html.escape(caption_text, quote=True)
+
+                            gallery_parts.append(
+                                f'<a href="{escaped_src}" target="_blank" rel="noopener noreferrer" '
+                                f'title="{escaped_full}" style="text-decoration: none;">'
+                                f'<div style="display: inline-block; margin: 4px; text-align: center; vertical-align: top;">'
+                                f'<img src="{escaped_src}" alt="{escaped_full}" '
+                                f'style="width: 80px; height: 80px; object-fit: cover; border-radius: 8px; '
+                                f'border: 1px solid #e2e8f0; cursor: pointer;" />'
+                                f'<div style="font-size: 10px; color: #64748b; max-width: 80px; overflow: hidden; '
+                                f'text-overflow: ellipsis; white-space: nowrap; margin-top: 2px;">{escaped_caption}</div>'
+                                f"</div></a>"
+                            )
+
+                    if gallery_parts:
+                        st.markdown(
+                            f'<div style="display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0;">'
+                            + "".join(gallery_parts)
+                            + "</div>",
+                            unsafe_allow_html=True,
+                        )
 
 
 def render_thinking_summary(message_metadata: Dict[str, Any]):
@@ -3285,6 +3332,35 @@ def render_chat_view():
         active_persona = current_conv.get("personaPrompt")
         if active_persona:
             st.info(f"**Instructions active:** {persona_preview(active_persona, 100)}")
+
+        # Show planning mode status in chat view
+        planning_mode = current_conv.get("planningModeEnabled", False)
+        if planning_mode:
+            status = get_planning_status(conversation_id)
+            if status:
+                progress_pct = status.get("progressPercentage", 0)
+                next_task = status.get("nextTask")
+                pending = status.get("pendingTasks", 0)
+
+                with st.container():
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        if next_task:
+                            st.success(
+                                f"**Current Task:** {next_task.get('description', 'N/A')} ({progress_pct:.0f}% complete, {pending} remaining)"
+                            )
+                        else:
+                            st.success(
+                                f"✅ **All tasks completed!** ({progress_pct:.0f}% complete)"
+                            )
+                    with col2:
+                        if st.button(
+                            "📋",
+                            key="goto_planning_from_chat",
+                            help="View Planning Tab",
+                        ):
+                            st.session_state.active_view = "planning"
+                            st.rerun()
     elif conversation_id == "pending_new":
         st.markdown("# New Chat")
         queued_persona = st.session_state.get("pending_persona_prompt", "")
@@ -3355,7 +3431,7 @@ def render_chat_view():
 
         if st.session_state.show_attachment_uploader and file_uploader_key:
             uploaded_files = st.file_uploader(
-                "📎 Attach images",
+                "Attach images",
                 type=["png", "jpg", "jpeg", "gif", "webp"],
                 accept_multiple_files=True,
                 key=file_uploader_key,
@@ -3384,7 +3460,7 @@ def render_chat_view():
 
             with col3:
                 attach_button = st.form_submit_button(
-                    "📎\nAttach", use_container_width=True
+                    "Attach", use_container_width=True
                 )
 
             if attach_button:
@@ -3610,7 +3686,6 @@ def render_chat_view():
                             st.rerun()
                         elif event_type != "error" and not interrupt_data:
                             st.toast("Failed to send message", icon="❌")
-
     # Note: Legacy tool approval UI removed. Now using modern interrupt-based approval in render_interrupt_approval_ui()
 
 
@@ -3869,9 +3944,7 @@ def render_chunk_preview_modal():
             )
             st.caption(f"📊 Character count: {char_count}")
         else:
-            st.info(
-                "ℹ️ Chunk content is not available. This requires backend enhancement to include chunk content in message metadata."
-            )
+            st.info("Chunk content is not available.")
 
         st.divider()
 
@@ -4036,6 +4109,388 @@ def render_documents_tab():
         st.divider()
 
 
+# ==================== PLANNING TAB ====================
+
+TASK_STATUS_MAP = {
+    "pending": {"label": "Pending", "icon": "⏳", "color": "#f59e0b"},
+    "in_progress": {"label": "In Progress", "icon": "🔄", "color": "#3b82f6"},
+    "completed": {"label": "Completed", "icon": "✅", "color": "#10b981"},
+    "skipped": {"label": "Skipped", "icon": "⏭️", "color": "#64748b"},
+}
+
+
+def get_task_plans(
+    conversation_id: str, include_completed: bool = True
+) -> List[Dict[str, Any]]:
+    """Fetch task plans for a conversation."""
+    endpoint = f"/conversations/{conversation_id}/task-plans?includeCompleted={str(include_completed).lower()}"
+    response = make_api_request("GET", endpoint)
+    if response and response.get("success"):
+        return response.get("data", [])
+    return []
+
+
+def get_planning_status(conversation_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch planning status for a conversation."""
+    endpoint = f"/conversations/{conversation_id}/planning-status"
+    response = make_api_request("GET", endpoint)
+    if response and response.get("success"):
+        return response.get("data")
+    return None
+
+
+def toggle_planning_mode(conversation_id: str) -> Optional[Dict[str, Any]]:
+    """Toggle planning mode for a conversation."""
+    endpoint = f"/conversations/{conversation_id}/toggle-planning-mode"
+    response = make_api_request("POST", endpoint)
+    if response and response.get("success"):
+        return response.get("data")
+    return None
+
+
+def create_task_plan_ai(
+    conversation_id: str, user_message: str
+) -> Optional[List[Dict[str, Any]]]:
+    """Create a task plan using AI from user message."""
+    endpoint = f"/conversations/{conversation_id}/task-plans"
+    response = make_api_request("POST", endpoint, {"userMessage": user_message})
+    if response and response.get("success"):
+        return response.get("data", [])
+    return None
+
+
+def create_task_plan_manual(
+    conversation_id: str, descriptions: List[str]
+) -> Optional[List[Dict[str, Any]]]:
+    """Create task plans manually from a list of descriptions."""
+    endpoint = f"/conversations/{conversation_id}/task-plans/manual"
+    response = make_api_request("POST", endpoint, {"taskDescriptions": descriptions})
+    if response and response.get("success"):
+        return response.get("data", [])
+    return None
+
+
+def update_task_plan(
+    task_id: str, update_data: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Update a task plan."""
+    endpoint = f"/task-plans/{task_id}"
+    response = make_api_request("PATCH", endpoint, update_data)
+    if response and response.get("success"):
+        return response.get("data")
+    return None
+
+
+def complete_task_plan(task_id: str) -> Optional[Dict[str, Any]]:
+    """Mark a task as completed."""
+    endpoint = f"/task-plans/{task_id}/complete"
+    response = make_api_request("POST", endpoint)
+    if response and response.get("success"):
+        return response.get("data")
+    return None
+
+
+def delete_task_plan(task_id: str) -> bool:
+    """Delete a task plan."""
+    endpoint = f"/task-plans/{task_id}"
+    response = make_api_request("DELETE", endpoint)
+    return response and response.get("success", False)
+
+
+def render_planning_tab():
+    """Render the Planning tab for managing task plans."""
+    st.markdown("# 📋 Planning")
+
+    conversation_id = st.session_state.get("current_conversation_id")
+    is_new_conversation = conversation_id == "pending_new"
+    has_conversation = conversation_id not in (None, "pending_new")
+
+    if conversation_id is None:
+        st.info("Select a conversation or create a new chat to manage plans.")
+        return
+
+    if is_new_conversation:
+        st.info(
+            "Create a conversation first by sending a message, then you can create task plans."
+        )
+        return
+
+    # Get current conversation info
+    current_conv: Optional[Dict[str, Any]] = next(
+        (
+            conv
+            for conv in st.session_state.conversations_list
+            if conv.get("id") == conversation_id
+        ),
+        None,
+    )
+
+    if current_conv:
+        st.markdown(f"**Conversation:** {current_conv.get('title', 'Untitled')}")
+
+    # Fetch planning status
+    status = get_planning_status(conversation_id)
+    planning_mode_enabled = (
+        status.get("planningModeEnabled", False) if status else False
+    )
+
+    # Planning Mode Toggle Section
+    st.markdown("### Planning Mode")
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        if planning_mode_enabled:
+            st.success(
+                "🟢 Planning mode is **enabled**. The AI will guide you through tasks step by step."
+            )
+        else:
+            st.info(
+                "⚪ Planning mode is **disabled**. Enable it to work through tasks systematically."
+            )
+
+    with col2:
+        button_label = "Disable" if planning_mode_enabled else "Enable"
+        button_type = "secondary" if planning_mode_enabled else "primary"
+        if st.button(
+            button_label,
+            key="toggle_planning_mode",
+            type=button_type,
+            use_container_width=True,
+        ):
+            result = toggle_planning_mode(conversation_id)
+            if result:
+                new_mode = "enabled" if not planning_mode_enabled else "disabled"
+                st.toast(f"Planning mode {new_mode}!", icon="✅")
+                refresh_conversations_list()
+                st.rerun()
+            else:
+                st.toast(
+                    "Failed to toggle planning mode. A plan may already exist.",
+                    icon="❌",
+                )
+
+    # Progress Section (if tasks exist)
+    if status and status.get("totalTasks", 0) > 0:
+        st.markdown("### Progress")
+
+        total = status.get("totalTasks", 0)
+        completed = status.get("completedTasks", 0)
+        pending = status.get("pendingTasks", 0)
+        in_progress = status.get("inProgressTasks", 0)
+        skipped = status.get("skippedTasks", 0)
+        progress_pct = status.get("progressPercentage", 0)
+
+        # Progress bar
+        st.progress(progress_pct / 100)
+        st.caption(f"{progress_pct:.0f}% complete ({completed}/{total} tasks)")
+
+        # Metrics row
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("⏳ Pending", pending)
+        with col2:
+            st.metric("🔄 In Progress", in_progress)
+        with col3:
+            st.metric("✅ Completed", completed)
+        with col4:
+            st.metric("⏭️ Skipped", skipped)
+
+        # Next task info
+        next_task = status.get("nextTask")
+        if next_task:
+            st.markdown("#### Next Task")
+            st.info(
+                f"**Task {next_task.get('taskOrder', 0) + 1}:** {next_task.get('description', 'No description')}"
+            )
+
+    st.divider()
+
+    # Create New Plan Section
+    st.markdown("### Create Task Plan")
+
+    tab_ai, tab_manual = st.tabs(["AI Generated", "Manual Entry"])
+
+    # Check if we need to clear inputs (set by successful task creation)
+    if st.session_state.get("clear_planning_generate_input"):
+        st.session_state.planning_generate_input = ""
+        del st.session_state.clear_planning_generate_input
+    if st.session_state.get("clear_planning_manual_input"):
+        st.session_state.planning_manual_input = ""
+        del st.session_state.clear_planning_manual_input
+
+    with tab_ai:
+        st.markdown(
+            "Describe your goal or project and the AI will create a structured plan for you."
+        )
+
+        ai_input = st.text_area(
+            "Describe your goal",
+            key="planning_generate_input",
+            height=100,
+            placeholder="Example: Build a REST API with user authentication, CRUD operations for products, and integrate with a payment gateway.",
+        )
+
+        if st.button(
+            "Generate Plan",
+            key="generate_plan_btn",
+            type="primary",
+            disabled=not ai_input.strip(),
+        ):
+            with st.spinner("Generating task plan..."):
+                tasks = create_task_plan_ai(conversation_id, ai_input.strip())
+                if tasks:
+                    st.toast(f"Created {len(tasks)} tasks!", icon="✅")
+                    st.session_state.clear_planning_generate_input = True
+                    st.rerun()
+                else:
+                    st.toast("Failed to generate plan. Try again.", icon="❌")
+
+    with tab_manual:
+        st.markdown("Enter tasks manually, one per line.")
+
+        manual_input = st.text_area(
+            "Task list (one per line)",
+            key="planning_manual_input",
+            height=150,
+            placeholder="Set up project structure\nCreate database models\nImplement authentication\nWrite unit tests",
+        )
+
+        if st.button(
+            "Create Tasks",
+            key="create_manual_tasks_btn",
+            type="primary",
+            disabled=not manual_input.strip(),
+        ):
+            descriptions = [
+                line.strip()
+                for line in manual_input.strip().split("\n")
+                if line.strip()
+            ]
+            if descriptions:
+                with st.spinner("Creating tasks..."):
+                    tasks = create_task_plan_manual(conversation_id, descriptions)
+                    if tasks:
+                        st.toast(f"Created {len(tasks)} tasks!", icon="✅")
+                        st.session_state.clear_planning_manual_input = True
+                        st.rerun()
+                    else:
+                        st.toast("Failed to create tasks. Try again.", icon="❌")
+            else:
+                st.warning("Please enter at least one task description.")
+
+    st.divider()
+
+    # Task List Section
+    st.markdown("### Task List")
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        show_completed = st.checkbox(
+            "Show completed tasks", value=True, key="show_completed_tasks"
+        )
+    with col2:
+        if st.button("Refresh", key="refresh_tasks_btn", use_container_width=True):
+            st.rerun()
+
+    tasks = get_task_plans(conversation_id, include_completed=show_completed)
+
+    if not tasks:
+        st.info("No tasks yet. Create a plan above to get started!")
+    else:
+        for task in tasks:
+            task_id = task.get("id")
+            task_order = task.get("taskOrder", 0)
+            description = task.get("description", "No description")
+            task_status = task.get("status", "pending")
+            status_info = TASK_STATUS_MAP.get(task_status, TASK_STATUS_MAP["pending"])
+            is_ad_hoc = task.get("taskMetadata", {}).get("ad_hoc", False)
+            completed_at = task.get("completedAt")
+
+            # Task card styling
+            border_color = status_info["color"]
+            with st.container():
+                st.markdown(
+                    f"""
+                    <div style="
+                        border-left: 4px solid {border_color};
+                        padding: 12px 16px;
+                        margin: 8px 0;
+                        background: #f8fafc;
+                        border-radius: 0 8px 8px 0;
+                    ">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <span style="font-weight: 600; color: #1f2937;">
+                                    {status_info['icon']} Task {task_order + 1}
+                                </span>
+                            </div>
+                            <span style="color: {border_color}; font-size: 0.85rem; font-weight: 500;">
+                                {status_info['label']}
+                            </span>
+                        </div>
+                        <p style="margin: 8px 0 0 0; color: #374151;">{html.escape(description)}</p>
+                        {f'<p style="margin: 4px 0 0 0; color: #6b7280; font-size: 0.8rem;">Completed: {completed_at[:16] if completed_at else "N/A"}</p>' if task_status == "completed" else ''}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                # Action buttons
+                col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+
+                with col1:
+                    if task_status == "pending":  # Pending
+                        if st.button(
+                            "▶Start", key=f"start_{task_id}", use_container_width=True
+                        ):
+                            result = update_task_plan(
+                                task_id, {"status": "in_progress"}
+                            )
+                            if result:
+                                st.toast("Task started!", icon="🔄")
+                                st.rerun()
+
+                with col2:
+                    if task_status in (
+                        "pending",
+                        "in_progress",
+                    ):  # Pending or In Progress
+                        if st.button(
+                            "Complete",
+                            key=f"complete_{task_id}",
+                            use_container_width=True,
+                        ):
+                            result = complete_task_plan(task_id)
+                            if result:
+                                st.toast("Task completed!", icon="✅")
+                                st.rerun()
+
+                with col3:
+                    if task_status in (
+                        "pending",
+                        "in_progress",
+                    ):  # Pending or In Progress
+                        if st.button(
+                            "⏭Skip", key=f"skip_{task_id}", use_container_width=True
+                        ):
+                            result = update_task_plan(task_id, {"status": "skipped"})
+                            if result:
+                                st.toast("Task skipped!", icon="⏭️")
+                                st.rerun()
+
+                with col4:
+                    if st.button(
+                        "Delete", key=f"delete_{task_id}", use_container_width=True
+                    ):
+                        if delete_task_plan(task_id):
+                            st.toast("Task deleted!", icon="🗑️")
+                            st.rerun()
+                        else:
+                            st.toast("Failed to delete task.", icon="❌")
+
+                st.markdown("---")
+
+
 def render_settings_view():
     """Settings and instructions view"""
     st.markdown("# ⚙️ Instructions")
@@ -4186,12 +4641,15 @@ def main():
     render_chunk_preview_modal()
 
     # Tab-based navigation across primary workspaces
-    tab_chat, tab_docs, tab_instructions, tab_mcp = st.tabs(
-        ["💬 Chat", "📄 Documents", "⚙️ Instructions", "🔧 MCP Config"]
+    tab_chat, tab_planning, tab_docs, tab_instructions, tab_mcp = st.tabs(
+        ["💬 Chat", "📋 Planning", "📄 Documents", "⚙️ Instructions", "🔧 MCP Config"]
     )
 
     with tab_chat:
         render_chat_view()
+
+    with tab_planning:
+        render_planning_tab()
 
     with tab_docs:
         render_documents_tab()
