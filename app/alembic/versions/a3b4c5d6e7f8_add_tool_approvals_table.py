@@ -27,8 +27,16 @@ def upgrade() -> None:
     This table tracks all human approval decisions for tool calls in HITL workflows,
     providing a complete audit trail for compliance, debugging, and analytics.
     """
-    # Create decision_type enum
-    op.execute("CREATE TYPE decision_type AS ENUM ('accept', 'edit', 'reject')")
+    # Create decision_type enum if it doesn't exist
+    op.execute(
+        """
+        DO $$ BEGIN
+            CREATE TYPE decision_type AS ENUM ('accept', 'edit', 'reject');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """
+    )
 
     # Create tool_approvals table
     op.create_table(

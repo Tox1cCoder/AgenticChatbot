@@ -68,21 +68,6 @@ class ConversationService(IConversationService):
         else:
             conv_dict["messages"] = None
 
-        # if "feedback" in include:
-        #     try:
-        #         feedback = getattr(conversation_entity, "feedback", None)
-        #         if feedback is None:
-        #             feedback = conversation_entity.__dict__.get("feedback")
-
-        #         if feedback is not None:
-        #             conv_dict["feedback"] = None
-        #         else:
-        #             conv_dict["feedback"] = None
-        #     except Exception:
-        #         conv_dict["feedback"] = None
-        # else:
-        #     conv_dict["feedback"] = None
-
         return ConversationRead.model_validate(conv_dict)
 
     def create_conversation(

@@ -29,6 +29,15 @@ from app.schemas.document import (
     DocumentListResponse,
     DocumentStatus,
 )
+from app.schemas.task_plan import (
+    TaskPlanCreate,
+    TaskPlanUpdate,
+    TaskPlanRead,
+    TaskPlanInDB,
+    TaskPlanGenerateRequest,
+    TaskPlanManualCreateRequest,
+    PlanningStatusResponse,
+)
 
 __all__ = [
     # User schemas
@@ -57,4 +66,12 @@ __all__ = [
     "DocumentUpdate",
     "DocumentListResponse",
     "DocumentStatus",
+    # TaskPlan schemas
+    "TaskPlanCreate",
+    "TaskPlanUpdate",
+    "TaskPlanRead",
+    "TaskPlanInDB",
+    "TaskPlanGenerateRequest",
+    "TaskPlanManualCreateRequest",
+    "PlanningStatusResponse",
 ]

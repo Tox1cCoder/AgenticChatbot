@@ -11,6 +11,7 @@ from app.repositories.conversation import ConversationRepository
 from app.repositories.message import MessageRepository
 from app.repositories.feedback import FeedbackRepository
 from app.repositories.document import DocumentRepository
+from app.repositories.task_plan import TaskPlanRepository
 
 from app.services.auth_service import AuthService
 from app.services.user_service import UserService
@@ -22,9 +23,11 @@ from app.services.document_service import DocumentService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.mcp_service import MCPService
 from app.services.jwt_service import JwtService
+from app.services.task_plan_service import TaskPlanService
 
 from app.ai.checkpoint import CheckpointManager
 from app.ai.mcp_integration import MCPManager
+from app.ai.agents.planning_agent import PlanningAgent
 from app.repositories.document_image import DocumentImageRepository
 
 from qdrant_client import QdrantClient
@@ -36,6 +39,7 @@ from app.utils.validation.conversation_validation import ConversationValidationU
 from app.utils.validation.feedback_validation import FeedbackValidationUtils
 from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.document_validation import DocumentValidationUtils
+from app.utils.validation.task_plan_validation import TaskPlanValidationUtils
 
 from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
 
@@ -48,6 +52,7 @@ from app.interfaces import (
     IAuthService,
     IDocumentService,
 )
+from app.interfaces.task_plan_service_interface import ITaskPlanService
 
 
 class Container(containers.DeclarativeContainer):
@@ -62,6 +67,7 @@ class Container(containers.DeclarativeContainer):
             "app.api.feedback",
             "app.api.documents",
             "app.api.mcp",
+            "app.api.task_plans",
         ]
     )
 
@@ -134,6 +140,11 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    task_plan_repository = providers.Factory(
+        TaskPlanRepository,
+        session_factory=db.provided.session,
+    )
+
     # Validation utils
     user_validation_utils = providers.Factory(
         UserValidationUtils,
@@ -154,6 +165,15 @@ class Container(containers.DeclarativeContainer):
     document_validation_utils = providers.Factory(
         DocumentValidationUtils,
         session_factory=db.provided.session,
+    )
+    task_plan_validation_utils = providers.Factory(
+        TaskPlanValidationUtils,
+        session_factory=db.provided.session,
+    )
+
+    # Planning agent
+    planning_agent = providers.Factory(
+        PlanningAgent,
     )
 
     # Business services
@@ -193,12 +213,22 @@ class Container(containers.DeclarativeContainer):
 
     ai_service = providers.Factory(_create_ai_service)
 
+    task_plan_service: providers.Provider[ITaskPlanService] = providers.Factory(
+        TaskPlanService,
+        task_plan_repository=task_plan_repository,
+        conversation_validation_utils=conversation_validation_utils,
+        task_plan_validation_utils=task_plan_validation_utils,
+        planning_agent=planning_agent,
+        conversation_repository=conversation_repository,
+    )
+
     message_service: providers.Provider[IMessageService] = providers.Factory(
         MessageService,
         message_repository=message_repository,
         conversation_validation_utils=conversation_validation_utils,
         message_validation_utils=message_validation_utils,
         ai_service=ai_service,
+        task_plan_service=task_plan_service,
     )
 
     feedback_service: providers.Provider[IFeedbackService] = providers.Factory(

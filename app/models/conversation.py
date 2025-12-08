@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, String, Text, ForeignKey, DateTime, func
+from sqlalchemy import Column, String, Text, ForeignKey, DateTime, Boolean, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -22,11 +22,13 @@ class Conversation(Base):
     )
     title = Column(String(255), nullable=False)
     persona_prompt = Column(Text, nullable=True)
+    planning_mode_enabled = Column(Boolean, default=False, nullable=False)
 
     # Relationships
     user = relationship("User", back_populates="conversations")
     messages = relationship("Message", back_populates="conversation")
     documents = relationship("Document", back_populates="conversation")
+    task_plans = relationship("TaskPlan", back_populates="conversation")
 
     def __repr__(self) -> str:
         return f"<Conversation(id={self.id}, title='{self.title}', owner_id={self.owner_id})>"

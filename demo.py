@@ -626,7 +626,124 @@ APP_STYLE = """
     .thinking-expander-header:hover {
         color: #7c3aed;
     }
+    
+    /* Image Lightbox Modal */
+    .image-lightbox-overlay {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.85);
+        z-index: 9999;
+        justify-content: center;
+        align-items: center;
+        cursor: zoom-out;
+    }
+    
+    .image-lightbox-overlay.active {
+        display: flex;
+    }
+    
+    .image-lightbox-content {
+        max-width: 90%;
+        max-height: 90%;
+        object-fit: contain;
+        border-radius: 8px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+    
+    .image-lightbox-close {
+        position: absolute;
+        top: 20px;
+        right: 30px;
+        color: white;
+        font-size: 32px;
+        font-weight: bold;
+        cursor: pointer;
+        z-index: 10000;
+    }
+    
+    .image-lightbox-close:hover {
+        color: #f87171;
+    }
+    
+    /* Image thumbnail hover effects */
+    .img-thumb {
+        transition: transform 0.2s ease, box-shadow 0.2s ease, filter 0.2s ease;
+        cursor: pointer;
+    }
+    
+    .img-thumb:hover {
+        transform: scale(1.08);
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+        filter: brightness(1.05);
+    }
 </style>
+"""
+
+# JavaScript for image lightbox with event delegation for Streamlit compatibility
+IMAGE_LIGHTBOX_JS = """
+<div id="imageLightbox" class="image-lightbox-overlay">
+    <span class="image-lightbox-close">&times;</span>
+    <img id="lightboxImage" class="image-lightbox-content" src="" alt="Full size image">
+</div>
+<script>
+(function() {
+    // Ensure we only initialize once
+    if (window._lightboxInitialized) return;
+    window._lightboxInitialized = true;
+    
+    function openImageLightbox(src) {
+        var lightbox = document.getElementById('imageLightbox');
+        var img = document.getElementById('lightboxImage');
+        if (lightbox && img) {
+            img.src = src;
+            lightbox.classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
+    }
+    
+    function closeImageLightbox() {
+        var lightbox = document.getElementById('imageLightbox');
+        if (lightbox) {
+            lightbox.classList.remove('active');
+            document.body.style.overflow = 'auto';
+        }
+    }
+    
+    // Make functions globally available
+    window.openImageLightbox = openImageLightbox;
+    window.closeImageLightbox = closeImageLightbox;
+    
+    // Event delegation for image thumbnails - handles dynamically added elements
+    document.addEventListener('click', function(e) {
+        var target = e.target;
+        
+        // Check if clicked on an img-thumb image
+        if (target.classList.contains('img-thumb')) {
+            e.preventDefault();
+            e.stopPropagation();
+            openImageLightbox(target.src);
+            return;
+        }
+        
+        // Check if clicked on lightbox overlay or close button
+        var lightbox = document.getElementById('imageLightbox');
+        if (lightbox && lightbox.classList.contains('active')) {
+            if (target.classList.contains('image-lightbox-overlay') || 
+                target.classList.contains('image-lightbox-close')) {
+                closeImageLightbox();
+            }
+        }
+    }, true);
+    
+    // Escape key to close
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') closeImageLightbox();
+    });
+</script>
 """
 
 
@@ -1144,6 +1261,7 @@ st.set_page_config(
 )
 
 st.markdown(APP_STYLE, unsafe_allow_html=True)
+st.markdown(IMAGE_LIGHTBOX_JS, unsafe_allow_html=True)
 initialize_session_state()
 
 # Clear any old cached functions on first run
@@ -1261,8 +1379,13 @@ def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
 
     stream_completed = False
     try:
+        # Long-running MCP tools can block the stream for several minutes, so use a generous read timeout
         response = requests.post(
-            url, json=data, headers=headers, stream=True, timeout=120
+            url,
+            json=data,
+            headers=headers,
+            stream=True,
+            timeout=(30, 900),
         )
         response.raise_for_status()
 
@@ -1848,7 +1971,11 @@ def _build_attachment_thumbnail(
 
 
 def render_attachment_gallery(attachments: List[Dict[str, str]], *, align: str) -> None:
-    """Render a compact row of clickable image thumbnails."""
+    """Render a compact row of clickable image thumbnails.
+
+    - URL images (from search agent): open in new tab
+    - Base64 images (generated/stored): open in lightbox modal
+    """
     if not attachments:
         return
 
@@ -1875,35 +2002,44 @@ def render_attachment_gallery(attachments: List[Dict[str, str]], *, align: str) 
         return
 
     # Build compact HTML gallery with clickable thumbnails
+    # Using class="img-thumb" for event delegation (no inline onclick needed)
     gallery_html_parts = []
     for att in valid_attachments:
-        if att["type"] == "base64":
-            src = f"data:{att.get('mime', 'image/png')};base64,{att['data']}"
-        else:
-            src = att["url"]
-
         # Truncate name for display (max 20 chars)
         display_name = att["name"]
         if len(display_name) > 20:
             display_name = display_name[:17] + "..."
 
-        escaped_src = html.escape(src, quote=True)
         escaped_name = html.escape(display_name, quote=True)
         escaped_full_name = html.escape(att["name"], quote=True)
 
-        gallery_html_parts.append(
-            f'<a href="{escaped_src}" target="_blank" rel="noopener noreferrer" '
-            f'title="{escaped_full_name}" style="text-decoration: none;">'
-            f'<div style="display: inline-block; margin: 4px; text-align: center; vertical-align: top;">'
-            f'<img src="{escaped_src}" alt="{escaped_full_name}" '
-            f'style="width: 72px; height: 72px; object-fit: cover; border-radius: 8px; '
-            f'border: 1px solid #e2e8f0; cursor: pointer; transition: transform 0.15s ease;" '
-            f"onmouseover=\"this.style.transform='scale(1.05)'\" "
-            f"onmouseout=\"this.style.transform='scale(1)'\" />"
-            f'<div style="font-size: 10px; color: #64748b; max-width: 72px; overflow: hidden; '
-            f'text-overflow: ellipsis; white-space: nowrap; margin-top: 2px;">{escaped_name}</div>'
-            f"</div></a>"
-        )
+        if att["type"] == "base64":
+            # Base64 images: use lightbox modal via event delegation
+            src = f"data:{att.get('mime', 'image/png')};base64,{att['data']}"
+            escaped_src = html.escape(src, quote=True)
+            gallery_html_parts.append(
+                f'<div style="display: inline-block; margin: 4px; text-align: center; vertical-align: top;" '
+                f'title="{escaped_full_name}">'
+                f'<img src="{escaped_src}" alt="{escaped_full_name}" class="img-thumb" '
+                f'style="width: 72px; height: 72px; object-fit: cover; border-radius: 8px; '
+                f'border: 1px solid #e2e8f0; cursor: pointer;" />'
+                f'<div style="font-size: 10px; color: #64748b; max-width: 72px; overflow: hidden; '
+                f'text-overflow: ellipsis; white-space: nowrap; margin-top: 2px;">{escaped_name}</div>'
+                f"</div>"
+            )
+        else:
+            # URL images: also use lightbox for consistent experience
+            escaped_url = html.escape(att["url"], quote=True)
+            gallery_html_parts.append(
+                f'<div style="display: inline-block; margin: 4px; text-align: center; vertical-align: top;" '
+                f'title="{escaped_full_name}">'
+                f'<img src="{escaped_url}" alt="{escaped_full_name}" class="img-thumb" '
+                f'style="width: 72px; height: 72px; object-fit: cover; border-radius: 8px; '
+                f'border: 1px solid #e2e8f0; cursor: pointer;" />'
+                f'<div style="font-size: 10px; color: #64748b; max-width: 72px; overflow: hidden; '
+                f'text-overflow: ellipsis; white-space: nowrap; margin-top: 2px;">{escaped_name}</div>'
+                f"</div>"
+            )
 
     wrapper_align = "flex-end" if align == "right" else "flex-start"
     gallery_html = (
@@ -2219,16 +2355,16 @@ def render_citations(message_metadata: Dict[str, Any], msg_id: Optional[str] = N
                             escaped_caption = html.escape(display_caption, quote=True)
                             escaped_full = html.escape(caption_text, quote=True)
 
+                            # Use lightbox for base64 images via event delegation
                             gallery_parts.append(
-                                f'<a href="{escaped_src}" target="_blank" rel="noopener noreferrer" '
-                                f'title="{escaped_full}" style="text-decoration: none;">'
-                                f'<div style="display: inline-block; margin: 4px; text-align: center; vertical-align: top;">'
-                                f'<img src="{escaped_src}" alt="{escaped_full}" '
+                                f'<div style="display: inline-block; margin: 4px; text-align: center; vertical-align: top;" '
+                                f'title="{escaped_full}">'
+                                f'<img src="{escaped_src}" alt="{escaped_full}" class="img-thumb" '
                                 f'style="width: 80px; height: 80px; object-fit: cover; border-radius: 8px; '
                                 f'border: 1px solid #e2e8f0; cursor: pointer;" />'
                                 f'<div style="font-size: 10px; color: #64748b; max-width: 80px; overflow: hidden; '
                                 f'text-overflow: ellipsis; white-space: nowrap; margin-top: 2px;">{escaped_caption}</div>'
-                                f"</div></a>"
+                                f"</div>"
                             )
 
                     if gallery_parts:
@@ -4123,7 +4259,7 @@ def get_task_plans(
     conversation_id: str, include_completed: bool = True
 ) -> List[Dict[str, Any]]:
     """Fetch task plans for a conversation."""
-    endpoint = f"/conversations/{conversation_id}/task-plans?includeCompleted={str(include_completed).lower()}"
+    endpoint = f"/conversations/{conversation_id}/task-plans?include_completed={str(include_completed).lower()}"
     response = make_api_request("GET", endpoint)
     if response and response.get("success"):
         return response.get("data", [])
@@ -4134,15 +4270,6 @@ def get_planning_status(conversation_id: str) -> Optional[Dict[str, Any]]:
     """Fetch planning status for a conversation."""
     endpoint = f"/conversations/{conversation_id}/planning-status"
     response = make_api_request("GET", endpoint)
-    if response and response.get("success"):
-        return response.get("data")
-    return None
-
-
-def toggle_planning_mode(conversation_id: str) -> Optional[Dict[str, Any]]:
-    """Toggle planning mode for a conversation."""
-    endpoint = f"/conversations/{conversation_id}/toggle-planning-mode"
-    response = make_api_request("POST", endpoint)
     if response and response.get("success"):
         return response.get("data")
     return None
@@ -4230,44 +4357,6 @@ def render_planning_tab():
 
     # Fetch planning status
     status = get_planning_status(conversation_id)
-    planning_mode_enabled = (
-        status.get("planningModeEnabled", False) if status else False
-    )
-
-    # Planning Mode Toggle Section
-    st.markdown("### Planning Mode")
-
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        if planning_mode_enabled:
-            st.success(
-                "🟢 Planning mode is **enabled**. The AI will guide you through tasks step by step."
-            )
-        else:
-            st.info(
-                "⚪ Planning mode is **disabled**. Enable it to work through tasks systematically."
-            )
-
-    with col2:
-        button_label = "Disable" if planning_mode_enabled else "Enable"
-        button_type = "secondary" if planning_mode_enabled else "primary"
-        if st.button(
-            button_label,
-            key="toggle_planning_mode",
-            type=button_type,
-            use_container_width=True,
-        ):
-            result = toggle_planning_mode(conversation_id)
-            if result:
-                new_mode = "enabled" if not planning_mode_enabled else "disabled"
-                st.toast(f"Planning mode {new_mode}!", icon="✅")
-                refresh_conversations_list()
-                st.rerun()
-            else:
-                st.toast(
-                    "Failed to toggle planning mode. A plan may already exist.",
-                    icon="❌",
-                )
 
     # Progress Section (if tasks exist)
     if status and status.get("totalTasks", 0) > 0:

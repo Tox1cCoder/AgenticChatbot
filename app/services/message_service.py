@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional, List, Tuple, Any, Dict, TYPE_CHECKING
 from uuid import UUID, uuid4
 import redis
 
@@ -8,7 +8,7 @@ from app.repositories.message import MessageRepository
 from app.repositories.tool_approval import ToolApprovalRepository
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
-from app.models.enums import MessageRole
+from app.models.enums import MessageRole, TaskStatus
 from app.models.tool_approval import DecisionType
 from app.factories.message_factory import MessageFactory
 from app.utils.validation.conversation_validation import ConversationValidationUtils
@@ -16,18 +16,21 @@ from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.pagination_validation import validate_pagination_params
 from app.interfaces.message_service_interface import IMessageService
 from app.services.ai_service import AIService
-from app.ai.schemas import InterruptDecision, InterruptResponse, InterruptDecisionType
-from app.utils.text_processing import sanitize_persona
+from app.ai.schemas import (
+    AgentResponse,
+    InterruptDecision,
+    InterruptResponse,
+    InterruptDecisionType,
+)
+from app.utils.text_processing import sanitize_persona, fix_markdown_code_blocks
 from app.core.config import settings
-import logging
+from app.core.exceptions import PauseReason
 
-
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from app.interfaces.task_plan_service_interface import ITaskPlanService
 
 
 class MessageService(IMessageService):
-    """Service layer for Message operations"""
-
     def __init__(
         self,
         message_repository: MessageRepository,
@@ -35,30 +38,21 @@ class MessageService(IMessageService):
         message_validation_utils: MessageValidationUtils,
         ai_service: AIService,
         tool_approval_repository: Optional[ToolApprovalRepository] = None,
+        task_plan_service: Optional["ITaskPlanService"] = None,
     ):
         self.repository = message_repository
         self.conversation_validation_utils = conversation_validation_utils
         self.message_validation_utils = message_validation_utils
         self.ai_service = ai_service
         self.tool_approval_repository = tool_approval_repository
-
-        # Initialize Redis connection for timeout tracking
+        self.task_plan_service = task_plan_service
         self.redis_client = self._init_redis_client()
 
     def _init_redis_client(self):
-        """Create a Redis client if configuration is provided."""
         redis_url = getattr(settings, "redis_url", "") or ""
         if not redis_url.strip():
-            logger.debug("Redis URL not configured; HITL timeout tracking disabled.")
             return None
-
-        try:
-            return redis.from_url(redis_url)
-        except Exception as e:
-            logger.warning(
-                f"Failed to connect to Redis at {redis_url}: {e}. Timeout tracking disabled."
-            )
-            return None
+        return redis.from_url(redis_url)
 
     async def create_message(self, message_create_data: MessageCreate) -> MessageRead:
         self.conversation_validation_utils.validate_conversation_exists(
@@ -82,6 +76,69 @@ class MessageService(IMessageService):
             persona = conversation.persona_prompt if conversation else None
             sanitized_persona = sanitize_persona(persona)
 
+            # Check if planning mode is enabled and get current task
+            planning_mode_enabled = (
+                conversation.planning_mode_enabled if conversation else False
+            )
+            current_task = None
+            current_task_context = None
+            has_existing_plan = False
+            existing_tasks_dict = None
+            if self.task_plan_service and user_id:
+                try:
+                    existing_tasks = self.task_plan_service.get_conversation_tasks(
+                        message_create_data.conversation_id,
+                        user_id,
+                        include_completed=True,
+                    )
+                    has_existing_plan = len(existing_tasks) > 0
+
+                    if planning_mode_enabled and not has_existing_plan:
+                        created_tasks = await self.task_plan_service.create_task_plan(
+                            message_create_data.conversation_id,
+                            message_create_data.content,
+                            user_id,
+                        )
+                        has_existing_plan = len(created_tasks) > 0
+                        if has_existing_plan:
+                            existing_tasks = (
+                                self.task_plan_service.get_conversation_tasks(
+                                    message_create_data.conversation_id,
+                                    user_id,
+                                    include_completed=True,
+                                )
+                            )
+
+                    if has_existing_plan:
+                        planning_mode_enabled = True
+
+                    # Get current task for execution context
+                    current_task = self.task_plan_service.get_next_task(
+                        message_create_data.conversation_id, user_id
+                    )
+                    current_task_context = self._build_task_context_dict(current_task)
+
+                    # Convert existing tasks to dict for planning agent
+                    if existing_tasks:
+                        existing_tasks_dict = [
+                            {
+                                "id": str(task.id),
+                                "description": task.description,
+                                "status": (
+                                    task.status.value
+                                    if hasattr(task.status, "value")
+                                    else str(task.status)
+                                ),
+                                "task_order": task.task_order,
+                                "dependencies": [
+                                    str(d) for d in (task.dependencies or [])
+                                ],
+                            }
+                            for task in existing_tasks
+                        ]
+                except Exception:
+                    pass
+
             # Extract attachments from message_create_data if present
             attachments = (
                 message_create_data.attachments
@@ -89,49 +146,40 @@ class MessageService(IMessageService):
                 else None
             )
 
-            bot_response = await self.ai_service.generate_bot_response(
-                user_message=message_create_data.content,
-                conversation_id=message_create_data.conversation_id,
-                user_id=user_id,
-                attachments=attachments,
+            auto_execute_plan = (
+                planning_mode_enabled
+                and has_existing_plan
+                and current_task_context is not None
             )
 
-            # Check if response contains interrupt information
-            if (
-                bot_response
-                and bot_response.metadata
-                and "interrupt" in bot_response.metadata
-            ):
+            (
+                bot_response_content,
+                bot_metadata,
+                bot_response,
+                execution_count,
+                interrupt_payload,
+            ) = await self._run_plan_execution_loop(
+                message_content=message_create_data.content,
+                conversation_id=message_create_data.conversation_id,
+                user_id=user_id,
+                sanitized_persona=sanitized_persona,
+                planning_mode_enabled=planning_mode_enabled,
+                has_existing_plan=has_existing_plan,
+                current_task=current_task,
+                current_task_context=current_task_context,
+                existing_tasks_dict=existing_tasks_dict,
+                attachments=attachments,
+                auto_execute_plan=auto_execute_plan,
+            )
+
+            if interrupt_payload:
                 user_message_read = MessageRead.model_validate(created_message)
-                interrupt_payload = bot_response.metadata["interrupt"]
                 if isinstance(interrupt_payload, dict):
                     interrupt_payload = InterruptResponse.model_validate(
                         interrupt_payload
                     )
                 user_message_read.interrupt = interrupt_payload
                 return user_message_read
-
-            bot_response_content = (
-                bot_response.message.content
-                if bot_response and bot_response.message
-                else "Error: No response generated"
-            )
-
-            # Create metadata for bot response
-            bot_metadata = dict(bot_response.metadata) if bot_response else {}
-            if sanitized_persona:
-                bot_metadata.setdefault("persona_used", sanitized_persona)
-
-            if bot_response and bot_response.tool_artifacts:
-                bot_metadata.setdefault("tool_artifacts", bot_response.tool_artifacts)
-
-            # Extract images from bot response metadata
-            if (
-                bot_response
-                and bot_response.metadata
-                and "images" in bot_response.metadata
-            ):
-                bot_metadata["images"] = bot_response.metadata["images"]
 
             bot_response_entity = MessageFactory.create_bot_response(
                 conversation_id=message_create_data.conversation_id,
@@ -176,6 +224,70 @@ class MessageService(IMessageService):
             persona = conversation.persona_prompt if conversation else None
             sanitized_persona = sanitize_persona(persona)
 
+            # Check if planning mode is enabled and get current task
+            planning_mode_enabled = (
+                conversation.planning_mode_enabled if conversation else False
+            )
+            current_task = None
+            current_task_context = None
+            has_existing_plan = False
+            existing_tasks_dict = None
+            if self.task_plan_service and user_id:
+                try:
+                    existing_tasks = self.task_plan_service.get_conversation_tasks(
+                        message_create_data.conversation_id,
+                        user_id,
+                        include_completed=True,
+                    )
+                    has_existing_plan = len(existing_tasks) > 0
+
+                    if planning_mode_enabled and not has_existing_plan:
+                        created_tasks = await self.task_plan_service.create_task_plan(
+                            message_create_data.conversation_id,
+                            message_create_data.content,
+                            user_id,
+                        )
+                        has_existing_plan = len(created_tasks) > 0
+                        if has_existing_plan:
+                            existing_tasks = (
+                                self.task_plan_service.get_conversation_tasks(
+                                    message_create_data.conversation_id,
+                                    user_id,
+                                    include_completed=True,
+                                )
+                            )
+
+                    if has_existing_plan:
+                        planning_mode_enabled = True
+
+                    # Get current task for execution context
+                    current_task = self.task_plan_service.get_next_task(
+                        message_create_data.conversation_id, user_id
+                    )
+                    current_task_context = self._build_task_context_dict(current_task)
+
+                    # Convert existing tasks to dict for planning agent
+                    if existing_tasks:
+                        existing_tasks_dict = [
+                            {
+                                "id": str(task.id),
+                                "description": task.description,
+                                "status": (
+                                    task.status.value
+                                    if hasattr(task.status, "value")
+                                    else str(task.status)
+                                ),
+                                "task_order": task.task_order,
+                                "dependencies": [
+                                    str(d) for d in (task.dependencies or [])
+                                ],
+                            }
+                            for task in existing_tasks
+                        ]
+
+                except Exception:
+                    pass
+
             # Extract attachments from message_create_data if present
             attachments = (
                 message_create_data.attachments
@@ -183,9 +295,69 @@ class MessageService(IMessageService):
                 else None
             )
 
+            auto_execute_plan = (
+                planning_mode_enabled
+                and has_existing_plan
+                and current_task_context is not None
+            )
+
             # Stream bot response generation
             bot_response_content = "Error: No response generated"
             bot_response = None
+
+            if auto_execute_plan:
+                (
+                    bot_response_content,
+                    bot_metadata,
+                    bot_response,
+                    execution_count,
+                    interrupt_payload,
+                ) = await self._run_plan_execution_loop(
+                    message_content=message_create_data.content,
+                    conversation_id=message_create_data.conversation_id,
+                    user_id=user_id,
+                    sanitized_persona=sanitized_persona,
+                    planning_mode_enabled=planning_mode_enabled,
+                    has_existing_plan=has_existing_plan,
+                    current_task=current_task,
+                    current_task_context=current_task_context,
+                    existing_tasks_dict=existing_tasks_dict,
+                    attachments=attachments,
+                    auto_execute_plan=True,
+                )
+
+                if interrupt_payload:
+                    if isinstance(interrupt_payload, dict):
+                        interrupt_payload = InterruptResponse.model_validate(
+                            interrupt_payload
+                        )
+                    yield {
+                        "type": "interrupt",
+                        "thread_id": str(message_create_data.conversation_id),
+                        "next": None,
+                        "pending_tool_calls": None,
+                        "interrupt": interrupt_payload,
+                    }
+                    return
+
+                bot_response_entity = MessageFactory.create_bot_response(
+                    conversation_id=message_create_data.conversation_id,
+                    content=bot_response_content,
+                    message_metadata=bot_metadata,
+                )
+                bot_message = self.repository.create(bot_response_entity)
+
+                # Emit simplified events (no token streaming) for auto-execution
+                agent_name = bot_response.agent_id if bot_response else "chat_agent"
+                yield {"type": "agent_selected", "agent": agent_name}
+                yield {"type": "token", "content": bot_response_content}
+                yield {
+                    "type": "complete",
+                    "message": MessageRead.model_validate(bot_message).model_dump(
+                        mode="json"
+                    ),
+                }
+                return
 
             try:
                 async for event in self.ai_service.generate_bot_response_stream(
@@ -193,6 +365,10 @@ class MessageService(IMessageService):
                     conversation_id=message_create_data.conversation_id,
                     user_id=user_id,
                     attachments=attachments,
+                    current_task=current_task_context,
+                    planning_mode_enabled=planning_mode_enabled,
+                    has_existing_plan=has_existing_plan,
+                    existing_tasks=existing_tasks_dict,
                 ):
                     event_type = event.get("type")
 
@@ -291,6 +467,9 @@ class MessageService(IMessageService):
                 if not bot_response_content or not bot_response_content.strip():
                     bot_response_content = "No response generated"
 
+                # Fix markdown code blocks that may be missing newlines
+                bot_response_content = fix_markdown_code_blocks(bot_response_content)
+
                 # Create metadata for bot response
                 bot_metadata = dict(bot_response.metadata) if bot_response else {}
                 if sanitized_persona:
@@ -309,6 +488,46 @@ class MessageService(IMessageService):
                 ):
                     bot_metadata["images"] = bot_response.metadata["images"]
 
+                plan_saved, has_existing_plan = self._sync_plan_from_response_metadata(
+                    conversation_id=message_create_data.conversation_id,
+                    user_id=user_id,
+                    bot_response=bot_response,
+                    has_existing_plan=has_existing_plan,
+                )
+                if plan_saved:
+                    bot_metadata["plan_saved"] = True
+
+                # Mark current task as completed if planning mode is active
+                # Skip if plan was just replaced (old task IDs are invalid)
+                if (
+                    planning_mode_enabled
+                    and current_task
+                    and self.task_plan_service
+                    and user_id
+                    and not plan_saved
+                ):
+                    try:
+                        # Re-fetch task to verify status is still pending before marking complete
+                        fresh_task = self.task_plan_service.get_by_id(
+                            current_task.id, user_id
+                        )
+                        if fresh_task and fresh_task.status == TaskStatus.pending:
+                            self.task_plan_service.mark_task_completed(
+                                current_task.id, user_id
+                            )
+                            # Get next task for metadata
+                            next_task = self.task_plan_service.get_next_task(
+                                message_create_data.conversation_id, user_id
+                            )
+                            if next_task:
+                                bot_metadata["next_task"] = {
+                                    "id": str(next_task.id),
+                                    "description": next_task.description,
+                                    "order": next_task.task_order,
+                                }
+                    except Exception:
+                        pass
+
                 # Create and persist bot response message
                 bot_response_entity = MessageFactory.create_bot_response(
                     conversation_id=message_create_data.conversation_id,
@@ -326,11 +545,6 @@ class MessageService(IMessageService):
                 }
 
             except Exception as exc:
-                logger.error(
-                    f"Error in streaming message creation: {exc}", exc_info=True
-                )
-
-                # Create error bot response
                 error_content = f"Error generating response: {str(exc)}"
                 error_metadata = {"error": str(exc)}
 
@@ -356,18 +570,6 @@ class MessageService(IMessageService):
         decisions: List[InterruptDecision],
         interrupt_id: Optional[str] = None,
     ) -> MessageRead:
-        """
-        Resume message creation after handling interrupts.
-
-        Args:
-            thread_id: Thread ID from the interrupt response
-            conversation_id: Conversation ID
-            decisions: List of approval/rejection/edit decisions
-            interrupt_id: LangGraph interrupt identifier for targeted resume
-
-        Returns:
-            MessageRead of the created bot response message
-        """
         self.conversation_validation_utils.validate_conversation_exists(conversation_id)
 
         if self.redis_client and interrupt_id:
@@ -468,7 +670,6 @@ class MessageService(IMessageService):
                 )
             interrupt_payload = bot_response.metadata["interrupt"]
             if isinstance(interrupt_payload, dict):
-                # Add interrupt counter for better UX
                 interrupt_count = (
                     interrupt_payload.get("metadata", {}).get("interrupt_count", 0) + 1
                 )
@@ -618,21 +819,10 @@ class MessageService(IMessageService):
         user_input: Optional[str] = None,
         rejection_messages: Optional[List] = None,
     ) -> MessageRead:
-        """
-        Resume a paused workflow and return the bot's response message.
-
-        Args:
-            conversation_id: The conversation ID
-            user_id: The user ID
-            user_input: Optional user input (not currently used)
-            rejection_messages: Optional list of ToolMessages indicating tool rejection
-        """
-        # Validate conversation access
         self.conversation_validation_utils.validate_conversation_access(
             user_id, conversation_id
         )
 
-        # Resume the workflow through AI service
         bot_response = await self.ai_service.resume_workflow(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -640,30 +830,242 @@ class MessageService(IMessageService):
             rejection_messages=rejection_messages,
         )
 
-        # Extract response content
         bot_response_content = (
             bot_response.message.content
             if bot_response and bot_response.message
-            else "Error: No response generated after resume"
+            else "No response generated after resume"
         )
 
-        # Create metadata for bot response
         bot_metadata = dict(bot_response.metadata) if bot_response else {}
         if bot_response and bot_response.tool_artifacts:
             bot_metadata.setdefault("tool_artifacts", bot_response.tool_artifacts)
 
-        # Extract images from bot response metadata
         if bot_response and bot_response.metadata and "images" in bot_response.metadata:
             bot_metadata["images"] = bot_response.metadata["images"]
 
-        # Save the bot response as a message in the database
         bot_response_entity = MessageFactory.create_bot_response(
             conversation_id=conversation_id,
             content=bot_response_content,
             message_metadata=bot_metadata,
         )
 
-        # Create the message
         bot_message = self.repository.create(bot_response_entity)
-
         return MessageRead.model_validate(bot_message)
+
+    def _sync_plan_from_response_metadata(
+        self,
+        conversation_id: UUID,
+        user_id: Optional[UUID],
+        bot_response: Optional[AgentResponse],
+        has_existing_plan: bool,
+    ) -> Tuple[bool, bool]:
+        if (
+            not self.task_plan_service
+            or not bot_response
+            or not bot_response.metadata
+            or not user_id
+        ):
+            return False, has_existing_plan
+
+        plan_payload = bot_response.metadata.get("plan")
+        if not plan_payload:
+            return False, has_existing_plan
+
+        plan_modified = bool(bot_response.metadata.get("plan_modified"))
+        if has_existing_plan and not plan_modified:
+            return False, has_existing_plan
+
+        try:
+            self.task_plan_service.sync_plan_from_agent(
+                conversation_id=conversation_id,
+                plan_payload=plan_payload,
+                user_id=user_id,
+                replace_existing=True,
+            )
+            return True, True
+        except Exception:
+            return False, has_existing_plan
+
+    @staticmethod
+    def _build_task_context_dict(task: Optional[Any]) -> Optional[Dict[str, Any]]:
+        if not task:
+            return None
+        return {
+            "id": str(task.id),
+            "description": task.description,
+            "order": getattr(task, "task_order", getattr(task, "order", 0)),
+            "dependencies": [str(dep) for dep in (task.dependencies or [])],
+            "status": (
+                task.status.value if hasattr(task.status, "value") else str(task.status)
+            ),
+        }
+
+    async def _run_plan_execution_loop(
+        self,
+        *,
+        message_content: str,
+        conversation_id: UUID,
+        user_id: Optional[UUID],
+        sanitized_persona: Optional[str],
+        planning_mode_enabled: bool,
+        has_existing_plan: bool,
+        current_task: Optional[Any],
+        current_task_context: Optional[Dict[str, Any]],
+        existing_tasks_dict: Optional[List[Dict[str, Any]]],
+        attachments: Optional[list],
+        auto_execute_plan: bool,
+    ) -> Tuple[
+        Optional[str],
+        Dict[str, Any],
+        Optional[AgentResponse],
+        int,
+        Optional[Dict[str, Any]],
+    ]:
+        max_tasks = getattr(settings, "max_auto_plan_tasks", 3)
+        attachments_for_iteration = attachments
+        combined_contents: List[str] = []
+        execution_count = 0
+        bot_response: Optional[AgentResponse] = None
+        bot_metadata: Dict[str, Any] = {}
+        has_plan = has_existing_plan
+
+        while True:
+            # Exit early if no task to execute (plan complete)
+            if auto_execute_plan and execution_count > 0 and not current_task_context:
+                break
+
+            bot_response = await self.ai_service.generate_bot_response(
+                user_message=message_content,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                attachments=attachments_for_iteration,
+                current_task=current_task_context,
+                all_tasks=existing_tasks_dict,
+                planning_mode_enabled=planning_mode_enabled,
+                has_existing_plan=has_plan,
+                existing_tasks=existing_tasks_dict,
+            )
+
+            if (
+                bot_response
+                and bot_response.metadata
+                and "interrupt" in bot_response.metadata
+            ):
+                return (
+                    None,
+                    {},
+                    bot_response,
+                    execution_count,
+                    bot_response.metadata["interrupt"],
+                )
+
+            bot_response_content = (
+                bot_response.message.content
+                if bot_response and bot_response.message
+                else "No response generated"
+            )
+            combined_contents.append(bot_response_content)
+
+            bot_metadata = dict(bot_response.metadata) if bot_response else {}
+            if sanitized_persona:
+                bot_metadata.setdefault("persona_used", sanitized_persona)
+
+            if bot_response and bot_response.tool_artifacts:
+                bot_metadata.setdefault("tool_artifacts", bot_response.tool_artifacts)
+
+            if (
+                bot_response
+                and bot_response.metadata
+                and "images" in bot_response.metadata
+            ):
+                bot_metadata["images"] = bot_response.metadata["images"]
+
+            plan_saved, has_plan = self._sync_plan_from_response_metadata(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                bot_response=bot_response,
+                has_existing_plan=has_plan,
+            )
+            if plan_saved:
+                bot_metadata["plan_saved"] = True
+
+            next_task = None
+            # Mark current task as completed if planning mode is active
+            # Skip if plan was just replaced (old task IDs are invalid)
+            if (
+                planning_mode_enabled
+                and current_task
+                and self.task_plan_service
+                and user_id
+                and not plan_saved
+            ):
+                fresh_task = self.task_plan_service.get_by_id(current_task.id, user_id)
+                if fresh_task and fresh_task.status == TaskStatus.pending:
+                    self.task_plan_service.mark_task_completed(current_task.id, user_id)
+
+            # Always refresh task data after processing (whether plan was saved or task completed)
+            if planning_mode_enabled and self.task_plan_service and user_id:
+                # Refresh existing_tasks_dict with updated status
+                refreshed_tasks = self.task_plan_service.get_conversation_tasks(
+                    conversation_id, user_id, include_completed=True
+                )
+                existing_tasks_dict = [
+                    {
+                        "id": str(t.id),
+                        "description": t.description,
+                        "status": (
+                            t.status.value
+                            if hasattr(t.status, "value")
+                            else str(t.status)
+                        ),
+                        "task_order": t.task_order,
+                        "dependencies": [str(d) for d in (t.dependencies or [])],
+                    }
+                    for t in refreshed_tasks
+                ]
+
+                next_task = self.task_plan_service.get_next_task(
+                    conversation_id, user_id
+                )
+                if next_task:
+                    bot_metadata["next_task"] = {
+                        "id": str(next_task.id),
+                        "description": next_task.description,
+                        "order": next_task.task_order,
+                    }
+
+            execution_count += 1
+            attachments_for_iteration = None
+
+            # Stop if: not auto-executing, no more tasks, or hit max tasks limit
+            if not auto_execute_plan or not next_task or execution_count >= max_tasks:
+                if auto_execute_plan and next_task and execution_count >= max_tasks:
+                    bot_metadata["execution_paused"] = True
+                    bot_metadata["execution_pause_reason"] = (
+                        PauseReason.MAX_TASKS_REACHED.value
+                    )
+                    bot_metadata["execution_pause_message"] = (
+                        f"Executed {execution_count} tasks. Send a message to continue with remaining tasks."
+                    )
+                break
+
+            current_task = next_task
+            current_task_context = self._build_task_context_dict(next_task)
+
+        # If no content was generated but we have a pause message, use that as content
+        if not combined_contents and bot_metadata.get("execution_pause_message"):
+            combined_content = bot_metadata["execution_pause_message"]
+        else:
+            combined_content = (
+                "\n\n---\n\n".join(combined_contents)
+                if combined_contents
+                else "No response generated"
+            )
+
+        # Fix markdown code blocks that may be missing newlines before opening fences
+        combined_content = fix_markdown_code_blocks(combined_content)
+
+        if auto_execute_plan and execution_count > 1:
+            bot_metadata["auto_executed_tasks"] = execution_count
+
+        return combined_content, bot_metadata, bot_response, execution_count, None

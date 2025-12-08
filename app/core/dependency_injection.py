@@ -17,11 +17,13 @@ from app.interfaces import (
     IAuthService,
     IDocumentService,
 )
+from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.repositories.user import UserRepository
 from app.repositories.conversation import ConversationRepository
 from app.repositories.message import MessageRepository
 from app.repositories.feedback import FeedbackRepository
 from app.repositories.document import DocumentRepository
+from app.repositories.task_plan import TaskPlanRepository
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.mcp_service import MCPService
 from app.services.jwt_service import JwtService
@@ -32,6 +34,7 @@ from app.utils.validation.conversation_validation import (
 from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.feedback_validation import FeedbackValidationUtils
 from app.utils.validation.document_validation import DocumentValidationUtils
+from app.utils.validation.task_plan_validation import TaskPlanValidationUtils
 
 
 class AutoInjector:
@@ -118,6 +121,7 @@ class AppAutoInjector(AutoInjector):
             IFeedbackService: getattr(container_ref, "feedback_service"),
             IAuthService: getattr(container_ref, "auth_service"),
             IDocumentService: getattr(container_ref, "document_service"),
+            ITaskPlanService: getattr(container_ref, "task_plan_service"),
             DocumentProcessingService: getattr(
                 container_ref, "document_processing_service"
             ),
@@ -220,6 +224,7 @@ class AppContainerInjector(ContainerInjector):
             IFeedbackService: getattr(container_ref, "feedback_service"),
             IAuthService: getattr(container_ref, "auth_service"),
             IDocumentService: getattr(container_ref, "document_service"),
+            ITaskPlanService: getattr(container_ref, "task_plan_service"),
             DocumentProcessingService: getattr(
                 container_ref, "document_processing_service"
             ),
@@ -230,6 +235,7 @@ class AppContainerInjector(ContainerInjector):
             MessageRepository: getattr(container_ref, "message_repository"),
             FeedbackRepository: getattr(container_ref, "feedback_repository"),
             DocumentRepository: getattr(container_ref, "document_repository"),
+            TaskPlanRepository: getattr(container_ref, "task_plan_repository"),
             # Validation utilities
             UserValidationUtils: getattr(container_ref, "user_validation_utils"),
             ConversationValidationUtils: getattr(
@@ -241,5 +247,8 @@ class AppContainerInjector(ContainerInjector):
             ),
             DocumentValidationUtils: getattr(
                 container_ref, "document_validation_utils"
+            ),
+            TaskPlanValidationUtils: getattr(
+                container_ref, "task_plan_validation_utils"
             ),
         }

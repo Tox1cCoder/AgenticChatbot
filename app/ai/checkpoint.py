@@ -34,8 +34,6 @@ class CheckpointManager:
             return
 
         try:
-            logger.info("Setting up LangGraph checkpoint tables...")
-
             # Create persistent async connection
             self._conn = await psycopg.AsyncConnection.connect(self.db_url)
 
@@ -51,7 +49,6 @@ class CheckpointManager:
             )
 
         except Exception as e:
-            logger.error(f"Failed to setup checkpoint tables: {e}", exc_info=True)
             raise
 
     def get_checkpointer(self) -> Optional[AsyncPostgresSaver]:
@@ -66,31 +63,11 @@ class CheckpointManager:
     async def cleanup(self) -> None:
         """Cleanup checkpoint manager and close database connection."""
         try:
-            logger.info("Cleaning up checkpoint manager...")
-
             if self._conn:
                 await self._conn.close()
                 self._conn = None
 
             self._initialized = False
             self.checkpointer = None
-            logger.info("Checkpoint manager cleanup complete")
         except Exception as e:
             logger.error(f"Error during checkpoint manager cleanup: {e}", exc_info=True)
-
-
-# Global checkpoint manager instance
-_checkpoint_manager: Optional[CheckpointManager] = None
-
-
-def get_checkpoint_manager() -> Optional[CheckpointManager]:
-    """
-    Get the global CheckpointManager singleton instance.
-    """
-    global _checkpoint_manager
-    return _checkpoint_manager
-
-
-def set_checkpoint_manager(manager: CheckpointManager) -> None:
-    global _checkpoint_manager
-    _checkpoint_manager = manager

@@ -9,6 +9,7 @@ from .mcp import (
     ToolExecutionError,
     ServerConfigurationError,
 )
+from .planning import PlanExecutionPausedException, PauseReason
 
 __all__ = [
     "CustomHTTPException",
@@ -24,4 +25,6 @@ __all__ = [
     "ToolNotFoundError",
     "ToolExecutionError",
     "ServerConfigurationError",
+    "PlanExecutionPausedException",
+    "PauseReason",
 ]

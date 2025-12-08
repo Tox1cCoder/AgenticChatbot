@@ -1,6 +1,5 @@
-import logging
 import asyncio
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from uuid import UUID
 
 from ..ai.graph import create_workflow
@@ -10,7 +9,6 @@ from ..ai.schemas import (
     AgentType,
     MessageRole,
     InterruptDecision,
-    InterruptDecisionType,
 )
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from qdrant_client import QdrantClient
@@ -18,8 +16,6 @@ from sentence_transformers import SentenceTransformer
 from ..repositories.conversation import ConversationRepository
 from ..repositories.document import DocumentRepository
 from ..utils.text_processing import sanitize_persona
-
-logger = logging.getLogger(__name__)
 
 
 class AIService:
@@ -68,13 +64,17 @@ class AIService:
         user_id: UUID,
         message: str,
         attachments: Optional[list] = None,
+        current_task: Optional[Dict[str, Any]] = None,
+        all_tasks: Optional[List[Dict[str, Any]]] = None,
+        planning_mode_enabled: bool = False,
+        has_existing_plan: bool = False,
+        existing_tasks: Optional[List[Dict[str, Any]]] = None,
     ) -> AgentResponse:
 
         thread_id = (
             str(conversation_id) if conversation_id and self.checkpointer else None
         )
 
-        # Load and sanitize persona
         persona = self._load_persona(conversation_id)
         persona = sanitize_persona(persona)
 
@@ -85,6 +85,11 @@ class AIService:
             thread_id=thread_id,
             persona=persona,
             attachments=attachments,
+            current_task=current_task,
+            all_tasks=all_tasks,
+            planning_mode_enabled=planning_mode_enabled,
+            has_existing_plan=has_existing_plan,
+            existing_tasks=existing_tasks,
         )
 
         if response:
@@ -100,16 +105,25 @@ class AIService:
         conversation_id: Optional[UUID] = None,
         user_id: Optional[UUID] = None,
         attachments: Optional[list] = None,
+        current_task: Optional[Dict[str, Any]] = None,
+        all_tasks: Optional[List[Dict[str, Any]]] = None,
+        planning_mode_enabled: bool = False,
+        has_existing_plan: bool = False,
+        existing_tasks: Optional[List[Dict[str, Any]]] = None,
     ) -> AgentResponse:
 
         if conversation_id is None or user_id is None:
-            logger.warning("Conversation ID or User ID is None")
             response = await self.workflow.execute(
                 message=user_message,
                 conversation_id=None,
                 user_id=None,
                 persona=None,
                 attachments=attachments,
+                current_task=current_task,
+                all_tasks=all_tasks,
+                planning_mode_enabled=planning_mode_enabled,
+                has_existing_plan=has_existing_plan,
+                existing_tasks=existing_tasks,
             )
             if response:
                 return response
@@ -120,6 +134,11 @@ class AIService:
             user_id=user_id,
             message=user_message,
             attachments=attachments,
+            current_task=current_task,
+            all_tasks=all_tasks,
+            planning_mode_enabled=planning_mode_enabled,
+            has_existing_plan=has_existing_plan,
+            existing_tasks=existing_tasks,
         )
 
     async def resume_workflow(
@@ -127,17 +146,7 @@ class AIService:
         conversation_id: UUID,
         user_id: UUID,
         user_input: Optional[str] = None,
-        rejection_messages: Optional[List] = None,
     ) -> AgentResponse:
-        """
-        Resume a workflow that was interrupted (e.g. for human approval).
-
-        Args:
-            conversation_id: The conversation ID
-            user_id: The user ID
-            user_input: Optional user input (not currently used)
-            rejection_messages: Optional list of ToolMessages indicating tool rejection
-        """
         thread_id = (
             str(conversation_id) if conversation_id and self.checkpointer else None
         )
@@ -147,25 +156,15 @@ class AIService:
                 "Cannot resume: Checkpointing not enabled or conversation ID missing"
             )
 
-        try:
-            state_info = await self.workflow.get_state(thread_id)
+        response = await self.workflow.resume(
+            thread_id=thread_id,
+            user_input=user_input,
+        )
 
-            response = await self.workflow.resume(
-                thread_id=thread_id,
-                user_input=user_input,
-                rejection_messages=rejection_messages,
-            )
+        if response:
+            return response
 
-            if response:
-                return response
-
-            return self._build_error_response(
-                "Error: No response generated after resume"
-            )
-
-        except Exception as e:
-            logger.error(f"Error resuming workflow: {e}", exc_info=True)
-            return self._build_error_response(f"Error resuming workflow: {str(e)}")
+        return self._build_error_response("Error: No response generated after resume")
 
     async def resume_interrupted_execution(
         self,
@@ -174,40 +173,23 @@ class AIService:
         decisions: List[InterruptDecision],
         interrupt_id: Optional[str] = None,
     ) -> AgentResponse:
-        """
-        Resume execution after handling tool interrupts with user decisions.
-
-        Args:
-            thread_id: The thread ID to resume
-            conversation_id: Conversation ID
-            decisions: List of user decisions (accept/edit/reject) for each tool
-            interrupt_id: LangGraph interrupt identifier (optional)
-
-        Returns:
-            AgentResponse with the bot's response after handling decisions
-        """
         if not self.checkpointer:
             return self._build_error_response(
                 "Cannot resume: Checkpointing not enabled"
             )
 
-        try:
-            response = await self.workflow.resume_with_decisions(
-                thread_id=thread_id,
-                decisions=decisions,
-                interrupt_id=interrupt_id,
-            )
+        response = await self.workflow.resume_with_decisions(
+            thread_id=thread_id,
+            decisions=decisions,
+            interrupt_id=interrupt_id,
+        )
 
-            if response:
-                return response
+        if response:
+            return response
 
-            return self._build_error_response(
-                "Error: No response generated after resuming with decisions"
-            )
-
-        except Exception as e:
-            logger.error(f"Error resuming with decisions: {e}", exc_info=True)
-            return self._build_error_response(f"Error resuming execution: {str(e)}")
+        return self._build_error_response(
+            "Error: No response generated after resuming with decisions"
+        )
 
     async def generate_bot_response_stream(
         self,
@@ -215,102 +197,86 @@ class AIService:
         conversation_id: Optional[UUID] = None,
         user_id: Optional[UUID] = None,
         attachments: Optional[list] = None,
+        current_task: Optional[Dict[str, Any]] = None,
+        all_tasks: Optional[List[Dict[str, Any]]] = None,
+        planning_mode_enabled: bool = False,
+        has_existing_plan: bool = False,
+        existing_tasks: Optional[List[Dict[str, Any]]] = None,
     ):
-        """
-        Generate bot response with streaming support.
-        Yields incremental token chunks as they arrive from the workflow.
-        """
         thread_id = (
             str(conversation_id) if conversation_id and self.checkpointer else None
         )
 
-        # Load and sanitize persona
         persona = None
         if conversation_id:
             persona = self._load_persona(conversation_id)
             persona = sanitize_persona(persona)
 
-        # Track final response
         final_response = None
 
-        try:
-            async for event in self.workflow.execute_stream(
-                message=user_message,
-                conversation_id=str(conversation_id) if conversation_id else None,
-                user_id=str(user_id) if user_id else None,
-                thread_id=thread_id,
-                persona=persona,
-                attachments=attachments,
-            ):
-                event_type = event.get("type")
+        async for event in self.workflow.execute_stream(
+            message=user_message,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            user_id=str(user_id) if user_id else None,
+            thread_id=thread_id,
+            persona=persona,
+            attachments=attachments,
+            current_task=current_task,
+            all_tasks=all_tasks,
+            planning_mode_enabled=planning_mode_enabled,
+            has_existing_plan=has_existing_plan,
+            existing_tasks=existing_tasks,
+        ):
+            event_type = event.get("type")
 
-                if event_type == "agent_selected":
-                    # Yield agent selection notification
-                    agent_name = event.get("agent", "unknown")
-                    yield {"type": "agent_selected", "agent": agent_name}
+            if event_type == "agent_selected":
+                agent_name = event.get("agent", "unknown")
+                yield {"type": "agent_selected", "agent": agent_name}
 
-                elif event_type == "node":
-                    # Yield node execution notification
-                    node_name = event.get("node")
-                    yield {"type": "node", "node": node_name}
+            elif event_type == "node":
+                node_name = event.get("node")
+                yield {"type": "node", "node": node_name}
 
-                elif event_type == "thinking":
-                    # Yield thinking/reasoning content from Gemini models
-                    content = event.get("content", "")
-                    yield {"type": "thinking", "content": content}
+            elif event_type == "thinking":
+                content = event.get("content", "")
+                yield {"type": "thinking", "content": content}
 
-                elif event_type == "token":
-                    # Yield incremental token chunks directly
-                    content = event.get("content", "")
-                    yield {"type": "token", "content": content}
+            elif event_type == "token":
+                content = event.get("content", "")
+                yield {"type": "token", "content": content}
 
-                elif event_type == "tool_start":
-                    # Yield tool start event
-                    tool_name = event.get("name", "unknown")
-                    yield {"type": "tool", "name": tool_name, "status": "start"}
+            elif event_type == "tool_start":
+                tool_name = event.get("name", "unknown")
+                yield {"type": "tool", "name": tool_name, "status": "start"}
 
-                elif event_type == "tool_end":
-                    # Yield tool end event
-                    tool_name = event.get("name", "unknown")
-                    yield {"type": "tool", "name": tool_name, "status": "end"}
+            elif event_type == "tool_end":
+                tool_name = event.get("name", "unknown")
+                yield {"type": "tool", "name": tool_name, "status": "end"}
 
-                elif event_type == "complete":
-                    # Store final response
-                    final_response = event.get("response")
+            elif event_type == "complete":
+                final_response = event.get("response")
 
-                elif event_type == "error":
-                    # Yield error event
-                    error_msg = event.get("error", "Unknown error")
-                    yield {"type": "error", "error": error_msg}
+            elif event_type == "error":
+                error_msg = event.get("error", "Unknown error")
+                yield {"type": "error", "error": error_msg}
 
-                elif event_type == "interrupt":
-                    next_nodes = event.get("next", [])
-                    pending_tool_calls = event.get("pending_tool_calls")
-                    yield {
-                        "type": "interrupt",
-                        "next": next_nodes,
-                        "thread_id": thread_id,
-                        "pending_tool_calls": pending_tool_calls,
-                        "interrupt": event.get("interrupt"),
-                        "message": "Workflow paused - awaiting approval for tool execution",
-                    }
+            elif event_type == "interrupt":
+                next_nodes = event.get("next", [])
+                pending_tool_calls = event.get("pending_tool_calls")
+                yield {
+                    "type": "interrupt",
+                    "next": next_nodes,
+                    "thread_id": thread_id,
+                    "pending_tool_calls": pending_tool_calls,
+                    "interrupt": event.get("interrupt"),
+                    "message": "Workflow paused - awaiting approval for tool execution",
+                }
 
-            # Yield final complete event with full response
-            if final_response:
-                yield {"type": "complete", "response": final_response}
-            else:
-                # Build error response if no final response
-                error_response = self._build_error_response(
-                    "Error: No response generated"
-                )
-                yield {"type": "complete", "response": error_response}
-
-        except Exception as exc:
-            logger.error(
-                f"Error in streaming response generation: {exc}", exc_info=True
-            )
-            error_response = self._build_error_response(f"Error: {str(exc)}")
-            yield {"type": "error", "error": str(exc), "response": error_response}
+        if final_response:
+            yield {"type": "complete", "response": final_response}
+        else:
+            error_response = self._build_error_response("Error: No response generated")
+            yield {"type": "complete", "response": error_response}
 
     def get_bot_response_sync(
         self,
@@ -318,17 +284,6 @@ class AIService:
         conversation_id: Optional[UUID] = None,
         user_id: Optional[UUID] = None,
     ) -> AgentResponse:
-        """Synchronous wrapper for generate_bot_response."""
-        try:
-            return asyncio.run(
-                self.generate_bot_response(user_message, conversation_id, user_id)
-            )
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                return loop.run_until_complete(
-                    self.generate_bot_response(user_message, conversation_id, user_id)
-                )
-            finally:
-                loop.close()
+        return asyncio.run(
+            self.generate_bot_response(user_message, conversation_id, user_id)
+        )

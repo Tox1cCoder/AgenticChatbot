@@ -16,6 +16,10 @@ class ConversationCreate(BaseModel):
         max_length=8000,
         description="Custom persona/system instruction for this conversation",
     )
+    planning_mode_enabled: Optional[bool] = Field(
+        default=False,
+        description="Enable planning mode for this conversation",
+    )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -28,6 +32,10 @@ class ConversationUpdate(BaseModel):
         None,
         max_length=8000,
         description="Custom persona/system instruction for this conversation",
+    )
+    planning_mode_enabled: Optional[bool] = Field(
+        None,
+        description="Toggle planning mode",
     )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
@@ -50,6 +58,10 @@ class ConversationRead(BaseModel):
         None,
         max_length=8000,
         description="Custom persona/system instruction for this conversation",
+    )
+    planning_mode_enabled: bool = Field(
+        default=False,
+        description="Whether planning mode is enabled",
     )
     message_count: Optional[int] = Field(
         default=None, description="Total number of messages in the conversation"
@@ -76,6 +88,10 @@ class ConversationInDB(BaseModel):
         None,
         max_length=8000,
         description="Custom persona/system instruction for this conversation",
+    )
+    planning_mode_enabled: bool = Field(
+        default=False,
+        description="Whether planning mode is enabled",
     )
 
 

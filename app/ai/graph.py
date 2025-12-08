@@ -1,5 +1,3 @@
-import asyncio
-import logging
 from typing import Optional, TYPE_CHECKING, List, Dict, Any
 from uuid import UUID
 
@@ -17,23 +15,20 @@ from .schemas import (
     AgentType,
     MessageRole,
     InterruptDecision,
-    InterruptDecisionType,
 )
 from .agents.router import Router
 from .agents.chat_agent import ChatAgent
 from .agents.rag_agent import RAGAgent
 from .agents.search_agent import SearchAgent
 from .agents.image_generator_agent import ImageGeneratorAgent
+from .agents.planning_agent import PlanningAgent
 from .memory import get_memory_manager
 from ..core.config import settings
 from .hitl_config import build_interrupt_response, requires_human_approval
 from .utils import normalize_tool_call, coerce_response_text
-import json
 
 if TYPE_CHECKING:
     from ..repositories.document import DocumentRepository
-
-logger = logging.getLogger(__name__)
 
 
 class MultiAgentWorkflow:
@@ -56,11 +51,13 @@ class MultiAgentWorkflow:
         )
         self.search_agent = SearchAgent()
         self.image_generator_agent = ImageGeneratorAgent()
+        self.planning_agent = PlanningAgent()
         self.agents = {
             "chat_agent": self.chat_agent,
             "rag_agent": self.rag_agent,
             "search_agent": self.search_agent,
             "image_generator_agent": self.image_generator_agent,
+            "planning_agent": self.planning_agent,
         }
 
         self.checkpointer = checkpointer
@@ -82,6 +79,7 @@ class MultiAgentWorkflow:
         workflow.add_node("rag_agent", self._rag_node)
         workflow.add_node("search_agent", self._search_node)
         workflow.add_node("image_generator_agent", self._image_generator_node)
+        workflow.add_node("planning_agent", self._planning_node)
         workflow.add_node("approval", self._approval_node)
         workflow.add_node("tools", self._tool_node)
 
@@ -95,6 +93,7 @@ class MultiAgentWorkflow:
                 "rag_agent": "rag_agent",
                 "search_agent": "search_agent",
                 "image_generator_agent": "image_generator_agent",
+                "planning_agent": "planning_agent",
                 "end": END,
             },
         )
@@ -110,6 +109,7 @@ class MultiAgentWorkflow:
         )
 
         workflow.add_edge("rag_agent", END)
+        workflow.add_edge("planning_agent", END)
 
         workflow.add_conditional_edges(
             "search_agent",
@@ -146,11 +146,9 @@ class MultiAgentWorkflow:
 
         if self.checkpointer:
             return workflow.compile(checkpointer=self.checkpointer)
-        else:
-            return workflow.compile()
+        return workflow.compile()
 
     async def _tool_node(self, state: GraphState) -> GraphState:
-        """Execute pending tool calls."""
         messages = state.get("messages", [])
         last_message = messages[-1]
 
@@ -173,6 +171,10 @@ class MultiAgentWorkflow:
 
         tool_map = {t.name: t for t in agent.tools}
         tool_outputs = []
+        tool_artifacts = []  # Track tool execution artifacts
+        all_images = []  # Track images from tool results
+
+        import json  # Import for parsing JSON results
 
         for tool_call in last_message.tool_calls:
             tool_name = tool_call["name"]
@@ -187,30 +189,85 @@ class MultiAgentWorkflow:
                         if tool.coroutine
                         else tool.invoke(tool_args)
                     )
+                    result_str = str(result)
                     tool_outputs.append(
                         {
                             "tool_call_id": tool_id,
                             "role": "tool",
                             "name": tool_name,
-                            "content": str(result),
+                            "content": result_str,
                         }
                     )
+
+                    # Track tool artifact
+                    tool_artifacts.append(
+                        {
+                            "tool": tool_name,
+                            "args": tool_args,
+                            "output": (
+                                result_str[:1000]
+                                if len(result_str) > 1000
+                                else result_str
+                            ),
+                            "error": None,
+                        }
+                    )
+
+                    # Extract images from tool result (e.g., Tavily search results)
+                    try:
+                        parsed_result = json.loads(result_str)
+                        if (
+                            isinstance(parsed_result, dict)
+                            and "images" in parsed_result
+                        ):
+                            for img in parsed_result["images"]:
+                                if isinstance(img, dict):
+                                    img_url = img.get("url")
+                                    img_desc = img.get("description", "")
+                                    if img_url:
+                                        all_images.append(
+                                            {
+                                                "url": img_url,
+                                                "description": img_desc,
+                                            }
+                                        )
+                    except (json.JSONDecodeError, TypeError):
+                        pass  # Not JSON or no images
+
                 except Exception as e:
+                    error_msg = f"Error: {e}"
                     tool_outputs.append(
                         {
                             "tool_call_id": tool_id,
                             "role": "tool",
                             "name": tool_name,
-                            "content": f"Error: {e}",
+                            "content": error_msg,
+                        }
+                    )
+                    tool_artifacts.append(
+                        {
+                            "tool": tool_name,
+                            "args": tool_args,
+                            "output": None,
+                            "error": str(e),
                         }
                     )
             else:
+                error_msg = f"Error: Tool {tool_name} not found"
                 tool_outputs.append(
                     {
                         "tool_call_id": tool_id,
                         "role": "tool",
                         "name": tool_name,
-                        "content": f"Error: Tool {tool_name} not found",
+                        "content": error_msg,
+                    }
+                )
+                tool_artifacts.append(
+                    {
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "output": None,
+                        "error": f"Tool {tool_name} not found",
                     }
                 )
 
@@ -225,16 +282,22 @@ class MultiAgentWorkflow:
             )
 
         state.setdefault("messages", []).extend(new_messages)
+
+        # Store tool artifacts and images in context for later extraction
+        context = state.get("context", {})
+        if tool_artifacts:
+            existing_artifacts = context.get("tool_artifacts", [])
+            existing_artifacts.extend(tool_artifacts)
+            context["tool_artifacts"] = existing_artifacts
+        if all_images:
+            existing_images = context.get("tool_images", [])
+            existing_images.extend(all_images)
+            context["tool_images"] = existing_images
+        state["context"] = context
+
         return state
 
     async def _approval_node(self, state: GraphState) -> GraphState:
-        """
-        Human-in-the-loop approval node.
-
-        Pauses execution using interrupt() for tools that require human approval.
-        The interrupt payload contains tool details for the frontend to display.
-        Resume with Command(resume=decisions) where decisions contain approve/reject/edit info.
-        """
         messages = state.get("messages", [])
         if not messages:
             return state
@@ -243,13 +306,10 @@ class MultiAgentWorkflow:
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return state
 
-        # Build action requests for the interrupt payload
         action_requests = [
             normalize_tool_call(tool_call) for tool_call in last_message.tool_calls
         ]
 
-        # Pause execution and wait for human decision
-        # The resume value will be a list of InterruptDecision objects
         human_decisions = interrupt(
             {
                 "action_requests": action_requests,
@@ -257,9 +317,7 @@ class MultiAgentWorkflow:
             }
         )
 
-        # Process decisions from human review
         if not human_decisions:
-            # No decisions provided, reject all tools
             rejection_messages = [
                 ToolMessage(
                     content="Tool execution cancelled: No approval provided",
@@ -268,7 +326,6 @@ class MultiAgentWorkflow:
                 )
                 for tool_call in last_message.tool_calls
             ]
-            # Replace AI message (no tool calls) and add rejection messages
             state["messages"] = (
                 messages[:-1]
                 + [AIMessage(content=last_message.content)]
@@ -276,7 +333,6 @@ class MultiAgentWorkflow:
             )
             return state
 
-        # Parse decisions and update state accordingly
         decisions = (
             human_decisions if isinstance(human_decisions, list) else [human_decisions]
         )
@@ -338,7 +394,6 @@ class MultiAgentWorkflow:
         return state
 
     def _should_call_tools(self, state: GraphState) -> str:
-        """Check if the last message has tool calls and whether they need approval."""
         messages = state.get("messages", [])
         if not messages:
             return "end"
@@ -347,7 +402,6 @@ class MultiAgentWorkflow:
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return "end"
 
-        # Check if any tool requires human approval
         tool_names = [
             normalize_tool_call(tc).get("name") for tc in last_message.tool_calls
         ]
@@ -357,7 +411,6 @@ class MultiAgentWorkflow:
         return "tools"
 
     def _route_tool_output(self, state: GraphState) -> str:
-        """Route back to the selected agent after tool execution."""
         return state.get("selected_agent", "end")
 
     def _build_interrupt_agent_response(
@@ -366,7 +419,6 @@ class MultiAgentWorkflow:
         thread_id: Optional[str],
         fallback_conversation_id: Optional[str] = None,
     ) -> Optional[AgentResponse]:
-        """Create an AgentResponse containing interrupt metadata from graph state."""
         if not state_snapshot or not thread_id:
             return None
 
@@ -398,6 +450,7 @@ class MultiAgentWorkflow:
             "rag_agent": AgentType.RAG,
             "search_agent": AgentType.SEARCH,
             "image_generator_agent": AgentType.IMAGE_GENERATOR,
+            "planning_agent": AgentType.PLANNING,
         }
         agent_type = agent_type_map.get(selected_agent, AgentType.SEARCH)
 
@@ -416,6 +469,8 @@ class MultiAgentWorkflow:
         if not messages:
             return state
 
+        context = state.get("context", {})
+
         last_message = messages[-1]
         content = (
             last_message.content
@@ -425,14 +480,25 @@ class MultiAgentWorkflow:
         conversation_id = state.get("conversation_id")
         has_documents = self._conversation_has_documents(conversation_id)
 
+        # Extract planning context from state
+        planning_mode_enabled = context.get("planning_mode_enabled", False)
+        has_existing_plan = context.get("has_existing_plan", False)
+
         agent_msg = AgentMessage(
             role=MessageRole.USER,
             content=content,
             metadata={"persona": state.get("persona")},
         )
 
+        # Include planning_agent in available agents
+        available_agents = list(self.agents.keys())
+
         selected_agent = await self.router.route_message(
-            agent_msg, list(self.agents.keys()), has_documents=has_documents
+            agent_msg,
+            available_agents,
+            has_documents=has_documents,
+            planning_mode_enabled=planning_mode_enabled,
+            has_existing_plan=has_existing_plan,
         )
 
         if selected_agent == "rag_agent" and not has_documents:
@@ -452,10 +518,83 @@ class MultiAgentWorkflow:
         except (ValueError, Exception):
             return False
 
+    def _build_graph_config(
+        self, thread_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        config: Dict[str, Any] = {}
+        recursion_limit = getattr(settings, "react_agent_recursion_limit", None)
+        if recursion_limit and recursion_limit > 0:
+            config["recursion_limit"] = recursion_limit
+
+        if self.checkpointer and thread_id:
+            config.setdefault("configurable", {})["thread_id"] = thread_id
+
+        return config or None
+
+    def _build_plan_context_string(
+        self,
+        current_task: Optional[Dict[str, Any]],
+        all_tasks: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[str]:
+        if not current_task or not current_task.get("description"):
+            return None
+
+        parts = ["=== TASK EXECUTION CONTEXT ==="]
+
+        if all_tasks:
+            completed = [t for t in all_tasks if t.get("status") == "completed"]
+            pending = [t for t in all_tasks if t.get("status") == "pending"]
+            in_progress = [t for t in all_tasks if t.get("status") == "in_progress"]
+
+            parts.append(
+                f"\nPlan Progress: {len(completed)}/{len(all_tasks)} tasks completed"
+            )
+
+            if completed:
+                parts.append("\n✅ COMPLETED TASKS:")
+                for t in completed:
+                    order = t.get("task_order", t.get("order", 0))
+                    parts.append(
+                        f"  {order + 1}. {t.get('description', 'No description')}"
+                    )
+
+            current_order = current_task.get("order", current_task.get("task_order", 0))
+            parts.append(f"\n🔄 CURRENT TASK (#{current_order + 1}):")
+            parts.append(f"  {current_task.get('description', '')}")
+            parts.append(
+                "\n  ** You are executing THIS task now. Focus on completing it. **"
+            )
+
+            remaining = [
+                t
+                for t in pending
+                if t.get("task_order", t.get("order", 0)) > current_order
+            ]
+            if remaining:
+                parts.append("\n⏳ REMAINING TASKS:")
+                for t in remaining:
+                    order = t.get("task_order", t.get("order", 0))
+                    parts.append(
+                        f"  {order + 1}. {t.get('description', 'No description')}"
+                    )
+
+        else:
+            order = current_task.get("order", current_task.get("task_order", 0))
+            parts.append(f"\n🔄 CURRENT TASK (#{order + 1}):")
+            parts.append(f"  {current_task.get('description', '')}")
+            parts.append("\n  ** Focus on completing this specific task. **")
+
+        parts.append("\n=== END TASK CONTEXT ===\n")
+        return "\n".join(parts)
+
     async def _chat_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
         if not messages:
             return state
+
+        current_task = state.get("current_task")
+        all_tasks = state.get("all_tasks")
+        plan_context_str = self._build_plan_context_string(current_task, all_tasks)
 
         last_message = messages[-1]
         content = (
@@ -514,17 +653,37 @@ class MultiAgentWorkflow:
                 else content
             )
 
+            enriched_content = user_content
+            if plan_context_str:
+                enriched_content = f"{plan_context_str}\n\n{user_content}"
+
+            metadata = {
+                "history": conversation_history,
+                "persona": state.get("persona"),
+            }
+            if current_task:
+                metadata["task_context"] = current_task
+
             agent_msg = AgentMessage(
                 role=MessageRole.USER,
-                content=user_content,
-                metadata={
-                    "history": conversation_history,
-                    "persona": state.get("persona"),
-                },
+                content=enriched_content,
+                metadata=metadata,
                 attachments=context.get("attachments"),
             )
 
             response = await self.chat_agent.invoke_model(agent_msg, conversation_id)
+
+        # Merge tool artifacts and images from context into response
+        context = state.get("context", {})
+        tool_artifacts = context.get("tool_artifacts", [])
+        tool_images = context.get("tool_images", [])
+
+        if tool_artifacts:
+            response.tool_artifacts = tool_artifacts
+        if tool_images:
+            if not response.metadata:
+                response.metadata = {}
+            response.metadata["images"] = tool_images
 
         state["response"] = response
 
@@ -539,6 +698,10 @@ class MultiAgentWorkflow:
         messages = state.get("messages", [])
         if not messages:
             return state
+
+        current_task = state.get("current_task")
+        all_tasks = state.get("all_tasks")
+        plan_context_str = self._build_plan_context_string(current_task, all_tasks)
 
         last_message = messages[-1]
         content = (
@@ -566,10 +729,19 @@ class MultiAgentWorkflow:
             )
 
         context = state.get("context", {})
+
+        enriched_content = content
+        if plan_context_str:
+            enriched_content = f"{plan_context_str}\n\n{content}"
+
+        metadata = {"history": conversation_history, "persona": state.get("persona")}
+        if current_task:
+            metadata["task_context"] = current_task
+
         agent_msg = AgentMessage(
             role=MessageRole.USER,
-            content=content,
-            metadata={"history": conversation_history, "persona": state.get("persona")},
+            content=enriched_content,
+            metadata=metadata,
             attachments=context.get("attachments"),
         )
 
@@ -585,6 +757,10 @@ class MultiAgentWorkflow:
         messages = state.get("messages", [])
         if not messages:
             return state
+
+        current_task = state.get("current_task")
+        all_tasks = state.get("all_tasks")
+        plan_context_str = self._build_plan_context_string(current_task, all_tasks)
 
         last_message = messages[-1]
         content = (
@@ -642,20 +818,40 @@ class MultiAgentWorkflow:
                 else content
             )
 
+            enriched_content = user_content
+            if plan_context_str:
+                enriched_content = f"{plan_context_str}\n\n{user_content}"
+
             context = state.get("context", {})
+            metadata = {
+                "history": conversation_history,
+                "persona": state.get("persona"),
+            }
+            if current_task:
+                metadata["task_context"] = current_task
+
             agent_msg = AgentMessage(
                 role=MessageRole.USER,
-                content=user_content,
-                metadata={
-                    "history": conversation_history,
-                    "persona": state.get("persona"),
-                },
+                content=enriched_content,
+                metadata=metadata,
                 attachments=context.get("attachments"),
             )
 
             response = await self.search_agent.process_message(
                 agent_msg, conversation_id
             )
+
+        # Merge tool artifacts and images from context into response
+        context = state.get("context", {})
+        tool_artifacts = context.get("tool_artifacts", [])
+        tool_images = context.get("tool_images", [])
+
+        if tool_artifacts:
+            response.tool_artifacts = tool_artifacts
+        if tool_images:
+            if not response.metadata:
+                response.metadata = {}
+            response.metadata["images"] = tool_images
 
         state["response"] = response
 
@@ -670,6 +866,10 @@ class MultiAgentWorkflow:
         messages = state.get("messages", [])
         if not messages:
             return state
+
+        current_task = state.get("current_task")
+        all_tasks = state.get("all_tasks")
+        plan_context_str = self._build_plan_context_string(current_task, all_tasks)
 
         last_human_idx = next(
             (
@@ -721,16 +921,39 @@ class MultiAgentWorkflow:
             full_history = conversation_history + messages[:-1]
             context = state.get("context", {})
 
+            enriched_content = content
+            if plan_context_str:
+                enriched_content = f"{plan_context_str}\n\n{content}"
+
+            metadata = {"history": full_history, "persona": state.get("persona")}
+            if current_task:
+                metadata["task_context"] = current_task
+
             agent_msg = AgentMessage(
                 role=MessageRole.USER,
-                content=content,
-                metadata={"history": full_history, "persona": state.get("persona")},
+                content=enriched_content,
+                metadata=metadata,
                 attachments=context.get("attachments"),
             )
 
             response = await self.image_generator_agent.invoke_model(
                 agent_msg, conversation_id
             )
+
+        # Merge tool artifacts and images from context into response
+        context = state.get("context", {})
+        tool_artifacts = context.get("tool_artifacts", [])
+        tool_images = context.get("tool_images", [])
+
+        if tool_artifacts:
+            response.tool_artifacts = tool_artifacts
+        if tool_images:
+            if not response.metadata:
+                response.metadata = {}
+            # Append to existing images from image generator
+            existing_images = response.metadata.get("images", [])
+            existing_images.extend(tool_images)
+            response.metadata["images"] = existing_images
 
         state["response"] = response
 
@@ -741,11 +964,86 @@ class MultiAgentWorkflow:
 
         return state
 
+    async def _planning_node(self, state: GraphState) -> GraphState:
+        messages = state.get("messages", [])
+        if not messages:
+            return state
+
+        last_message = messages[-1]
+        content = (
+            last_message.content
+            if hasattr(last_message, "content")
+            else str(last_message)
+        )
+
+        conversation_history = []
+        conversation_id = state.get("conversation_id")
+        user_id = state.get("user_id")
+
+        if conversation_id and user_id:
+            memory_manager = get_memory_manager()
+            conv_memory = await memory_manager.get_memory(
+                UUID(conversation_id), UUID(user_id), force_refresh=True
+            )
+            history_limit = (
+                settings.chat_history_max_messages
+                if settings.chat_history_max_messages > 0
+                else None
+            )
+            conversation_history = conv_memory.get_recent_messages(
+                limit=history_limit, exclude_last=1
+            )
+
+        context = state.get("context", {})
+        existing_tasks = context.get("existing_tasks", [])
+
+        metadata = {
+            "history": conversation_history,
+            "persona": state.get("persona"),
+        }
+
+        # Include existing tasks if available for plan modifications
+        if existing_tasks:
+            metadata["existing_tasks"] = existing_tasks
+
+        agent_msg = AgentMessage(
+            role=MessageRole.USER,
+            content=content,
+            metadata=metadata,
+        )
+
+        # Check if this is a plan modification or new plan creation
+        if existing_tasks:
+            response = await self.planning_agent.modify_plan(
+                agent_msg, existing_tasks, conversation_id
+            )
+        else:
+            response = await self.planning_agent.generate_plan(
+                agent_msg, conversation_id
+            )
+
+        state["response"] = response
+        state.setdefault("messages", []).append(
+            AIMessage(content=response.message.content)
+        )
+
+        return state
+
     def _should_continue(self, state: GraphState) -> str:
         selected_agent = state.get("selected_agent")
         if selected_agent in self.agents:
             return selected_agent
         return "end"
+
+    def _get_agent_type(self, selected_agent: Optional[str]) -> AgentType:
+        agent_type_map = {
+            "chat_agent": AgentType.CHAT,
+            "rag_agent": AgentType.RAG,
+            "search_agent": AgentType.SEARCH,
+            "image_generator_agent": AgentType.IMAGE_GENERATOR,
+            "planning_agent": AgentType.PLANNING,
+        }
+        return agent_type_map.get(selected_agent, AgentType.CHAT)
 
     async def execute(
         self,
@@ -755,6 +1053,11 @@ class MultiAgentWorkflow:
         thread_id: Optional[str] = None,
         persona: Optional[str] = None,
         attachments: Optional[list] = None,
+        current_task: Optional[Dict[str, Any]] = None,
+        all_tasks: Optional[List[Dict[str, Any]]] = None,
+        planning_mode_enabled: bool = False,
+        has_existing_plan: bool = False,
+        existing_tasks: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[AgentResponse]:
 
         initial_state: GraphState = {
@@ -773,15 +1076,22 @@ class MultiAgentWorkflow:
         initial_state["tool_results"] = None
         initial_state["iteration_count"] = None
 
-        # Store attachments in context for agent access
+        # Task planning context
+        if current_task:
+            initial_state["current_task"] = current_task
+            initial_state["task_plan_id"] = current_task.get("id")
+        if all_tasks:
+            initial_state["all_tasks"] = all_tasks
+
         if attachments:
             initial_state["context"]["attachments"] = attachments
 
-        config = (
-            {"configurable": {"thread_id": thread_id}}
-            if self.checkpointer and thread_id
-            else None
-        )
+        initial_state["context"]["planning_mode_enabled"] = planning_mode_enabled
+        initial_state["context"]["has_existing_plan"] = has_existing_plan
+        if existing_tasks:
+            initial_state["context"]["existing_tasks"] = existing_tasks
+
+        config = self._build_graph_config(thread_id)
         result = await self.graph.ainvoke(initial_state, config=config)
 
         if self.checkpointer and thread_id:
@@ -806,11 +1116,10 @@ class MultiAgentWorkflow:
     async def resume_execution(
         self, thread_id: str, resume_value: Any
     ) -> Optional[AgentResponse]:
-        """Resume execution after handling interrupts."""
         if not self.checkpointer:
             raise RuntimeError("Checkpointing must be enabled for resume_execution")
 
-        config = {"configurable": {"thread_id": thread_id}}
+        config = self._build_graph_config(thread_id)
         result = await self.graph.ainvoke(Command(resume=resume_value), config=config)
         return result.get("response")
 
@@ -819,15 +1128,10 @@ class MultiAgentWorkflow:
         thread_id: str,
         user_input: Optional[str] = None,
     ) -> Optional[AgentResponse]:
-        """
-        Resume the workflow from an interrupt with a simple approval.
-
-        For more complex decision handling (edit/reject), use resume_with_decisions().
-        """
         if not self.checkpointer:
             raise ValueError("Checkpointing is not enabled, cannot resume.")
 
-        config = {"configurable": {"thread_id": thread_id}}
+        config = self._build_graph_config(thread_id)
 
         # Get current state to extract tool calls for auto-approval
         state_snapshot = await self.graph.aget_state(config)
@@ -873,24 +1177,12 @@ class MultiAgentWorkflow:
         decisions: List[InterruptDecision],
         interrupt_id: Optional[str] = None,
     ) -> Optional[AgentResponse]:
-        """
-        Resume workflow execution with user decisions on tool execution.
-
-        Args:
-            thread_id: The thread ID to resume
-            decisions: List of decisions for each tool (accept/edit/reject)
-            interrupt_id: Optional interrupt identifier (for validation)
-
-        Returns:
-            AgentResponse with the bot's response after processing decisions
-        """
         if not self.checkpointer:
             raise ValueError("Checkpointing is not enabled, cannot resume.")
 
-        config = {"configurable": {"thread_id": thread_id}}
+        config = self._build_graph_config(thread_id)
         state_snapshot = await self.graph.aget_state(config)
 
-        # Validate interrupt state
         if not state_snapshot.next or len(state_snapshot.next) == 0:
             raise ValueError("Workflow is not in interrupted state")
         if "approval" not in state_snapshot.next:
@@ -898,11 +1190,10 @@ class MultiAgentWorkflow:
                 f"Unexpected interrupt state: next nodes are {state_snapshot.next}"
             )
 
-        # Convert decisions to format expected by approval node
         resume_data = [
             {
                 "task_id": d.task_id,
-                "tool_call_id": d.task_id,  # task_id maps to tool_call_id
+                "tool_call_id": d.task_id,
                 "type": d.type.value if hasattr(d.type, "value") else d.type,
                 "args": d.args,
             }
@@ -911,7 +1202,6 @@ class MultiAgentWorkflow:
 
         result = await self.graph.ainvoke(Command(resume=resume_data), config=config)
 
-        # Check if workflow paused again for additional tools
         final_snapshot = await self.graph.aget_state(config)
         if final_snapshot.next and len(final_snapshot.next) > 0:
             if "approval" in final_snapshot.next:
@@ -939,13 +1229,12 @@ class MultiAgentWorkflow:
         thread_id: Optional[str] = None,
         persona: Optional[str] = None,
         attachments: Optional[list] = None,
+        current_task: Optional[Dict[str, Any]] = None,
+        all_tasks: Optional[List[Dict[str, Any]]] = None,
+        planning_mode_enabled: bool = False,
+        has_existing_plan: bool = False,
+        existing_tasks: Optional[List[Dict[str, Any]]] = None,
     ):
-        """
-        Execute the workflow with streaming support.
-        Uses a hybrid approach:
-        - For RAG agent: calls agent's stream_message() directly for native Gemini streaming with thinking
-        - For other agents: uses LangGraph's astream_events for LangChain streaming
-        """
         initial_state: GraphState = {
             "messages": [HumanMessage(content=message)],
             "context": {},
@@ -962,14 +1251,21 @@ class MultiAgentWorkflow:
         initial_state["tool_results"] = None
         initial_state["iteration_count"] = None
 
+        if current_task:
+            initial_state["current_task"] = current_task
+            initial_state["task_plan_id"] = current_task.get("id")
+        if all_tasks:
+            initial_state["all_tasks"] = all_tasks
+
         if attachments:
             initial_state["context"]["attachments"] = attachments
 
-        config = (
-            {"configurable": {"thread_id": thread_id}}
-            if self.checkpointer and thread_id
-            else None
-        )
+        initial_state["context"]["planning_mode_enabled"] = planning_mode_enabled
+        initial_state["context"]["has_existing_plan"] = has_existing_plan
+        if existing_tasks:
+            initial_state["context"]["existing_tasks"] = existing_tasks
+
+        config = self._build_graph_config(thread_id)
 
         try:
             routed_state = await self._route_node(initial_state)
@@ -1029,6 +1325,63 @@ class MultiAgentWorkflow:
                 yield {"type": "error", "error": str(e)}
             return
 
+        # Handle planning agent (non-streaming)
+        if selected_agent == "planning_agent":
+            conversation_history = []
+            if conversation_id and user_id:
+                try:
+                    memory_manager = get_memory_manager()
+                    conv_memory = await memory_manager.get_memory(
+                        UUID(conversation_id), UUID(user_id), force_refresh=True
+                    )
+                    history_limit = (
+                        settings.chat_history_max_messages
+                        if settings.chat_history_max_messages > 0
+                        else None
+                    )
+                    conversation_history = conv_memory.get_recent_messages(
+                        limit=history_limit, exclude_last=1
+                    )
+                except Exception:
+                    pass
+
+            metadata = {
+                "history": conversation_history,
+                "persona": persona,
+            }
+            if existing_tasks:
+                metadata["existing_tasks"] = existing_tasks
+
+            agent_msg = AgentMessage(
+                role=MessageRole.USER,
+                content=message,
+                metadata=metadata,
+            )
+
+            try:
+                # Check if this is a plan modification or new plan creation
+                if existing_tasks:
+                    response = await self.planning_agent.modify_plan(
+                        agent_msg, existing_tasks, conversation_id
+                    )
+                else:
+                    response = await self.planning_agent.generate_plan(
+                        agent_msg, conversation_id
+                    )
+
+                # Yield the response content as tokens for UI consistency
+                if response and response.message:
+                    yield {"type": "token", "content": response.message.content}
+                    yield {"type": "complete", "response": response}
+                else:
+                    yield {
+                        "type": "error",
+                        "error": "Planning agent returned no response",
+                    }
+            except Exception as e:
+                yield {"type": "error", "error": str(e)}
+            return
+
         accumulated_content = ""
         accumulated_thinking = ""  # Track thinking content for non-RAG agents
         try:
@@ -1040,8 +1393,6 @@ class MultiAgentWorkflow:
                 if kind == "on_chat_model_stream":
                     chunk = event["data"]["chunk"]
                     if hasattr(chunk, "content") and chunk.content:
-                        # Use coerce_response_text to handle various content formats
-                        # including Anthropic's content blocks with 'text' key
                         content = coerce_response_text(chunk.content)
 
                         if content:
@@ -1113,12 +1464,9 @@ class MultiAgentWorkflow:
                     if accumulated_thinking:
                         metadata["thinking_summary"] = accumulated_thinking
 
+                    agent_type = self._get_agent_type(selected_agent)
                     response = AgentResponse(
-                        agent_type=(
-                            AgentType.CHAT
-                            if selected_agent == "chat_agent"
-                            else AgentType.SEARCH
-                        ),
+                        agent_type=agent_type,
                         agent_id=selected_agent or "unknown",
                         message=AgentMessage(
                             role=MessageRole.ASSISTANT, content=accumulated_content
@@ -1137,12 +1485,9 @@ class MultiAgentWorkflow:
                 if accumulated_thinking:
                     metadata["thinking_summary"] = accumulated_thinking
 
+                agent_type = self._get_agent_type(selected_agent)
                 response = AgentResponse(
-                    agent_type=(
-                        AgentType.CHAT
-                        if selected_agent == "chat_agent"
-                        else AgentType.SEARCH
-                    ),
+                    agent_type=agent_type,
                     agent_id=selected_agent or "unknown",
                     message=AgentMessage(
                         role=MessageRole.ASSISTANT, content=accumulated_content
@@ -1154,11 +1499,10 @@ class MultiAgentWorkflow:
                 yield {"type": "error", "error": "No response generated"}
 
     async def get_state(self, thread_id: str) -> dict:
-        """Get the current state of a workflow."""
         if not self.checkpointer:
             raise ValueError("Checkpointing is not enabled, cannot get state.")
 
-        config = {"configurable": {"thread_id": thread_id}}
+        config = self._build_graph_config(thread_id)
         snapshot = await self.graph.aget_state(config)
 
         pending_tool_calls = None
@@ -1181,7 +1525,6 @@ class MultiAgentWorkflow:
         }
 
     async def cleanup(self):
-        """Cleanup resources from agents that use MCP tools."""
         for agent in self._cleanup_agents:
             if hasattr(agent, "cleanup"):
                 try:

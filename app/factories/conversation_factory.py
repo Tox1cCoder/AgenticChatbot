@@ -23,6 +23,7 @@ class ConversationFactory:
             "owner_id": owner_id,
             "title": conversation_data.title,
             "persona_prompt": conversation_data.persona_prompt,
+            "planning_mode_enabled": conversation_data.planning_mode_enabled or False,
             **timestamps,
         }
 
@@ -39,5 +40,8 @@ class ConversationFactory:
             "owner_id": conversation_data["owner_id"],
             "title": conversation_data["title"],
             "persona_prompt": conversation_data.get("persona_prompt"),
+            "planning_mode_enabled": conversation_data.get(
+                "planning_mode_enabled", False
+            ),
             **timestamps,
         }

@@ -79,7 +79,7 @@ class ConversationCRUDStrategy(
                 Conversation.id == conversation_id, Conversation.deleted_at.is_(None)
             )
         )
-        return db.execute(statement).scalar_one_or_none()
+        return db.execute(statement).unique().scalar_one_or_none()
 
     def get_with_recent_messages(
         self,
@@ -89,7 +89,7 @@ class ConversationCRUDStrategy(
         order_by: str = "updated_at",
         order_direction: str = "desc",
     ) -> List[Conversation]:
-        """Get conversations with limited recent messages and total message count"""        
+        """Get conversations with limited recent messages and total message count"""
         # Get all conversations for the user
         statement = select(Conversation).where(
             Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
@@ -112,12 +112,11 @@ class ConversationCRUDStrategy(
         # Load recent messages and count total messages for each conversation
         for conversation in conversations:
             # Get total message count
-            count_statement = (
-                select(func.count(Message.id))
-                .where(Message.conversation_id == conversation.id)
+            count_statement = select(func.count(Message.id)).where(
+                Message.conversation_id == conversation.id
             )
             total_message_count = db.execute(count_statement).scalar() or 0
-            
+
             # Get recent messages
             message_statement = (
                 select(Message)

@@ -158,18 +158,3 @@ def build_interrupt_response(
     )
 
     return response.model_dump()
-
-
-def store_interrupt_metadata(
-    state: Dict[str, Any], interrupt_id: str, timestamp: Any
-) -> Dict[str, Any]:
-    """
-    Store interrupt metadata in the graph state for validation and audit purposes.
-    """
-    if "metadata" not in state:
-        state["metadata"] = {}
-
-    state["metadata"]["interrupt_id"] = interrupt_id
-    state["metadata"]["interrupt_timestamp"] = timestamp
-
-    return state
