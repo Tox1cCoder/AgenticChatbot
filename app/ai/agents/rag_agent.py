@@ -138,7 +138,6 @@ class RAGAgent:
             logger.warning("No MCP tools available for RAGAgent; running without tools")
 
     def _deduplicate_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
-        """Ensure we only keep one instance of each tool by name."""
         unique_tools: Dict[str, BaseTool] = {}
         for tool in tools or []:
             unique_tools.setdefault(tool.name, tool)
@@ -689,8 +688,6 @@ class RAGAgent:
                 if event_type == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
-                        # Use coerce_response_text to handle various content formats
-                        # including Anthropic's content blocks
                         token = coerce_response_text(chunk.content)
                         if token:  # Only yield non-empty tokens
                             accumulated_text += token
@@ -791,9 +788,6 @@ class RAGAgent:
         """
         Stream content generation with thinking support.
         Yields events with type 'thinking' for thought content and 'token' for answer content.
-
-        Note: The Gemini client's generate_content_stream returns a sync iterator,
-        so we need to handle it carefully in async context.
         """
         import asyncio
         import queue

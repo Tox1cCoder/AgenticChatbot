@@ -1,4 +1,3 @@
-import logging
 import re
 from typing import List, Optional
 
@@ -7,8 +6,6 @@ from google import genai
 from ..schemas import AgentMessage
 from ..prompts import ROUTER_SYSTEM_PROMPT
 from ...core.config import settings
-
-logger = logging.getLogger(__name__)
 
 
 class Router:
@@ -19,10 +16,8 @@ class Router:
 
     def _init_gemini(self):
         api_key = settings.gemini_api_key
-
         if api_key.startswith("GEMINI_API_KEY="):
             api_key = api_key.split("=", 1)[-1].strip()
-
         self.gemini_client = genai.Client(api_key=api_key)
 
     async def route_message(
@@ -30,12 +25,12 @@ class Router:
         message: AgentMessage,
         available_agents: List[str],
         has_documents: bool = False,
+        planning_mode_enabled: bool = False,
+        has_existing_plan: bool = False,
     ) -> str:
-        """Route the message to the appropriate agent"""
         content = message.content.strip()
         persona = message.metadata.get("persona")
 
-        # Build the routing prompt with document context
         prompt_parts = []
 
         if persona is not None and persona.strip():
@@ -44,6 +39,16 @@ class Router:
         if has_documents:
             prompt_parts.append(
                 "CONTEXT: This conversation has uploaded documents available.\n"
+            )
+
+        if planning_mode_enabled:
+            prompt_parts.append(
+                "CONTEXT: Planning mode is active for this conversation.\n"
+            )
+
+        if has_existing_plan:
+            prompt_parts.append(
+                "CONTEXT: This conversation has an existing task plan.\n"
             )
 
         prompt_parts.append(ROUTER_SYSTEM_PROMPT)
@@ -59,25 +64,19 @@ class Router:
         selected_agent = self._extract_agent_name(response_text, available_agents)
 
         if selected_agent:
-            logger.info(f"LLM routed to {selected_agent}: {content[:50]}...")
             return selected_agent
 
         if has_documents and "rag_agent" in available_agents:
-            logger.debug(
-                "Router response ambiguous; defaulting to rag_agent due to available documents."
-            )
             return "rag_agent"
 
-        fallback_agent = (
-            "chat_agent" if "chat_agent" in available_agents else available_agents[0]
-        )
+        if planning_mode_enabled and "planning_agent" in available_agents:
+            return "planning_agent"
 
-        return fallback_agent
+        return "chat_agent" if "chat_agent" in available_agents else available_agents[0]
 
     def _extract_agent_name(
         self, response_text: str, available_agents: List[str]
     ) -> Optional[str]:
-        """Normalize LLM output into a valid agent name if possible."""
         if not response_text:
             return None
 

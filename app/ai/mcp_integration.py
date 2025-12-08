@@ -95,6 +95,10 @@ class MCPManager:
                     "args": abs_args,
                 }
 
+                # Pass current working directory if specified
+                if "cwd" in server_info:
+                    server_config[server_name]["cwd"] = server_info["cwd"]
+
                 # Pass environment variables to subprocess if specified
                 if "env" in server_info:
                     server_config[server_name]["env"] = server_info["env"]

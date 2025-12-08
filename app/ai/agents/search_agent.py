@@ -268,13 +268,9 @@ class SearchAgent:
                 if event_type == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
-                        # Use coerce_response_text to handle various content formats
-                        # including Anthropic's content blocks
                         token = coerce_response_text(chunk.content)
                         if token:
                             yield {"type": "token", "content": token}
-
-                # We might need to handle tool_call_chunks if we want to stream tool calls too
 
         except Exception as e:
             logger.error(f"Error streaming search agent: {e}", exc_info=True)
