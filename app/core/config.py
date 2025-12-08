@@ -1,13 +1,11 @@
 from functools import lru_cache
 from typing import List
-import logging
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 from pathlib import Path
 from dotenv import load_dotenv
-
-logger = logging.getLogger(__name__)
 
 # Load .env from the workspace root
 dotenv_path = Path(__file__).parent.parent.parent / ".env"
@@ -294,6 +292,12 @@ class Settings(BaseSettings):
     tool_choice_mode: str = Field(
         default="auto",
         description="Tool calling mode: 'auto', 'any', 'none', or specific tool name",
+    )
+
+    # Planning Agent Configuration
+    max_auto_plan_tasks: int = Field(
+        default=3,
+        description="Maximum number of tasks to execute automatically before pausing for user confirmation",
     )
 
     # Tool Execution Configuration

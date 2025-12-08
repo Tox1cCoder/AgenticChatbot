@@ -2,12 +2,8 @@
 Shared utility functions for AI agents.
 """
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 import json
-import asyncio
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 def coerce_response_text(content: Any) -> str:
@@ -261,72 +257,6 @@ def extract_agent_execution_info(agent_response: Dict[str, Any]) -> Dict[str, An
                 result["reasoning_steps"].append(content)
 
     return result
-
-
-async def execute_tools_concurrently(
-    tool_calls: List[Dict[str, Any]], tools: List[Any]
-) -> List[Tuple[str, Dict[str, Any], Any, bool]]:
-    """
-    Execute multiple tool calls concurrently using asyncio.
-
-    Args:
-        tool_calls: List of tool call dictionaries from ai_message.tool_calls
-        tools: List of available BaseTool instances
-
-    Returns:
-        List of tuples: (tool_name, tool_args, result_or_error, success_flag)
-    """
-    if not tool_calls:
-        return []
-
-    # Create a mapping of tool names to tool instances
-    tool_map = {tool.name: tool for tool in tools}
-
-    async def execute_single_tool(
-        tool_call: Dict[str, Any],
-    ) -> Tuple[str, Dict[str, Any], Any, bool]:
-        """Execute a single tool call with error handling."""
-        tool_name = tool_call.get("name", "")
-        tool_args = tool_call.get("args", {})
-
-        try:
-            tool = tool_map.get(tool_name)
-            if not tool:
-                return (tool_name, tool_args, f"Tool '{tool_name}' not found", False)
-
-            # Execute tool (handle both sync and async tools)
-            if asyncio.iscoroutinefunction(tool.ainvoke):
-                result = await tool.ainvoke(tool_args)
-            else:
-                # Run sync tool in executor to avoid blocking
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, tool.invoke, tool_args)
-
-            return (tool_name, tool_args, result, True)
-
-        except Exception as e:
-            # Get error recovery hint
-            recovery_hint = get_error_recovery_hint(e, tool_name, tool_args)
-
-            # Format error with type and hint
-            error_message = (
-                f"Error ({type(e).__name__}): {str(e)}. Hint: {recovery_hint}"
-            )
-
-            # Log detailed error info for debugging
-            logger.error(
-                f"Error executing tool '{tool_name}' with args {tool_args}: {str(e)}",
-                exc_info=True,
-            )
-
-            return (tool_name, tool_args, error_message, False)
-
-    # Execute all tool calls concurrently
-    results = await asyncio.gather(
-        *[execute_single_tool(tc) for tc in tool_calls], return_exceptions=False
-    )
-
-    return results
 
 
 def get_error_recovery_hint(

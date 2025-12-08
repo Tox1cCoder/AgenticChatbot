@@ -4,37 +4,38 @@
       "enabled": true,
       "transport": "stdio",
       "command": "python",
-      "args": [
-        "app/ai/mcp_servers/calculator_server.py"
-      ],
+      "args": ["app/ai/mcp_servers/calculator_server.py"],
       "description": "Basic calculator operations (add, subtract, multiply, divide, power)"
     },
     "tavily": {
       "enabled": true,
       "transport": "stdio",
       "command": "python",
-      "args": [
-        "app/ai/mcp_servers/tavily_server.py"
-      ],
+      "args": ["app/ai/mcp_servers/tavily_server.py"],
       "description": "Web search using Tavily API for real-time information retrieval"
     },
     "time": {
       "enabled": true,
       "transport": "stdio",
       "command": "python",
-      "args": [
-        "app/ai/mcp_servers/time_server.py"
-      ],
+      "args": ["app/ai/mcp_servers/time_server.py"],
       "description": "Current time lookup utility with timezone support"
     },
-    "mcp-server-code-runner": {
+    "boring": {
+      "enabled": true,
       "transport": "stdio",
-      "command": "npx",
+      "command": "cmd",
       "args": [
-        "-y",
-        "mcp-server-code-runner@latest"
+        "/c",
+        "conda",
+        "run",
+        "-n",
+        "chatbot",
+        "--no-capture-output",
+        "python",
+        "app/ai/mcp_servers/boring_servers/boring_reader_server.py"
       ],
-      "enabled": true
+      "description": "Borehole PDF data extractor - extracts structured borehole log data from PDF files"
     }
   }
 }
