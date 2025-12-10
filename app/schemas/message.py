@@ -10,7 +10,6 @@ from app.utils.case_conversion import to_camel_case as to_camel
 from app.schemas.feedback import FeedbackRead
 from app.ai.schemas import InterruptResponse, InterruptDecision
 
-
 class MessageCreate(BaseModel):
     conversation_id: UUID = Field(
         ..., description="Conversation ID this message belongs to"
@@ -25,8 +24,6 @@ class MessageCreate(BaseModel):
     )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
-
-
 class MessageUpdate(BaseModel):
     content: Optional[str] = Field(None, min_length=1, description="Message content")
 

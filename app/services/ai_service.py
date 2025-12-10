@@ -247,11 +247,25 @@ class AIService:
 
             elif event_type == "tool_start":
                 tool_name = event.get("name", "unknown")
-                yield {"type": "tool", "name": tool_name, "status": "start"}
+                tool_call_id = event.get("tool_call_id")
+                yield {
+                    "type": "tool",
+                    "name": tool_name,
+                    "status": "start",
+                    "tool_call_id": tool_call_id,
+                }
 
             elif event_type == "tool_end":
                 tool_name = event.get("name", "unknown")
-                yield {"type": "tool", "name": tool_name, "status": "end"}
+                tool_call_id = event.get("tool_call_id")
+                result = event.get("result")
+                yield {
+                    "type": "tool",
+                    "name": tool_name,
+                    "status": "end",
+                    "tool_call_id": tool_call_id,
+                    "result": result,
+                }
 
             elif event_type == "complete":
                 final_response = event.get("response")

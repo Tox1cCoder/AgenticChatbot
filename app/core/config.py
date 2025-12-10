@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import List
+import os
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
@@ -11,6 +12,14 @@ from dotenv import load_dotenv
 dotenv_path = Path(__file__).parent.parent.parent / ".env"
 if dotenv_path.exists():
     load_dotenv(dotenv_path)
+
+_langsmith_tracing = os.getenv("LANGSMITH_TRACING", "false").lower() == "true"
+_langsmith_api_key = os.getenv("LANGSMITH_API_KEY", "")
+
+if _langsmith_tracing and _langsmith_api_key:
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    os.environ["LANGCHAIN_API_KEY"] = _langsmith_api_key
+    os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGSMITH_PROJECT", "sample-chatbot")
 
 
 class Settings(BaseSettings):
@@ -76,6 +85,20 @@ class Settings(BaseSettings):
     tavily_api_key: str = Field(
         default="",
         description="Tavily API Key for web search",
+    )
+
+    # LangSmith Configuration
+    langsmith_api_key: str = Field(
+        default="",
+        description="LangSmith API Key for tracing and observability",
+    )
+    langsmith_project: str = Field(
+        default="sample-chatbot",
+        description="LangSmith project name for organizing traces",
+    )
+    langsmith_tracing: bool = Field(
+        default=False,
+        description="Enable LangSmith tracing (requires valid API key)",
     )
 
     # Agent Model Configuration

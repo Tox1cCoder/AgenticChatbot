@@ -47,7 +47,6 @@ class ToolInterruptRequest(BaseModel):
         None, description="Which decision types are permitted for this tool"
     )
 
-
 class InterruptDecision(BaseModel):
     """Decision for handling a tool interrupt."""
 
@@ -73,6 +72,9 @@ class InterruptResponse(BaseModel):
     )
     thread_id: str = Field(..., description="Conversation thread ID for resuming")
     conversation_id: str = Field(..., description="Conversation ID")
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None, description="Additional metadata for the interrupt"
+    )
 
 
 class AgentMessage(BaseModel):

@@ -4,21 +4,27 @@
       "enabled": true,
       "transport": "stdio",
       "command": "python",
-      "args": ["app/ai/mcp_servers/calculator_server.py"],
+      "args": [
+        "app/ai/mcp_servers/calculator_server.py"
+      ],
       "description": "Basic calculator operations (add, subtract, multiply, divide, power)"
     },
     "tavily": {
       "enabled": true,
       "transport": "stdio",
       "command": "python",
-      "args": ["app/ai/mcp_servers/tavily_server.py"],
+      "args": [
+        "app/ai/mcp_servers/tavily_server.py"
+      ],
       "description": "Web search using Tavily API for real-time information retrieval"
     },
     "time": {
       "enabled": true,
       "transport": "stdio",
       "command": "python",
-      "args": ["app/ai/mcp_servers/time_server.py"],
+      "args": [
+        "app/ai/mcp_servers/time_server.py"
+      ],
       "description": "Current time lookup utility with timezone support"
     },
     "boring": {

@@ -584,9 +584,12 @@ class MessageService(IMessageService):
                         datetime.utcnow() - stored_time
                     ).total_seconds() / 60
                     if elapsed_minutes > settings.hitl_approval_timeout_minutes:
+                        # Clean up the expired key
+                        self.redis_client.delete(key)
                         raise TimeoutError(
-                            f"Interrupt approval timeout exceeded: {elapsed_minutes:.1f} minutes elapsed, "
-                            f"limit is {settings.hitl_approval_timeout_minutes} minutes"
+                            f"This approval request has expired ({elapsed_minutes:.0f} minutes elapsed, "
+                            f"limit is {settings.hitl_approval_timeout_minutes} minutes). "
+                            "Please send a new message to try again."
                         )
             except TimeoutError:
                 raise
@@ -648,7 +651,7 @@ class MessageService(IMessageService):
                 self.redis_client.delete(key)
             except Exception:
                 pass
-
+                pass
         if (
             bot_response
             and bot_response.metadata

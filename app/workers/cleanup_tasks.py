@@ -96,70 +96,85 @@ def health_check_task():
 def cleanup_abandoned_interrupts():
     """
     Background task to clean up abandoned HITL interrupts.
+    
+    This task:
+    1. Scans Redis for expired interrupt keys
+    2. Deletes expired Redis keys
+    3. Cleans up LangGraph checkpoint state for expired threads
     """
     try:
         redis_url = getattr(settings, "redis_url", "") or ""
         if not redis_url.strip():
-            message = "Redis URL not configured; skipping interrupt cleanup task."
-            logger.debug(message)
             return {
                 "success": True,
                 "timestamp": datetime.utcnow().isoformat(),
                 "expired_interrupts_cleaned": 0,
+                "checkpoints_cleaned": 0,
                 "active_interrupts": 0,
-                "message": message,
+                "message": "Redis URL not configured; skipping interrupt cleanup task.",
             }
 
-        # Connect to Redis
         redis_client = redis.from_url(redis_url)
 
-        # Scan for all interrupt keys
         interrupt_pattern = "interrupt:*"
         expired_count = 0
+        checkpoint_cleaned_count = 0
         active_count = 0
+        expired_threads = []
 
+        # First pass: identify and clean up expired Redis keys
         for key in redis_client.scan_iter(match=interrupt_pattern):
             try:
-                # Get the stored timestamp
                 stored_timestamp = redis_client.get(key)
                 if not stored_timestamp:
                     continue
 
-                # Parse timestamp
                 stored_time = datetime.fromisoformat(stored_timestamp.decode("utf-8"))
                 elapsed_minutes = (datetime.utcnow() - stored_time).total_seconds() / 60
 
                 if elapsed_minutes > settings.hitl_approval_timeout_minutes:
-                    # Interrupt has expired
                     expired_count += 1
 
-                    # Extract conversation_id and interrupt_id from key
                     # Key format: "interrupt:{conversation_id}:{interrupt_id}"
                     key_parts = key.decode("utf-8").split(":")
-                    conversation_id = key_parts[1] if len(key_parts) > 1 else "unknown"
-                    interrupt_id = key_parts[2] if len(key_parts) > 2 else "unknown"
+                    conversation_id = key_parts[1] if len(key_parts) > 1 else None
+                    
+                    # Track thread for checkpoint cleanup (conversation_id is the thread_id)
+                    if conversation_id:
+                        expired_threads.append(conversation_id)
 
-                    # Delete the expired key
                     redis_client.delete(key)
                 else:
                     active_count += 1
 
-            except Exception as e:
-                logger.error(f"Error processing interrupt key {key}: {e}")
+            except Exception:
                 continue
 
-        result = {
+        # Second pass: clean up LangGraph checkpoint state for expired threads
+        if expired_threads:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                checkpoint_cleaned_count = loop.run_until_complete(
+                    _cleanup_checkpoint_states(expired_threads)
+                )
+            finally:
+                loop.close()
+
+        if expired_count > 0:
+            logger.info(
+                f"Cleanup completed: {expired_count} expired interrupts, "
+                f"{checkpoint_cleaned_count} checkpoint states cleaned"
+            )
+
+        return {
             "success": True,
             "timestamp": datetime.utcnow().isoformat(),
             "expired_interrupts_cleaned": expired_count,
+            "checkpoints_cleaned": checkpoint_cleaned_count,
             "active_interrupts": active_count,
-            "message": f"Cleanup completed: {expired_count} expired, {active_count} active",
+            "message": f"Cleanup completed: {expired_count} expired, {checkpoint_cleaned_count} checkpoints cleaned, {active_count} active",
         }
-
-        if expired_count > 0:
-            logger.info(f"Cleaned up {expired_count} expired interrupts")
-
-        return result
 
     except Exception as e:
         logger.error(f"Cleanup abandoned interrupts task failed: {str(e)}")
@@ -168,3 +183,40 @@ def cleanup_abandoned_interrupts():
             "error": str(e),
             "message": "Cleanup abandoned interrupts task failed",
         }
+
+
+async def _cleanup_checkpoint_states(thread_ids: list) -> int:
+    """
+    Clean up LangGraph checkpoint states for the given thread IDs.
+    
+    Args:
+        thread_ids: List of thread IDs (conversation IDs) to clean up
+        
+    Returns:
+        Number of successfully cleaned checkpoint states
+    """
+    cleaned_count = 0
+    
+    try:
+        from app.ai.checkpoint import CheckpointManager
+        
+        checkpoint_manager = CheckpointManager(
+            db_url=settings.database_url,
+            settings=settings,
+        )
+        await checkpoint_manager.setup()
+        
+        for thread_id in thread_ids:
+            try:
+                if await checkpoint_manager.delete_thread(thread_id):
+                    cleaned_count += 1
+            except Exception:
+                continue
+        
+        await checkpoint_manager.cleanup()
+        
+    except Exception:
+        pass
+    
+    return cleaned_count
+
