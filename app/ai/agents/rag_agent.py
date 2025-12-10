@@ -24,7 +24,7 @@ from langchain.agents import create_agent
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_rag_prompt
 from ...core.config import Settings
-from ..mcp_integration import MCPManager
+from ..mcp_integration import get_global_mcp_manager
 from ...core.config import settings
 from ..utils import (
     coerce_response_text,
@@ -102,23 +102,19 @@ class RAGAgent:
         logger.info(f"Re-ranker initialized: {self.settings.reranker_model}")
 
     async def _init_tools(self):
-        """Initialize MCP manager and load tools useful for document analysis"""
-        if self.mcp_manager is None:
-            try:
-                self.mcp_manager = MCPManager()
-                await self.mcp_manager.initialize()
-            except Exception as e:
-                logger.error(
-                    f"Failed to initialize MCP manager for RAGAgent: {e}",
-                    exc_info=True,
-                )
-                self.tools = []
-                return
-
+        """Initialize MCP manager and load tools using global singleton"""
+        if self.mcp_manager is not None:
+            return 
+        
         try:
+            self.mcp_manager = await get_global_mcp_manager()
             all_tools = await self.mcp_manager.get_tools()
         except Exception as e:
-            logger.error("Failed to load MCP tools for RAGAgent: %s", e, exc_info=True)
+            logger.error(
+                "Failed to get global MCP manager for RAGAgent: %s",
+                e,
+                exc_info=True,
+            )
             self.tools = []
             return
 

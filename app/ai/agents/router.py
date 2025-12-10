@@ -2,6 +2,7 @@ import re
 from typing import List, Optional
 
 from google import genai
+import asyncio
 
 from ..schemas import AgentMessage
 from ..prompts import ROUTER_SYSTEM_PROMPT
@@ -56,8 +57,10 @@ class Router:
 
         prompt = "\n".join(prompt_parts)
 
-        response = self.gemini_client.models.generate_content(
-            model=self.model_name, contents=prompt
+        response = await asyncio.to_thread(
+            self.gemini_client.models.generate_content,
+            model=self.model_name,
+            contents=prompt,
         )
 
         response_text = response.text if hasattr(response, "text") else str(response)

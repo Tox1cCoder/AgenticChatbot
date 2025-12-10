@@ -211,7 +211,7 @@ class Container(containers.DeclarativeContainer):
             checkpointer=checkpointer,
         )
 
-    ai_service = providers.Factory(_create_ai_service)
+    ai_service = providers.Singleton(_create_ai_service)
 
     task_plan_service: providers.Provider[ITaskPlanService] = providers.Factory(
         TaskPlanService,

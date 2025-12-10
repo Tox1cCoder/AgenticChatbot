@@ -70,6 +70,28 @@ class MultiAgentWorkflow:
             self.rag_agent,
             self.image_generator_agent,
         ]
+        self._initialized = False
+
+    async def initialize(self) -> None:
+        """
+        Eagerly initialize all agent tools.
+        """
+        if self._initialized:
+            return
+
+        # Pre-initialize MCP tools for all agents that use them
+        for agent in [
+            self.chat_agent,
+            self.search_agent,
+            self.image_generator_agent,
+            self.rag_agent,
+        ]:
+            if hasattr(agent, "_init_tools"):
+                await agent._init_tools()
+            elif hasattr(agent, "_init_mcp"):
+                await agent._init_mcp()
+
+        self._initialized = True
 
     def _build_graph(self) -> StateGraph:
         workflow = StateGraph(GraphState)
@@ -283,6 +305,10 @@ class MultiAgentWorkflow:
 
         state.setdefault("messages", []).extend(new_messages)
 
+        # Increment iteration count to track tool-calling loops
+        current_iteration = state.get("iteration_count") or 0
+        state["iteration_count"] = current_iteration + 1
+
         # Store tool artifacts and images in context for later extraction
         context = state.get("context", {})
         if tool_artifacts:
@@ -411,6 +437,20 @@ class MultiAgentWorkflow:
         return "tools"
 
     def _route_tool_output(self, state: GraphState) -> str:
+        # Check iteration count to prevent infinite loops
+        iteration_count = state.get("iteration_count", 0)
+        max_iterations = getattr(settings, "react_agent_max_iterations", 3)
+
+        # If we've exceeded max iterations, end the conversation
+        if iteration_count >= max_iterations:
+            # Add a message indicating we've reached the limit
+            messages = state.get("messages", [])
+            if messages:
+                context = state.get("context", {})
+                context["max_iterations_reached"] = True
+                state["context"] = context
+            return "end"
+
         return state.get("selected_agent", "end")
 
     def _build_interrupt_agent_response(
@@ -610,7 +650,7 @@ class MultiAgentWorkflow:
         if conversation_id and user_id:
             memory_manager = get_memory_manager()
             conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=True
+                UUID(conversation_id), UUID(user_id), force_refresh=False
             )
             history_limit = (
                 settings.chat_history_max_messages
@@ -717,7 +757,7 @@ class MultiAgentWorkflow:
         if conversation_id and user_id:
             memory_manager = get_memory_manager()
             conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=True
+                UUID(conversation_id), UUID(user_id), force_refresh=False
             )
             history_limit = (
                 settings.rag_history_max_messages
@@ -795,7 +835,7 @@ class MultiAgentWorkflow:
         if conversation_id and user_id:
             memory_manager = get_memory_manager()
             conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=True
+                UUID(conversation_id), UUID(user_id), force_refresh=False
             )
             history_limit = (
                 settings.search_history_max_messages
@@ -902,7 +942,7 @@ class MultiAgentWorkflow:
         if conversation_id and user_id:
             memory_manager = get_memory_manager()
             conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=True
+                UUID(conversation_id), UUID(user_id), force_refresh=False
             )
             history_limit = (
                 settings.chat_history_max_messages
@@ -983,7 +1023,7 @@ class MultiAgentWorkflow:
         if conversation_id and user_id:
             memory_manager = get_memory_manager()
             conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=True
+                UUID(conversation_id), UUID(user_id), force_refresh=False
             )
             history_limit = (
                 settings.chat_history_max_messages

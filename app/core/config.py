@@ -309,7 +309,7 @@ class Settings(BaseSettings):
         description="Minimum quality score (0.0-1.0) to accept response without refinement",
     )
     react_agent_recursion_limit: int = Field(
-        default=25,
+        default=50,
         description="LangGraph recursion limit for agent execution. Should be set to 2 * react_agent_max_iterations + 1 per LangGraph best practices",
     )
     tool_choice_mode: str = Field(
@@ -319,8 +319,12 @@ class Settings(BaseSettings):
 
     # Planning Agent Configuration
     max_auto_plan_tasks: int = Field(
-        default=3,
-        description="Maximum number of tasks to execute automatically before pausing for user confirmation",
+        default=20,
+        description="Absolute maximum number of tasks per execution session (safety limit)",
+    )
+    execution_call_budget: int = Field(
+        default=12,
+        description="Maximum LLM calls per execution session before pausing for user",
     )
 
     # Tool Execution Configuration

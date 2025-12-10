@@ -8,14 +8,16 @@ mcp = FastMCP("Time")
 
 
 @mcp.tool()
-def get_current_time(timezone: str = "UTC", format: str = "%Y-%m-%d %H:%M:%S %Z") -> str:
+def get_current_time(
+    timezone: str = "Asia/Ho_Chi_Minh", format: str = "%Y-%m-%d %H:%M:%S %Z"
+) -> str:
     """
     Return the current time for the requested IANA timezone.
-    
+
     Args:
         timezone: IANA timezone identifier string. Must be a valid IANA timezone name.
             Common timezones: 'UTC', 'America/New_York', 'Europe/London', 'Asia/Tokyo', 'Asia/Ho_Chi_Minh'
-        
+
         format: Optional strftime-compatible format string for the human_readable field.
             Format examples:
                 '%Y-%m-%d %H:%M:%S' for '2024-01-15 14:30:00'
@@ -52,9 +54,9 @@ def get_current_time(timezone: str = "UTC", format: str = "%Y-%m-%d %H:%M:%S %Z"
     }
 
     if resolved_timezone != timezone:
-        payload[
-            "note"
-        ] = "Requested timezone was not found. Returned time in UTC instead."
+        payload["note"] = (
+            "Requested timezone was not found. Returned time in UTC instead."
+        )
 
     return json.dumps(payload)
 

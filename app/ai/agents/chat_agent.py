@@ -15,7 +15,7 @@ from ..utils import (
     get_error_recovery_hint,
 )
 from ...core.config import settings
-from ..mcp_integration import MCPManager
+from ..mcp_integration import get_global_mcp_manager
 
 logger = logging.getLogger(__name__)
 
@@ -54,24 +54,20 @@ class ChatAgent:
         self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
     async def _init_tools(self):
-        """Initialize MCP manager and load general-purpose tools"""
-        if self.mcp_manager is None:
-            try:
-                self.mcp_manager = MCPManager()
-                await self.mcp_manager.initialize()
-            except Exception as e:
-                logger.error(
-                    "Failed to initialize MCP manager for ChatAgent: %s",
-                    e,
-                    exc_info=True,
-                )
-                self.tools = []
-                return
-
+        """Initialize MCP manager and load general-purpose tools using global singleton"""
+        if self.mcp_manager is not None:
+            return  # Already initialized
+        
         try:
+            # Use global singleton MCP manager for performance
+            self.mcp_manager = await get_global_mcp_manager()
             all_tools = await self.mcp_manager.get_tools()
         except Exception as e:
-            logger.error("Failed to load MCP tools for ChatAgent: %s", e, exc_info=True)
+            logger.error(
+                "Failed to get global MCP manager for ChatAgent: %s",
+                e,
+                exc_info=True,
+            )
             self.tools = []
             return
 
@@ -379,10 +375,7 @@ class ChatAgent:
         return response.text if hasattr(response, "text") else str(response)
 
     async def cleanup(self):
-        """Cleanup MCP resources"""
-        if self.mcp_manager:
-            try:
-                await self.mcp_manager.cleanup()
-                logger.info("ChatAgent MCP cleanup completed")
-            except Exception as e:
-                logger.error(f"Error cleaning up ChatAgent MCP resources: {e}")
+        """Cleanup agent resources (MCP manager is shared and cleaned up globally)"""
+        self.mcp_manager = None
+        self.tools = []
+        logger.debug("ChatAgent cleanup completed (MCP manager is shared)")

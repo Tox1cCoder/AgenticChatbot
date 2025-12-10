@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ...core.config import settings
-from ..mcp_integration import MCPManager
+from ..mcp_integration import get_global_mcp_manager
 from ..utils import coerce_response_text
 
 logger = logging.getLogger(__name__)
@@ -53,32 +53,34 @@ class ImageGeneratorAgent:
         self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
     async def _init_tools(self):
-        """Initialize MCP manager and load all available tools"""
-        if self.mcp_manager is None:
-            try:
-                self.mcp_manager = MCPManager()
-                await self.mcp_manager.initialize()
+        """Initialize MCP manager and load all available tools using global singleton"""
+        if self.mcp_manager is not None:
+            return  # Already initialized
+        
+        try:
+            # Use global singleton MCP manager for performance
+            self.mcp_manager = await get_global_mcp_manager()
+            self.tools = await self.mcp_manager.get_tools()
 
-                self.tools = await self.mcp_manager.get_tools()
+            server_status = self.mcp_manager.get_servers_status()
+            active_servers = [
+                name
+                for name, status in server_status.items()
+                if status.get("enabled")
+            ]
+            logger.info(
+                "Loaded %d MCP tools for ImageGeneratorAgent from %d servers",
+                len(self.tools),
+                len(active_servers),
+            )
 
-                server_status = self.mcp_manager.get_servers_status()
-                active_servers = [
-                    name
-                    for name, status in server_status.items()
-                    if status.get("enabled")
-                ]
-                logger.info(
-                    "Loaded %d MCP tools for ImageGeneratorAgent from %d servers",
-                    len(self.tools),
-                    len(active_servers),
-                )
-
-            except Exception as e:
-                logger.error(
-                    f"Failed to initialize MCP manager for ImageGeneratorAgent: {e}",
-                    exc_info=True,
-                )
-                self.tools = []
+        except Exception as e:
+            logger.error(
+                "Failed to get global MCP manager for ImageGeneratorAgent: %s",
+                e,
+                exc_info=True,
+            )
+            self.tools = []
 
     async def invoke_model(
         self,
@@ -408,12 +410,8 @@ Do not output anything else, just the prompt."""
         )
 
     async def cleanup(self):
-        """Cleanup MCP resources"""
-        if self.mcp_manager:
-            try:
-                await self.mcp_manager.cleanup()
-                logger.info("ImageGeneratorAgent MCP cleanup completed")
-            except Exception as e:
-                logger.error(
-                    f"Error cleaning up ImageGeneratorAgent MCP resources: {e}"
-                )
+        """Cleanup agent resources (MCP manager is shared and cleaned up globally)"""
+
+        self.mcp_manager = None
+        self.tools = []
+        logger.debug("ImageGeneratorAgent cleanup completed (MCP manager is shared)")

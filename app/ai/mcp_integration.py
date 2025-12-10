@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -673,3 +674,49 @@ class MCPManager:
             "config": server_config,
             "description": server_config.get("description", ""),
         }
+
+_global_mcp_manager: Optional["MCPManager"] = None
+_mcp_init_lock: asyncio.Lock = asyncio.Lock()
+_mcp_initialized: bool = False
+
+
+async def get_global_mcp_manager() -> MCPManager:
+    """
+    Get or create a singleton MCPManager instance.
+    
+    Returns:
+        MCPManager: The global MCP manager instance with tools pre-loaded.
+    """
+    global _global_mcp_manager, _mcp_initialized
+    
+    if _global_mcp_manager is not None and _mcp_initialized:
+        return _global_mcp_manager
+    
+    async with _mcp_init_lock:
+        # Double-check after acquiring lock
+        if _global_mcp_manager is not None and _mcp_initialized:
+            return _global_mcp_manager
+        
+        _global_mcp_manager = MCPManager()
+        await _global_mcp_manager.initialize()
+        
+        # Pre-load all tools to avoid lazy loading overhead
+        tools = await _global_mcp_manager.get_tools()
+        _mcp_initialized = True
+        
+    return _global_mcp_manager
+
+
+async def reset_global_mcp_manager() -> None:
+    """
+    Reset the global MCP manager.
+    """
+    global _global_mcp_manager, _mcp_initialized
+    
+    async with _mcp_init_lock:
+        if _global_mcp_manager is not None:
+            await _global_mcp_manager.cleanup()
+        
+        _global_mcp_manager = None
+        _mcp_initialized = False
+        logger.info("Global MCP manager reset")

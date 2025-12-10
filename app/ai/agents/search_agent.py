@@ -9,7 +9,7 @@ from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT
 from ..utils import coerce_response_text
 from ...core.config import settings
-from ..mcp_integration import MCPManager
+from ..mcp_integration import get_global_mcp_manager
 
 logger = logging.getLogger(__name__)
 
@@ -42,22 +42,18 @@ class SearchAgent:
         self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
     async def _init_mcp(self):
-        """Initialize MCP manager and load external tool suites"""
-        if self.mcp_manager is None:
-            try:
-                self.mcp_manager = MCPManager()
-                await self.mcp_manager.initialize()
-
-            except Exception as e:
-                logger.error(f"Failed to initialize MCP manager: {e}", exc_info=True)
-                self.tools = []
-                return
-
+        """Initialize MCP manager and load external tool suites using global singleton"""
+        if self.mcp_manager is not None:
+            return  # Already initialized
+        
         try:
+            self.mcp_manager = await get_global_mcp_manager()
             all_tools = await self.mcp_manager.get_tools()
         except Exception as e:
             logger.error(
-                f"Failed to load MCP tools for SearchAgent: {e}", exc_info=True
+                "Failed to get global MCP manager for SearchAgent: %s",
+                e,
+                exc_info=True,
             )
             self.tools = []
             return
@@ -277,10 +273,7 @@ class SearchAgent:
             yield {"type": "error", "error": str(e)}
 
     async def cleanup(self):
-        """Cleanup MCP resources"""
-        if self.mcp_manager:
-            try:
-                await self.mcp_manager.cleanup()
-                logger.info("Search Agent MCP manager cleaned up")
-            except Exception as e:
-                logger.error(f"Error cleaning up Search Agent: {e}")
+        """Cleanup agent resources """
+        self.mcp_manager = None
+        self.tools = []
+        logger.debug("SearchAgent cleanup completed (MCP manager is shared)")
