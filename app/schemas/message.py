@@ -4,9 +4,12 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from app.models.enums import MessageRole
-from app.utils.case_conversion import to_camel_case as to_camel
+from app.utils.case_conversion import (
+    to_camel_case as to_camel,
+    convert_dict_keys_to_snake_case,
+)
 from app.schemas.feedback import FeedbackRead
 from app.ai.schemas import InterruptResponse, InterruptDecision
 
@@ -91,6 +94,22 @@ class MessageRead(BaseModel):
         description="Interrupt information when tool execution requires human approval",
     )
 
+    @model_validator(mode="after")
+    def _populate_interrupt_from_metadata(self):
+        # Persisted interrupts are stored inside message_metadata["interrupt"].
+        if self.interrupt is None and isinstance(self.message_metadata, dict):
+            payload = self.message_metadata.get("interrupt")
+            if payload:
+                try:
+                    self.interrupt = (
+                        payload
+                        if isinstance(payload, InterruptResponse)
+                        else InterruptResponse.model_validate(payload)
+                    )
+                except Exception:
+                    pass
+        return self
+
 
 class InterruptResumeRequest(BaseModel):
     """Request to resume execution after handling interrupts."""
@@ -103,6 +122,17 @@ class InterruptResumeRequest(BaseModel):
     decisions: List[InterruptDecision] = Field(
         ..., description="Approval/rejection/edit decisions"
     )
+
+    @field_validator("decisions", mode="before")
+    @classmethod
+    def _normalize_decisions_keys(cls, value):
+        # Accept both camelCase and snake_case decision payloads.
+        if isinstance(value, list):
+            return [
+                convert_dict_keys_to_snake_case(v) if isinstance(v, dict) else v
+                for v in value
+            ]
+        return value
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 

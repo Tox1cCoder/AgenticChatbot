@@ -104,8 +104,8 @@ class RAGAgent:
     async def _init_tools(self):
         """Initialize MCP manager and load tools using global singleton"""
         if self.mcp_manager is not None:
-            return 
-        
+            return
+
         try:
             self.mcp_manager = await get_global_mcp_manager()
             all_tools = await self.mcp_manager.get_tools()
@@ -692,11 +692,25 @@ class RAGAgent:
                 # Track tool execution
                 elif event_type == "on_tool_start":
                     tool_name = event.get("name", "unknown_tool")
-                    yield {"type": "tool_start", "name": tool_name}
+                    tool_input = event.get("data", {}).get("input")
+                    tool_call_id = event.get("run_id")
+                    yield {
+                        "type": "tool_start",
+                        "name": tool_name,
+                        "tool_call_id": str(tool_call_id) if tool_call_id else None,
+                        "args": tool_input,
+                    }
 
                 elif event_type == "on_tool_end":
                     tool_name = event.get("name", "unknown_tool")
-                    yield {"type": "tool_end", "name": tool_name}
+                    tool_output = event.get("data", {}).get("output")
+                    tool_call_id = event.get("run_id")
+                    yield {
+                        "type": "tool_end",
+                        "name": tool_name,
+                        "tool_call_id": str(tool_call_id) if tool_call_id else None,
+                        "result": tool_output,
+                    }
 
             # Get final response for complete extraction
             agent_response = await agent_executor.ainvoke(
@@ -941,21 +955,21 @@ class RAGAgent:
                 ]
             )
 
-        search_results = self.qdrant_client.search(
+        search_results = self.qdrant_client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_embedding,
+            query=query_embedding,
             limit=top_k,
             score_threshold=self.score_threshold,
             query_filter=search_filter,
-        )
+        ).points
 
         if not search_results and conversation_id:
-            search_results = self.qdrant_client.search(
+            search_results = self.qdrant_client.query_points(
                 collection_name=self.collection_name,
-                query_vector=query_embedding,
+                query=query_embedding,
                 limit=top_k,
                 score_threshold=self.score_threshold,
-            )
+            ).points
 
         results = []
         for result in search_results:

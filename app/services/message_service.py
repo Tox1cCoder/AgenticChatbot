@@ -54,6 +54,50 @@ class MessageService(IMessageService):
             return None
         return redis.from_url(redis_url)
 
+    def _persist_interrupt_bot_message(
+        self,
+        conversation_id: UUID,
+        interrupt_payload: Any,
+        sanitized_persona: Optional[str] = None,
+        pending_tool_calls: Optional[Any] = None,
+        thread_id: Optional[str] = None,
+        next_nodes: Optional[Any] = None,
+    ) -> MessageRead:
+        """
+        Persist an assistant message that represents a paused workflow awaiting HITL approval.
+
+        This makes pending approvals recoverable via normal message history APIs (DB-backed),
+        rather than only via the live SSE stream.
+        """
+        if isinstance(interrupt_payload, InterruptResponse):
+            interrupt_dict = interrupt_payload.model_dump(mode="json")
+        elif isinstance(interrupt_payload, dict):
+            interrupt_dict = interrupt_payload
+        else:
+            interrupt_dict = {"raw": str(interrupt_payload)}
+
+        metadata: Dict[str, Any] = {
+            "interrupt": interrupt_dict,
+            "paused": True,
+            "pause_reason": "tool_approval_required",
+        }
+        if sanitized_persona:
+            metadata["persona_used"] = sanitized_persona
+        if thread_id:
+            metadata["thread_id"] = thread_id
+        if next_nodes is not None:
+            metadata["next"] = next_nodes
+        if pending_tool_calls is not None:
+            metadata["pending_tool_calls"] = pending_tool_calls
+
+        bot_response_entity = MessageFactory.create_bot_response(
+            conversation_id=conversation_id,
+            content="Tool execution requires approval",
+            message_metadata=metadata,
+        )
+        bot_message = self.repository.create(bot_response_entity)
+        return MessageRead.model_validate(bot_message)
+
     async def create_message(self, message_create_data: MessageCreate) -> MessageRead:
         self.conversation_validation_utils.validate_conversation_exists(
             message_create_data.conversation_id
@@ -179,6 +223,25 @@ class MessageService(IMessageService):
                         interrupt_payload
                     )
                 user_message_read.interrupt = interrupt_payload
+
+                # Persist an assistant "approval required" message so clients can
+                # recover pending approvals from message history (not just SSE).
+                try:
+                    self._persist_interrupt_bot_message(
+                        conversation_id=message_create_data.conversation_id,
+                        interrupt_payload=interrupt_payload,
+                        sanitized_persona=sanitized_persona,
+                        thread_id=getattr(interrupt_payload, "thread_id", None),
+                        pending_tool_calls=[
+                            r.model_dump(mode="json")
+                            for r in getattr(interrupt_payload, "action_requests", [])
+                        ]
+                        if isinstance(interrupt_payload, InterruptResponse)
+                        else None,
+                    )
+                except Exception:
+                    pass
+
                 return user_message_read
 
             bot_response_entity = MessageFactory.create_bot_response(
@@ -331,12 +394,21 @@ class MessageService(IMessageService):
                         interrupt_payload = InterruptResponse.model_validate(
                             interrupt_payload
                         )
+
+                    persisted = self._persist_interrupt_bot_message(
+                        conversation_id=message_create_data.conversation_id,
+                        interrupt_payload=interrupt_payload,
+                        sanitized_persona=sanitized_persona,
+                        thread_id=interrupt_payload.thread_id,
+                        next_nodes=None,
+                    )
                     yield {
                         "type": "interrupt",
-                        "thread_id": str(message_create_data.conversation_id),
+                        "thread_id": interrupt_payload.thread_id,
                         "next": None,
                         "pending_tool_calls": None,
                         "interrupt": interrupt_payload,
+                        "message": persisted.model_dump(mode="json"),
                     }
                     return
 
@@ -390,6 +462,9 @@ class MessageService(IMessageService):
                             "type": "tool",
                             "name": event.get("name"),
                             "status": event.get("status"),
+                            "tool_call_id": event.get("tool_call_id"),
+                            "args": event.get("args"),
+                            "result": event.get("result"),
                         }
 
                     elif event_type == "interrupt":
@@ -422,10 +497,20 @@ class MessageService(IMessageService):
 
                         yield {
                             "type": "interrupt",
-                            "thread_id": str(message_create_data.conversation_id),
+                            "thread_id": event.get("thread_id")
+                            or str(message_create_data.conversation_id),
                             "next": event.get("next"),
                             "pending_tool_calls": event.get("pending_tool_calls"),
                             "interrupt": interrupt_response,
+                            "message": self._persist_interrupt_bot_message(
+                                conversation_id=message_create_data.conversation_id,
+                                interrupt_payload=interrupt_response,
+                                sanitized_persona=sanitized_persona,
+                                pending_tool_calls=event.get("pending_tool_calls"),
+                                thread_id=event.get("thread_id")
+                                or str(message_create_data.conversation_id),
+                                next_nodes=event.get("next"),
+                            ).model_dump(mode="json"),
                         }
                         # Workflow is paused - don't create a bot message yet
                         # The resume endpoint will handle that
@@ -657,20 +742,6 @@ class MessageService(IMessageService):
             and bot_response.metadata
             and "interrupt" in bot_response.metadata
         ):
-            latest_message = self.repository.get_latest_by_conversation(conversation_id)
-            if latest_message:
-                message_read = MessageRead.model_validate(latest_message)
-            else:
-                message_read = MessageRead(
-                    id=uuid4(),
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow(),
-                    deleted_at=None,
-                    conversation_id=conversation_id,
-                    sender=MessageRole.assistant.value,
-                    content="Tool execution requires approval",
-                    message_metadata={},
-                )
             interrupt_payload = bot_response.metadata["interrupt"]
             if isinstance(interrupt_payload, dict):
                 interrupt_count = (
@@ -694,8 +765,18 @@ class MessageService(IMessageService):
                     pass  # Could auto-reject or provide fallback
 
                 interrupt_payload = InterruptResponse.model_validate(interrupt_payload)
-            message_read.interrupt = interrupt_payload
-            return message_read
+
+            persisted = self._persist_interrupt_bot_message(
+                conversation_id=conversation_id,
+                interrupt_payload=interrupt_payload,
+                sanitized_persona=sanitized_persona,
+                thread_id=(
+                    interrupt_payload.thread_id
+                    if isinstance(interrupt_payload, InterruptResponse)
+                    else None
+                ),
+            )
+            return persisted
 
         bot_response_content = (
             bot_response.message.content

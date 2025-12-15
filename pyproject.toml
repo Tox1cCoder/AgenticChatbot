@@ -49,6 +49,7 @@ dependencies = [
     "qdrant-client>=1.7.0",
     "sentence-transformers>=2.2.2",
     "transformers>=4.30.0",
+    "huggingface-hub>=0.34.0,<1.0",
     "torch>=2.1.0",
     
     # Token Counting & NLP

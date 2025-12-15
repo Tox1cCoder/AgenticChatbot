@@ -68,6 +68,7 @@ class Container(containers.DeclarativeContainer):
             "app.api.documents",
             "app.api.mcp",
             "app.api.task_plans",
+            "app.api.ai_sdk",
         ]
     )
 

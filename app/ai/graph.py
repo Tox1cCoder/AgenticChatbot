@@ -25,7 +25,7 @@ from .agents.planning_agent import PlanningAgent
 from .memory import get_memory_manager
 from ..core.config import settings
 from .hitl_config import build_interrupt_response, requires_human_approval
-from .utils import normalize_tool_call, coerce_response_text
+from .utils import normalize_tool_call, coerce_response_text, make_json_safe
 
 if TYPE_CHECKING:
     from ..repositories.document import DocumentRepository
@@ -224,6 +224,7 @@ class MultiAgentWorkflow:
                     # Track tool artifact
                     tool_artifacts.append(
                         {
+                            "tool_call_id": tool_id,
                             "tool": tool_name,
                             "args": tool_args,
                             "output": (
@@ -286,6 +287,7 @@ class MultiAgentWorkflow:
                 )
                 tool_artifacts.append(
                     {
+                        "tool_call_id": tool_id,
                         "tool": tool_name,
                         "args": tool_args,
                         "output": None,
@@ -1450,7 +1452,7 @@ class MultiAgentWorkflow:
                     yield {"type": "tool_start", "name": event["name"]}
                 elif kind == "on_tool_end":
                     yield {"type": "tool_end", "name": event["name"]}
-
+                    
         except Exception as e:
             yield {"type": "error", "error": str(e)}
             return

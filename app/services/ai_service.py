@@ -16,6 +16,7 @@ from sentence_transformers import SentenceTransformer
 from ..repositories.conversation import ConversationRepository
 from ..repositories.document import DocumentRepository
 from ..utils.text_processing import sanitize_persona
+from ..ai.utils import make_json_safe
 
 
 class AIService:
@@ -245,11 +246,13 @@ class AIService:
             elif event_type == "tool_start":
                 tool_name = event.get("name", "unknown")
                 tool_call_id = event.get("tool_call_id")
+                tool_args = event.get("args")
                 yield {
                     "type": "tool",
                     "name": tool_name,
                     "status": "start",
                     "tool_call_id": tool_call_id,
+                    "args": make_json_safe(tool_args),
                 }
 
             elif event_type == "tool_end":
@@ -261,7 +264,7 @@ class AIService:
                     "name": tool_name,
                     "status": "end",
                     "tool_call_id": tool_call_id,
-                    "result": result,
+                    "result": make_json_safe(result),
                 }
 
             elif event_type == "complete":
