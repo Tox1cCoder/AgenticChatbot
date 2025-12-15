@@ -44,9 +44,6 @@ class AIService:
             conversation = self.conversation_repository.get_by_id(conversation_id)
             return conversation.persona_prompt if conversation else None
         except Exception as e:
-            logger.error(
-                f"Error loading persona for conversation {conversation_id}: {e}"
-            )
             return None
 
     def _build_error_response(self, message: str) -> AgentResponse:

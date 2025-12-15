@@ -439,7 +439,7 @@ class MultiAgentWorkflow:
     def _route_tool_output(self, state: GraphState) -> str:
         # Check iteration count to prevent infinite loops
         iteration_count = state.get("iteration_count", 0)
-        max_iterations = getattr(settings, "react_agent_max_iterations", 3)
+        max_iterations = getattr(settings, "react_agent_max_iterations")
 
         # If we've exceeded max iterations, end the conversation
         if iteration_count >= max_iterations:
