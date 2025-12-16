@@ -13,18 +13,16 @@ from app.models.enums import MessageRole
 from app.schemas.message import MessageCreate
 
 
-router = APIRouter(prefix="/ai", tags=["ai-sdk"])
+router = APIRouter(tags=["ai-sdk"])
 
 
 class AISDKChatRequest(BaseModel):
     """
     - messages: the UI message history
-    - conversationId: required (used for DB history + HITL resume)
     - userId: optional (enables server-side memory features)
     """
 
     messages: List[Dict[str, Any]] = Field(default_factory=list)
-    conversation_id: Optional[UUID] = Field(default=None, alias="conversationId")
     user_id: Optional[UUID] = Field(default=None, alias="userId")
 
     model_config = ConfigDict(populate_by_name=True, extra="allow")
@@ -40,7 +38,10 @@ def _extract_user_text(messages: List[Dict[str, Any]]) -> str:
         if isinstance(content, str) and content.strip():
             return content
 
+        # Some UIs serialize message parts into `content` as an array.
         parts = msg.get("parts")
+        if not isinstance(parts, list) and isinstance(content, list):
+            parts = content
         if isinstance(parts, list):
             texts: List[str] = []
             for part in parts:
@@ -52,6 +53,16 @@ def _extract_user_text(messages: List[Dict[str, Any]]) -> str:
             if joined:
                 return joined
 
+        # Fallbacks for non-standard payloads.
+        if isinstance(content, dict):
+            text = content.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+
+        text = msg.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
     return ""
 
 
@@ -59,11 +70,40 @@ def _sse(data: Dict[str, Any]) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-@router.post("/chat")
+def _coerce_json_object(value: Any) -> Dict[str, Any]:
+    """
+    Vercel AI SDK UI message stream expects tool `input`/`output` to be JSON objects.
+    Wrap scalars/lists into an object to avoid client-side schema errors.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return {"items": value}
+    if isinstance(value, str):
+        s = value.strip()
+        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, dict):
+                    return parsed
+                if isinstance(parsed, list):
+                    return {"items": parsed}
+            except Exception:
+                pass
+        return {"text": value}
+    return {"value": value}
+
+
+@router.post("/ai/chat/{conversation_id}")
+@router.post("/api/chat/{conversation_id}")
 @AppAutoInjector.auto_inject()
 async def chat_ui_message_stream(
+    conversation_id: UUID,
     payload: AISDKChatRequest,
     message_service: IMessageService,
+    current_user_id: UUID,
 ):
     """
     Vercel AI SDK UI Message Stream protocol (SSE).
@@ -72,21 +112,18 @@ async def chat_ui_message_stream(
     if not user_text:
         raise HTTPException(status_code=400, detail="No user message found")
 
-    if not payload.conversation_id:
-        raise HTTPException(
-            status_code=400, detail="conversationId is required for /ai/chat"
-        )
-
     message_id = str(uuid4())
     text_id = str(uuid4())
     reasoning_id = str(uuid4())
     reasoning_started = False
 
     tool_seq = 0
+    pending_tool_call_ids: List[str] = []
 
     async def event_generator():
-        nonlocal reasoning_started, tool_seq
+        nonlocal reasoning_started, tool_seq, pending_tool_call_ids
         text_started = False
+        any_text_delta = False
         try:
             # One backend call == one step for AI SDK UI step tracking.
             yield _sse({"type": "start-step"})
@@ -97,17 +134,20 @@ async def chat_ui_message_stream(
             text_started = True
 
             message_create = MessageCreate(
-                conversation_id=payload.conversation_id,
+                conversation_id=conversation_id,
                 content=user_text,
                 role=MessageRole.user,
             )
 
-            async for event in message_service.create_message_stream(message_create):
+            async for event in message_service.create_message_stream(
+                message_create, current_user_id
+            ):
                 event_type = event.get("type")
 
                 if event_type == "token":
                     delta = event.get("content") or ""
                     if delta:
+                        any_text_delta = True
                         yield _sse({"type": "text-delta", "id": text_id, "delta": delta})
 
                 elif event_type == "thinking":
@@ -146,10 +186,14 @@ async def chat_ui_message_stream(
                     if tool_call_id:
                         tool_call_id = str(tool_call_id)
                     else:
-                        tool_seq += 1
-                        tool_call_id = f"tool_{tool_seq}"
+                        if status == "end" and pending_tool_call_ids:
+                            tool_call_id = pending_tool_call_ids.pop(0)
+                        else:
+                            tool_seq += 1
+                            tool_call_id = f"tool_{tool_seq}"
 
                     if status == "start":
+                        pending_tool_call_ids.append(tool_call_id)
                         yield _sse(
                             {
                                 "type": "tool-input-start",
@@ -158,22 +202,26 @@ async def chat_ui_message_stream(
                             }
                         )
                         tool_input = event.get("args")
-                        if tool_input is not None:
-                            yield _sse(
-                                {
-                                    "type": "tool-input-available",
-                                    "toolCallId": tool_call_id,
-                                    "toolName": tool_name,
-                                    "input": tool_input,
-                                }
-                            )
+                        yield _sse(
+                            {
+                                "type": "tool-input-available",
+                                "toolCallId": tool_call_id,
+                                "toolName": tool_name,
+                                "input": _coerce_json_object(tool_input),
+                            }
+                        )
                     elif status == "end":
+                        if tool_call_id in pending_tool_call_ids:
+                            try:
+                                pending_tool_call_ids.remove(tool_call_id)
+                            except ValueError:
+                                pass
                         output = event.get("result")
                         yield _sse(
                             {
                                 "type": "tool-output-available",
                                 "toolCallId": tool_call_id,
-                                "output": output,
+                                "output": _coerce_json_object(output),
                             }
                         )
 
@@ -226,11 +274,26 @@ async def chat_ui_message_stream(
                     return
 
                 elif event_type == "complete":
-                    if event.get("message"):
+                    message = event.get("message") or {}
+                    if not any_text_delta:
+                        content = ""
+                        if isinstance(message, dict):
+                            content = message.get("content") or ""
+                        if isinstance(content, str) and content.strip():
+                            any_text_delta = True
+                            yield _sse(
+                                {
+                                    "type": "text-delta",
+                                    "id": text_id,
+                                    "delta": content,
+                                }
+                            )
+
+                    if message:
                         yield _sse(
                             {
                                 "type": "data-assistant-message",
-                                "data": {"message": event.get("message")},
+                                "data": {"message": message},
                                 "transient": True,
                             }
                         )

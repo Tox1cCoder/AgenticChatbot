@@ -28,11 +28,12 @@ async def create_message(
     message_data: MessageCreate,
     message_service: IMessageService,
     response: Response,
+    user_id: UUID,
 ) -> ApiResponse[MessageRead]:
     """
     Create a new message.
     """
-    result = await message_service.create_message(message_data)
+    result = await message_service.create_message(message_data, user_id)
 
     # Check if result contains interrupt information
     if result.interrupt:
@@ -53,6 +54,7 @@ async def create_message(
 async def create_message_stream(
     message_data: MessageCreate,
     message_service: IMessageService,
+    user_id: UUID,
 ):
     """
     Create a new message and stream the bot response.
@@ -61,7 +63,9 @@ async def create_message_stream(
     async def event_generator():
         """Generate Server-Sent Events (SSE) from the message stream"""
         try:
-            async for event in message_service.create_message_stream(message_data):
+            async for event in message_service.create_message_stream(
+                message_data, user_id
+            ):
                 event_type = event.get("type")
 
                 # Format as SSE: data: {json}\n\n
@@ -96,6 +100,7 @@ async def create_message_stream(
 async def resume_interrupt(
     resume_request: InterruptResumeRequest,
     message_service: IMessageService,
+    user_id: UUID,
 ) -> ApiResponse[MessageRead]:
     """
     Resume execution after handling tool execution interrupts.
@@ -103,6 +108,7 @@ async def resume_interrupt(
     result = await message_service.resume_message_creation(
         thread_id=resume_request.thread_id,
         conversation_id=resume_request.conversation_id,
+        user_id=user_id,
         interrupt_id=resume_request.interrupt_id,
         decisions=resume_request.decisions,
     )

@@ -14,7 +14,9 @@ class IMessageService(ABC):
     """Interface for Message service operations"""
 
     @abstractmethod
-    async def create_message(self, message_create_data: MessageCreate) -> MessageRead:
+    async def create_message(
+        self, message_create_data: MessageCreate, user_id: UUID
+    ) -> MessageRead:
         """Create a new message with validation"""
         pass
 

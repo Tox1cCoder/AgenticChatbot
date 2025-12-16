@@ -98,9 +98,11 @@ class MessageService(IMessageService):
         bot_message = self.repository.create(bot_response_entity)
         return MessageRead.model_validate(bot_message)
 
-    async def create_message(self, message_create_data: MessageCreate) -> MessageRead:
-        self.conversation_validation_utils.validate_conversation_exists(
-            message_create_data.conversation_id
+    async def create_message(
+        self, message_create_data: MessageCreate, user_id: UUID
+    ) -> MessageRead:
+        self.conversation_validation_utils.validate_conversation_access(
+            user_id, message_create_data.conversation_id
         )
 
         message_entity = MessageFactory.create_from_schema_with_role(
@@ -116,7 +118,7 @@ class MessageService(IMessageService):
                     message_create_data.conversation_id
                 )
             )
-            user_id = conversation.owner_id if conversation else None
+            user_id = user_id or (conversation.owner_id if conversation else None)
             persona = conversation.persona_prompt if conversation else None
             sanitized_persona = sanitize_persona(persona)
 
@@ -253,13 +255,15 @@ class MessageService(IMessageService):
 
         return MessageRead.model_validate(created_message)
 
-    async def create_message_stream(self, message_create_data: MessageCreate):
+    async def create_message_stream(
+        self, message_create_data: MessageCreate, user_id: UUID
+    ):
         """
         Create a message and stream the bot response.
         Yields chunks as they arrive from the AI service.
         """
-        self.conversation_validation_utils.validate_conversation_exists(
-            message_create_data.conversation_id
+        self.conversation_validation_utils.validate_conversation_access(
+            user_id, message_create_data.conversation_id
         )
 
         # Create and persist the user message
@@ -283,7 +287,7 @@ class MessageService(IMessageService):
                     message_create_data.conversation_id
                 )
             )
-            user_id = conversation.owner_id if conversation else None
+            user_id = user_id or (conversation.owner_id if conversation else None)
             persona = conversation.persona_prompt if conversation else None
             sanitized_persona = sanitize_persona(persona)
 
@@ -652,10 +656,13 @@ class MessageService(IMessageService):
         self,
         thread_id: str,
         conversation_id: UUID,
+        user_id: UUID,
         decisions: List[InterruptDecision],
         interrupt_id: Optional[str] = None,
     ) -> MessageRead:
-        self.conversation_validation_utils.validate_conversation_exists(conversation_id)
+        self.conversation_validation_utils.validate_conversation_access(
+            user_id, conversation_id
+        )
 
         if self.redis_client and interrupt_id:
             key = f"interrupt:{conversation_id}:{interrupt_id}"
@@ -687,7 +694,7 @@ class MessageService(IMessageService):
                 conversation_id
             )
         )
-        user_id = conversation.owner_id if conversation else None
+        user_id = user_id or (conversation.owner_id if conversation else None)
         persona = conversation.persona_prompt if conversation else None
         sanitized_persona = sanitize_persona(persona)
 

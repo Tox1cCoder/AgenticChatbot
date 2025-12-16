@@ -41,9 +41,10 @@ async def create_conversation(
 async def get_conversation(
     conversation_id: UUID,
     conversation_service: IConversationService,
+    user_id: UUID,
 ) -> ApiResponse[ConversationRead]:
     """Get conversation by ID"""
-    result = conversation_service.get_by_id(conversation_id)
+    result = conversation_service.get_by_id_for_user(conversation_id, user_id)
     return ApiResponse(
         success=True, message="Conversation retrieved successfully", data=result
     )

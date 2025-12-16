@@ -1,3 +1,6 @@
+import sys
+import asyncio
+import uvicorn
 import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -81,6 +84,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["x-vercel-ai-ui-message-stream"],
     )
 
     # Register centralized exception handlers
@@ -133,6 +137,12 @@ async def root():
         "docs_url": "/docs",
         "health_check": "/health",
     }
+
+
+@app.get("/health")
+async def health_check():
+    """Basic health check"""
+    return {"status": "healthy", "message": "OK"}
 
 
 @app.get("/health/celery")
@@ -258,3 +268,9 @@ async def health_check_all():
             "All services healthy" if all_healthy else "One or more services unhealthy"
         ),
     }
+
+if __name__ == "__main__":
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

@@ -1413,7 +1413,13 @@ class MultiAgentWorkflow:
 
                 # Yield the response content as tokens for UI consistency
                 if response and response.message:
-                    yield {"type": "token", "content": response.message.content}
+                    content = coerce_response_text(response.message.content)
+                    # Planning agent uses structured output (non-streaming); chunk to emulate token streaming for UI.
+                    chunk_size = 200
+                    for i in range(0, len(content), chunk_size):
+                        chunk = content[i : i + chunk_size]
+                        if chunk:
+                            yield {"type": "token", "content": chunk}
                     yield {"type": "complete", "response": response}
                 else:
                     yield {
@@ -1449,9 +1455,25 @@ class MultiAgentWorkflow:
                                 yield {"type": "token", "content": content}
 
                 elif kind == "on_tool_start":
-                    yield {"type": "tool_start", "name": event["name"]}
+                    data = event.get("data") or {}
+                    tool_call_id = event.get("run_id") or event.get("id")
+                    tool_input = data.get("input") if isinstance(data, dict) else None
+                    yield {
+                        "type": "tool_start",
+                        "name": event.get("name", "unknown"),
+                        "tool_call_id": str(tool_call_id) if tool_call_id else None,
+                        "args": make_json_safe(tool_input),
+                    }
                 elif kind == "on_tool_end":
-                    yield {"type": "tool_end", "name": event["name"]}
+                    data = event.get("data") or {}
+                    tool_call_id = event.get("run_id") or event.get("id")
+                    tool_output = data.get("output") if isinstance(data, dict) else None
+                    yield {
+                        "type": "tool_end",
+                        "name": event.get("name", "unknown"),
+                        "tool_call_id": str(tool_call_id) if tool_call_id else None,
+                        "result": make_json_safe(tool_output),
+                    }
                     
         except Exception as e:
             yield {"type": "error", "error": str(e)}

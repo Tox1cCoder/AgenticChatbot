@@ -46,7 +46,7 @@ async def get_message_rating_stats(
 
 
 @router.get(
-    "/{message_id}/feedbacks/user/{user_id}", response_model=ApiResponse[FeedbackRead]
+    "/{message_id}/feedbacks/user", response_model=ApiResponse[FeedbackRead]
 )
 @AppAutoInjector.auto_inject()
 async def get_user_feedback_for_message(
@@ -84,6 +84,7 @@ async def get_message_feedbacks(
 )
 @AppAutoInjector.auto_inject()
 async def update_feedback(
+    message_id: UUID,
     feedback_id: UUID,
     feedback_data: FeedbackUpdate,
     feedback_service: IFeedbackService,
