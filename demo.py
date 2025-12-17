@@ -1769,6 +1769,12 @@ def toggle_mcp_server(server_name: str, enabled: bool) -> Optional[Dict[str, Any
     return response.get("data") if response else None
 
 
+def add_mcp_server_from_url(url_config: Dict[str, Any]) -> bool:
+    """Add a new MCP server from URL"""
+    response = make_api_request("POST", "/mcp/servers/from-url", url_config)
+    return response.get("success", False) if response else False
+
+
 def render_login_page():
     st.markdown("<br><br>", unsafe_allow_html=True)
 
@@ -2662,7 +2668,7 @@ def render_tools_tab():
         # Add Server Section
         st.markdown("#### Add New Server")
 
-        tab1, tab2 = st.tabs(["JSON Config", "Form"])
+        tab1, tab2, tab3 = st.tabs(["JSON Config", "Form", "URL"])
 
         with tab1:
             st.markdown("Paste your MCP server configuration in JSON format:")
@@ -2880,6 +2886,71 @@ def render_tools_tab():
                                             st.error("Failed to add server")
                         except Exception as e:
                             st.error(f"Error: {e}")
+
+        with tab3:
+            st.markdown("Add a server using a URL. Supports two formats:")
+            st.markdown(
+                """
+**Local NPX Command:**
+```
+npx @smithery/cli@latest run @ThinkFar/clear-thought-mcp
+```
+
+**Remote HTTP/HTTPS URL:**
+```
+https://server.smithery.ai/reddit/mcp
+```
+
+> **Note:** Flags like `--playground`, `--verbose`, and `--debug` are automatically removed to prevent non-JSON output that breaks the MCP protocol.
+"""
+            )
+
+            url_input = st.text_input(
+                "MCP Server URL*",
+                placeholder="npx @smithery/cli@latest run @ThinkFar/clear-thought-mcp",
+                help="Enter either an npx command or HTTP/HTTPS URL. Verbose flags will be filtered automatically.",
+            )
+
+            server_name_url = st.text_input(
+                "Custom Server Name (optional)",
+                placeholder="Auto-generated from URL if not provided",
+            )
+
+            description_url = st.text_area(
+                "Description (optional)", placeholder="Brief description of the server"
+            )
+
+            enabled_url = st.checkbox("Enable server", value=True, key="url_enabled")
+
+            if st.button("Add Server from URL", use_container_width=True):
+                if not url_input.strip():
+                    st.error("URL is required")
+                else:
+                    try:
+                        url_config = {
+                            "url": url_input.strip(),
+                            "enabled": enabled_url,
+                        }
+
+                        if server_name_url.strip():
+                            url_config["name"] = server_name_url.strip()
+
+                        if description_url.strip():
+                            url_config["description"] = description_url.strip()
+
+                        with st.spinner("Adding server from URL..."):
+                            result = add_mcp_server_from_url(url_config)
+                            if result:
+                                st.success("✅ Server added successfully from URL!")
+                                # Small delay to ensure file is written
+                                import time
+
+                                time.sleep(0.5)
+                                st.rerun()
+                            else:
+                                st.error("Failed to add server from URL")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
 
         st.markdown("---")
         st.markdown("#### Configured Servers")

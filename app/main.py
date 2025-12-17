@@ -2,6 +2,7 @@ import sys
 import asyncio
 import uvicorn
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis import Redis
@@ -46,6 +47,15 @@ async def init_checkpoint_tables():
     await checkpoint_manager.setup()
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    # Startup
+    await init_checkpoint_tables()
+    yield
+    # Shutdown (add cleanup code here if needed in the future)
+
+
 def create_app() -> FastAPI:
     """Create and configure FastAPI application"""
 
@@ -72,6 +82,7 @@ def create_app() -> FastAPI:
         version=settings.app_version,
         description=settings.app_description,
         debug=settings.api_debug,
+        lifespan=lifespan,
     )
 
     # Attach container to app for dependency injection
@@ -112,12 +123,6 @@ def create_app() -> FastAPI:
         DocumentEvent.DELETED,
     ]:
         event_bus.register_listener(evt, doc_logger)
-
-    # Register startup event for checkpoint initialization
-    @app.on_event("startup")
-    async def startup_event():
-        """Initialize checkpoint tables on application startup."""
-        await init_checkpoint_tables()
 
     return app
 
@@ -269,8 +274,9 @@ async def health_check_all():
         ),
     }
 
+
 if __name__ == "__main__":
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
+
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)

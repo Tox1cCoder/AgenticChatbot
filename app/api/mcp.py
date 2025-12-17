@@ -5,6 +5,7 @@ from app.core.dependency_injection import AppAutoInjector
 from app.services.mcp_service import MCPService
 from app.schemas.mcp import (
     MCPServerConfig,
+    MCPServerURLConfig,
     MCPServerInfo,
     MCPServerListResponse,
     MCPToolInfo,
@@ -66,6 +67,19 @@ async def add_server(
     """Add a new MCP server"""
     config_dict = server_config.model_dump(exclude_none=True)
     result = await mcp_service.add_server(config_dict)
+    response_data = MCPOperationResponse(message=result["message"])
+    return ApiResponse(success=True, message=result["message"], data=response_data)
+
+
+@router.post("/servers/from-url", status_code=status.HTTP_201_CREATED)
+@AppAutoInjector.auto_inject()
+async def add_server_from_url(
+    url_config: MCPServerURLConfig,
+    mcp_service: MCPService,
+) -> ApiResponse[MCPOperationResponse]:
+    """Add a new MCP server from a URL (npx command or HTTP URL)"""
+    config_dict = url_config.model_dump(exclude_none=True)
+    result = await mcp_service.add_server_from_url(config_dict)
     response_data = MCPOperationResponse(message=result["message"])
     return ApiResponse(success=True, message=result["message"], data=response_data)
 

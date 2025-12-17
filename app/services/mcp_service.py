@@ -119,6 +119,68 @@ class MCPService:
         logger.debug("Added server: %s", name)
         return {"message": f"Server '{name}' added successfully"}
 
+    async def add_server_from_url(self, url_config: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Add a new MCP server from a URL
+
+        Args:
+            url_config: Dict containing:
+                - url: str - The URL string (npx command or HTTP URL)
+                - name: Optional[str] - Custom server name
+                - description: Optional[str] - Server description
+                - enabled: bool - Whether to enable the server
+
+        Returns:
+            Dict with success message including generated server name
+
+        Raises:
+            ServerConfigurationError: If URL parsing or validation fails
+        """
+        from app.utils.mcp_url_parser import (
+            parse_mcp_url,
+            generate_server_name_from_url,
+        )
+
+        url = url_config.get("url", "").strip()
+        if not url:
+            raise ServerConfigurationError("URL is required")
+
+        try:
+            # Parse URL to get server configuration
+            parsed_config = parse_mcp_url(url)
+
+            # Generate or use provided server name
+            server_name = url_config.get("name", "").strip()
+            if not server_name:
+                server_name = generate_server_name_from_url(url)
+
+            # Build complete server config
+            server_config = {
+                "name": server_name,
+                "enabled": url_config.get("enabled", True),
+                **parsed_config,
+            }
+
+            # Add description if provided
+            if url_config.get("description"):
+                server_config["description"] = url_config["description"]
+
+            # Use the existing add_server method
+            result = await self.add_server(server_config)
+
+            logger.info("Added server from URL: %s -> %s", url, server_name)
+            return {"message": f"Server '{server_name}' added successfully from URL"}
+
+        except ServerConfigurationError:
+            # Re-raise configuration errors as-is
+            raise
+        except Exception as e:
+            # Wrap other exceptions
+            logger.error("Failed to add server from URL: %s", str(e))
+            raise ServerConfigurationError(
+                detail=f"Failed to parse URL: {str(e)}", error_code="URL_PARSING_ERROR"
+            )
+
     async def remove_server(self, server_name: str) -> Dict[str, str]:
         """
         Remove an MCP server

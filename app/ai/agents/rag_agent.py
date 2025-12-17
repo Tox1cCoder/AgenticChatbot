@@ -52,7 +52,6 @@ class RAGAgent:
 
         self.collection_name = collection_name
         self.embedding_dimension = settings.embedding_dimension
-        # Use configurable model (gemini-2.5-flash for thinking support)
         self.model_name = settings.rag_agent_model
         self.gemini_client = None
         self.langchain_model = None

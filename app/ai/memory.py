@@ -20,16 +20,12 @@ class ConversationMemory:
         self,
         conversation_id: UUID,
         user_id: UUID,
-        max_messages: Optional[int] = None,
         batch_size: int = 100,
     ):
         self.conversation_id = conversation_id
         self.user_id = user_id
-        self.max_messages = max_messages if max_messages and max_messages > 0 else None
         self.batch_size = max(1, batch_size)
-        self._messages: deque[AgentMessage] = (
-            deque(maxlen=self.max_messages) if self.max_messages else deque()
-        )
+        self._messages: deque[AgentMessage] = deque()
         self._message_repo = MessageCRUDStrategy(Message)
         self._initialized = False
 
@@ -80,16 +76,10 @@ class ConversationMemory:
                 if agent_msg:
                     collected.append(agent_msg)
 
-            if self.max_messages and len(collected) >= self.max_messages:
-                break
-
             if paginator.meta.last_page <= page:
                 break
 
             page += 1
-
-        if self.max_messages:
-            collected = collected[: self.max_messages]
 
         collected.reverse()
         return collected, total_available
@@ -153,10 +143,8 @@ class MemoryManager:
 
     def __init__(
         self,
-        max_messages: Optional[int] = None,
         batch_size: int = 100,
     ):
-        self.max_messages = max_messages if max_messages and max_messages > 0 else None
         self.batch_size = max(1, batch_size)
         self._memories: Dict[str, ConversationMemory] = {}
 
@@ -169,7 +157,6 @@ class MemoryManager:
             memory = ConversationMemory(
                 conversation_id,
                 user_id,
-                self.max_messages,
                 self.batch_size,
             )
             self._memories[key] = memory
@@ -198,7 +185,6 @@ def get_memory_manager() -> MemoryManager:
     global _memory_manager
     if _memory_manager is None:
         _memory_manager = MemoryManager(
-            max_messages=settings.memory_max_messages,
             batch_size=settings.memory_load_batch_size,
         )
     return _memory_manager

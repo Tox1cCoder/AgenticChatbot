@@ -171,18 +171,14 @@ def build_chat_prompt(
         parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
     if conversation_history:
-        max_messages = (
-            settings.chat_history_max_messages
-            if settings.chat_history_max_messages > 0
-            else None
-        )
+        # Pass all history without message limit, only apply token limit if configured
         max_tokens = (
             settings.chat_history_max_tokens
             if settings.chat_history_max_tokens > 0
             else None
         )
         selected_history = _select_history_for_prompt(
-            conversation_history, max_messages, max_tokens
+            conversation_history, None, max_tokens
         )
 
         if selected_history:
@@ -317,18 +313,14 @@ def build_rag_prompt(
         )
 
     if conversation_history:
-        max_messages = (
-            settings.rag_history_max_messages
-            if settings.rag_history_max_messages > 0
-            else None
-        )
+        # Pass all history without message limit, only apply token limit if configured
         max_tokens = (
             settings.rag_history_max_tokens
             if settings.rag_history_max_tokens > 0
             else None
         )
         selected_history = _select_history_for_prompt(
-            conversation_history, max_messages, max_tokens
+            conversation_history, None, max_tokens
         )
 
         if selected_history:
@@ -373,18 +365,14 @@ Avoid repeating the exact tool JSON; integrate the findings into natural languag
         parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
     if conversation_history:
-        max_messages = (
-            settings.search_history_max_messages
-            if settings.search_history_max_messages > 0
-            else None
-        )
+        # Pass all history without message limit, only apply token limit if configured
         max_tokens = (
             settings.search_history_max_tokens
             if settings.search_history_max_tokens > 0
             else None
         )
         selected_history = _select_history_for_prompt(
-            conversation_history, max_messages, max_tokens
+            conversation_history, None, max_tokens
         )
 
         if selected_history:
@@ -409,18 +397,14 @@ def build_image_generator_prompt(
         parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
     if conversation_history:
-        max_messages = (
-            settings.chat_history_max_messages
-            if settings.chat_history_max_messages > 0
-            else None
-        )
+        # Pass all history without message limit, only apply token limit if configured
         max_tokens = (
             settings.chat_history_max_tokens
             if settings.chat_history_max_tokens > 0
             else None
         )
         selected_history = _select_history_for_prompt(
-            conversation_history, max_messages, max_tokens
+            conversation_history, None, max_tokens
         )
 
         if selected_history:
@@ -508,18 +492,14 @@ def build_planning_prompt(
         parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
     if conversation_history:
-        max_messages = (
-            settings.chat_history_max_messages
-            if settings.chat_history_max_messages > 0
-            else None
-        )
+        # Pass all history without message limit, only apply token limit if configured
         max_tokens = (
             settings.chat_history_max_tokens
             if settings.chat_history_max_tokens > 0
             else None
         )
         selected_history = _select_history_for_prompt(
-            conversation_history, max_messages, max_tokens
+            conversation_history, None, max_tokens
         )
 
         if selected_history:

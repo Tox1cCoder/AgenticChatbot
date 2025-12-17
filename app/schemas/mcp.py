@@ -108,6 +108,20 @@ class MCPToolExecuteResponse(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
+class MCPServerURLConfig(BaseModel):
+    """Schema for adding MCP server from URL."""
+
+    url: str = Field(..., description="The URL string (npx command or HTTP URL)")
+    name: Optional[str] = Field(
+        None,
+        description="Optional custom server name (auto-generated if not provided)",
+    )
+    description: Optional[str] = Field(None, description="Optional description")
+    enabled: bool = Field(default=True, description="Whether to enable the server")
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
 class MCPOperationResponse(BaseModel):
     """Schema for MCP operation responses (add/remove/toggle server)."""
 

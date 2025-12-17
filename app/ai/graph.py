@@ -652,15 +652,11 @@ class MultiAgentWorkflow:
         if conversation_id and user_id:
             memory_manager = get_memory_manager()
             conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=False
+                UUID(conversation_id), UUID(user_id), force_refresh=True
             )
-            history_limit = (
-                settings.chat_history_max_messages
-                if settings.chat_history_max_messages > 0
-                else None
-            )
+            # Get all messages from history without limit
             conversation_history = conv_memory.get_recent_messages(
-                limit=history_limit, exclude_last=1
+                limit=None, exclude_last=1
             )
 
         context = state.get("context", {})
@@ -759,15 +755,11 @@ class MultiAgentWorkflow:
         if conversation_id and user_id:
             memory_manager = get_memory_manager()
             conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=False
+                UUID(conversation_id), UUID(user_id), force_refresh=True
             )
-            history_limit = (
-                settings.rag_history_max_messages
-                if settings.rag_history_max_messages > 0
-                else None
-            )
+            # Get all messages from history without limit
             conversation_history = conv_memory.get_recent_messages(
-                limit=history_limit, exclude_last=1
+                limit=None, exclude_last=1
             )
 
         context = state.get("context", {})
@@ -837,15 +829,11 @@ class MultiAgentWorkflow:
         if conversation_id and user_id:
             memory_manager = get_memory_manager()
             conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=False
+                UUID(conversation_id), UUID(user_id), force_refresh=True
             )
-            history_limit = (
-                settings.search_history_max_messages
-                if settings.search_history_max_messages > 0
-                else None
-            )
+            # Get all messages from history without limit
             conversation_history = conv_memory.get_recent_messages(
-                limit=history_limit, exclude_last=1
+                limit=None, exclude_last=1
             )
 
         if has_tool_context:
@@ -944,15 +932,11 @@ class MultiAgentWorkflow:
         if conversation_id and user_id:
             memory_manager = get_memory_manager()
             conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=False
+                UUID(conversation_id), UUID(user_id), force_refresh=True
             )
-            history_limit = (
-                settings.chat_history_max_messages
-                if settings.chat_history_max_messages > 0
-                else None
-            )
+            # Get all messages from history without limit
             conversation_history = conv_memory.get_recent_messages(
-                limit=history_limit, exclude_last=1
+                limit=None, exclude_last=1
             )
 
         if has_tool_context:
@@ -1025,15 +1009,11 @@ class MultiAgentWorkflow:
         if conversation_id and user_id:
             memory_manager = get_memory_manager()
             conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=False
+                UUID(conversation_id), UUID(user_id), force_refresh=True
             )
-            history_limit = (
-                settings.chat_history_max_messages
-                if settings.chat_history_max_messages > 0
-                else None
-            )
+            # Get all messages from history without limit
             conversation_history = conv_memory.get_recent_messages(
-                limit=history_limit, exclude_last=1
+                limit=None, exclude_last=1
             )
 
         context = state.get("context", {})
@@ -1327,13 +1307,9 @@ class MultiAgentWorkflow:
                     conv_memory = await memory_manager.get_memory(
                         UUID(conversation_id), UUID(user_id), force_refresh=True
                     )
-                    history_limit = (
-                        settings.rag_history_max_messages
-                        if settings.rag_history_max_messages > 0
-                        else None
-                    )
+                    # Get all messages from history without limit
                     conversation_history = conv_memory.get_recent_messages(
-                        limit=history_limit, exclude_last=1
+                        limit=None, exclude_last=1
                     )
                 except Exception:
                     pass
@@ -1376,13 +1352,9 @@ class MultiAgentWorkflow:
                     conv_memory = await memory_manager.get_memory(
                         UUID(conversation_id), UUID(user_id), force_refresh=True
                     )
-                    history_limit = (
-                        settings.chat_history_max_messages
-                        if settings.chat_history_max_messages > 0
-                        else None
-                    )
+                    # Get all messages from history without limit
                     conversation_history = conv_memory.get_recent_messages(
-                        limit=history_limit, exclude_last=1
+                        limit=None, exclude_last=1
                     )
                 except Exception:
                     pass
@@ -1474,7 +1446,7 @@ class MultiAgentWorkflow:
                         "tool_call_id": str(tool_call_id) if tool_call_id else None,
                         "result": make_json_safe(tool_output),
                     }
-                    
+
         except Exception as e:
             yield {"type": "error", "error": str(e)}
             return

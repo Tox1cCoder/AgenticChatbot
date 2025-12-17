@@ -969,7 +969,7 @@ class DocumentProcessingService:
         ]
 
         model_name = getattr(
-            self.settings, "image_caption_model", "gemini-flash-latest"
+            self.settings, "image_caption_model"
         )
         response = self.gemini_client.models.generate_content(
             model=model_name,

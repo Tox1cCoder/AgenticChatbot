@@ -102,18 +102,9 @@ class Settings(BaseSettings):
     )
 
     # Agent Model Configuration
-    rag_agent_model: str = Field(
-        default="gemini-2.5-flash",
-        description="Gemini model identifier for RAG agent (use gemini-2.5-flash or gemini-2.5-pro for thinking support)",
-    )
-    chat_agent_model: str = Field(
-        default="gemini-2.5-flash",
-        description="Gemini model identifier for chat agent (use gemini-2.5-flash or gemini-2.5-pro for thinking support)",
-    )
-    search_agent_model: str = Field(
-        default="gemini-2.5-flash",
-        description="Gemini model identifier for search agent (use gemini-2.5-flash or gemini-2.5-pro for thinking support)",
-    )
+    rag_agent_model: str = Field(default="gemini-flash-latest")
+    chat_agent_model: str = Field(default="gemini-flash-latest")
+    search_agent_model: str = Field(default="gemini-flash-latest")
 
     # Image Generation Configuration
     enable_image_generation: bool = Field(
@@ -135,7 +126,7 @@ class Settings(BaseSettings):
 
     # Image Captioning Configuration
     image_caption_model: str = Field(
-        default="gemini-flash-latest",
+        default="gemini-3-pro-preview",
         description="Gemini model identifier for document image captioning",
     )
     image_caption_max_retry_attempts: int = Field(

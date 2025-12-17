@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 class ChatAgent:
 
     def __init__(self):
-        # Use configurable model (gemini-2.5-flash for thinking support)
         self.model_name = settings.chat_agent_model
         self.gemini_client = None
         self.langchain_model = None

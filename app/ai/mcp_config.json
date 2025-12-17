@@ -27,6 +27,15 @@
       ],
       "description": "Current time lookup utility with timezone support"
     },
+    "form_filler": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "app/ai/mcp_servers/form_filler_server.py"
+      ],
+      "description": "Natural language incident report form filler - extracts structured data from Vietnamese/English descriptions"
+    },
     "boring": {
       "enabled": false,
       "transport": "stdio",

@@ -58,7 +58,6 @@ class ImageGeneratorAgent:
             return  # Already initialized
         
         try:
-            # Use global singleton MCP manager for performance
             self.mcp_manager = await get_global_mcp_manager()
             self.tools = await self.mcp_manager.get_tools()
 
