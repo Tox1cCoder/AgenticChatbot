@@ -5,9 +5,15 @@ from typing import Optional, List, Dict, Any, AsyncIterator
 from google import genai
 from google.genai import types
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
+from langchain_core.messages import (
+    HumanMessage,
+    SystemMessage,
+    BaseMessage,
+    ToolMessage,
+)
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from ..prompts import TOOL_CONTEXT_SUFFIX
 from ...core.config import settings
 from ..mcp_integration import get_global_mcp_manager
 from ..utils import coerce_response_text
@@ -56,16 +62,14 @@ class ImageGeneratorAgent:
         """Initialize MCP manager and load all available tools using global singleton"""
         if self.mcp_manager is not None:
             return  # Already initialized
-        
+
         try:
             self.mcp_manager = await get_global_mcp_manager()
             self.tools = await self.mcp_manager.get_tools()
 
             server_status = self.mcp_manager.get_servers_status()
             active_servers = [
-                name
-                for name, status in server_status.items()
-                if status.get("enabled")
+                name for name, status in server_status.items() if status.get("enabled")
             ]
             logger.info(
                 "Loaded %d MCP tools for ImageGeneratorAgent from %d servers",
@@ -197,9 +201,17 @@ class ImageGeneratorAgent:
 
         llm_with_tools = self._get_llm_with_tools()
 
-        langchain_messages: List[BaseMessage] = [
-            SystemMessage(content=self._get_system_prompt())
-        ]
+        # Check if there are already tool results in the message history
+        has_tool_context = any(
+            isinstance(m, ToolMessage) or (hasattr(m, "tool_calls") and m.tool_calls)
+            for m in messages
+        )
+
+        system_prompt = self._get_system_prompt()
+        if has_tool_context:
+            system_prompt = system_prompt + TOOL_CONTEXT_SUFFIX
+
+        langchain_messages: List[BaseMessage] = [SystemMessage(content=system_prompt)]
         langchain_messages.extend(messages)
 
         response = await llm_with_tools.ainvoke(langchain_messages)

@@ -67,33 +67,78 @@ def _extract_user_text(messages: List[Dict[str, Any]]) -> str:
 
 
 def _sse(data: Dict[str, Any]) -> str:
-    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+    return f"data: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
-def _coerce_json_object(value: Any) -> Dict[str, Any]:
+def _clean_tool_output(value: Any) -> Any:
     """
-    Vercel AI SDK UI message stream expects tool `input`/`output` to be JSON objects.
-    Wrap scalars/lists into an object to avoid client-side schema errors.
+    Clean tool output by extracting actual data from LangChain Content objects.
     """
     if value is None:
-        return {}
-    if isinstance(value, dict):
-        return value
+        return None
+
+    # Handle lists - recursively clean each item
     if isinstance(value, list):
-        return {"items": value}
+        cleaned = []
+        for item in value:
+            if isinstance(item, dict):
+                # Extract text from LangChain Content objects
+                if "type" in item and item.get("type") == "text" and "text" in item:
+                    cleaned.append(item["text"])
+                else:
+                    # Recursively clean nested dicts
+                    cleaned.append(_clean_tool_output(item))
+            else:
+                cleaned.append(_clean_tool_output(item))
+        
+        # Unwrap single-item lists
+        if len(cleaned) == 1:
+            return cleaned[0]
+        return cleaned
+
+    # Handle dicts - recursively clean nested structures
+    if isinstance(value, dict):
+        # If it's a LangChain Content object, extract the text
+        if "type" in value and value.get("type") == "text" and "text" in value:
+            return value["text"]
+        # Otherwise, clean nested values
+        return {k: _clean_tool_output(v) for k, v in value.items()}
+
+    return value
+
+
+def _coerce_json_object(value: Any) -> Any:
+    """
+    Vercel AI SDK UI message stream expects tool `input`/`output` to be JSON-serializable.
+    Returns the exact tool result without any wrapping.
+    """
+    if value is None:
+        return None
+    
+    # Return dicts and lists as-is - they'll be properly serialized by json.dumps
+    if isinstance(value, (dict, list)):
+        return value
+    
+    # Return primitives as-is (except strings that look like JSON)
+    if isinstance(value, (int, float, bool)):
+        return value
+    
+    # Try to parse strings as JSON if they look like JSON
     if isinstance(value, str):
         s = value.strip()
-        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+        if (s.startswith("{") and s.endswith("}")) or (
+            s.startswith("[") and s.endswith("]")
+        ):
             try:
-                parsed = json.loads(s)
-                if isinstance(parsed, dict):
-                    return parsed
-                if isinstance(parsed, list):
-                    return {"items": parsed}
+                # Parse the JSON string to return the actual object
+                # This prevents double-encoding and escaped newlines
+                return json.loads(s)
             except Exception:
                 pass
-        return {"text": value}
-    return {"value": value}
+        return value
+    
+    # Fallback for other types - convert to string
+    return str(value)
 
 
 @router.post("/ai/chat/{conversation_id}")
@@ -148,7 +193,9 @@ async def chat_ui_message_stream(
                     delta = event.get("content") or ""
                     if delta:
                         any_text_delta = True
-                        yield _sse({"type": "text-delta", "id": text_id, "delta": delta})
+                        yield _sse(
+                            {"type": "text-delta", "id": text_id, "delta": delta}
+                        )
 
                 elif event_type == "thinking":
                     delta = event.get("content") or ""
@@ -207,7 +254,9 @@ async def chat_ui_message_stream(
                                 "type": "tool-input-available",
                                 "toolCallId": tool_call_id,
                                 "toolName": tool_name,
-                                "input": _coerce_json_object(tool_input),
+                                "input": _coerce_json_object(
+                                    _clean_tool_output(tool_input)
+                                ),
                             }
                         )
                     elif status == "end":
@@ -221,7 +270,9 @@ async def chat_ui_message_stream(
                             {
                                 "type": "tool-output-available",
                                 "toolCallId": tool_call_id,
-                                "output": _coerce_json_object(output),
+                                "output": _coerce_json_object(
+                                    _clean_tool_output(output)
+                                ),
                             }
                         )
 

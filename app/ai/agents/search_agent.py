@@ -2,11 +2,16 @@ import logging
 from typing import Optional, List, Dict, Any, AsyncIterator
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
+from langchain_core.messages import (
+    HumanMessage,
+    SystemMessage,
+    BaseMessage,
+    ToolMessage,
+)
 from langchain_core.tools import BaseTool
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT
+from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT, TOOL_CONTEXT_SUFFIX
 from ..utils import coerce_response_text
 from ...core.config import settings
 from ..mcp_integration import get_global_mcp_manager
@@ -45,7 +50,7 @@ class SearchAgent:
         """Initialize MCP manager and load external tool suites using global singleton"""
         if self.mcp_manager is not None:
             return  # Already initialized
-        
+
         try:
             self.mcp_manager = await get_global_mcp_manager()
             all_tools = await self.mcp_manager.get_tools()
@@ -168,7 +173,15 @@ class SearchAgent:
 
         llm_with_tools = self._get_llm_with_tools()
 
+        # Check if there are already tool results in the message history
+        has_tool_context = any(
+            isinstance(m, ToolMessage) or (hasattr(m, "tool_calls") and m.tool_calls)
+            for m in messages
+        )
+
         system_prompt = SEARCH_SYSTEM_PROMPT
+        if has_tool_context:
+            system_prompt = system_prompt + TOOL_CONTEXT_SUFFIX
         if persona and persona.strip():
             system_prompt = (
                 f"Custom Persona:\n{persona.strip()}\n\n---\n{system_prompt}"
@@ -273,7 +286,7 @@ class SearchAgent:
             yield {"type": "error", "error": str(e)}
 
     async def cleanup(self):
-        """Cleanup agent resources """
+        """Cleanup agent resources"""
         self.mcp_manager = None
         self.tools = []
         logger.debug("SearchAgent cleanup completed (MCP manager is shared)")

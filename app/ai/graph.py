@@ -72,6 +72,26 @@ class MultiAgentWorkflow:
         ]
         self._initialized = False
 
+    def _get_current_turn_messages(self, messages: List) -> List:
+        """
+        Extract only messages from the current turn (from last HumanMessage onwards).
+        """
+        if not messages:
+            return messages
+
+        # Find the last HumanMessage index
+        last_human_idx = None
+        for idx in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[idx], HumanMessage):
+                last_human_idx = idx
+                break
+
+        if last_human_idx is None:
+            return messages
+
+        # Return only messages from the current turn
+        return messages[last_human_idx:]
+
     async def initialize(self) -> None:
         """
         Eagerly initialize all agent tools.
@@ -680,8 +700,13 @@ class MultiAgentWorkflow:
         )
 
         if has_tool_context:
+            # Only pass current turn messages to prevent old tool calls from being repeated
+            current_turn_messages = self._get_current_turn_messages(messages)
             response = await self.chat_agent.invoke_model_with_history(
-                messages, conversation_history, state.get("persona"), conversation_id
+                current_turn_messages,
+                conversation_history,
+                state.get("persona"),
+                conversation_id,
             )
         else:
             user_content = (
@@ -837,8 +862,13 @@ class MultiAgentWorkflow:
             )
 
         if has_tool_context:
+            # Only pass current turn messages to prevent old tool calls from being repeated
+            current_turn_messages = self._get_current_turn_messages(messages)
             response = await self.search_agent.invoke_model_with_history(
-                messages, conversation_history, state.get("persona"), conversation_id
+                current_turn_messages,
+                conversation_history,
+                state.get("persona"),
+                conversation_id,
             )
         else:
             user_content = (
@@ -940,8 +970,13 @@ class MultiAgentWorkflow:
             )
 
         if has_tool_context:
+            # Only pass current turn messages to prevent old tool calls from being repeated
+            current_turn_messages = self._get_current_turn_messages(messages)
             response = await self.image_generator_agent.invoke_model_with_history(
-                messages, conversation_history, state.get("persona"), conversation_id
+                current_turn_messages,
+                conversation_history,
+                state.get("persona"),
+                conversation_id,
             )
         else:
             full_history = conversation_history + messages[:-1]

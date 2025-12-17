@@ -400,7 +400,7 @@ class Settings(BaseSettings):
         description="Whether to allow responding with feedback by default",
     )
     hitl_tools_require_approval: List[str] = Field(
-        default=["tavily_search"],
+        default=[],
         description="List of tool names that require human approval. Empty list means all tools require approval when HITL is enabled.",
     )
     hitl_approval_timeout_minutes: int = Field(

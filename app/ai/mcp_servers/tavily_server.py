@@ -17,7 +17,26 @@ mcp = FastMCP("Tavily")
 
 @mcp.tool()
 def tavily_search(query: str, max_results: int = 5) -> str:
-    """Search the web using Tavily API for real-time information"""
+    """Search the web for current news, recent events, or information you don't know.
+
+    USE THIS TOOL WHEN:
+    - User asks about recent news, current events, or today's information
+    - User asks about something you're uncertain about or don't have knowledge of
+    - User asks about real-time data (stock prices, weather, sports scores, etc.)
+    - User wants to verify or fact-check information
+
+    DO NOT USE THIS TOOL WHEN:
+    - You already have the information from your training or previous tool results
+    - The question is about general knowledge that doesn't require current data
+    - You're asked for opinions, advice, or creative tasks
+
+    Args:
+        query: The search query - be specific and include relevant context
+        max_results: Number of results to return (default: 5)
+
+    Returns:
+        JSON with search results including titles, URLs, content snippets, and relevance scores
+    """
     try:
         # Try to get API key from environment first
         api_key = os.getenv("TAVILY_API_KEY")

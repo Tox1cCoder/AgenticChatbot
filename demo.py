@@ -3851,7 +3851,6 @@ def render_chat_view():
                                         conversation_id
                                     )
                                 else:
-                                    # No interrupt data - this shouldn't happen with proper HITL setup
                                     st.error(
                                         "❌ Interrupt detected but no interrupt data provided. Check HITL configuration."
                                     )

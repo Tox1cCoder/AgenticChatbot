@@ -266,6 +266,19 @@ class MCPManager:
         else:
             return schema
 
+    def _remove_non_string_enums(self, schema: Any) -> Any:
+        if isinstance(schema, dict):
+            cleaned: Dict[str, Any] = {}
+            for key, value in schema.items():
+                if key == "enum" and isinstance(value, list):
+                    if any(not isinstance(item, str) for item in value):
+                        continue
+                cleaned[key] = self._remove_non_string_enums(value)
+            return cleaned
+        if isinstance(schema, list):
+            return [self._remove_non_string_enums(item) for item in schema]
+        return schema
+
     def _clean_tool_schemas(self, tools: List[BaseTool]) -> List[BaseTool]:
 
         cleaned_tools = []
@@ -277,6 +290,14 @@ class MCPManager:
 
             args_schema = tool.args_schema
 
+            # Some MCP adapters expose JSON-schema dicts directly.
+            # Sanitize those in-place (schema-only) to keep GenAI tool formatting happy.
+            if isinstance(args_schema, dict):
+                filtered = self._filter_schema_recursively(args_schema)
+                tool.args_schema = self._remove_non_string_enums(filtered)
+                cleaned_tools.append(tool)
+                continue
+
             if isinstance(args_schema, type) and issubclass(
                 args_schema, PydanticBaseModel
             ):
@@ -284,14 +305,15 @@ class MCPManager:
                 original_schema_method = args_schema.model_json_schema
 
                 # Create a wrapper that filters unsupported keys
-                def filtered_schema_method(*args, **kwargs):
+                def filtered_schema_method(
+                    *args,
+                    original_schema_method=original_schema_method,
+                    **kwargs,
+                ):
                     schema = original_schema_method(*args, **kwargs)
                     if isinstance(schema, dict):
-                        # Remove unsupported keys at root level
-                        unsupported_keys = {"$schema", "additionalProperties"}
-                        schema = {
-                            k: v for k, v in schema.items() if k not in unsupported_keys
-                        }
+                        schema = self._filter_schema_recursively(schema)
+                        schema = self._remove_non_string_enums(schema)
                     return schema
 
                 args_schema.model_json_schema = staticmethod(filtered_schema_method)

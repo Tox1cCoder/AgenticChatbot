@@ -51,6 +51,18 @@
         "app/ai/mcp_servers/boring_servers/boring_reader_server.py"
       ],
       "description": "Borehole PDF data extractor - extracts structured borehole log data from PDF files"
+    },
+    "weather": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@timlukahorstmann/mcp-weather"
+      ],
+      "env": {
+        "ACCUWEATHER_API_KEY": "zpka_a60ac65c742a4a70b34530754b2c3010_ca64d211"
+      },
+      "enabled": true
     }
   }
 }

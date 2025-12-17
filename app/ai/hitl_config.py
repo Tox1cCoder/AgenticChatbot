@@ -128,7 +128,6 @@ def build_interrupt_response(
 
         default_prefix = interrupt_id or "task"
 
-        # New LangGraph HITL payload shape
         if "action_requests" in payload:
             allowed_map = _parse_review_configs(payload.get("review_configs", []))
             requests = _extract_action_requests(
