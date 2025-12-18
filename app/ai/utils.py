@@ -182,19 +182,20 @@ def extract_agent_execution_info(agent_response: Dict[str, Any]) -> Dict[str, An
     - Final response text
     - List of tools used
     - Tool artifacts (calls with arguments and outputs)
-    - Reasoning steps if available
+
+    Note: For Gemini's "thinking" feature (extended reasoning), use the 'thinking_summary'
+    field in response metadata instead. This function only extracts tool execution info.
 
     Args:
         agent_response: The response dictionary from agent.invoke()
 
     Returns:
-        Dictionary with keys: response_text, tools_used, tool_artifacts, reasoning_steps
+        Dictionary with keys: response_text, tools_used, tool_artifacts
     """
     result = {
         "response_text": "",
         "tools_used": [],
         "tool_artifacts": [],
-        "reasoning_steps": [],
     }
 
     # Extract messages from response
@@ -248,13 +249,6 @@ def extract_agent_execution_info(agent_response: Dict[str, Any]) -> Dict[str, An
                     )
 
     result["tools_used"] = list(tools_used_set)
-
-    # Extract reasoning steps (messages leading to final response)
-    for msg in messages:
-        if hasattr(msg, "type") and msg.type == "ai":
-            content = coerce_response_text(msg.content)
-            if content and content != result["response_text"]:
-                result["reasoning_steps"].append(content)
 
     return result
 

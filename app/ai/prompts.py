@@ -111,7 +111,6 @@ OUTPUT:
 
 LANGUAGE: Match the user's language for responses, but image prompts may be in English for best results."""
 
-# System prompt suffix for when tool results are already in conversation
 TOOL_CONTEXT_SUFFIX = """
 
 TOOL RESULTS IN CONTEXT:

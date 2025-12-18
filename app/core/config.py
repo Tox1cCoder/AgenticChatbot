@@ -102,9 +102,9 @@ class Settings(BaseSettings):
     )
 
     # Agent Model Configuration
-    rag_agent_model: str = Field(default="gemini-flash-latest")
-    chat_agent_model: str = Field(default="gemini-flash-latest")
-    search_agent_model: str = Field(default="gemini-flash-latest")
+    rag_agent_model: str = Field(default="gemini-3-flash-preview")
+    chat_agent_model: str = Field(default="gemini-3-flash-preview")
+    search_agent_model: str = Field(default="gemini-3-flash-preview")
 
     # Image Generation Configuration
     enable_image_generation: bool = Field(
@@ -418,8 +418,8 @@ class Settings(BaseSettings):
         description="Include thought summaries in streaming responses when thinking mode is enabled",
     )
     thinking_budget: int = Field(
-        default=0,
-        description="Token budget for thinking (0 = model default). Higher values allow more reasoning tokens.",
+        default=-1,
+        description="Token budget for thinking (-1 = dynamic/model decides, 0 = disabled, positive = capped). Higher values allow more reasoning tokens.",
     )
 
 

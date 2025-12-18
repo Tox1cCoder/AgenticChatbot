@@ -49,7 +49,7 @@ class ImageGeneratorAgent:
 
         # Build LangChain model with optional thinking support
         model_kwargs = {
-            "model": "gemini-flash-latest",
+            "model": "gemini-3-flash-preview",
             "google_api_key": api_key,
             "temperature": 0.8,
         }

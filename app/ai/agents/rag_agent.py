@@ -90,7 +90,7 @@ class RAGAgent:
             "google_api_key": api_key,
             "temperature": 0.24,
         }
-        if settings.enable_thinking and settings.thinking_budget > 0:
+        if settings.enable_thinking:
             model_kwargs["thinking_budget"] = settings.thinking_budget
 
         self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)

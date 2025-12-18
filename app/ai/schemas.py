@@ -47,6 +47,7 @@ class ToolInterruptRequest(BaseModel):
         None, description="Which decision types are permitted for this tool"
     )
 
+
 class InterruptDecision(BaseModel):
     """Decision for handling a tool interrupt."""
 
@@ -119,8 +120,6 @@ class GraphState(TypedDict):
     response: NotRequired[Optional[AgentResponse]]
     context: NotRequired[Dict[str, Any]]
     persona: NotRequired[Optional[str]]
-    reasoning_steps: NotRequired[Optional[List[Dict[str, Any]]]]
-    tool_results: NotRequired[Optional[Dict[str, Any]]]
     iteration_count: NotRequired[Optional[int]]
     pending_tool_calls: NotRequired[Optional[List[Any]]]
     # Task planning context fields

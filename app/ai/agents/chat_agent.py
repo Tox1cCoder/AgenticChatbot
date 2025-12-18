@@ -52,7 +52,7 @@ class ChatAgent:
             "google_api_key": api_key,
             "temperature": 0.8,
         }
-        if settings.enable_thinking and settings.thinking_budget > 0:
+        if settings.enable_thinking:
             model_kwargs["thinking_budget"] = settings.thinking_budget
 
         self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
@@ -196,9 +196,6 @@ class ChatAgent:
         # Extract conversation history
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
-
-        # Check if this invocation includes tool results (post-tool-execution)
-        has_tool_results = "Tool results:" in message.content
 
         # Build prompt
         prompt = build_chat_prompt(
