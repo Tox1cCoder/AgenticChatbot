@@ -3548,26 +3548,55 @@ def render_chat_view():
                 progress_pct = status.get("progressPercentage", 0)
                 next_task = status.get("nextTask")
                 pending = status.get("pendingTasks", 0)
+                completed = status.get("completedTasks", 0)
+                total = status.get("totalTasks", 0)
+                in_progress = status.get("inProgressTasks", 0)
 
                 with st.container():
+                    # Progress bar and summary
                     col1, col2 = st.columns([4, 1])
                     with col1:
+                        st.progress(progress_pct / 100.0)
                         if next_task:
                             st.success(
-                                f"**Current Task:** {next_task.get('description', 'N/A')} ({progress_pct:.0f}% complete, {pending} remaining)"
+                                f"📋 **{completed}/{total}** tasks complete | "
+                                f"**Current:** {next_task.get('description', 'N/A')[:50]}..."
+                                if len(next_task.get('description', '')) > 50
+                                else f"📋 **{completed}/{total}** tasks complete | "
+                                f"**Current:** {next_task.get('description', 'N/A')}"
                             )
                         else:
                             st.success(
-                                f"✅ **All tasks completed!** ({progress_pct:.0f}% complete)"
+                                f"✅ **All {total} tasks completed!**"
                             )
                     with col2:
                         if st.button(
-                            "📋",
+                            "📋 View All",
                             key="goto_planning_from_chat",
-                            help="View Planning Tab",
+                            help="View Full Task List",
                         ):
                             st.session_state.active_view = "planning"
                             st.rerun()
+                    
+                    # Show task list in expander
+                    tasks = get_task_plans(conversation_id, include_completed=True)
+                    if tasks:
+                        task_list = tasks.get("data", []) if isinstance(tasks, dict) else tasks
+                        if task_list:
+                            with st.expander("📝 Task Progress", expanded=False):
+                                for task in task_list:
+                                    task_status = task.get("status", "pending")
+                                    task_desc = task.get("description", "No description")
+                                    
+                                    if task_status == "completed":
+                                        st.markdown(f"✅ ~~{task_desc}~~")
+                                    elif task_status == "in_progress":
+                                        st.markdown(f"🔄 **{task_desc}** ← Current")
+                                    elif task_status == "skipped":
+                                        st.markdown(f"⏭️ ~~{task_desc}~~ (skipped)")
+                                    else:
+                                        st.markdown(f"⬜ {task_desc}")
+
     elif conversation_id == "pending_new":
         st.markdown("# New Chat")
         queued_persona = st.session_state.get("pending_persona_prompt", "")

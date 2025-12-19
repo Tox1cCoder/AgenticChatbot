@@ -88,9 +88,11 @@ class ConversationCRUDStrategy(
         latest_messages: int = 3,
         order_by: str = "updated_at",
         order_direction: str = "desc",
+        page: int = 1,
+        limit: int = 10,
     ) -> List[Conversation]:
         """Get conversations with limited recent messages and total message count"""
-        # Get all conversations for the user
+        # Get paginated conversations for the user
         statement = select(Conversation).where(
             Conversation.owner_id == owner_id, Conversation.deleted_at.is_(None)
         )
@@ -106,6 +108,10 @@ class ConversationCRUDStrategy(
         else:
             # Default ordering
             statement = statement.order_by(Conversation.updated_at.desc())
+
+        # Apply pagination
+        offset = (page - 1) * limit
+        statement = statement.offset(offset).limit(limit)
 
         conversations = list(db.execute(statement).scalars().all())
 
@@ -195,9 +201,12 @@ class ConversationRepository:
                     latest_messages,
                     order_by,
                     order_direction,
+                    page,
+                    limit,
                 )
-                total = len(conversations)
-                return Paginator.create(conversations, total, 1, total)
+                # Get total count for pagination
+                total = self._crud_strategy.count_by_owner_id(session, owner_id)
+                return Paginator.create(conversations, total, page, limit)
             else:
                 return self._crud_strategy.get_by_owner_id(
                     session, owner_id, page, limit, order_by, order_direction
