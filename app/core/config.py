@@ -314,7 +314,7 @@ class Settings(BaseSettings):
         description="Absolute maximum number of tasks per execution session (safety limit)",
     )
     execution_call_budget: int = Field(
-        default=12,
+        default=20,
         description="Maximum LLM calls per execution session before pausing for user",
     )
 

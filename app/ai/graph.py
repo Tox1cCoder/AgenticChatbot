@@ -92,6 +92,122 @@ class MultiAgentWorkflow:
         # Return only messages from the current turn
         return messages[last_human_idx:]
 
+    # ============================================================
+    # Shared Helper Methods (reduce duplication across agent nodes)
+    # ============================================================
+
+    async def _get_conversation_history(
+        self, conversation_id: Optional[str], user_id: Optional[str]
+    ) -> List:
+        """Retrieve conversation history from memory manager."""
+        if not conversation_id or not user_id:
+            return []
+        
+        try:
+            memory_manager = get_memory_manager()
+            conv_memory = await memory_manager.get_memory(
+                UUID(conversation_id), UUID(user_id), force_refresh=True
+            )
+            return conv_memory.get_recent_messages(limit=None, exclude_last=1)
+        except Exception:
+            return []
+
+    def _find_last_human_message_index(self, messages: List) -> Optional[int]:
+        """Find the index of the last HumanMessage in the messages list."""
+        for idx in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[idx], HumanMessage):
+                return idx
+        return None
+
+    def _has_tool_context(self, messages: List, last_human_idx: Optional[int]) -> bool:
+        """Check if there are tool-related messages after the last human message."""
+        if last_human_idx is None:
+            return False
+        
+        return any(
+            isinstance(m, (AIMessage, ToolMessage))
+            and (isinstance(m, ToolMessage) or (hasattr(m, "tool_calls") and m.tool_calls))
+            for m in messages[last_human_idx + 1:]
+        )
+
+    def _merge_tool_artifacts(
+        self, state: GraphState, response: AgentResponse, append_images: bool = False
+    ) -> None:
+        """Merge tool artifacts and images from context into response."""
+        context = state.get("context", {})
+        tool_artifacts = context.get("tool_artifacts", [])
+        tool_images = context.get("tool_images", [])
+
+        if tool_artifacts:
+            response.tool_artifacts = tool_artifacts
+        
+        if tool_images:
+            if not response.metadata:
+                response.metadata = {}
+            if append_images:
+                existing_images = response.metadata.get("images", [])
+                existing_images.extend(tool_images)
+                response.metadata["images"] = existing_images
+            else:
+                response.metadata["images"] = tool_images
+
+    def _finalize_agent_response(
+        self, state: GraphState, response: AgentResponse
+    ) -> GraphState:
+        """Update state with agent response and append AI message."""
+        state["response"] = response
+
+        ai_kwargs = {"content": response.message.content}
+        if response.message.tool_calls:
+            ai_kwargs["tool_calls"] = response.message.tool_calls
+        state.setdefault("messages", []).append(AIMessage(**ai_kwargs))
+
+        return state
+
+    def _build_initial_state(
+        self,
+        message: str,
+        conversation_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        persona: Optional[str] = None,
+        attachments: Optional[list] = None,
+        current_task: Optional[Dict[str, Any]] = None,
+        all_tasks: Optional[List[Dict[str, Any]]] = None,
+        planning_mode_enabled: bool = False,
+        has_existing_plan: bool = False,
+        existing_tasks: Optional[List[Dict[str, Any]]] = None,
+    ) -> GraphState:
+        """Build initial state for graph execution (shared by execute and execute_stream)."""
+        initial_state: GraphState = {
+            "messages": [HumanMessage(content=message)],
+            "context": {},
+        }
+
+        if conversation_id is not None:
+            initial_state["conversation_id"] = conversation_id
+        if user_id is not None:
+            initial_state["user_id"] = user_id
+        initial_state["selected_agent"] = None
+        initial_state["response"] = None
+        initial_state["persona"] = persona
+        initial_state["iteration_count"] = None
+
+        if current_task:
+            initial_state["current_task"] = current_task
+            initial_state["task_plan_id"] = current_task.get("id")
+        if all_tasks:
+            initial_state["all_tasks"] = all_tasks
+
+        if attachments:
+            initial_state["context"]["attachments"] = attachments
+
+        initial_state["context"]["planning_mode_enabled"] = planning_mode_enabled
+        initial_state["context"]["has_existing_plan"] = has_existing_plan
+        if existing_tasks:
+            initial_state["context"]["existing_tasks"] = existing_tasks
+
+        return initial_state
+
     async def initialize(self) -> None:
         """
         Eagerly initialize all agent tools.
@@ -674,53 +790,19 @@ class MultiAgentWorkflow:
         if not messages:
             return state
 
+        # Get context and history using shared helpers
         current_task = state.get("current_task")
         all_tasks = state.get("all_tasks")
         plan_context_str = self._build_plan_context_string(current_task, all_tasks)
-
-        last_message = messages[-1]
-        content = (
-            last_message.content
-            if hasattr(last_message, "content")
-            else str(last_message)
-        )
-
-        conversation_history = []
+        
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
-
-        if conversation_id and user_id:
-            memory_manager = get_memory_manager()
-            conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=True
-            )
-            # Get all messages from history without limit
-            conversation_history = conv_memory.get_recent_messages(
-                limit=None, exclude_last=1
-            )
-
-        context = state.get("context", {})
-        last_human_idx = next(
-            (
-                idx
-                for idx in range(len(messages) - 1, -1, -1)
-                if isinstance(messages[idx], HumanMessage)
-            ),
-            None,
-        )
-
-        has_tool_context = any(
-            isinstance(m, (AIMessage, ToolMessage))
-            and (
-                isinstance(m, ToolMessage)
-                or (hasattr(m, "tool_calls") and m.tool_calls)
-            )
-            for m in messages[last_human_idx + 1 :]
-            if last_human_idx is not None
-        )
+        conversation_history = await self._get_conversation_history(conversation_id, user_id)
+        
+        last_human_idx = self._find_last_human_message_index(messages)
+        has_tool_context = self._has_tool_context(messages, last_human_idx)
 
         if has_tool_context:
-            # Only pass current turn messages to prevent old tool calls from being repeated
             current_turn_messages = self._get_current_turn_messages(messages)
             response = await self.chat_agent.invoke_model_with_history(
                 current_turn_messages,
@@ -729,21 +811,17 @@ class MultiAgentWorkflow:
                 conversation_id,
             )
         else:
+            last_message = messages[-1]
+            content = last_message.content if hasattr(last_message, "content") else str(last_message)
             user_content = (
                 messages[last_human_idx].content
-                if last_human_idx is not None
-                and hasattr(messages[last_human_idx], "content")
+                if last_human_idx is not None and hasattr(messages[last_human_idx], "content")
                 else content
             )
 
-            enriched_content = user_content
-            if plan_context_str:
-                enriched_content = f"{plan_context_str}\n\n{user_content}"
-
-            metadata = {
-                "history": conversation_history,
-                "persona": state.get("persona"),
-            }
+            enriched_content = f"{plan_context_str}\n\n{user_content}" if plan_context_str else user_content
+            context = state.get("context", {})
+            metadata = {"history": conversation_history, "persona": state.get("persona")}
             if current_task:
                 metadata["task_context"] = current_task
 
@@ -753,29 +831,10 @@ class MultiAgentWorkflow:
                 metadata=metadata,
                 attachments=context.get("attachments"),
             )
-
             response = await self.chat_agent.invoke_model(agent_msg, conversation_id)
 
-        # Merge tool artifacts and images from context into response
-        context = state.get("context", {})
-        tool_artifacts = context.get("tool_artifacts", [])
-        tool_images = context.get("tool_images", [])
-
-        if tool_artifacts:
-            response.tool_artifacts = tool_artifacts
-        if tool_images:
-            if not response.metadata:
-                response.metadata = {}
-            response.metadata["images"] = tool_images
-
-        state["response"] = response
-
-        ai_kwargs = {"content": response.message.content}
-        if response.message.tool_calls:
-            ai_kwargs["tool_calls"] = response.message.tool_calls
-        state.setdefault("messages", []).append(AIMessage(**ai_kwargs))
-
-        return state
+        self._merge_tool_artifacts(state, response)
+        return self._finalize_agent_response(state, response)
 
     async def _rag_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
@@ -837,52 +896,19 @@ class MultiAgentWorkflow:
         if not messages:
             return state
 
+        # Get context and history using shared helpers
         current_task = state.get("current_task")
         all_tasks = state.get("all_tasks")
         plan_context_str = self._build_plan_context_string(current_task, all_tasks)
-
-        last_message = messages[-1]
-        content = (
-            last_message.content
-            if hasattr(last_message, "content")
-            else str(last_message)
-        )
-
-        last_human_idx = next(
-            (
-                idx
-                for idx in range(len(messages) - 1, -1, -1)
-                if isinstance(messages[idx], HumanMessage)
-            ),
-            None,
-        )
-
-        has_tool_context = any(
-            isinstance(m, (AIMessage, ToolMessage))
-            and (
-                isinstance(m, ToolMessage)
-                or (hasattr(m, "tool_calls") and m.tool_calls)
-            )
-            for m in messages[last_human_idx + 1 :]
-            if last_human_idx is not None
-        )
-
-        conversation_history = []
+        
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
-
-        if conversation_id and user_id:
-            memory_manager = get_memory_manager()
-            conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=True
-            )
-            # Get all messages from history without limit
-            conversation_history = conv_memory.get_recent_messages(
-                limit=None, exclude_last=1
-            )
+        conversation_history = await self._get_conversation_history(conversation_id, user_id)
+        
+        last_human_idx = self._find_last_human_message_index(messages)
+        has_tool_context = self._has_tool_context(messages, last_human_idx)
 
         if has_tool_context:
-            # Only pass current turn messages to prevent old tool calls from being repeated
             current_turn_messages = self._get_current_turn_messages(messages)
             response = await self.search_agent.invoke_model_with_history(
                 current_turn_messages,
@@ -891,22 +917,17 @@ class MultiAgentWorkflow:
                 conversation_id,
             )
         else:
+            last_message = messages[-1]
+            content = last_message.content if hasattr(last_message, "content") else str(last_message)
             user_content = (
                 messages[last_human_idx].content
-                if last_human_idx is not None
-                and hasattr(messages[last_human_idx], "content")
+                if last_human_idx is not None and hasattr(messages[last_human_idx], "content")
                 else content
             )
 
-            enriched_content = user_content
-            if plan_context_str:
-                enriched_content = f"{plan_context_str}\n\n{user_content}"
-
+            enriched_content = f"{plan_context_str}\n\n{user_content}" if plan_context_str else user_content
             context = state.get("context", {})
-            metadata = {
-                "history": conversation_history,
-                "persona": state.get("persona"),
-            }
+            metadata = {"history": conversation_history, "persona": state.get("persona")}
             if current_task:
                 metadata["task_context"] = current_task
 
@@ -916,81 +937,32 @@ class MultiAgentWorkflow:
                 metadata=metadata,
                 attachments=context.get("attachments"),
             )
+            response = await self.search_agent.process_message(agent_msg, conversation_id)
 
-            response = await self.search_agent.process_message(
-                agent_msg, conversation_id
-            )
-
-        # Merge tool artifacts and images from context into response
-        context = state.get("context", {})
-        tool_artifacts = context.get("tool_artifacts", [])
-        tool_images = context.get("tool_images", [])
-
-        if tool_artifacts:
-            response.tool_artifacts = tool_artifacts
-        if tool_images:
-            if not response.metadata:
-                response.metadata = {}
-            response.metadata["images"] = tool_images
-
-        state["response"] = response
-
-        ai_kwargs = {"content": response.message.content}
-        if response.message.tool_calls:
-            ai_kwargs["tool_calls"] = response.message.tool_calls
-        state.setdefault("messages", []).append(AIMessage(**ai_kwargs))
-
-        return state
+        self._merge_tool_artifacts(state, response)
+        return self._finalize_agent_response(state, response)
 
     async def _image_generator_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
         if not messages:
             return state
 
+        # Get context and history using shared helpers
         current_task = state.get("current_task")
         all_tasks = state.get("all_tasks")
         plan_context_str = self._build_plan_context_string(current_task, all_tasks)
-
-        last_human_idx = next(
-            (
-                idx
-                for idx in range(len(messages) - 1, -1, -1)
-                if isinstance(messages[idx], HumanMessage)
-            ),
-            None,
-        )
-
-        last_human_message = (
-            messages[last_human_idx] if last_human_idx is not None else None
-        )
-        content = last_human_message.content if last_human_message else ""
-
-        has_tool_context = any(
-            isinstance(m, (AIMessage, ToolMessage))
-            and (
-                isinstance(m, ToolMessage)
-                or (hasattr(m, "tool_calls") and m.tool_calls)
-            )
-            for m in messages[last_human_idx + 1 :]
-            if last_human_idx is not None
-        )
-
-        conversation_history = []
+        
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
-
-        if conversation_id and user_id:
-            memory_manager = get_memory_manager()
-            conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=True
-            )
-            # Get all messages from history without limit
-            conversation_history = conv_memory.get_recent_messages(
-                limit=None, exclude_last=1
-            )
+        conversation_history = await self._get_conversation_history(conversation_id, user_id)
+        
+        last_human_idx = self._find_last_human_message_index(messages)
+        has_tool_context = self._has_tool_context(messages, last_human_idx)
+        
+        last_human_message = messages[last_human_idx] if last_human_idx is not None else None
+        content = last_human_message.content if last_human_message else ""
 
         if has_tool_context:
-            # Only pass current turn messages to prevent old tool calls from being repeated
             current_turn_messages = self._get_current_turn_messages(messages)
             response = await self.image_generator_agent.invoke_model_with_history(
                 current_turn_messages,
@@ -1001,11 +973,7 @@ class MultiAgentWorkflow:
         else:
             full_history = conversation_history + messages[:-1]
             context = state.get("context", {})
-
-            enriched_content = content
-            if plan_context_str:
-                enriched_content = f"{plan_context_str}\n\n{content}"
-
+            enriched_content = f"{plan_context_str}\n\n{content}" if plan_context_str else content
             metadata = {"history": full_history, "persona": state.get("persona")}
             if current_task:
                 metadata["task_context"] = current_task
@@ -1016,34 +984,11 @@ class MultiAgentWorkflow:
                 metadata=metadata,
                 attachments=context.get("attachments"),
             )
+            response = await self.image_generator_agent.invoke_model(agent_msg, conversation_id)
 
-            response = await self.image_generator_agent.invoke_model(
-                agent_msg, conversation_id
-            )
-
-        # Merge tool artifacts and images from context into response
-        context = state.get("context", {})
-        tool_artifacts = context.get("tool_artifacts", [])
-        tool_images = context.get("tool_images", [])
-
-        if tool_artifacts:
-            response.tool_artifacts = tool_artifacts
-        if tool_images:
-            if not response.metadata:
-                response.metadata = {}
-            # Append to existing images from image generator
-            existing_images = response.metadata.get("images", [])
-            existing_images.extend(tool_images)
-            response.metadata["images"] = existing_images
-
-        state["response"] = response
-
-        ai_kwargs = {"content": response.message.content}
-        if response.message.tool_calls:
-            ai_kwargs["tool_calls"] = response.message.tool_calls
-        state.setdefault("messages", []).append(AIMessage(**ai_kwargs))
-
-        return state
+        # Use append_images=True since image generator produces its own images
+        self._merge_tool_artifacts(state, response, append_images=True)
+        return self._finalize_agent_response(state, response)
 
     async def _planning_node(self, state: GraphState) -> GraphState:
         """
@@ -1386,34 +1331,18 @@ class MultiAgentWorkflow:
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[AgentResponse]:
 
-        initial_state: GraphState = {
-            "messages": [HumanMessage(content=message)],
-            "context": {},
-        }
-
-        if conversation_id is not None:
-            initial_state["conversation_id"] = conversation_id
-        if user_id is not None:
-            initial_state["user_id"] = user_id
-        initial_state["selected_agent"] = None
-        initial_state["response"] = None
-        initial_state["persona"] = persona
-        initial_state["iteration_count"] = None
-
-        # Task planning context
-        if current_task:
-            initial_state["current_task"] = current_task
-            initial_state["task_plan_id"] = current_task.get("id")
-        if all_tasks:
-            initial_state["all_tasks"] = all_tasks
-
-        if attachments:
-            initial_state["context"]["attachments"] = attachments
-
-        initial_state["context"]["planning_mode_enabled"] = planning_mode_enabled
-        initial_state["context"]["has_existing_plan"] = has_existing_plan
-        if existing_tasks:
-            initial_state["context"]["existing_tasks"] = existing_tasks
+        initial_state = self._build_initial_state(
+            message=message,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            persona=persona,
+            attachments=attachments,
+            current_task=current_task,
+            all_tasks=all_tasks,
+            planning_mode_enabled=planning_mode_enabled,
+            has_existing_plan=has_existing_plan,
+            existing_tasks=existing_tasks,
+        )
 
         config = self._build_graph_config(thread_id)
         result = await self.graph.ainvoke(initial_state, config=config)
@@ -1559,33 +1488,18 @@ class MultiAgentWorkflow:
         has_existing_plan: bool = False,
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
     ):
-        initial_state: GraphState = {
-            "messages": [HumanMessage(content=message)],
-            "context": {},
-        }
-
-        if conversation_id is not None:
-            initial_state["conversation_id"] = conversation_id
-        if user_id is not None:
-            initial_state["user_id"] = user_id
-        initial_state["selected_agent"] = None
-        initial_state["response"] = None
-        initial_state["persona"] = persona
-        initial_state["iteration_count"] = None
-
-        if current_task:
-            initial_state["current_task"] = current_task
-            initial_state["task_plan_id"] = current_task.get("id")
-        if all_tasks:
-            initial_state["all_tasks"] = all_tasks
-
-        if attachments:
-            initial_state["context"]["attachments"] = attachments
-
-        initial_state["context"]["planning_mode_enabled"] = planning_mode_enabled
-        initial_state["context"]["has_existing_plan"] = has_existing_plan
-        if existing_tasks:
-            initial_state["context"]["existing_tasks"] = existing_tasks
+        initial_state = self._build_initial_state(
+            message=message,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            persona=persona,
+            attachments=attachments,
+            current_task=current_task,
+            all_tasks=all_tasks,
+            planning_mode_enabled=planning_mode_enabled,
+            has_existing_plan=has_existing_plan,
+            existing_tasks=existing_tasks,
+        )
 
         config = self._build_graph_config(thread_id)
 

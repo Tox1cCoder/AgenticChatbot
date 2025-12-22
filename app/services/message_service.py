@@ -126,64 +126,19 @@ class MessageService(IMessageService):
             planning_mode_enabled = (
                 conversation.planning_mode_enabled if conversation else False
             )
-            current_task = None
-            current_task_context = None
-            has_existing_plan = False
-            existing_tasks_dict = None
-            if self.task_plan_service and user_id:
-                try:
-                    existing_tasks = self.task_plan_service.get_conversation_tasks(
-                        message_create_data.conversation_id,
-                        user_id,
-                        include_completed=True,
-                    )
-                    has_existing_plan = len(existing_tasks) > 0
-
-                    if planning_mode_enabled and not has_existing_plan:
-                        created_tasks = await self.task_plan_service.create_task_plan(
-                            message_create_data.conversation_id,
-                            message_create_data.content,
-                            user_id,
-                        )
-                        has_existing_plan = len(created_tasks) > 0
-                        if has_existing_plan:
-                            existing_tasks = (
-                                self.task_plan_service.get_conversation_tasks(
-                                    message_create_data.conversation_id,
-                                    user_id,
-                                    include_completed=True,
-                                )
-                            )
-
-                    if has_existing_plan:
-                        planning_mode_enabled = True
-
-                    # Get current task for execution context
-                    current_task = self.task_plan_service.get_next_task(
-                        message_create_data.conversation_id, user_id
-                    )
-                    current_task_context = self._build_task_context_dict(current_task)
-
-                    # Convert existing tasks to dict for planning agent
-                    if existing_tasks:
-                        existing_tasks_dict = [
-                            {
-                                "id": str(task.id),
-                                "description": task.description,
-                                "status": (
-                                    task.status.value
-                                    if hasattr(task.status, "value")
-                                    else str(task.status)
-                                ),
-                                "task_order": task.task_order,
-                                "dependencies": [
-                                    str(d) for d in (task.dependencies or [])
-                                ],
-                            }
-                            for task in existing_tasks
-                        ]
-                except Exception:
-                    pass
+            
+            # Use shared helper to prepare planning context
+            planning_ctx = await self._prepare_planning_context(
+                conversation_id=message_create_data.conversation_id,
+                user_id=user_id,
+                message_content=message_create_data.content,
+                planning_mode_enabled=planning_mode_enabled,
+            )
+            planning_mode_enabled = planning_ctx["planning_mode_enabled"]
+            has_existing_plan = planning_ctx["has_existing_plan"]
+            current_task = planning_ctx["current_task"]
+            current_task_context = planning_ctx["current_task_context"]
+            existing_tasks_dict = planning_ctx["existing_tasks_dict"]
 
             # Extract attachments from message_create_data if present
             attachments = (
@@ -295,65 +250,19 @@ class MessageService(IMessageService):
             planning_mode_enabled = (
                 conversation.planning_mode_enabled if conversation else False
             )
-            current_task = None
-            current_task_context = None
-            has_existing_plan = False
-            existing_tasks_dict = None
-            if self.task_plan_service and user_id:
-                try:
-                    existing_tasks = self.task_plan_service.get_conversation_tasks(
-                        message_create_data.conversation_id,
-                        user_id,
-                        include_completed=True,
-                    )
-                    has_existing_plan = len(existing_tasks) > 0
-
-                    if planning_mode_enabled and not has_existing_plan:
-                        created_tasks = await self.task_plan_service.create_task_plan(
-                            message_create_data.conversation_id,
-                            message_create_data.content,
-                            user_id,
-                        )
-                        has_existing_plan = len(created_tasks) > 0
-                        if has_existing_plan:
-                            existing_tasks = (
-                                self.task_plan_service.get_conversation_tasks(
-                                    message_create_data.conversation_id,
-                                    user_id,
-                                    include_completed=True,
-                                )
-                            )
-
-                    if has_existing_plan:
-                        planning_mode_enabled = True
-
-                    # Get current task for execution context
-                    current_task = self.task_plan_service.get_next_task(
-                        message_create_data.conversation_id, user_id
-                    )
-                    current_task_context = self._build_task_context_dict(current_task)
-
-                    # Convert existing tasks to dict for planning agent
-                    if existing_tasks:
-                        existing_tasks_dict = [
-                            {
-                                "id": str(task.id),
-                                "description": task.description,
-                                "status": (
-                                    task.status.value
-                                    if hasattr(task.status, "value")
-                                    else str(task.status)
-                                ),
-                                "task_order": task.task_order,
-                                "dependencies": [
-                                    str(d) for d in (task.dependencies or [])
-                                ],
-                            }
-                            for task in existing_tasks
-                        ]
-
-                except Exception:
-                    pass
+            
+            # Use shared helper to prepare planning context
+            planning_ctx = await self._prepare_planning_context(
+                conversation_id=message_create_data.conversation_id,
+                user_id=user_id,
+                message_content=message_create_data.content,
+                planning_mode_enabled=planning_mode_enabled,
+            )
+            planning_mode_enabled = planning_ctx["planning_mode_enabled"]
+            has_existing_plan = planning_ctx["has_existing_plan"]
+            current_task = planning_ctx["current_task"]
+            current_task_context = planning_ctx["current_task_context"]
+            existing_tasks_dict = planning_ctx["existing_tasks_dict"]
 
             # Extract attachments from message_create_data if present
             attachments = (
@@ -1003,6 +912,83 @@ class MessageService(IMessageService):
                 task.status.value if hasattr(task.status, "value") else str(task.status)
             ),
         }
+
+    async def _prepare_planning_context(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        message_content: str,
+        planning_mode_enabled: bool,
+    ) -> Dict[str, Any]:
+        """
+        Prepare task planning context for message creation.
+        
+        Returns a dict with keys:
+        - planning_mode_enabled: bool
+        - has_existing_plan: bool
+        - current_task: Optional[task entity]
+        - current_task_context: Optional[dict]
+        - existing_tasks_dict: Optional[List[dict]]
+        """
+        result = {
+            "planning_mode_enabled": planning_mode_enabled,
+            "has_existing_plan": False,
+            "current_task": None,
+            "current_task_context": None,
+            "existing_tasks_dict": None,
+        }
+        
+        if not self.task_plan_service or not user_id:
+            return result
+        
+        try:
+            existing_tasks = self.task_plan_service.get_conversation_tasks(
+                conversation_id, user_id, include_completed=True
+            )
+            result["has_existing_plan"] = len(existing_tasks) > 0
+
+            # Create plan if planning mode enabled but no plan exists
+            if planning_mode_enabled and not result["has_existing_plan"]:
+                created_tasks = await self.task_plan_service.create_task_plan(
+                    conversation_id, message_content, user_id
+                )
+                result["has_existing_plan"] = len(created_tasks) > 0
+                if result["has_existing_plan"]:
+                    existing_tasks = self.task_plan_service.get_conversation_tasks(
+                        conversation_id, user_id, include_completed=True
+                    )
+
+            if result["has_existing_plan"]:
+                result["planning_mode_enabled"] = True
+
+            # Get current task for execution context
+            result["current_task"] = self.task_plan_service.get_next_task(
+                conversation_id, user_id
+            )
+            result["current_task_context"] = self._build_task_context_dict(
+                result["current_task"]
+            )
+
+            # Convert existing tasks to dict for planning agent
+            if existing_tasks:
+                result["existing_tasks_dict"] = [
+                    {
+                        "id": str(task.id),
+                        "description": task.description,
+                        "status": (
+                            task.status.value
+                            if hasattr(task.status, "value")
+                            else str(task.status)
+                        ),
+                        "task_order": task.task_order,
+                        "dependencies": [str(d) for d in (task.dependencies or [])],
+                    }
+                    for task in existing_tasks
+                ]
+        except Exception:
+            pass
+        
+        return result
 
     async def _run_plan_execution_loop(
         self,

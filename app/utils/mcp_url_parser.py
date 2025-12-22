@@ -1,9 +1,3 @@
-"""URL parser for MCP server configuration.
-
-This module provides utilities to parse MCP server URLs and convert them
-into appropriate server configurations. Supports both local npx-based
-servers and remote HTTP servers.
-"""
 
 from typing import Any, Dict
 from app.core.exceptions.mcp import ServerConfigurationError
@@ -17,19 +11,12 @@ def generate_server_name_from_url(url: str) -> str:
 
     Returns:
         A generated server name
-
-    Examples:
-        >>> generate_server_name_from_url("npx @smithery/cli@latest run @ThinkFar/clear-thought-mcp --playground")
-        'clear-thought-mcp'
-        >>> generate_server_name_from_url("https://server.smithery.ai/reddit/mcp")
-        'reddit-mcp'
     """
     url = url.strip()
 
     # Handle npx URLs
     if url.startswith("npx "):
         # Extract package name from npx command
-        # Pattern: npx @smithery/cli@latest run @ThinkFar/clear-thought-mcp --playground
         parts = url.split()
         for i, part in enumerate(parts):
             if part == "run" and i + 1 < len(parts):
@@ -47,7 +34,6 @@ def generate_server_name_from_url(url: str) -> str:
     # Handle HTTP/HTTPS URLs
     elif url.startswith("http://") or url.startswith("https://"):
         # Extract server name from URL path
-        # https://server.smithery.ai/reddit/mcp -> reddit-mcp
         try:
             from urllib.parse import urlparse
 
