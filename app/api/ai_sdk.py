@@ -576,7 +576,7 @@ async def get_conversation_messages_ai_sdk(
     messages = [
         {
             "id": str(msg.id),
-            "role": msg.role.value if hasattr(msg.role, "value") else msg.role,
+            "role": "user" if msg.sender == 1 else "assistant",
             "content": msg.content,
             "created_at": msg.created_at.isoformat() if msg.created_at else None,
         }
@@ -585,7 +585,7 @@ async def get_conversation_messages_ai_sdk(
 
     return {
         "messages": messages,
-        "total": paginated_result.total,
+        "total": paginated_result.meta.total,
     }
 
 
@@ -611,7 +611,6 @@ async def chat_ui_message_stream(
 
     async def event_generator():
         try:
-            # One backend call == one step for AI SDK UI step tracking.
             yield _sse({"type": "start-step"})
 
             # Start assistant message + first text block.

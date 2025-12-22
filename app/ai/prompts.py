@@ -595,9 +595,6 @@ LANGUAGE: Always respond in the user's language.
 
 CRITICAL: You MUST call write_todos tool to update task status. Never just say "task complete" in text - always use COMPLETE_TODO action to actually mark it complete."""
 
-
-
-
 def build_planning_prompt(
     user_request: str, conversation_history: list, persona: Optional[str] = None
 ) -> str:
