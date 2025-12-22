@@ -122,6 +122,7 @@ class MultiAgentWorkflow:
         workflow.add_node("search_agent", self._search_node)
         workflow.add_node("image_generator_agent", self._image_generator_node)
         workflow.add_node("planning_agent", self._planning_node)
+        workflow.add_node("planning_tools", self._planning_tools_node)
         workflow.add_node("approval", self._approval_node)
         workflow.add_node("tools", self._tool_node)
 
@@ -151,7 +152,25 @@ class MultiAgentWorkflow:
         )
 
         workflow.add_edge("rag_agent", END)
-        workflow.add_edge("planning_agent", END)
+        
+        # Planning agent ReAct loop: planning_agent → planning_tools → planning_agent OR end
+        workflow.add_conditional_edges(
+            "planning_agent",
+            self._should_call_planning_tools,
+            {
+                "planning_tools": "planning_tools",
+                "end": END,
+            },
+        )
+        
+        workflow.add_conditional_edges(
+            "planning_tools",
+            self._should_continue_planning,
+            {
+                "planning_agent": "planning_agent",
+                "end": END,
+            },
+        )
 
         workflow.add_conditional_edges(
             "search_agent",
@@ -189,6 +208,7 @@ class MultiAgentWorkflow:
         if self.checkpointer:
             return workflow.compile(checkpointer=self.checkpointer)
         return workflow.compile()
+
 
     async def _tool_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
@@ -1026,17 +1046,18 @@ class MultiAgentWorkflow:
         return state
 
     async def _planning_node(self, state: GraphState) -> GraphState:
+        """
+        Planning agent node with tool-calling ReAct pattern.
+        
+        Uses invoke_model_with_history to get responses that may include tool calls
+        for the write_todos tool. Supports both initial plan creation and
+        ongoing task management.
+        """
         messages = state.get("messages", [])
         if not messages:
             return state
 
-        last_message = messages[-1]
-        content = (
-            last_message.content
-            if hasattr(last_message, "content")
-            else str(last_message)
-        )
-
+        # Get conversation context
         conversation_history = []
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
@@ -1046,45 +1067,293 @@ class MultiAgentWorkflow:
             conv_memory = await memory_manager.get_memory(
                 UUID(conversation_id), UUID(user_id), force_refresh=True
             )
-            # Get all messages from history without limit
             conversation_history = conv_memory.get_recent_messages(
                 limit=None, exclude_last=1
             )
 
         context = state.get("context", {})
         existing_tasks = context.get("existing_tasks", [])
+        
+        # Get current todos from state (may have been updated by planning_tools)
+        todos = state.get("todos", [])
+        current_task_index = state.get("current_task_index")
+        
+        # Increment planning call count for budget tracking
+        planning_call_count = (state.get("planning_call_count") or 0) + 1
+        state["planning_call_count"] = planning_call_count
 
-        metadata = {
-            "history": conversation_history,
-            "persona": state.get("persona"),
-        }
+        persona = state.get("persona")
+        
+        # Get only current turn messages for the model
+        current_turn_messages = self._get_current_turn_messages(messages)
 
-        # Include existing tasks if available for plan modifications
-        if existing_tasks:
-            metadata["existing_tasks"] = existing_tasks
-
-        agent_msg = AgentMessage(
-            role=MessageRole.USER,
-            content=content,
-            metadata=metadata,
+        # Call the planning agent with history
+        response = await self.planning_agent.invoke_model_with_history(
+            messages=current_turn_messages,
+            conversation_history=conversation_history,
+            persona=persona,
+            conversation_id=conversation_id,
+            todos=todos,
+            current_task_index=current_task_index,
         )
-
-        # Check if this is a plan modification or new plan creation
-        if existing_tasks:
-            response = await self.planning_agent.modify_plan(
-                agent_msg, existing_tasks, conversation_id
-            )
-        else:
-            response = await self.planning_agent.generate_plan(
-                agent_msg, conversation_id
-            )
 
         state["response"] = response
-        state.setdefault("messages", []).append(
-            AIMessage(content=response.message.content)
-        )
+        
+        # Add AI message to state (with tool calls if present)
+        ai_kwargs = {"content": response.message.content or ""}
+        if response.message.tool_calls:
+            ai_kwargs["tool_calls"] = response.message.tool_calls
+        state.setdefault("messages", []).append(AIMessage(**ai_kwargs))
+
+        # Sync todos from response metadata if plan was generated/modified
+        if response.metadata.get("todos"):
+            state["todos"] = response.metadata["todos"]
 
         return state
+
+    async def _planning_tools_node(self, state: GraphState) -> GraphState:
+        """
+        Execute write_todos tool calls from the planning agent.
+        
+        Handles the actual todo state updates based on tool call arguments.
+        """
+        from .schemas import TodoAction, TodoStatus
+        
+        messages = state.get("messages", [])
+        if not messages:
+            return state
+            
+        last_message = messages[-1]
+        if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+            return state
+        
+        todos = list(state.get("todos", []))  # Make a copy
+        current_task_index = state.get("current_task_index")
+        tool_outputs = []
+        
+        for tool_call in last_message.tool_calls:
+            tool_call_data = normalize_tool_call(tool_call)
+            tool_name = tool_call_data.get("name")
+            tool_id = tool_call_data.get("id")
+            tool_args = tool_call_data.get("args", {})
+            
+            if tool_name != "write_todos":
+                # Execute MCP tool
+                try:
+                    # Find the tool in the planning agent's tools
+                    tool = None
+                    if self.planning_agent and hasattr(self.planning_agent, 'tools'):
+                        for t in self.planning_agent.tools:
+                            if t.name == tool_name:
+                                tool = t
+                                break
+                    
+                    if tool:
+                        # Execute the tool
+                        result = await tool.ainvoke(tool_args)
+                        tool_outputs.append({
+                            "tool_call_id": tool_id,
+                            "name": tool_name,
+                            "content": str(result) if result else "Tool executed successfully",
+                        })
+                    else:
+                        tool_outputs.append({
+                            "tool_call_id": tool_id,
+                            "name": tool_name,
+                            "content": f"Tool not found: {tool_name}",
+                        })
+                except Exception as e:
+                    logger.error(f"Error executing MCP tool {tool_name}: {e}")
+                    tool_outputs.append({
+                        "tool_call_id": tool_id,
+                        "name": tool_name,
+                        "content": f"Error executing tool: {str(e)}",
+                    })
+                continue
+            
+            action = tool_args.get("action")
+            result = ""
+            
+            try:
+                if action == TodoAction.SET_TODOS.value or action == "set_todos":
+                    # Replace all todos
+                    new_todos = tool_args.get("todos", [])
+                    todos = new_todos
+                    current_task_index = 0 if todos else None
+                    result = f"Set {len(todos)} todos in the plan."
+                
+                elif action == TodoAction.ADD_TODO.value or action == "add_todo":
+                    # Add a single todo
+                    new_todo = tool_args.get("todo", {})
+                    if new_todo:
+                        new_todo["order"] = len(todos)
+                        todos.append(new_todo)
+                        result = f"Added todo: {new_todo.get('description', 'unknown')}"
+                    else:
+                        result = "Error: No todo provided for ADD_TODO"
+                
+                elif action == TodoAction.COMPLETE_TODO.value or action == "complete_todo":
+                    # Mark todo as completed
+                    todo_id = tool_args.get("todo_id")
+                    for i, todo in enumerate(todos):
+                        if todo.get("id") == todo_id:
+                            todo["status"] = TodoStatus.COMPLETED.value
+                            result = f"Completed todo: {todo.get('description', todo_id)}"
+                            # Move to next task
+                            if current_task_index is not None and i == current_task_index:
+                                current_task_index = self._find_next_ready_task(todos, i)
+                            break
+                    else:
+                        result = f"Todo with id {todo_id} not found"
+                
+                elif action == TodoAction.START_TODO.value or action == "start_todo":
+                    # Mark todo as in progress
+                    todo_id = tool_args.get("todo_id")
+                    for i, todo in enumerate(todos):
+                        if todo.get("id") == todo_id:
+                            todo["status"] = TodoStatus.IN_PROGRESS.value
+                            current_task_index = i
+                            result = f"Started todo: {todo.get('description', todo_id)}"
+                            break
+                    else:
+                        result = f"Todo with id {todo_id} not found"
+                
+                elif action == TodoAction.UPDATE_TODO.value or action == "update_todo":
+                    # Update a todo
+                    updated_todo = tool_args.get("todo", {})
+                    todo_id = updated_todo.get("id")
+                    for i, todo in enumerate(todos):
+                        if todo.get("id") == todo_id:
+                            todos[i] = {**todo, **updated_todo}
+                            result = f"Updated todo: {todo_id}"
+                            break
+                    else:
+                        result = f"Todo with id {todo_id} not found"
+                
+                elif action == TodoAction.REMOVE_TODO.value or action == "remove_todo":
+                    # Remove a todo
+                    todo_id = tool_args.get("todo_id")
+                    for i, todo in enumerate(todos):
+                        if todo.get("id") == todo_id:
+                            todos.pop(i)
+                            result = f"Removed todo: {todo_id}"
+                            # Adjust current task index if needed
+                            if current_task_index is not None:
+                                if i < current_task_index:
+                                    current_task_index -= 1
+                                elif i == current_task_index:
+                                    current_task_index = self._find_next_ready_task(todos, max(0, i - 1))
+                            break
+                    else:
+                        result = f"Todo with id {todo_id} not found"
+                
+                else:
+                    result = f"Unknown action: {action}"
+                    
+            except Exception as e:
+                result = f"Error executing {action}: {str(e)}"
+            
+            tool_outputs.append({
+                "tool_call_id": tool_id,
+                "name": tool_name,
+                "content": result,
+            })
+        
+        # Add tool messages to state
+        for output in tool_outputs:
+            state.setdefault("messages", []).append(
+                ToolMessage(
+                    content=output["content"],
+                    tool_call_id=output["tool_call_id"],
+                    name=output["name"],
+                )
+            )
+        
+        # Update state with new todos
+        state["todos"] = todos
+        state["current_task_index"] = current_task_index
+        
+        # Increment iteration count for budget tracking
+        current_iteration = state.get("iteration_count") or 0
+        state["iteration_count"] = current_iteration + 1
+        
+        return state
+
+    def _find_next_ready_task(
+        self, todos: list, start_index: int = 0
+    ) -> Optional[int]:
+        """Find the next task that is ready to execute (pending with all deps completed)."""
+        from .schemas import TodoStatus
+        
+        completed_ids = {
+            t.get("id") for t in todos 
+            if t.get("status") == TodoStatus.COMPLETED.value
+        }
+        
+        for i in range(start_index, len(todos)):
+            todo = todos[i]
+            if todo.get("status") == TodoStatus.PENDING.value:
+                deps = todo.get("dependencies", [])
+                if all(dep in completed_ids for dep in deps):
+                    return i
+        return None
+
+    def _should_call_planning_tools(self, state: GraphState) -> str:
+        """Determine if planning agent made tool calls that need execution."""
+        messages = state.get("messages", [])
+        if not messages:
+            return "end"
+        
+        last_message = messages[-1]
+        if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+            return "end"
+        
+        # Route to planning_tools for ANY tool call (write_todos or MCP tools)
+        if last_message.tool_calls:
+            return "planning_tools"
+        
+        # No tool calls - end
+        return "end"
+
+    def _should_continue_planning(self, state: GraphState) -> str:
+        """Determine if planning agent should continue after tool execution.
+        
+        Continues until:
+        - All tasks are completed, OR
+        - Max iterations reached (respects LLM rate limits), OR
+        - Agent decides to stop (no more tool calls)
+        """
+        from .schemas import TodoStatus
+        
+        # Check iteration/call budget (higher limit for agentic behavior)
+        planning_call_count = state.get("planning_call_count", 0)
+        max_iterations = getattr(settings, "planning_max_iterations", 15)
+        
+        # Check if we've exceeded the budget
+        if planning_call_count >= max_iterations:
+            context = state.get("context", {})
+            context["planning_budget_reached"] = True
+            context["pause_reason"] = "max_iterations_reached"
+            state["context"] = context
+            return "end"
+        
+        # Check if all tasks are completed
+        todos = state.get("todos", [])
+        if todos:
+            pending_count = sum(1 for t in todos if t.get("status") in (
+                TodoStatus.PENDING.value, "pending",
+                TodoStatus.IN_PROGRESS.value, "in_progress"
+            ))
+            if pending_count == 0:
+                # All tasks completed - stop naturally
+                context = state.get("context", {})
+                context["all_tasks_completed"] = True
+                state["context"] = context
+                return "end"
+        
+        # Continue to planning agent for more processing
+        return "planning_agent"
+
 
     def _should_continue(self, state: GraphState) -> str:
         selected_agent = state.get("selected_agent")
@@ -1374,64 +1643,75 @@ class MultiAgentWorkflow:
                 yield {"type": "error", "error": str(e)}
             return
 
-        # Handle planning agent (non-streaming)
+        # Handle planning agent - uses ainvoke (not streaming) internally
         if selected_agent == "planning_agent":
-            conversation_history = []
-            if conversation_id and user_id:
-                try:
-                    memory_manager = get_memory_manager()
-                    conv_memory = await memory_manager.get_memory(
-                        UUID(conversation_id), UUID(user_id), force_refresh=True
-                    )
-                    # Get all messages from history without limit
-                    conversation_history = conv_memory.get_recent_messages(
-                        limit=None, exclude_last=1
-                    )
-                except Exception:
-                    pass
-
-            metadata = {
-                "history": conversation_history,
-                "persona": persona,
-            }
+            # Convert existing_tasks to todos format for state
+            todos = []
             if existing_tasks:
-                metadata["existing_tasks"] = existing_tasks
+                for i, task in enumerate(existing_tasks):
+                    todos.append({
+                        "id": task.get("id", str(i)),
+                        "description": task.get("description", ""),
+                        "status": task.get("status", "pending"),
+                        "order": task.get("task_order", i),
+                        "dependencies": task.get("dependencies", []),
+                        "complexity": task.get("estimated_complexity"),
+                    })
 
-            agent_msg = AgentMessage(
-                role=MessageRole.USER,
-                content=message,
-                metadata=metadata,
-            )
+            # Set up initial state for graph execution
+            initial_state["todos"] = todos
+            # Find the first pending or in-progress task as current
+            current_task_index = None
+            for i, todo in enumerate(todos):
+                status = todo.get("status", "pending")
+                if status in ("pending", "in_progress"):
+                    current_task_index = i
+                    break
+            initial_state["current_task_index"] = current_task_index
+            initial_state["planning_call_count"] = 0
 
             try:
-                # Check if this is a plan modification or new plan creation
-                if existing_tasks:
-                    response = await self.planning_agent.modify_plan(
-                        agent_msg, existing_tasks, conversation_id
-                    )
-                else:
-                    response = await self.planning_agent.generate_plan(
-                        agent_msg, conversation_id
-                    )
-
-                # Yield the response content as tokens for UI consistency
-                if response and response.message:
-                    content = coerce_response_text(response.message.content)
-                    # Planning agent uses structured output (non-streaming); chunk to emulate token streaming for UI.
-                    chunk_size = 200
-                    for i in range(0, len(content), chunk_size):
-                        chunk = content[i : i + chunk_size]
-                        if chunk:
-                            yield {"type": "token", "content": chunk}
+                # Use ainvoke for planning agent since it doesn't stream internally
+                result = await self.graph.ainvoke(initial_state, config=config)
+                
+                response = result.get("response")
+                final_todos = result.get("todos", [])
+                
+                # Ensure we have a valid response with todos in metadata
+                if response:
+                    if response.metadata is None:
+                        response.metadata = {}
+                    if final_todos:
+                        response.metadata["todos"] = final_todos
+                    response.metadata["planning_call_count"] = result.get("planning_call_count", 0)
+                    
+                    # Check context for completion status
+                    context = result.get("context", {})
+                    if context.get("all_tasks_completed"):
+                        response.metadata["all_tasks_completed"] = True
+                    if context.get("planning_budget_reached"):
+                        response.metadata["planning_budget_reached"] = True
+                    
+                    # If response content is empty, try to extract from last AI message
+                    if not response.message.content:
+                        messages = result.get("messages", [])
+                        for msg in reversed(messages):
+                            if isinstance(msg, AIMessage) and msg.content:
+                                response.message.content = msg.content
+                                break
+                
+                # Yield the content as tokens for UI compatibility
+                if response and response.message and response.message.content:
+                    yield {"type": "token", "content": response.message.content}
+                
+                if response:
                     yield {"type": "complete", "response": response}
                 else:
-                    yield {
-                        "type": "error",
-                        "error": "Planning agent returned no response",
-                    }
+                    yield {"type": "error", "error": "No response generated"}
             except Exception as e:
                 yield {"type": "error", "error": str(e)}
             return
+
 
         accumulated_content = ""
         accumulated_thinking = ""  # Track thinking content for non-RAG agents

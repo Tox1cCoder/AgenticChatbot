@@ -219,7 +219,6 @@ def build_chat_prompt(
         parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
     if conversation_history:
-        # Pass all history without message limit, only apply token limit if configured
         max_tokens = (
             settings.chat_history_max_tokens
             if settings.chat_history_max_tokens > 0
@@ -361,7 +360,6 @@ def build_rag_prompt(
         )
 
     if conversation_history:
-        # Pass all history without message limit, only apply token limit if configured
         max_tokens = (
             settings.rag_history_max_tokens
             if settings.rag_history_max_tokens > 0
@@ -419,7 +417,6 @@ LANGUAGE: Match the user's language."""
         parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
     if conversation_history:
-        # Pass all history without message limit, only apply token limit if configured
         max_tokens = (
             settings.search_history_max_tokens
             if settings.search_history_max_tokens > 0
@@ -451,7 +448,6 @@ def build_image_generator_prompt(
         parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
     if conversation_history:
-        # Pass all history without message limit, only apply token limit if configured
         max_tokens = (
             settings.chat_history_max_tokens
             if settings.chat_history_max_tokens > 0
@@ -536,6 +532,72 @@ RESPONSE FORMAT:
 Create comprehensive plans that cover all aspects of the request while maintaining logical ordering and appropriate granularity."""
 
 
+PLANNING_EXECUTION_PROMPT = """You are a task planning and execution assistant. You help users create, manage, and execute task plans.
+
+You have access to the `write_todos` tool to manage the task list. Use it to:
+- SET_TODOS: Create a new task list (when the user asks to create a plan)
+- ADD_TODO: Add a new task to the existing list
+- START_TODO: Mark a task as "in progress" when starting work on it
+- COMPLETE_TODO: Mark a task as "completed" when finished
+- UPDATE_TODO: Modify a task's description or properties
+- REMOVE_TODO: Remove a task from the list
+
+TODO FORMAT for SET_TODOS and ADD_TODO actions:
+Each todo must have this structure:
+{
+  "id": "1",           // Unique string identifier (use "1", "2", "3", etc. for NEW plans)
+  "description": "...", // What needs to be done  
+  "status": "pending",  // One of: "pending", "in_progress", "completed", "skipped"
+  "order": 0,          // 0-indexed position in the list
+  "dependencies": [],   // List of todo IDs this depends on (e.g., ["1", "2"])
+  "complexity": "low"   // Optional: "low", "medium", or "high"
+}
+
+EXAMPLE - Creating a plan for "Build a website":
+Use write_todos with action="set_todos" and todos=[
+  {"id": "1", "description": "Set up project structure", "status": "pending", "order": 0, "dependencies": [], "complexity": "low"},
+  {"id": "2", "description": "Design homepage layout", "status": "pending", "order": 1, "dependencies": [], "complexity": "medium"},
+  {"id": "3", "description": "Implement navigation", "status": "pending", "order": 2, "dependencies": ["1"], "complexity": "low"},
+  {"id": "4", "description": "Build homepage", "status": "pending", "order": 3, "dependencies": ["1", "2"], "complexity": "medium"}
+]
+
+WORKFLOW:
+1. When user asks to CREATE a plan: IMMEDIATELY call write_todos with action="set_todos" and provide the full todos list
+2. When user asks to MODIFY a plan: Use ADD_TODO, UPDATE_TODO, or REMOVE_TODO actions
+3. When user wants to START executing or IMPLEMENT the plan:
+   - Work through tasks autonomously - don't stop after each task!
+   - For each task: START_TODO -> do the work -> COMPLETE_TODO -> move to next
+   - Continue until all tasks are done or you need user input
+
+IMPORTANT - USING TASK IDs:
+- When an EXISTING PLAN is shown above, each task has an ID displayed as [ID: xxx]
+- You MUST use that EXACT ID when calling COMPLETE_TODO or START_TODO
+- Example: If you see "Task 1 [ID: abc-123-def]: Set up project" - use todo_id="abc-123-def"
+- Do NOT use numbers like "1" or "2" for existing tasks - use the exact ID shown
+
+AGENTIC EXECUTION:
+- Work AUTONOMOUSLY through the plan - complete as many tasks as possible in one session
+- For each task you work on:
+  1. Call START_TODO to mark it in progress
+  2. Use available tools to complete the work
+  3. Call COMPLETE_TODO to mark it done
+  4. Immediately move to the next ready task
+- DO NOT wait for user confirmation between tasks
+- Simple tasks can be completed together; complex ones may need multiple tool calls
+
+WHEN TO STOP:
+- When ALL tasks are completed (report success)
+- When you need user clarification or approval for a specific decision
+- When you encounter an error you cannot resolve
+- DO NOT stop just because you finished one task - continue to the next!
+
+LANGUAGE: Always respond in the user's language.
+
+CRITICAL: You MUST call write_todos tool to update task status. Never just say "task complete" in text - always use COMPLETE_TODO action to actually mark it complete."""
+
+
+
+
 def build_planning_prompt(
     user_request: str, conversation_history: list, persona: Optional[str] = None
 ) -> str:
@@ -546,7 +608,6 @@ def build_planning_prompt(
         parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
 
     if conversation_history:
-        # Pass all history without message limit, only apply token limit if configured
         max_tokens = (
             settings.chat_history_max_tokens
             if settings.chat_history_max_tokens > 0

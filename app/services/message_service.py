@@ -586,6 +586,19 @@ class MessageService(IMessageService):
                 if plan_saved:
                     bot_metadata["plan_saved"] = True
 
+                # Sync todos from graph state if present (for planning agent)
+                if (
+                    bot_response
+                    and bot_response.metadata
+                    and bot_response.metadata.get("todos")
+                ):
+                    self._sync_todos_to_database(
+                        conversation_id=message_create_data.conversation_id,
+                        user_id=user_id,
+                        todos=bot_response.metadata["todos"],
+                    )
+                    bot_metadata["todos_synced"] = True
+
                 # Mark current task as completed if planning mode is active
                 # Skip if plan was just replaced (old task IDs are invalid)
                 if (
@@ -1012,109 +1025,93 @@ class MessageService(IMessageService):
         int,
         Optional[Dict[str, Any]],
     ]:
-        max_tasks = getattr(settings, "max_auto_plan_tasks", 3)
-        attachments_for_iteration = attachments
-        combined_contents: List[str] = []
-        execution_count = 0
+        """
+        Execute planning workflow with graph-driven ReAct loop.
+        
+        The graph now handles iteration internally via the planning_tools node.
+        This function makes a single call and syncs todo state afterward.
+        """
         bot_response: Optional[AgentResponse] = None
         bot_metadata: Dict[str, Any] = {}
         has_plan = has_existing_plan
 
-        while True:
-            # Exit early if no task to execute (plan complete)
-            if auto_execute_plan and execution_count > 0 and not current_task_context:
-                break
+        # Single call to AI service - graph handles ReAct loop internally
+        bot_response = await self.ai_service.generate_bot_response(
+            user_message=message_content,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            attachments=attachments,
+            current_task=current_task_context,
+            all_tasks=existing_tasks_dict,
+            planning_mode_enabled=planning_mode_enabled,
+            has_existing_plan=has_plan,
+            existing_tasks=existing_tasks_dict,
+        )
 
-            bot_response = await self.ai_service.generate_bot_response(
-                user_message=message_content,
+        # Handle interrupts (HITL)
+        if (
+            bot_response
+            and bot_response.metadata
+            and "interrupt" in bot_response.metadata
+        ):
+            return (
+                None,
+                {},
+                bot_response,
+                0,  # execution_count not relevant with graph-driven execution
+                bot_response.metadata["interrupt"],
+            )
+
+        bot_response_content = (
+            bot_response.message.content
+            if bot_response and bot_response.message
+            else "No response generated"
+        )
+
+        bot_metadata = dict(bot_response.metadata) if bot_response else {}
+        if sanitized_persona:
+            bot_metadata.setdefault("persona_used", sanitized_persona)
+
+        if bot_response and bot_response.tool_artifacts:
+            bot_metadata.setdefault("tool_artifacts", bot_response.tool_artifacts)
+
+        if (
+            bot_response
+            and bot_response.metadata
+            and "images" in bot_response.metadata
+        ):
+            bot_metadata["images"] = bot_response.metadata["images"]
+
+        # Sync plan from response metadata (legacy and new format)
+        plan_saved, has_plan = self._sync_plan_from_response_metadata(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            bot_response=bot_response,
+            has_existing_plan=has_plan,
+        )
+        if plan_saved:
+            bot_metadata["plan_saved"] = True
+
+        # Sync todos from graph state if present
+        if bot_response and bot_response.metadata.get("todos"):
+            self._sync_todos_to_database(
                 conversation_id=conversation_id,
                 user_id=user_id,
-                attachments=attachments_for_iteration,
-                current_task=current_task_context,
-                all_tasks=existing_tasks_dict,
-                planning_mode_enabled=planning_mode_enabled,
-                has_existing_plan=has_plan,
-                existing_tasks=existing_tasks_dict,
+                todos=bot_response.metadata["todos"],
+            )
+            bot_metadata["todos_synced"] = True
+
+        # Check if planning budget was reached
+        if bot_response and bot_response.metadata.get("planning_budget_reached"):
+            bot_metadata["execution_paused"] = True
+            bot_metadata["execution_pause_reason"] = PauseReason.MAX_TASKS_REACHED.value
+            bot_metadata["execution_pause_message"] = (
+                "Completed a planning iteration. Send a message to continue."
             )
 
-            if (
-                bot_response
-                and bot_response.metadata
-                and "interrupt" in bot_response.metadata
-            ):
-                return (
-                    None,
-                    {},
-                    bot_response,
-                    execution_count,
-                    bot_response.metadata["interrupt"],
-                )
-
-            bot_response_content = (
-                bot_response.message.content
-                if bot_response and bot_response.message
-                else "No response generated"
-            )
-            combined_contents.append(bot_response_content)
-
-            bot_metadata = dict(bot_response.metadata) if bot_response else {}
-            if sanitized_persona:
-                bot_metadata.setdefault("persona_used", sanitized_persona)
-
-            if bot_response and bot_response.tool_artifacts:
-                bot_metadata.setdefault("tool_artifacts", bot_response.tool_artifacts)
-
-            if (
-                bot_response
-                and bot_response.metadata
-                and "images" in bot_response.metadata
-            ):
-                bot_metadata["images"] = bot_response.metadata["images"]
-
-            plan_saved, has_plan = self._sync_plan_from_response_metadata(
-                conversation_id=conversation_id,
-                user_id=user_id,
-                bot_response=bot_response,
-                has_existing_plan=has_plan,
-            )
-            if plan_saved:
-                bot_metadata["plan_saved"] = True
-
-            next_task = None
-            # Mark current task as completed if planning mode is active
-            # Skip if plan was just replaced (old task IDs are invalid)
-            if (
-                planning_mode_enabled
-                and current_task
-                and self.task_plan_service
-                and user_id
-                and not plan_saved
-            ):
-                fresh_task = self.task_plan_service.get_by_id(current_task.id, user_id)
-                if fresh_task and fresh_task.status == TaskStatus.pending:
-                    self.task_plan_service.mark_task_completed(current_task.id, user_id)
-
-            # Always refresh task data after processing (whether plan was saved or task completed)
-            if planning_mode_enabled and self.task_plan_service and user_id:
-                # Refresh existing_tasks_dict with updated status
-                refreshed_tasks = self.task_plan_service.get_conversation_tasks(
-                    conversation_id, user_id, include_completed=True
-                )
-                existing_tasks_dict = [
-                    {
-                        "id": str(t.id),
-                        "description": t.description,
-                        "status": (
-                            t.status.value
-                            if hasattr(t.status, "value")
-                            else str(t.status)
-                        ),
-                        "task_order": t.task_order,
-                        "dependencies": [str(d) for d in (t.dependencies or [])],
-                    }
-                    for t in refreshed_tasks
-                ]
-
+        # Refresh task data for next_task info
+        if planning_mode_enabled and self.task_plan_service and user_id:
+            try:
                 next_task = self.task_plan_service.get_next_task(
                     conversation_id, user_id
                 )
@@ -1124,39 +1121,74 @@ class MessageService(IMessageService):
                         "description": next_task.description,
                         "order": next_task.task_order,
                     }
+            except Exception:
+                pass
 
-            execution_count += 1
-            attachments_for_iteration = None
+        # Fix markdown code blocks
+        bot_response_content = fix_markdown_code_blocks(bot_response_content)
 
-            # Stop if: not auto-executing, no more tasks, or hit max tasks limit
-            if not auto_execute_plan or not next_task or execution_count >= max_tasks:
-                if auto_execute_plan and next_task and execution_count >= max_tasks:
-                    bot_metadata["execution_paused"] = True
-                    bot_metadata["execution_pause_reason"] = (
-                        PauseReason.MAX_TASKS_REACHED.value
-                    )
-                    bot_metadata["execution_pause_message"] = (
-                        f"Executed {execution_count} tasks. Send a message to continue with remaining tasks."
-                    )
-                break
+        return bot_response_content, bot_metadata, bot_response, 1, None
 
-            current_task = next_task
-            current_task_context = self._build_task_context_dict(next_task)
+    def _sync_todos_to_database(
+        self,
+        conversation_id: UUID,
+        user_id: Optional[UUID],
+        todos: List[Dict[str, Any]],
+    ) -> None:
+        if not self.task_plan_service or not todos or not user_id:
+            return
 
-        # If no content was generated but we have a pause message, use that as content
-        if not combined_contents and bot_metadata.get("execution_pause_message"):
-            combined_content = bot_metadata["execution_pause_message"]
-        else:
-            combined_content = (
-                "\n\n---\n\n".join(combined_contents)
-                if combined_contents
-                else "No response generated"
+        try:
+            existing_tasks = self.task_plan_service.get_conversation_tasks(
+                conversation_id, user_id, include_completed=True
             )
+            
+            if not existing_tasks:
+                plan_payload = {
+                    "tasks": [
+                        {
+                            "description": todo.get("description", ""),
+                            "dependencies": [
+                                int(d) for d in todo.get("dependencies", []) 
+                                if isinstance(d, int) or (isinstance(d, str) and d.isdigit())
+                            ],
+                            "estimated_complexity": todo.get("complexity"),
+                        }
+                        for todo in todos
+                    ]
+                }
+                self.task_plan_service.sync_plan_from_agent(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    plan_payload=plan_payload,
+                )
+                return
 
-        # Fix markdown code blocks that may be missing newlines before opening fences
-        combined_content = fix_markdown_code_blocks(combined_content)
+            task_by_id = {str(task.id): task for task in existing_tasks}
+            task_by_order = {task.task_order: task for task in existing_tasks}
+            tasks_by_index = {i: task for i, task in enumerate(existing_tasks)}
+            
+            for i, todo in enumerate(todos):
+                todo_id = str(todo.get("id", ""))
+                todo_status = todo.get("status", "pending")
+                todo_order = todo.get("order")
+                
+                task = task_by_id.get(todo_id)
+                
+                if not task and todo_order is not None:
+                    task = task_by_order.get(todo_order)
+                
+                if not task:
+                    task = tasks_by_index.get(i)
+                
+                if task:
+                    task_status_str = task.status.value if hasattr(task.status, "value") else str(task.status)
+                    if todo_status in ("completed", "COMPLETED") and task_status_str != "completed":
+                        self.task_plan_service.mark_task_completed(task.id, user_id)
+                    elif todo_status in ("in_progress", "IN_PROGRESS") and task_status_str == "pending":
+                        if hasattr(self.task_plan_service, "mark_task_in_progress"):
+                            self.task_plan_service.mark_task_in_progress(task.id, user_id)
 
-        if auto_execute_plan and execution_count > 1:
-            bot_metadata["auto_executed_tasks"] = execution_count
+        except Exception:
+            pass
 
-        return combined_content, bot_metadata, bot_response, execution_count, None

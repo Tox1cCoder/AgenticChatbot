@@ -17,6 +17,7 @@ from app.ai.agents.planning_agent import PlanningAgent
 from app.ai.schemas import AgentMessage, MessageRole
 from app.models.enums import TaskStatus
 from app.core.exceptions import ResourceNotFoundException
+from app.ai.schemas import Plan, Task
 
 if TYPE_CHECKING:
     from app.ai.schemas import Plan
@@ -44,8 +45,6 @@ class TaskPlanService(ITaskPlanService):
             self.conversation_repository.update(conversation_id, update)
 
     def _build_plan_from_payload(self, plan_payload: Dict[str, Any]) -> "Plan":
-        from app.ai.schemas import Plan, Task
-
         tasks = [Task(**t) for t in plan_payload.get("tasks", [])]
         return Plan(tasks=tasks, overall_goal=plan_payload.get("overall_goal"))
 

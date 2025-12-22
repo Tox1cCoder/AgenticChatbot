@@ -241,6 +241,10 @@ class MCPManager:
             for key, value in schema.items():
                 if key in unsupported_keys:
                     continue
+                
+                # Skip None values - Gemini can't handle them in schemas
+                if value is None:
+                    continue
 
                 # Recursively filter nested structures
                 if key in (
@@ -251,20 +255,27 @@ class MCPManager:
                     "oneOf",
                     "definitions",
                 ):
-                    filtered[key] = self._filter_schema_recursively(value)
+                    filtered_value = self._filter_schema_recursively(value)
+                    # Only include if not empty after filtering
+                    if filtered_value:
+                        filtered[key] = filtered_value
                 elif isinstance(value, dict):
-                    filtered[key] = self._filter_schema_recursively(value)
+                    filtered_value = self._filter_schema_recursively(value)
+                    if filtered_value:  # Only include non-empty dicts
+                        filtered[key] = filtered_value
                 elif isinstance(value, list):
                     filtered[key] = [
                         self._filter_schema_recursively(item) for item in value
+                        if item is not None
                     ]
                 else:
                     filtered[key] = value
             return filtered
         elif isinstance(schema, list):
-            return [self._filter_schema_recursively(item) for item in schema]
+            return [self._filter_schema_recursively(item) for item in schema if item is not None]
         else:
             return schema
+
 
     def _remove_non_string_enums(self, schema: Any) -> Any:
         if isinstance(schema, dict):

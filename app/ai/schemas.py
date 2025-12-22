@@ -128,6 +128,11 @@ class GraphState(TypedDict):
     all_tasks: NotRequired[Optional[List[Dict[str, Any]]]]
     planning_mode_enabled: NotRequired[Optional[bool]]
     has_existing_plan: NotRequired[Optional[bool]]
+    # Dynamic todo tracking (for write_todos tool)
+    todos: NotRequired[Optional[List[Dict[str, Any]]]]
+    current_task_index: NotRequired[Optional[int]]
+    planning_call_count: NotRequired[Optional[int]]
+
 
 
 class Task(BaseModel):
@@ -150,3 +155,64 @@ class Plan(BaseModel):
     overall_goal: Optional[str] = Field(
         None, description="High-level description of what the plan achieves"
     )
+
+
+# === Todo Management Schemas for write_todos tool ===
+
+
+class TodoStatus(str, Enum):
+    """Status of a todo item."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    SKIPPED = "skipped"
+
+
+class TodoAction(str, Enum):
+    """Action types for the write_todos tool."""
+
+    SET_TODOS = "set_todos"  # Replace all todos with new list
+    ADD_TODO = "add_todo"  # Add a single todo
+    UPDATE_TODO = "update_todo"  # Update a todo's description or status
+    COMPLETE_TODO = "complete_todo"  # Mark a todo as completed
+    REMOVE_TODO = "remove_todo"  # Remove a todo
+    START_TODO = "start_todo"  # Mark a todo as in progress
+
+
+class TodoItem(BaseModel):
+    """Represents a todo item in the planning workflow."""
+
+    id: str = Field(..., description="Unique identifier for the todo")
+    description: str = Field(..., description="What needs to be done")
+    status: TodoStatus = Field(
+        default=TodoStatus.PENDING, description="Current status of the todo"
+    )
+    order: int = Field(..., description="Order/position in the todo list (0-indexed)")
+    dependencies: List[str] = Field(
+        default_factory=list,
+        description="List of todo IDs this item depends on",
+    )
+    complexity: Optional[str] = Field(
+        None, description="Complexity estimate: 'low', 'medium', or 'high'"
+    )
+
+
+class WriteTodosInput(BaseModel):
+    """Input schema for the write_todos tool."""
+
+    action: TodoAction = Field(..., description="The action to perform")
+    todos: Optional[List[TodoItem]] = Field(
+        None, description="For SET_TODOS: the complete list of todos to set"
+    )
+    todo: Optional[TodoItem] = Field(
+        None, description="For ADD_TODO, UPDATE_TODO: the todo item"
+    )
+    todo_id: Optional[str] = Field(
+        None,
+        description="For COMPLETE_TODO, REMOVE_TODO, START_TODO: the ID of the todo to modify",
+    )
+    reason: Optional[str] = Field(
+        None, description="Optional reason for the action (e.g., why skipping/completing)"
+    )
+

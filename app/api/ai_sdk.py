@@ -1,16 +1,19 @@
 import json
 import asyncio
-from typing import Any, Dict, List, Optional
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Optional, AsyncGenerator
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.message_service_interface import IMessageService
+from app.interfaces.conversation_service_interface import IConversationService
 from app.models.enums import MessageRole
 from app.schemas.message import MessageCreate
+from app.schemas.conversation import ConversationCreate, ConversationUpdate
 
 
 router = APIRouter(tags=["ai-sdk"])
@@ -90,7 +93,7 @@ def _clean_tool_output(value: Any) -> Any:
                     cleaned.append(_clean_tool_output(item))
             else:
                 cleaned.append(_clean_tool_output(item))
-        
+
         # Unwrap single-item lists
         if len(cleaned) == 1:
             return cleaned[0]
@@ -114,15 +117,15 @@ def _coerce_json_object(value: Any) -> Any:
     """
     if value is None:
         return None
-    
+
     # Return dicts and lists as-is - they'll be properly serialized by json.dumps
     if isinstance(value, (dict, list)):
         return value
-    
+
     # Return primitives as-is (except strings that look like JSON)
     if isinstance(value, (int, float, bool)):
         return value
-    
+
     # Try to parse strings as JSON if they look like JSON
     if isinstance(value, str):
         s = value.strip()
@@ -136,9 +139,454 @@ def _coerce_json_object(value: Any) -> Any:
             except Exception:
                 pass
         return value
-    
+
     # Fallback for other types - convert to string
     return str(value)
+
+
+class StreamState:
+    """Maintains the streaming state across event handlers."""
+
+    def __init__(self, message_id: str, text_id: str, reasoning_id: str):
+        self.message_id = message_id
+        self.text_id = text_id
+        self.reasoning_id = reasoning_id
+        self.text_started = False
+        self.reasoning_started = False
+        self.any_text_delta = False
+        self.tool_seq = 0
+        self.pending_tool_call_ids: List[str] = []
+
+
+class EventHandler(ABC):
+    """Base class for event handlers."""
+
+    @abstractmethod
+    async def handle(
+        self, event: Dict[str, Any], state: StreamState
+    ) -> AsyncGenerator[str, None]:
+        """Handle an event and yield SSE messages."""
+        pass
+
+
+class TokenEventHandler(EventHandler):
+    """Handles token streaming events."""
+
+    async def handle(
+        self, event: Dict[str, Any], state: StreamState
+    ) -> AsyncGenerator[str, None]:
+        delta = event.get("content") or ""
+        if delta:
+            state.any_text_delta = True
+            yield _sse({"type": "text-delta", "id": state.text_id, "delta": delta})
+
+
+class ThinkingEventHandler(EventHandler):
+    """Handles thinking/reasoning events."""
+
+    async def handle(
+        self, event: Dict[str, Any], state: StreamState
+    ) -> AsyncGenerator[str, None]:
+        delta = event.get("content") or ""
+        if not delta:
+            return
+
+        if not state.reasoning_started:
+            state.reasoning_started = True
+            yield _sse({"type": "reasoning-start", "id": state.reasoning_id})
+
+        yield _sse(
+            {"type": "reasoning-delta", "id": state.reasoning_id, "delta": delta}
+        )
+
+
+class AgentSelectedEventHandler(EventHandler):
+    """Handles agent selection events."""
+
+    async def handle(
+        self, event: Dict[str, Any], state: StreamState
+    ) -> AsyncGenerator[str, None]:
+        agent = event.get("agent")
+        yield _sse(
+            {
+                "type": "data-agent-selected",
+                "data": {"agent": agent},
+                "transient": True,
+            }
+        )
+
+
+class UserMessageCreatedEventHandler(EventHandler):
+    """Handles user message creation events."""
+
+    async def handle(
+        self, event: Dict[str, Any], state: StreamState
+    ) -> AsyncGenerator[str, None]:
+        yield _sse(
+            {
+                "type": "data-user-message",
+                "data": {"message": event.get("message")},
+                "transient": True,
+            }
+        )
+
+
+class ToolEventHandler(EventHandler):
+    """Handles tool execution events."""
+
+    async def handle(
+        self, event: Dict[str, Any], state: StreamState
+    ) -> AsyncGenerator[str, None]:
+        tool_name = event.get("name") or "unknown"
+        status = event.get("status")
+        tool_call_id = self._get_tool_call_id(event, status, state)
+
+        if status == "start":
+            async for msg in self._handle_tool_start(
+                event, tool_call_id, tool_name, state
+            ):
+                yield msg
+        elif status == "end":
+            async for msg in self._handle_tool_end(event, tool_call_id, state):
+                yield msg
+
+    def _get_tool_call_id(
+        self, event: Dict[str, Any], status: str, state: StreamState
+    ) -> str:
+        """Get or generate tool call ID."""
+        tool_call_id = event.get("tool_call_id")
+        if tool_call_id:
+            return str(tool_call_id)
+
+        if status == "end" and state.pending_tool_call_ids:
+            return state.pending_tool_call_ids.pop(0)
+
+        state.tool_seq += 1
+        return f"tool_{state.tool_seq}"
+
+    async def _handle_tool_start(
+        self,
+        event: Dict[str, Any],
+        tool_call_id: str,
+        tool_name: str,
+        state: StreamState,
+    ) -> AsyncGenerator[str, None]:
+        """Handle tool start event."""
+        state.pending_tool_call_ids.append(tool_call_id)
+        yield _sse(
+            {
+                "type": "tool-input-start",
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+            }
+        )
+
+        tool_input = event.get("args")
+        yield _sse(
+            {
+                "type": "tool-input-available",
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+                "input": _coerce_json_object(_clean_tool_output(tool_input)),
+            }
+        )
+
+    async def _handle_tool_end(
+        self, event: Dict[str, Any], tool_call_id: str, state: StreamState
+    ) -> AsyncGenerator[str, None]:
+        """Handle tool end event."""
+        if tool_call_id in state.pending_tool_call_ids:
+            try:
+                state.pending_tool_call_ids.remove(tool_call_id)
+            except ValueError:
+                pass
+
+        output = event.get("result")
+        yield _sse(
+            {
+                "type": "tool-output-available",
+                "toolCallId": tool_call_id,
+                "output": _coerce_json_object(_clean_tool_output(output)),
+            }
+        )
+
+
+class InterruptEventHandler(EventHandler):
+    """Handles interrupt events."""
+
+    async def handle(
+        self, event: Dict[str, Any], state: StreamState
+    ) -> AsyncGenerator[str, None]:
+        yield _sse(
+            {
+                "type": "text-delta",
+                "id": state.text_id,
+                "delta": "Tool execution requires approval.",
+            }
+        )
+
+        if state.text_started:
+            yield _sse({"type": "text-end", "id": state.text_id})
+        if state.reasoning_started:
+            yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
+
+        yield _sse(
+            {
+                "type": "data-interrupt",
+                "data": {
+                    "threadId": event.get("thread_id"),
+                    "next": event.get("next"),
+                    "pendingToolCalls": event.get("pending_tool_calls"),
+                    "interrupt": event.get("interrupt"),
+                    "message": event.get("message"),
+                },
+            }
+        )
+
+        yield _sse({"type": "finish-step"})
+        yield _sse({"type": "finish"})
+        yield "data: [DONE]\n\n"
+
+
+class ErrorEventHandler(EventHandler):
+    """Handles error events."""
+
+    async def handle(
+        self, event: Dict[str, Any], state: StreamState
+    ) -> AsyncGenerator[str, None]:
+        yield _sse({"type": "error", "errorText": event.get("error") or ""})
+
+        if state.text_started:
+            yield _sse({"type": "text-end", "id": state.text_id})
+        if state.reasoning_started:
+            yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
+
+        if event.get("message"):
+            yield _sse(
+                {
+                    "type": "data-error-message",
+                    "data": {"message": event.get("message")},
+                    "transient": True,
+                }
+            )
+
+        yield _sse({"type": "finish-step"})
+        yield _sse({"type": "finish"})
+        yield "data: [DONE]\n\n"
+
+
+class CompleteEventHandler(EventHandler):
+    """Handles completion events."""
+
+    async def handle(
+        self, event: Dict[str, Any], state: StreamState
+    ) -> AsyncGenerator[str, None]:
+        message = event.get("message") or {}
+
+        if not state.any_text_delta:
+            content = ""
+            if isinstance(message, dict):
+                content = message.get("content") or ""
+            if isinstance(content, str) and content.strip():
+                state.any_text_delta = True
+                yield _sse(
+                    {
+                        "type": "text-delta",
+                        "id": state.text_id,
+                        "delta": content,
+                    }
+                )
+
+        if message:
+            yield _sse(
+                {
+                    "type": "data-assistant-message",
+                    "data": {"message": message},
+                    "transient": True,
+                }
+            )
+
+
+class EventHandlerFactory:
+    """Factory for creating event handlers."""
+
+    _handlers = {
+        "token": TokenEventHandler(),
+        "thinking": ThinkingEventHandler(),
+        "agent_selected": AgentSelectedEventHandler(),
+        "user_message_created": UserMessageCreatedEventHandler(),
+        "tool": ToolEventHandler(),
+        "interrupt": InterruptEventHandler(),
+        "error": ErrorEventHandler(),
+        "complete": CompleteEventHandler(),
+    }
+
+    @classmethod
+    def get_handler(cls, event_type: str) -> Optional[EventHandler]:
+        """Get handler for the given event type."""
+        return cls._handlers.get(event_type)
+
+
+@router.post(
+    "/ai/conversations",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_201_CREATED,
+)
+@AppAutoInjector.auto_inject()
+async def create_conversation_ai_sdk(
+    conversation_service: IConversationService,
+    current_user_id: UUID,
+) -> Dict[str, Any]:
+    """Create a new conversation for AI SDK client"""
+    from app.schemas.conversation import ConversationCreate
+    from app.interfaces.conversation_service_interface import IConversationService
+
+    conversation_data = ConversationCreate(title="New Conversation")
+    result = conversation_service.create_conversation(
+        conversation_data, current_user_id
+    )
+    return {
+        "id": str(result.id),
+        "title": result.title,
+        "created_at": result.created_at.isoformat() if result.created_at else None,
+        "updated_at": result.updated_at.isoformat() if result.updated_at else None,
+    }
+
+
+@router.get("/ai/conversations", response_model=Dict[str, Any])
+@AppAutoInjector.auto_inject()
+async def get_conversations_ai_sdk(
+    conversation_service: IConversationService,
+    current_user_id: UUID,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=100, ge=1, le=100),
+    order_by: str = Query(default="updatedAt", alias="orderBy"),
+    order_direction: str = Query(default="desc", alias="orderDirection"),
+) -> Dict[str, Any]:
+    """Get all conversations for AI SDK client"""
+
+    # Convert camelCase to snake_case for order_by
+    order_by_mapping = {"createdAt": "created_at", "updatedAt": "updated_at"}
+    order_by_snake = order_by_mapping.get(order_by, "updated_at")
+
+    paginated_result = conversation_service.get_by_user_id(
+        current_user_id,
+        page=page,
+        limit=limit,
+        order_by=order_by_snake,
+        order_direction=order_direction,
+        include=[],
+        latest_messages=0,
+    )
+
+    conversations = [
+        {
+            "id": str(conv.id),
+            "title": conv.title,
+            "created_at": conv.created_at.isoformat() if conv.created_at else None,
+            "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+        }
+        for conv in paginated_result.items
+    ]
+
+    return {
+        "conversations": conversations,
+        "total": paginated_result.meta.total,
+    }
+
+
+@router.get("/ai/conversations/{conversation_id}", response_model=Dict[str, Any])
+@AppAutoInjector.auto_inject()
+async def get_conversation_ai_sdk(
+    conversation_id: UUID,
+    conversation_service: IConversationService,
+    current_user_id: UUID,
+) -> Dict[str, Any]:
+    """Get conversation by ID for AI SDK client"""
+    from app.interfaces.conversation_service_interface import IConversationService
+
+    result = conversation_service.get_by_id_for_user(conversation_id, current_user_id)
+    return {
+        "id": str(result.id),
+        "title": result.title,
+        "created_at": result.created_at.isoformat() if result.created_at else None,
+        "updated_at": result.updated_at.isoformat() if result.updated_at else None,
+    }
+
+
+@router.patch("/ai/conversations/{conversation_id}", response_model=Dict[str, Any])
+@AppAutoInjector.auto_inject()
+async def update_conversation_ai_sdk(
+    conversation_id: UUID,
+    payload: Dict[str, Any],
+    conversation_service: IConversationService,
+    current_user_id: UUID,
+) -> Dict[str, Any]:
+    """Update conversation for AI SDK client"""
+    from app.schemas.conversation import ConversationUpdate
+    from app.interfaces.conversation_service_interface import IConversationService
+
+    conversation_data = ConversationUpdate(title=payload.get("title"))
+    result = conversation_service.update_conversation(
+        conversation_id, current_user_id, conversation_data
+    )
+    return {
+        "id": str(result.id),
+        "title": result.title,
+        "created_at": result.created_at.isoformat() if result.created_at else None,
+        "updated_at": result.updated_at.isoformat() if result.updated_at else None,
+    }
+
+
+@router.delete(
+    "/ai/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+@AppAutoInjector.auto_inject()
+async def delete_conversation_ai_sdk(
+    conversation_id: UUID,
+    conversation_service: IConversationService,
+    current_user_id: UUID,
+):
+    """Delete conversation for AI SDK client"""
+    from app.interfaces.conversation_service_interface import IConversationService
+
+    conversation_service.delete_conversation(conversation_id, current_user_id)
+
+
+@router.get(
+    "/ai/conversations/{conversation_id}/messages", response_model=Dict[str, Any]
+)
+@AppAutoInjector.auto_inject()
+async def get_conversation_messages_ai_sdk(
+    conversation_id: UUID,
+    message_service: IMessageService,
+    current_user_id: UUID,
+) -> Dict[str, Any]:
+    """Get conversation messages for AI SDK client"""
+    paginated_result = message_service.get_conversation_messages(
+        conversation_id,
+        current_user_id,
+        page=1,
+        limit=100,
+        order_by="created_at",
+        order_direction="asc",
+        include_feedback=False,
+    )
+
+    messages = [
+        {
+            "id": str(msg.id),
+            "role": msg.role.value if hasattr(msg.role, "value") else msg.role,
+            "content": msg.content,
+            "created_at": msg.created_at.isoformat() if msg.created_at else None,
+        }
+        for msg in paginated_result.items
+    ]
+
+    return {
+        "messages": messages,
+        "total": paginated_result.total,
+    }
 
 
 @router.post("/ai/chat/{conversation_id}")
@@ -157,26 +605,19 @@ async def chat_ui_message_stream(
     if not user_text:
         raise HTTPException(status_code=400, detail="No user message found")
 
-    message_id = str(uuid4())
-    text_id = str(uuid4())
-    reasoning_id = str(uuid4())
-    reasoning_started = False
-
-    tool_seq = 0
-    pending_tool_call_ids: List[str] = []
+    state = StreamState(
+        message_id=str(uuid4()), text_id=str(uuid4()), reasoning_id=str(uuid4())
+    )
 
     async def event_generator():
-        nonlocal reasoning_started, tool_seq, pending_tool_call_ids
-        text_started = False
-        any_text_delta = False
         try:
             # One backend call == one step for AI SDK UI step tracking.
             yield _sse({"type": "start-step"})
 
             # Start assistant message + first text block.
-            yield _sse({"type": "start", "messageId": message_id})
-            yield _sse({"type": "text-start", "id": text_id})
-            text_started = True
+            yield _sse({"type": "start", "messageId": state.message_id})
+            yield _sse({"type": "text-start", "id": state.text_id})
+            state.text_started = True
 
             message_create = MessageCreate(
                 conversation_id=conversation_id,
@@ -188,173 +629,25 @@ async def chat_ui_message_stream(
                 message_create, current_user_id
             ):
                 event_type = event.get("type")
+                handler = EventHandlerFactory.get_handler(event_type)
 
-                if event_type == "token":
-                    delta = event.get("content") or ""
-                    if delta:
-                        any_text_delta = True
-                        yield _sse(
-                            {"type": "text-delta", "id": text_id, "delta": delta}
-                        )
+                if handler:
+                    async for msg in handler.handle(event, state):
+                        yield msg
 
-                elif event_type == "thinking":
-                    delta = event.get("content") or ""
-                    if not delta:
-                        continue
-                    if not reasoning_started:
-                        reasoning_started = True
-                        yield _sse({"type": "reasoning-start", "id": reasoning_id})
-                    yield _sse(
-                        {"type": "reasoning-delta", "id": reasoning_id, "delta": delta}
-                    )
+                    # Early return for interrupt and error events
+                    if event_type in ("interrupt", "error"):
+                        return
 
-                elif event_type == "agent_selected":
-                    agent = event.get("agent")
-                    yield _sse(
-                        {
-                            "type": "data-agent-selected",
-                            "data": {"agent": agent},
-                            "transient": True,
-                        }
-                    )
-                elif event_type == "user_message_created":
-                    yield _sse(
-                        {
-                            "type": "data-user-message",
-                            "data": {"message": event.get("message")},
-                            "transient": True,
-                        }
-                    )
-
-                elif event_type == "tool":
-                    tool_name = event.get("name") or "unknown"
-                    status = event.get("status")
-                    tool_call_id = event.get("tool_call_id")
-                    if tool_call_id:
-                        tool_call_id = str(tool_call_id)
-                    else:
-                        if status == "end" and pending_tool_call_ids:
-                            tool_call_id = pending_tool_call_ids.pop(0)
-                        else:
-                            tool_seq += 1
-                            tool_call_id = f"tool_{tool_seq}"
-
-                    if status == "start":
-                        pending_tool_call_ids.append(tool_call_id)
-                        yield _sse(
-                            {
-                                "type": "tool-input-start",
-                                "toolCallId": tool_call_id,
-                                "toolName": tool_name,
-                            }
-                        )
-                        tool_input = event.get("args")
-                        yield _sse(
-                            {
-                                "type": "tool-input-available",
-                                "toolCallId": tool_call_id,
-                                "toolName": tool_name,
-                                "input": _coerce_json_object(
-                                    _clean_tool_output(tool_input)
-                                ),
-                            }
-                        )
-                    elif status == "end":
-                        if tool_call_id in pending_tool_call_ids:
-                            try:
-                                pending_tool_call_ids.remove(tool_call_id)
-                            except ValueError:
-                                pass
-                        output = event.get("result")
-                        yield _sse(
-                            {
-                                "type": "tool-output-available",
-                                "toolCallId": tool_call_id,
-                                "output": _coerce_json_object(
-                                    _clean_tool_output(output)
-                                ),
-                            }
-                        )
-
-                elif event_type == "interrupt":
-                    yield _sse(
-                        {
-                            "type": "text-delta",
-                            "id": text_id,
-                            "delta": "Tool execution requires approval.",
-                        }
-                    )
-                    if text_started:
-                        yield _sse({"type": "text-end", "id": text_id})
-                    if reasoning_started:
-                        yield _sse({"type": "reasoning-end", "id": reasoning_id})
-                    yield _sse(
-                        {
-                            "type": "data-interrupt",
-                            "data": {
-                                "threadId": event.get("thread_id"),
-                                "next": event.get("next"),
-                                "pendingToolCalls": event.get("pending_tool_calls"),
-                                "interrupt": event.get("interrupt"),
-                                "message": event.get("message"),
-                            },
-                        }
-                    )
-                    yield _sse({"type": "finish-step"})
-                    yield _sse({"type": "finish"})
-                    yield "data: [DONE]\n\n"
-                    return
-
-                elif event_type == "error":
-                    yield _sse({"type": "error", "errorText": event.get("error") or ""})
-                    if text_started:
-                        yield _sse({"type": "text-end", "id": text_id})
-                    if reasoning_started:
-                        yield _sse({"type": "reasoning-end", "id": reasoning_id})
-                    if event.get("message"):
-                        yield _sse(
-                            {
-                                "type": "data-error-message",
-                                "data": {"message": event.get("message")},
-                                "transient": True,
-                            }
-                        )
-                    yield _sse({"type": "finish-step"})
-                    yield _sse({"type": "finish"})
-                    yield "data: [DONE]\n\n"
-                    return
-
-                elif event_type == "complete":
-                    message = event.get("message") or {}
-                    if not any_text_delta:
-                        content = ""
-                        if isinstance(message, dict):
-                            content = message.get("content") or ""
-                        if isinstance(content, str) and content.strip():
-                            any_text_delta = True
-                            yield _sse(
-                                {
-                                    "type": "text-delta",
-                                    "id": text_id,
-                                    "delta": content,
-                                }
-                            )
-
-                    if message:
-                        yield _sse(
-                            {
-                                "type": "data-assistant-message",
-                                "data": {"message": message},
-                                "transient": True,
-                            }
-                        )
-                    break
+                    # Break loop for complete event
+                    if event_type == "complete":
+                        break
 
             # Close blocks and finish.
-            if text_started:
-                yield _sse({"type": "text-end", "id": text_id})
-            if reasoning_started:
-                yield _sse({"type": "reasoning-end", "id": reasoning_id})
+            if state.text_started:
+                yield _sse({"type": "text-end", "id": state.text_id})
+            if state.reasoning_started:
+                yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
             yield _sse({"type": "finish-step"})
             yield _sse({"type": "finish"})
             yield "data: [DONE]\n\n"
@@ -363,10 +656,10 @@ async def chat_ui_message_stream(
             return
         except Exception as exc:
             yield _sse({"type": "error", "errorText": str(exc)})
-            if text_started:
-                yield _sse({"type": "text-end", "id": text_id})
-            if reasoning_started:
-                yield _sse({"type": "reasoning-end", "id": reasoning_id})
+            if state.text_started:
+                yield _sse({"type": "text-end", "id": state.text_id})
+            if state.reasoning_started:
+                yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
             yield _sse({"type": "finish-step"})
             yield _sse({"type": "finish"})
             yield "data: [DONE]\n\n"
@@ -381,3 +674,36 @@ async def chat_ui_message_stream(
             "x-vercel-ai-ui-message-stream": "v1",
         },
     )
+
+
+@router.post("/ai/resume-interrupt", response_model=Dict[str, Any])
+@AppAutoInjector.auto_inject()
+async def resume_interrupt_ai_sdk(
+    payload: Dict[str, Any],
+    message_service: IMessageService,
+    current_user_id: UUID,
+) -> Dict[str, Any]:
+    """Resume execution after handling tool execution interrupts for AI SDK client"""
+    from app.schemas.message import InterruptResumeRequest
+
+    resume_request = InterruptResumeRequest(
+        thread_id=payload.get("threadId"),
+        conversation_id=UUID(payload.get("conversationId")),
+        interrupt_id=payload.get("interruptId"),
+        decisions=payload.get("decisions", {}),
+    )
+
+    result = await message_service.resume_message_creation(
+        thread_id=resume_request.thread_id,
+        conversation_id=resume_request.conversation_id,
+        user_id=current_user_id,
+        interrupt_id=resume_request.interrupt_id,
+        decisions=resume_request.decisions,
+    )
+
+    return {
+        "id": str(result.id),
+        "role": result.role.value if hasattr(result.role, "value") else result.role,
+        "content": result.content,
+        "created_at": result.created_at.isoformat() if result.created_at else None,
+    }

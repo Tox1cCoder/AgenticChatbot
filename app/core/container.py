@@ -91,6 +91,7 @@ class Container(containers.DeclarativeContainer):
     embedding_model = providers.Singleton(
         SentenceTransformer,
         "google/embeddinggemma-300m",
+        device="cpu",
     )
 
     # JWT Service
