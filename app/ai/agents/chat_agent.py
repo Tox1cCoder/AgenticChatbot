@@ -50,10 +50,10 @@ class ChatAgent:
         model_kwargs = {
             "model": self.model_name,
             "google_api_key": api_key,
-            "temperature": 0.8,
+            "temperature": 1.0,
         }
         if settings.enable_thinking:
-            model_kwargs["thinking_budget"] = settings.thinking_budget
+            model_kwargs["thinking_level"] = settings.thinking_level
 
         self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 

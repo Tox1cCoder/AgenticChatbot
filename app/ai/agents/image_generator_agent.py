@@ -47,14 +47,12 @@ class ImageGeneratorAgent:
 
         self.gemini_client = genai.Client(api_key=api_key)
 
-        # Build LangChain model with optional thinking support
+        # Build LangChain model
         model_kwargs = {
-            "model": "gemini-3-flash-preview",
+            "model": "gemini-flash-latest",
             "google_api_key": api_key,
-            "temperature": 0.8,
+            "temperature": 1.0,
         }
-        if settings.enable_thinking and settings.thinking_budget > 0:
-            model_kwargs["thinking_budget"] = settings.thinking_budget
 
         self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 

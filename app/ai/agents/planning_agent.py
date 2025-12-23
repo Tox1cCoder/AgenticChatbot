@@ -114,7 +114,7 @@ def create_write_todos_tool():
 class PlanningAgent:
     """
     Planning agent that manages task plans using a ReAct-style tool-calling pattern.
-    
+
     Uses the write_todos tool to create, modify, and track task progress.
     Also has access to MCP tools to actually execute tasks.
     """
@@ -138,10 +138,10 @@ class PlanningAgent:
             model_kwargs = {
                 "model": self.model_name,
                 "google_api_key": api_key,
-                "temperature": 0.7,
+                "temperature": 1.0,
             }
-            if settings.enable_thinking and settings.thinking_budget > 0:
-                model_kwargs["thinking_budget"] = settings.thinking_budget
+            # Note: thinking_level should be configured in direct genai.Client calls,
+            # not in LangChain's ChatGoogleGenerativeAI
 
             self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
@@ -158,24 +158,29 @@ class PlanningAgent:
 
         try:
             from ..mcp_integration import get_global_mcp_manager
+
             self.mcp_manager = await get_global_mcp_manager()
             mcp_tools = await self.mcp_manager.get_tools()
         except Exception as e:
-            logger.error(f"Failed to get MCP tools for PlanningAgent: {e}", exc_info=True)
+            logger.error(
+                f"Failed to get MCP tools for PlanningAgent: {e}", exc_info=True
+            )
             mcp_tools = []
 
         # Combine write_todos with MCP tools
         write_todos_tool = create_write_todos_tool()
-        
+
         # Deduplicate tools by name
         unique_tools = {write_todos_tool.name: write_todos_tool}
         for tool in mcp_tools or []:
             unique_tools.setdefault(tool.name, tool)
-        
+
         self.tools = list(unique_tools.values())
-        
+
         if len(self.tools) > 1:
-            logger.info(f"PlanningAgent loaded {len(self.tools)} tools ({len(mcp_tools)} from MCP)")
+            logger.info(
+                f"PlanningAgent loaded {len(self.tools)} tools ({len(mcp_tools)} from MCP)"
+            )
         else:
             logger.info("PlanningAgent running with write_todos only (no MCP tools)")
 
@@ -188,11 +193,7 @@ class PlanningAgent:
         # ANY mode causes infinite loops since model must always call tools
         return self.langchain_model.bind_tools(
             self.tools,
-            tool_config={
-                "function_calling_config": {
-                    "mode": "AUTO"
-                }
-            },
+            tool_config={"function_calling_config": {"mode": "AUTO"}},
         )
 
     def _build_system_prompt(
@@ -219,14 +220,16 @@ class PlanningAgent:
             return ""
 
         lines = ["CURRENT TASK PLAN:"]
-        lines.append("(Use the ID shown in brackets when calling COMPLETE_TODO or START_TODO)")
+        lines.append(
+            "(Use the ID shown in brackets when calling COMPLETE_TODO or START_TODO)"
+        )
         lines.append("")
-        
+
         for i, todo in enumerate(todos):
             status = todo.get("status", "pending")
             desc = todo.get("description", "No description")
             todo_id = todo.get("id", str(i + 1))
-            
+
             # Status indicator
             if status == "completed":
                 indicator = "✅"
@@ -239,7 +242,9 @@ class PlanningAgent:
 
             # Highlight current task
             current_marker = " ← CURRENT TASK" if i == current_task_index else ""
-            lines.append(f"{indicator} Task {i + 1} [ID: {todo_id}]: {desc} ({status}){current_marker}")
+            lines.append(
+                f"{indicator} Task {i + 1} [ID: {todo_id}]: {desc} ({status}){current_marker}"
+            )
 
         # Add summary
         completed = sum(1 for t in todos if t.get("status") == "completed")
@@ -257,7 +262,7 @@ class PlanningAgent:
     ) -> AgentResponse:
         """
         Invoke the model with tool calling support.
-        
+
         Returns an AgentResponse that may contain tool_calls for the graph to execute.
         """
         if not self.langchain_model:
@@ -380,7 +385,9 @@ class PlanningAgent:
             )
 
         except Exception as e:
-            logger.error(f"Error in planning agent invoke_model_with_history: {e}", exc_info=True)
+            logger.error(
+                f"Error in planning agent invoke_model_with_history: {e}", exc_info=True
+            )
             return self._build_error_response(str(e), conversation_id)
 
     # === Legacy methods for backward compatibility ===
@@ -392,7 +399,7 @@ class PlanningAgent:
     ) -> AgentResponse:
         """
         Generate a structured plan using structured output.
-        
+
         This is kept for backward compatibility but the preferred approach
         is to use invoke_model which uses the write_todos tool.
         """
@@ -522,14 +529,16 @@ class PlanningAgent:
         """Convert a Plan to a list of todo dicts for state storage."""
         todos = []
         for i, task in enumerate(plan.tasks):
-            todos.append({
-                "id": str(uuid.uuid4()),
-                "description": task.description,
-                "status": TodoStatus.PENDING.value,
-                "order": i,
-                "dependencies": [str(d) for d in task.dependencies],
-                "complexity": task.estimated_complexity,
-            })
+            todos.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "description": task.description,
+                    "status": TodoStatus.PENDING.value,
+                    "order": i,
+                    "dependencies": [str(d) for d in task.dependencies],
+                    "complexity": task.estimated_complexity,
+                }
+            )
         return todos
 
     def _build_error_response(

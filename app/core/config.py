@@ -102,9 +102,9 @@ class Settings(BaseSettings):
     )
 
     # Agent Model Configuration
-    rag_agent_model: str = Field(default="gemini-3-flash-preview")
-    chat_agent_model: str = Field(default="gemini-3-flash-preview")
-    search_agent_model: str = Field(default="gemini-3-flash-preview")
+    rag_agent_model: str = Field(default="gemini-flash-latest")
+    chat_agent_model: str = Field(default="gemini-flash-latest")
+    search_agent_model: str = Field(default="gemini-flash-latest")
 
     # Image Generation Configuration
     enable_image_generation: bool = Field(
@@ -126,7 +126,7 @@ class Settings(BaseSettings):
 
     # Image Captioning Configuration
     image_caption_model: str = Field(
-        default="gemini-3-pro-preview",
+        default="gemini-3-flash-preview",
         description="Gemini model identifier for document image captioning",
     )
     image_caption_max_retry_attempts: int = Field(
@@ -410,16 +410,16 @@ class Settings(BaseSettings):
 
     # Gemini Thinking Configuration
     enable_thinking: bool = Field(
-        default=True,
-        description="Enable Gemini thinking mode for models that support it (e.g., Gemini 2.5)",
+        default=False,
+        description="Enable Gemini thinking mode for models that support it",
     )
     include_thoughts_in_response: bool = Field(
         default=True,
         description="Include thought summaries in streaming responses when thinking mode is enabled",
     )
-    thinking_budget: int = Field(
-        default=-1,
-        description="Token budget for thinking (-1 = dynamic/model decides, 0 = disabled, positive = capped). Higher values allow more reasoning tokens.",
+    thinking_level: str = Field(
+        default="high",
+        description="Thinking level for Gemini 3 models.",
     )
 
 

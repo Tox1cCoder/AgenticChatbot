@@ -35,14 +35,14 @@ class SearchAgent:
         if api_key.startswith("GEMINI_API_KEY="):
             api_key = api_key.split("=", 1)[-1].strip()
 
-        # Build LangChain model with optional thinking support
+        # Build LangChain model (thinking_level not supported in LangChain yet)
         model_kwargs = {
             "model": self.model_name,
             "google_api_key": api_key,
-            "temperature": 0.12,
+            "temperature": 1.0,
         }
-        if settings.enable_thinking:
-            model_kwargs["thinking_budget"] = settings.thinking_budget
+        # Note: thinking_level should be configured in direct genai.Client calls,
+        # not in LangChain's ChatGoogleGenerativeAI
 
         self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 

@@ -88,10 +88,10 @@ class RAGAgent:
         model_kwargs = {
             "model": self.model_name,
             "google_api_key": api_key,
-            "temperature": 0.24,
+            "temperature": 1.0,
         }
         if settings.enable_thinking:
-            model_kwargs["thinking_budget"] = settings.thinking_budget
+            model_kwargs["thinking_level"] = settings.thinking_level
 
         self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
@@ -806,10 +806,9 @@ class RAGAgent:
             config_kwargs = {}
             if settings.enable_thinking:
                 thinking_config_kwargs = {
-                    "include_thoughts": settings.include_thoughts_in_response
+                    "include_thoughts": settings.include_thoughts_in_response,
+                    "thinking_level": settings.thinking_level,
                 }
-                if settings.thinking_budget > 0:
-                    thinking_config_kwargs["thinking_budget"] = settings.thinking_budget
                 config_kwargs["thinking_config"] = types.ThinkingConfig(
                     **thinking_config_kwargs
                 )
@@ -1114,10 +1113,9 @@ class RAGAgent:
             config_kwargs = {}
             if settings.enable_thinking:
                 thinking_config_kwargs = {
-                    "include_thoughts": settings.include_thoughts_in_response
+                    "include_thoughts": settings.include_thoughts_in_response,
+                    "thinking_level": settings.thinking_level,
                 }
-                if settings.thinking_budget > 0:
-                    thinking_config_kwargs["thinking_budget"] = settings.thinking_budget
                 config_kwargs["thinking_config"] = types.ThinkingConfig(
                     **thinking_config_kwargs
                 )
