@@ -3561,14 +3561,12 @@ def render_chat_view():
                             st.success(
                                 f"📋 **{completed}/{total}** tasks complete | "
                                 f"**Current:** {next_task.get('description', 'N/A')[:50]}..."
-                                if len(next_task.get('description', '')) > 50
+                                if len(next_task.get("description", "")) > 50
                                 else f"📋 **{completed}/{total}** tasks complete | "
                                 f"**Current:** {next_task.get('description', 'N/A')}"
                             )
                         else:
-                            st.success(
-                                f"✅ **All {total} tasks completed!**"
-                            )
+                            st.success(f"✅ **All {total} tasks completed!**")
                     with col2:
                         if st.button(
                             "📋 View All",
@@ -3577,17 +3575,21 @@ def render_chat_view():
                         ):
                             st.session_state.active_view = "planning"
                             st.rerun()
-                    
+
                     # Show task list in expander
                     tasks = get_task_plans(conversation_id, include_completed=True)
                     if tasks:
-                        task_list = tasks.get("data", []) if isinstance(tasks, dict) else tasks
+                        task_list = (
+                            tasks.get("data", []) if isinstance(tasks, dict) else tasks
+                        )
                         if task_list:
                             with st.expander("📝 Task Progress", expanded=False):
                                 for task in task_list:
                                     task_status = task.get("status", "pending")
-                                    task_desc = task.get("description", "No description")
-                                    
+                                    task_desc = task.get(
+                                        "description", "No description"
+                                    )
+
                                     if task_status == "completed":
                                         st.markdown(f"✅ ~~{task_desc}~~")
                                     elif task_status == "in_progress":
@@ -3721,23 +3723,41 @@ def render_chat_view():
                     if conversation_id == "pending_new":
                         saved_attachments = list(pending_attachments)
                         conversation_title_source = stripped_message or message_to_send
-                        conversation_data = {
-                            "title": (
-                                conversation_title_source[:50] + "..."
-                                if len(conversation_title_source) > 50
-                                else conversation_title_source
-                            )
-                        }
-                        pending_persona = st.session_state.get(
-                            "pending_persona_prompt", ""
-                        )
-                        persona_payload = normalize_persona_input(pending_persona)
-                        if persona_payload:
-                            conversation_data["personaPrompt"] = persona_payload
 
                         with st.status(
                             "Creating conversation...", expanded=True
                         ) as status:
+                            # Generate AI-powered title
+                            status.update(label="Generating title...", state="running")
+                            title_response = make_api_request(
+                                "POST",
+                                "/conversations/generate-title",
+                                {"message": conversation_title_source},
+                            )
+
+                            if title_response and title_response.get("data"):
+                                generated_title = title_response["data"].get(
+                                    "title", conversation_title_source[:50]
+                                )
+                            else:
+                                # Fallback to truncated message if title generation fails
+                                generated_title = (
+                                    conversation_title_source[:50] + "..."
+                                    if len(conversation_title_source) > 50
+                                    else conversation_title_source
+                                )
+
+                            conversation_data = {"title": generated_title}
+                            pending_persona = st.session_state.get(
+                                "pending_persona_prompt", ""
+                            )
+                            persona_payload = normalize_persona_input(pending_persona)
+                            if persona_payload:
+                                conversation_data["personaPrompt"] = persona_payload
+
+                            status.update(
+                                label="Creating conversation...", state="running"
+                            )
                             conv_response = make_api_request(
                                 "POST", "/conversations/", conversation_data
                             )

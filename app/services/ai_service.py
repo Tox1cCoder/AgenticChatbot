@@ -17,6 +17,8 @@ from ..repositories.conversation import ConversationRepository
 from ..repositories.document import DocumentRepository
 from ..utils.text_processing import sanitize_persona
 from ..ai.utils import make_json_safe
+from langchain_google_genai import ChatGoogleGenerativeAI
+from ..core.config import settings
 
 
 class AIService:
@@ -301,3 +303,69 @@ class AIService:
         return asyncio.run(
             self.generate_bot_response(user_message, conversation_id, user_id)
         )
+
+    async def generate_conversation_title(self, user_message: str) -> str:
+        """
+        Generate a concise, descriptive title for a conversation based on the first user message.
+
+        Args:
+            user_message: The first message from the user
+
+        Returns:
+            A short, descriptive title (max 50 characters)
+        """
+        try:
+            # Initialize a lightweight model for title generation
+            api_key = settings.gemini_api_key
+            if api_key.startswith("GEMINI_API_KEY="):
+                api_key = api_key.split("=", 1)[-1].strip()
+
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-2.0-flash-exp",
+                google_api_key=api_key,
+                temperature=0.3,  # Lower temperature for more consistent titles
+            )
+
+            prompt = f"""Generate a very short, concise title (max 50 characters) for a conversation that starts with this user message:
+
+"{user_message}"
+
+Requirements:
+- Maximum 50 characters
+- Capture the main topic or intent
+- No quotes, no punctuation at the end
+- Should be clear and descriptive
+- Use title case
+
+Examples:
+User: "How do I learn Python?" → Title: "Learning Python"
+User: "What are the health benefits of exercise?" → Title: "Health Benefits of Exercise"
+User: "Can you help me plan a trip to Japan?" → Title: "Japan Trip Planning"
+
+Title:"""
+
+            response = await llm.ainvoke(prompt)
+            title = response.content.strip()
+
+            # Clean up the title
+            title = title.strip("\"'")  # Remove quotes
+            title = title.rstrip(".")  # Remove trailing period
+
+            # Ensure it's not too long
+            if len(title) > 50:
+                title = title[:47] + "..."
+
+            # Fallback to truncated message if generation fails
+            if not title or len(title) < 3:
+                title = user_message[:50]
+                if len(user_message) > 50:
+                    title = title[:47] + "..."
+
+            return title
+
+        except Exception as e:
+            # Fallback: use truncated user message
+            title = user_message[:50]
+            if len(user_message) > 50:
+                title = title[:47] + "..."
+            return title

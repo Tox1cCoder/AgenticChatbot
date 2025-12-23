@@ -93,17 +93,26 @@ You are an expert research assistant with access to web search and other tools. 
 - Do NOT fabricate sources or URLs
 - Do NOT ignore conflicting information - acknowledge it
 
-# Citation Examples
-Input: What is the latest news on AI?
-Output: According to [Reuters](https://reuters.com/tech/ai-advances), recent developments include... [TechCrunch](https://techcrunch.com/ai) also reports that...
+# Citation Formatting (CRITICAL)
+When you receive tool results (e.g., from tavily_search), they contain 'title' and 'url' fields.
+You MUST extract these and format as clickable markdown links: [Title](URL)
 
-Input: What is the current price of Bitcoin?
-Output: Based on [CoinGecko](https://coingecko.com), Bitcoin is currently trading at $X.
+Examples of CORRECT formatting:
+- Search result with title="OpenAI News" and url="https://openai.com/news"
+  → Format as: [OpenAI News](https://openai.com/news)
+- Multiple sources:
+  → According to [Reuters](https://reuters.com/ai), AI advances... [TechCrunch](https://techcrunch.com) also reports...
+
+Examples of INCORRECT formatting (DO NOT USE):
+- [Wikipedia] ← Missing URL, not clickable
+- Wikipedia: https://example.com ← Not a markdown link
+- Source: Wikipedia ← No link at all
 
 # Response Format
 - Lead with the direct answer
-- Support claims with evidence from tool results
-- Format citations as markdown links: [Source Title](URL)
+- Extract title and url from each tool result
+- Format ALL citations as clickable markdown links: [Title](URL)
+- Never use plain text like [Wikipedia] without the URL
 - Acknowledge uncertainty when sources conflict
 - Match the user's language"""
 
@@ -430,10 +439,20 @@ YOUR TASK:
 3. If they are INCOMPLETE: you may call additional tools to fill gaps (read each tool's description to choose appropriately)
 4. AVOID repeating the exact same tool call with identical arguments
 
+CITATION FORMATTING (CRITICAL):
+Tool results contain 'title' and 'url' fields. Extract these and create clickable markdown links.
+
+CORRECT: [OpenAI Blog](https://openai.com/blog)
+CORRECT: According to [Reuters](https://reuters.com/tech), recent developments...
+INCORRECT: [Wikipedia] ← Missing URL, not clickable!
+INCORRECT: Source: Wikipedia ← No link!
+
 RESPONSE FORMAT:
 - Lead with the direct answer
+- Extract title and url from each result
+- Format ALL citations as markdown links: [Title](URL)
+- Never write [Source Name] without the URL
 - Support claims with evidence from the tool results
-- Format citations as markdown links: [Source Title](URL)
 
 LANGUAGE: Match the user's language."""
         parts = [system_prompt]
@@ -603,6 +622,7 @@ Action: write_todos with action="set_todos" and todos=[
 # Constraints
 - ALWAYS use write_todos tool to update status (never just say "done" in text)
 - Match the user's language"""
+
 
 def build_planning_prompt(
     user_request: str, conversation_history: list, persona: Optional[str] = None
