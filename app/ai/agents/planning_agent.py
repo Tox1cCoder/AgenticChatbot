@@ -6,6 +6,8 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 
+from .base_agent import BaseAgent
+
 from ..schemas import (
     AgentMessage,
     AgentResponse,
@@ -111,99 +113,47 @@ def create_write_todos_tool():
     return write_todos
 
 
-class PlanningAgent:
-    """
-    Planning agent that manages task plans using a ReAct-style tool-calling pattern.
+class PlanningAgent(BaseAgent):
+    """Planning agent that manages task plans using ReAct-style tool-calling."""
 
-    Uses the write_todos tool to create, modify, and track task progress.
-    Also has access to MCP tools to actually execute tasks.
-    """
+    @property
+    def agent_type(self) -> AgentType:
+        return AgentType.PLANNING
 
-    def __init__(self):
-        self.model_name = settings.chat_agent_model
-        self.langchain_model = None
-        self.mcp_manager = None
-        self.tools = []
-        self._init_model()
+    @property
+    def agent_id(self) -> str:
+        return "planning_agent"
 
-    def _init_model(self):
-        api_key = settings.gemini_api_key
-        if not api_key:
-            return
-
-        if api_key.startswith("GEMINI_API_KEY="):
-            api_key = api_key.split("=", 1)[-1].strip()
-
-        try:
-            model_kwargs = {
-                "model": self.model_name,
-                "google_api_key": api_key,
-                "temperature": 1.0,
-            }
-            # Note: thinking_level should be configured in direct genai.Client calls,
-            # not in LangChain's ChatGoogleGenerativeAI
-
-            self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
-
-            # Initialize the write_todos tool (MCP tools added later via _init_tools)
-            self.tools = [create_write_todos_tool()]
-
-        except Exception as e:
-            logger.error(f"Failed to initialize planning agent model: {e}")
+    def _get_base_system_prompt(self) -> str:
+        return PLANNING_EXECUTION_PROMPT
 
     async def _init_tools(self):
-        """Initialize MCP tools and combine with write_todos tool."""
-        if self.mcp_manager is not None:
-            return  # Already initialized
+        # First call parent to initialize MCP tools
+        await super()._init_tools()
 
-        try:
-            from ..mcp_integration import get_global_mcp_manager
-
-            self.mcp_manager = await get_global_mcp_manager()
-            mcp_tools = await self.mcp_manager.get_tools()
-        except Exception as e:
-            logger.error(
-                f"Failed to get MCP tools for PlanningAgent: {e}", exc_info=True
-            )
-            mcp_tools = []
-
-        # Combine write_todos with MCP tools
+        # Add write_todos tool to the beginning of the tools list
         write_todos_tool = create_write_todos_tool()
 
-        # Deduplicate tools by name
-        unique_tools = {write_todos_tool.name: write_todos_tool}
-        for tool in mcp_tools or []:
-            unique_tools.setdefault(tool.name, tool)
+        # Deduplicate by checking if write_todos already exists
+        tool_names = {tool.name for tool in self.tools}
+        if write_todos_tool.name not in tool_names:
+            self.tools.insert(0, write_todos_tool)
 
-        self.tools = list(unique_tools.values())
-
-        if len(self.tools) > 1:
-            logger.info(
-                f"PlanningAgent loaded {len(self.tools)} tools ({len(mcp_tools)} from MCP)"
-            )
-        else:
-            logger.info("PlanningAgent running with write_todos only (no MCP tools)")
-
-    def _get_llm_with_tools(self):
-        """Get LLM with tools bound for tool calling."""
-        if not self.tools:
-            return self.langchain_model
-
-        # Use AUTO mode - the prompt strongly instructs tool usage
-        # ANY mode causes infinite loops since model must always call tools
-        return self.langchain_model.bind_tools(
-            self.tools,
-            tool_config={"function_calling_config": {"mode": "AUTO"}},
+        logger.info(
+            f"PlanningAgent loaded {len(self.tools)} tools (including write_todos)"
         )
 
     def _build_system_prompt(
         self,
+        persona: Optional[str] = None,
+        has_tool_context: bool = False,
         todos: Optional[List[Dict[str, Any]]] = None,
         current_task_index: Optional[int] = None,
     ) -> str:
-        """Build system prompt with current task context."""
-        base_prompt = PLANNING_EXECUTION_PROMPT
+        # Call parent to get base prompt with persona and tool context
+        base_prompt = super()._build_system_prompt(persona, has_tool_context)
 
+        # Append todo context if provided
         if todos:
             task_context = self._format_todos_context(todos, current_task_index)
             return f"{base_prompt}\n\n{task_context}"
@@ -215,7 +165,6 @@ class PlanningAgent:
         todos: List[Dict[str, Any]],
         current_task_index: Optional[int] = None,
     ) -> str:
-        """Format todos into a context string for the prompt."""
         if not todos:
             return ""
 
@@ -260,11 +209,6 @@ class PlanningAgent:
         todos: Optional[List[Dict[str, Any]]] = None,
         current_task_index: Optional[int] = None,
     ) -> AgentResponse:
-        """
-        Invoke the model with tool calling support.
-
-        Returns an AgentResponse that may contain tool_calls for the graph to execute.
-        """
         if not self.langchain_model:
             return self._build_error_response(
                 "Planning service is not properly configured.",
@@ -276,119 +220,48 @@ class PlanningAgent:
             await self._init_tools()
 
         llm_with_tools = self._get_llm_with_tools()
-        system_prompt = self._build_system_prompt(todos, current_task_index)
+        system_prompt = self._build_system_prompt(
+            None, False, todos, current_task_index
+        )
 
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=message.content),
         ]
 
-        try:
-            response = await llm_with_tools.ainvoke(messages)
+        response = await llm_with_tools.ainvoke(messages)
 
-            tool_calls = []
-            if hasattr(response, "tool_calls") and response.tool_calls:
-                tool_calls = response.tool_calls
-                return AgentResponse(
-                    agent_type=AgentType.PLANNING,
-                    agent_id="planning_agent",
-                    message=AgentMessage(
-                        role=MessageRole.ASSISTANT,
-                        content=coerce_response_text(response.content or ""),
-                        tool_calls=tool_calls,
-                    ),
-                    metadata={
-                        "model": self.model_name,
-                        "conversation_id": conversation_id,
-                        "has_tool_calls": True,
-                    },
-                )
-
-            # No tool calls - just a regular response
+        tool_calls = []
+        if hasattr(response, "tool_calls") and response.tool_calls:
+            tool_calls = response.tool_calls
             return AgentResponse(
                 agent_type=AgentType.PLANNING,
                 agent_id="planning_agent",
                 message=AgentMessage(
                     role=MessageRole.ASSISTANT,
                     content=coerce_response_text(response.content or ""),
+                    tool_calls=tool_calls,
                 ),
                 metadata={
                     "model": self.model_name,
                     "conversation_id": conversation_id,
+                    "has_tool_calls": True,
                 },
             )
 
-        except Exception as e:
-            logger.error(f"Error in planning agent invoke_model: {e}", exc_info=True)
-            return self._build_error_response(str(e), conversation_id)
-
-    async def invoke_model_with_history(
-        self,
-        messages: List[BaseMessage],
-        conversation_history: List[Any],
-        persona: Optional[str],
-        conversation_id: Optional[str] = None,
-        todos: Optional[List[Dict[str, Any]]] = None,
-        current_task_index: Optional[int] = None,
-    ) -> AgentResponse:
-        """
-        Invoke model with full message history (for ReAct loop after tool execution).
-        """
-        if not self.langchain_model:
-            return self._build_error_response(
-                "Planning service is not properly configured.",
-                conversation_id,
-            )
-
-        # Initialize MCP tools if not done yet
-        if self.mcp_manager is None:
-            await self._init_tools()
-
-        llm_with_tools = self._get_llm_with_tools()
-        system_prompt = self._build_system_prompt(todos, current_task_index)
-
-        langchain_messages: List[BaseMessage] = [SystemMessage(content=system_prompt)]
-        langchain_messages.extend(messages)
-
-        try:
-            response = await llm_with_tools.ainvoke(langchain_messages)
-
-            tool_calls = []
-            if hasattr(response, "tool_calls") and response.tool_calls:
-                tool_calls = response.tool_calls
-                return AgentResponse(
-                    agent_type=AgentType.PLANNING,
-                    agent_id="planning_agent",
-                    message=AgentMessage(
-                        role=MessageRole.ASSISTANT,
-                        content=coerce_response_text(response.content or ""),
-                        tool_calls=tool_calls,
-                    ),
-                    metadata={
-                        "model": self.model_name,
-                        "conversation_id": conversation_id,
-                        "has_tool_calls": True,
-                    },
-                )
-
-            return AgentResponse(
-                agent_type=AgentType.PLANNING,
-                agent_id="planning_agent",
-                message=AgentMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=coerce_response_text(response.content or ""),
-                ),
-                metadata={
-                    "model": self.model_name,
-                    "conversation_id": conversation_id,
-                },
-            )
-
-        except Exception as e:
-            logger.error(
-                f"Error in planning agent invoke_model_with_history: {e}", exc_info=True
-            )
-            return self._build_error_response(str(e), conversation_id)
+        # No tool calls - just a regular response
+        return AgentResponse(
+            agent_type=AgentType.PLANNING,
+            agent_id="planning_agent",
+            message=AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content=coerce_response_text(response.content or ""),
+            ),
+            metadata={
+                "model": self.model_name,
+                "conversation_id": conversation_id,
+            },
+        )
 
     # === Legacy methods for backward compatibility ===
 
@@ -397,12 +270,7 @@ class PlanningAgent:
         message: AgentMessage,
         conversation_id: Optional[str] = None,
     ) -> AgentResponse:
-        """
-        Generate a structured plan using structured output.
-
-        This is kept for backward compatibility but the preferred approach
-        is to use invoke_model which uses the write_todos tool.
-        """
+        """Legacy method: Generate plan using structured output."""
         if not self.langchain_model:
             return self._build_error_response(
                 "Planning service is not properly configured.",
@@ -444,17 +312,15 @@ class PlanningAgent:
                 },
             )
 
-        except ValueError as e:
-            return self._build_error_response(
-                f"Issue while creating the plan: {str(e)}. Please try rephrasing your request.",
-                conversation_id,
-                error=str(e),
-            )
-
         except Exception as e:
             logger.error(f"Error generating plan: {e}", exc_info=True)
+            error_msg = (
+                f"Issue while creating the plan: {str(e)}. Please try rephrasing your request."
+                if isinstance(e, ValueError)
+                else f"Error while generating the plan: {str(e)}"
+            )
             return self._build_error_response(
-                f"Error while generating the plan: {str(e)}",
+                error_msg,
                 conversation_id,
                 error=str(e),
             )
@@ -465,7 +331,7 @@ class PlanningAgent:
         existing_tasks: List[Dict[str, Any]],
         conversation_id: Optional[str] = None,
     ) -> AgentResponse:
-        """Modify an existing plan using structured output."""
+        """Legacy method: Modify plan using structured output."""
         if not self.langchain_model:
             return self._build_error_response(
                 "Planning service is not properly configured.",
@@ -511,22 +377,19 @@ class PlanningAgent:
             )
 
         except ValueError as e:
-            return self._build_error_response(
-                f"Issue while modifying the plan: {str(e)}. Please try rephrasing your request.",
-                conversation_id,
-                error=str(e),
-            )
-
-        except Exception as e:
             logger.error(f"Error modifying plan: {e}", exc_info=True)
+            error_msg = (
+                f"Issue while modifying the plan: {str(e)}. Please try rephrasing your request."
+                if isinstance(e, ValueError)
+                else f"Error while modifying the plan: {str(e)}"
+            )
             return self._build_error_response(
-                f"Error while modifying the plan: {str(e)}",
+                error_msg,
                 conversation_id,
                 error=str(e),
             )
 
     def _plan_to_todos(self, plan: Plan) -> List[Dict[str, Any]]:
-        """Convert a Plan to a list of todo dicts for state storage."""
         todos = []
         for i, task in enumerate(plan.tasks):
             todos.append(
@@ -540,28 +403,6 @@ class PlanningAgent:
                 }
             )
         return todos
-
-    def _build_error_response(
-        self,
-        message: str,
-        conversation_id: Optional[str],
-        error: Optional[str] = None,
-    ) -> AgentResponse:
-        """Create standardized error responses."""
-        return AgentResponse(
-            agent_type=AgentType.PLANNING,
-            agent_id="planning_agent",
-            message=AgentMessage(
-                role=MessageRole.ASSISTANT,
-                content=f"I'm sorry, but {message}",
-            ),
-            metadata={
-                "model": self.model_name,
-                "conversation_id": conversation_id,
-                "error": error or message,
-            },
-            error=error or message,
-        )
 
     def _format_existing_tasks(self, existing_tasks: List[Dict[str, Any]]) -> str:
         if not existing_tasks:
@@ -697,6 +538,4 @@ class PlanningAgent:
         return "\n".join(parts)
 
     async def cleanup(self):
-        """Cleanup agent resources."""
-        self.tools = []
-        logger.debug("PlanningAgent cleanup completed")
+        await super().cleanup()

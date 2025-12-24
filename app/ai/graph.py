@@ -76,9 +76,6 @@ class MultiAgentWorkflow:
         self._initialized = False
 
     def _get_current_turn_messages(self, messages: List) -> List:
-        """
-        Extract only messages from the current turn (from last HumanMessage onwards).
-        """
         if not messages:
             return messages
 
@@ -102,7 +99,6 @@ class MultiAgentWorkflow:
     async def _get_conversation_history(
         self, conversation_id: Optional[str], user_id: Optional[str]
     ) -> List:
-        """Retrieve conversation history from memory manager."""
         if not conversation_id or not user_id:
             return []
 
@@ -116,14 +112,12 @@ class MultiAgentWorkflow:
             return []
 
     def _find_last_human_message_index(self, messages: List) -> Optional[int]:
-        """Find the index of the last HumanMessage in the messages list."""
         for idx in range(len(messages) - 1, -1, -1):
             if isinstance(messages[idx], HumanMessage):
                 return idx
         return None
 
     def _has_tool_context(self, messages: List, last_human_idx: Optional[int]) -> bool:
-        """Check if there are tool-related messages after the last human message."""
         if last_human_idx is None:
             return False
 
@@ -139,7 +133,6 @@ class MultiAgentWorkflow:
     def _merge_tool_artifacts(
         self, state: GraphState, response: AgentResponse, append_images: bool = False
     ) -> None:
-        """Merge tool artifacts and images from context into response."""
         context = state.get("context", {})
         tool_artifacts = context.get("tool_artifacts", [])
         tool_images = context.get("tool_images", [])
@@ -160,7 +153,6 @@ class MultiAgentWorkflow:
     def _finalize_agent_response(
         self, state: GraphState, response: AgentResponse
     ) -> GraphState:
-        """Update state with agent response and append AI message."""
         state["response"] = response
 
         ai_kwargs = {"content": response.message.content}
@@ -183,7 +175,6 @@ class MultiAgentWorkflow:
         has_existing_plan: bool = False,
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
     ) -> GraphState:
-        """Build initial state for graph execution (shared by execute and execute_stream)."""
         initial_state: GraphState = {
             "messages": [HumanMessage(content=message)],
             "context": {},
@@ -215,13 +206,9 @@ class MultiAgentWorkflow:
         return initial_state
 
     async def initialize(self) -> None:
-        """
-        Eagerly initialize all agent tools.
-        """
         if self._initialized:
             return
 
-        # Pre-initialize MCP tools for all agents that use them
         for agent in [
             self.chat_agent,
             self.search_agent,
@@ -263,15 +250,18 @@ class MultiAgentWorkflow:
             },
         )
 
-        workflow.add_conditional_edges(
-            "chat_agent",
-            self._should_call_tools,
-            {
-                "approval": "approval",
-                "tools": "tools",
-                "end": END,
-            },
-        )
+        # Consolidate conditional edges for agents that use standard tool calling
+        tool_calling_agents = ["chat_agent", "search_agent", "image_generator_agent"]
+        for agent_name in tool_calling_agents:
+            workflow.add_conditional_edges(
+                agent_name,
+                self._should_call_tools,
+                {
+                    "approval": "approval",
+                    "tools": "tools",
+                    "end": END,
+                },
+            )
 
         workflow.add_edge("rag_agent", END)
 
@@ -294,37 +284,20 @@ class MultiAgentWorkflow:
             },
         )
 
-        workflow.add_conditional_edges(
-            "search_agent",
-            self._should_call_tools,
-            {
-                "approval": "approval",
-                "tools": "tools",
-                "end": END,
-            },
-        )
-
-        workflow.add_conditional_edges(
-            "image_generator_agent",
-            self._should_call_tools,
-            {
-                "approval": "approval",
-                "tools": "tools",
-                "end": END,
-            },
-        )
-
         workflow.add_edge("approval", "tools")
+
+        # Dynamic tool routing map based on agent registry
+        tool_routing_map = {
+            agent_name: agent_name
+            for agent_name in self.agents.keys()
+            if agent_name != "rag_agent"
+        }
+        tool_routing_map["end"] = END
 
         workflow.add_conditional_edges(
             "tools",
             self._route_tool_output,
-            {
-                "chat_agent": "chat_agent",
-                "search_agent": "search_agent",
-                "image_generator_agent": "image_generator_agent",
-                "end": END,  # Fallback
-            },
+            tool_routing_map,
         )
 
         if self.checkpointer:
@@ -354,10 +327,10 @@ class MultiAgentWorkflow:
 
         tool_map = {t.name: t for t in agent.tools}
         tool_outputs = []
-        tool_artifacts = []  # Track tool execution artifacts
-        all_images = []  # Track images from tool results
+        tool_artifacts = []
+        all_images = []
 
-        import json  # Import for parsing JSON results
+        import json
 
         for tool_call in last_message.tool_calls:
             tool_name = tool_call["name"]
@@ -397,7 +370,6 @@ class MultiAgentWorkflow:
                         }
                     )
 
-                    # Extract images from tool result (e.g., Tavily search results)
                     try:
                         parsed_result = json.loads(result_str)
                         if (
@@ -416,7 +388,7 @@ class MultiAgentWorkflow:
                                             }
                                         )
                     except (json.JSONDecodeError, TypeError):
-                        pass  # Not JSON or no images
+                        pass
 
                 except Exception as e:
                     error_msg = f"Error: {e}"
@@ -468,11 +440,9 @@ class MultiAgentWorkflow:
 
         state.setdefault("messages", []).extend(new_messages)
 
-        # Increment iteration count to track tool-calling loops
         current_iteration = state.get("iteration_count") or 0
         state["iteration_count"] = current_iteration + 1
 
-        # Store tool artifacts and images in context for later extraction
         context = state.get("context", {})
         if tool_artifacts:
             existing_artifacts = context.get("tool_artifacts", [])
@@ -600,13 +570,10 @@ class MultiAgentWorkflow:
         return "tools"
 
     def _route_tool_output(self, state: GraphState) -> str:
-        # Check iteration count to prevent infinite loops
         iteration_count = state.get("iteration_count", 0)
         max_iterations = getattr(settings, "react_agent_max_iterations")
 
-        # If we've exceeded max iterations, end the conversation
         if iteration_count >= max_iterations:
-            # Add a message indicating we've reached the limit
             messages = state.get("messages", [])
             if messages:
                 context = state.get("context", {})
@@ -614,7 +581,15 @@ class MultiAgentWorkflow:
                 state["context"] = context
             return "end"
 
-        return state.get("selected_agent", "end")
+        selected_agent = state.get("selected_agent", "end")
+
+        if selected_agent != "end" and selected_agent not in self.agents:
+            logger.warning(
+                f"Selected agent '{selected_agent}' not found in registry, ending conversation"
+            )
+            return "end"
+
+        return selected_agent
 
     def _build_interrupt_agent_response(
         self,
@@ -648,14 +623,13 @@ class MultiAgentWorkflow:
         )
 
         selected_agent = values.get("selected_agent", "search_agent")
-        agent_type_map = {
-            "chat_agent": AgentType.CHAT,
-            "rag_agent": AgentType.RAG,
-            "search_agent": AgentType.SEARCH,
-            "image_generator_agent": AgentType.IMAGE_GENERATOR,
-            "planning_agent": AgentType.PLANNING,
-        }
-        agent_type = agent_type_map.get(selected_agent, AgentType.SEARCH)
+
+        agent = self.agents.get(selected_agent)
+        agent_type = (
+            agent.agent_type
+            if agent and hasattr(agent, "agent_type")
+            else AgentType.SEARCH
+        )
 
         return AgentResponse(
             agent_type=agent_type,
@@ -683,7 +657,6 @@ class MultiAgentWorkflow:
         conversation_id = state.get("conversation_id")
         has_documents = self._conversation_has_documents(conversation_id)
 
-        # Extract planning context from state
         planning_mode_enabled = context.get("planning_mode_enabled", False)
         has_existing_plan = context.get("has_existing_plan", False)
 
@@ -693,7 +666,6 @@ class MultiAgentWorkflow:
             metadata={"persona": state.get("persona")},
         )
 
-        # Include planning_agent in available agents
         available_agents = list(self.agents.keys())
 
         selected_agent = await self.router.route_message(
@@ -795,7 +767,6 @@ class MultiAgentWorkflow:
         if not messages:
             return state
 
-        # Get context and history using shared helpers
         current_task = state.get("current_task")
         all_tasks = state.get("all_tasks")
         plan_context_str = self._build_plan_context_string(current_task, all_tasks)
@@ -807,50 +778,14 @@ class MultiAgentWorkflow:
         )
 
         last_human_idx = self._find_last_human_message_index(messages)
-        has_tool_context = self._has_tool_context(messages, last_human_idx)
+        current_turn_messages = self._get_current_turn_messages(messages)
 
-        if has_tool_context:
-            current_turn_messages = self._get_current_turn_messages(messages)
-            response = await self.chat_agent.invoke_model_with_history(
-                current_turn_messages,
-                conversation_history,
-                state.get("persona"),
-                conversation_id,
-            )
-        else:
-            last_message = messages[-1]
-            content = (
-                last_message.content
-                if hasattr(last_message, "content")
-                else str(last_message)
-            )
-            user_content = (
-                messages[last_human_idx].content
-                if last_human_idx is not None
-                and hasattr(messages[last_human_idx], "content")
-                else content
-            )
-
-            enriched_content = (
-                f"{plan_context_str}\n\n{user_content}"
-                if plan_context_str
-                else user_content
-            )
-            context = state.get("context", {})
-            metadata = {
-                "history": conversation_history,
-                "persona": state.get("persona"),
-            }
-            if current_task:
-                metadata["task_context"] = current_task
-
-            agent_msg = AgentMessage(
-                role=MessageRole.USER,
-                content=enriched_content,
-                metadata=metadata,
-                attachments=context.get("attachments"),
-            )
-            response = await self.chat_agent.invoke_model(agent_msg, conversation_id)
+        response = await self.chat_agent.invoke_model_with_history(
+            current_turn_messages,
+            conversation_history,
+            state.get("persona"),
+            conversation_id,
+        )
 
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)
@@ -915,7 +850,6 @@ class MultiAgentWorkflow:
         if not messages:
             return state
 
-        # Get context and history using shared helpers
         current_task = state.get("current_task")
         all_tasks = state.get("all_tasks")
         plan_context_str = self._build_plan_context_string(current_task, all_tasks)
@@ -927,52 +861,14 @@ class MultiAgentWorkflow:
         )
 
         last_human_idx = self._find_last_human_message_index(messages)
-        has_tool_context = self._has_tool_context(messages, last_human_idx)
+        current_turn_messages = self._get_current_turn_messages(messages)
 
-        if has_tool_context:
-            current_turn_messages = self._get_current_turn_messages(messages)
-            response = await self.search_agent.invoke_model_with_history(
-                current_turn_messages,
-                conversation_history,
-                state.get("persona"),
-                conversation_id,
-            )
-        else:
-            last_message = messages[-1]
-            content = (
-                last_message.content
-                if hasattr(last_message, "content")
-                else str(last_message)
-            )
-            user_content = (
-                messages[last_human_idx].content
-                if last_human_idx is not None
-                and hasattr(messages[last_human_idx], "content")
-                else content
-            )
-
-            enriched_content = (
-                f"{plan_context_str}\n\n{user_content}"
-                if plan_context_str
-                else user_content
-            )
-            context = state.get("context", {})
-            metadata = {
-                "history": conversation_history,
-                "persona": state.get("persona"),
-            }
-            if current_task:
-                metadata["task_context"] = current_task
-
-            agent_msg = AgentMessage(
-                role=MessageRole.USER,
-                content=enriched_content,
-                metadata=metadata,
-                attachments=context.get("attachments"),
-            )
-            response = await self.search_agent.process_message(
-                agent_msg, conversation_id
-            )
+        response = await self.search_agent.invoke_model_with_history(
+            current_turn_messages,
+            conversation_history,
+            state.get("persona"),
+            conversation_id,
+        )
 
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)
@@ -982,7 +878,6 @@ class MultiAgentWorkflow:
         if not messages:
             return state
 
-        # Get context and history using shared helpers
         current_task = state.get("current_task")
         all_tasks = state.get("all_tasks")
         plan_context_str = self._build_plan_context_string(current_task, all_tasks)
@@ -994,42 +889,15 @@ class MultiAgentWorkflow:
         )
 
         last_human_idx = self._find_last_human_message_index(messages)
-        has_tool_context = self._has_tool_context(messages, last_human_idx)
+        current_turn_messages = self._get_current_turn_messages(messages)
 
-        last_human_message = (
-            messages[last_human_idx] if last_human_idx is not None else None
+        response = await self.image_generator_agent.invoke_model_with_history(
+            current_turn_messages,
+            conversation_history,
+            state.get("persona"),
+            conversation_id,
         )
-        content = last_human_message.content if last_human_message else ""
 
-        if has_tool_context:
-            current_turn_messages = self._get_current_turn_messages(messages)
-            response = await self.image_generator_agent.invoke_model_with_history(
-                current_turn_messages,
-                conversation_history,
-                state.get("persona"),
-                conversation_id,
-            )
-        else:
-            full_history = conversation_history + messages[:-1]
-            context = state.get("context", {})
-            enriched_content = (
-                f"{plan_context_str}\n\n{content}" if plan_context_str else content
-            )
-            metadata = {"history": full_history, "persona": state.get("persona")}
-            if current_task:
-                metadata["task_context"] = current_task
-
-            agent_msg = AgentMessage(
-                role=MessageRole.USER,
-                content=enriched_content,
-                metadata=metadata,
-                attachments=context.get("attachments"),
-            )
-            response = await self.image_generator_agent.invoke_model(
-                agent_msg, conversation_id
-            )
-
-        # Use append_images=True since image generator produces its own images
         self._merge_tool_artifacts(state, response, append_images=True)
         return self._finalize_agent_response(state, response)
 
@@ -1093,18 +961,12 @@ class MultiAgentWorkflow:
             ai_kwargs["tool_calls"] = response.message.tool_calls
         state.setdefault("messages", []).append(AIMessage(**ai_kwargs))
 
-        # Sync todos from response metadata if plan was generated/modified
         if response.metadata.get("todos"):
             state["todos"] = response.metadata["todos"]
 
         return state
 
     async def _planning_tools_node(self, state: GraphState) -> GraphState:
-        """
-        Execute write_todos tool calls from the planning agent.
-
-        Handles the actual todo state updates based on tool call arguments.
-        """
         from .schemas import TodoAction, TodoStatus
 
         messages = state.get("messages", [])
@@ -1126,9 +988,7 @@ class MultiAgentWorkflow:
             tool_args = tool_call_data.get("args", {})
 
             if tool_name != "write_todos":
-                # Execute MCP tool
                 try:
-                    # Find the tool in the planning agent's tools
                     tool = None
                     if self.planning_agent and hasattr(self.planning_agent, "tools"):
                         for t in self.planning_agent.tools:
@@ -1137,7 +997,6 @@ class MultiAgentWorkflow:
                                 break
 
                     if tool:
-                        # Execute the tool
                         result = await tool.ainvoke(tool_args)
                         tool_outputs.append(
                             {
@@ -1174,14 +1033,12 @@ class MultiAgentWorkflow:
 
             try:
                 if action == TodoAction.SET_TODOS.value or action == "set_todos":
-                    # Replace all todos
                     new_todos = tool_args.get("todos", [])
                     todos = new_todos
                     current_task_index = 0 if todos else None
                     result = f"Set {len(todos)} todos in the plan."
 
                 elif action == TodoAction.ADD_TODO.value or action == "add_todo":
-                    # Add a single todo
                     new_todo = tool_args.get("todo", {})
                     if new_todo:
                         new_todo["order"] = len(todos)
@@ -1194,7 +1051,6 @@ class MultiAgentWorkflow:
                     action == TodoAction.COMPLETE_TODO.value
                     or action == "complete_todo"
                 ):
-                    # Mark todo as completed
                     todo_id = tool_args.get("todo_id")
                     for i, todo in enumerate(todos):
                         if todo.get("id") == todo_id:
@@ -1202,7 +1058,6 @@ class MultiAgentWorkflow:
                             result = (
                                 f"Completed todo: {todo.get('description', todo_id)}"
                             )
-                            # Move to next task
                             if (
                                 current_task_index is not None
                                 and i == current_task_index
@@ -1215,7 +1070,6 @@ class MultiAgentWorkflow:
                         result = f"Todo with id {todo_id} not found"
 
                 elif action == TodoAction.START_TODO.value or action == "start_todo":
-                    # Mark todo as in progress
                     todo_id = tool_args.get("todo_id")
                     for i, todo in enumerate(todos):
                         if todo.get("id") == todo_id:
@@ -1227,7 +1081,6 @@ class MultiAgentWorkflow:
                         result = f"Todo with id {todo_id} not found"
 
                 elif action == TodoAction.UPDATE_TODO.value or action == "update_todo":
-                    # Update a todo
                     updated_todo = tool_args.get("todo", {})
                     todo_id = updated_todo.get("id")
                     for i, todo in enumerate(todos):
@@ -1239,7 +1092,6 @@ class MultiAgentWorkflow:
                         result = f"Todo with id {todo_id} not found"
 
                 elif action == TodoAction.REMOVE_TODO.value or action == "remove_todo":
-                    # Remove a todo
                     todo_id = tool_args.get("todo_id")
                     for i, todo in enumerate(todos):
                         if todo.get("id") == todo_id:
@@ -1308,7 +1160,6 @@ class MultiAgentWorkflow:
         return None
 
     def _should_call_planning_tools(self, state: GraphState) -> str:
-        """Determine if planning agent made tool calls that need execution."""
         messages = state.get("messages", [])
         if not messages:
             return "end"
@@ -1317,28 +1168,17 @@ class MultiAgentWorkflow:
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return "end"
 
-        # Route to planning_tools for ANY tool call (write_todos or MCP tools)
         if last_message.tool_calls:
             return "planning_tools"
 
-        # No tool calls - end
         return "end"
 
     def _should_continue_planning(self, state: GraphState) -> str:
-        """Determine if planning agent should continue after tool execution.
-
-        Continues until:
-        - All tasks are completed, OR
-        - Max iterations reached (respects LLM rate limits), OR
-        - Agent decides to stop (no more tool calls)
-        """
         from .schemas import TodoStatus
 
-        # Check iteration/call budget (higher limit for agentic behavior)
         planning_call_count = state.get("planning_call_count", 0)
         max_iterations = getattr(settings, "planning_max_iterations", 15)
 
-        # Check if we've exceeded the budget
         if planning_call_count >= max_iterations:
             context = state.get("context", {})
             context["planning_budget_reached"] = True
@@ -1346,7 +1186,6 @@ class MultiAgentWorkflow:
             state["context"] = context
             return "end"
 
-        # Check if all tasks are completed
         todos = state.get("todos", [])
         if todos:
             pending_count = sum(
@@ -1361,13 +1200,11 @@ class MultiAgentWorkflow:
                 )
             )
             if pending_count == 0:
-                # All tasks completed - stop naturally
                 context = state.get("context", {})
                 context["all_tasks_completed"] = True
                 state["context"] = context
                 return "end"
 
-        # Continue to planning agent for more processing
         return "planning_agent"
 
     def _should_continue(self, state: GraphState) -> str:

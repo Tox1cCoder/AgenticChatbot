@@ -96,12 +96,10 @@ class RAGAgent:
         self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
     def _init_reranker(self):
-        """Initialize the re-ranker model"""
         self.reranker = CrossEncoder(self.settings.reranker_model)
         logger.info(f"Re-ranker initialized: {self.settings.reranker_model}")
 
     async def _init_tools(self):
-        """Initialize MCP manager and load tools using global singleton"""
         if self.mcp_manager is not None:
             return
 
@@ -139,7 +137,6 @@ class RAGAgent:
         return list(unique_tools.values())
 
     def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
-        """Create agent executor with proper tool binding configuration."""
 
         tool_choice = (
             settings.tool_choice_mode
@@ -408,10 +405,6 @@ class RAGAgent:
         message: AgentMessage,
         conversation_id: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """
-        Stream message processing with token-by-token generation.
-        Yields events as tokens are generated.
-        """
         query = message.content
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
@@ -814,10 +807,6 @@ class RAGAgent:
             return all_citations
 
     async def _generate_stream(self, prompt: str):
-        """
-        Stream content generation with thinking support.
-        Yields events with type 'thinking' for thought content and 'token' for answer content.
-        """
         import asyncio
         import queue
         import threading
@@ -905,7 +894,6 @@ class RAGAgent:
     async def _generate_with_tools(
         self, prompt: str, streaming_callback=None
     ) -> tuple[str, List[str], List[Dict[str, Any]]]:
-        """Generate response with tool calling support using create_agent."""
         try:
             # Create agent executor
             agent_executor = self._create_agent_executor(self.tools, prompt)
@@ -934,7 +922,6 @@ class RAGAgent:
         tool_response_text: str,
         tool_artifacts: List[Dict[str, Any]],
     ) -> str:
-        """Combine tool outputs with the base prompt for multimodal generation."""
         sections: List[str] = [base_prompt.rstrip()]
 
         context_chunks: List[str] = []
@@ -1028,7 +1015,6 @@ class RAGAgent:
     async def _rerank_results(
         self, query: str, results: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Re-rank search results using cross-encoder"""
         if not self.reranker or not results:
             return results
 
@@ -1134,10 +1120,6 @@ class RAGAgent:
             raise
 
     async def _generate(self, prompt: str) -> str:
-        """
-        Generate content with optional thinking support.
-        Returns tuple of (response_text, thinking_summary) when thinking is enabled.
-        """
         try:
             # Build generation config with thinking support
             config_kwargs = {}
@@ -1188,11 +1170,9 @@ class RAGAgent:
             raise RuntimeError(f"Gemini API error: {exc}") from exc
 
     async def initialize(self):
-        """Initialize the RAG agent"""
         return True
 
     async def cleanup(self):
-        """Cleanup resources"""
         # Cleanup MCP resources
         if self.mcp_manager:
             await self.mcp_manager.cleanup()
@@ -1202,7 +1182,6 @@ class RAGAgent:
             self.qdrant_client.close()
 
     def get_status(self) -> dict:
-        """Get the current status of the RAG agent"""
         try:
             collections = self.qdrant_client.get_collections()
             collection_exists = any(
@@ -1233,9 +1212,6 @@ class RAGAgent:
             }
 
     async def delete_document_vectors(self, document_id: str) -> dict:
-        """
-        Delete all vectors associated with a document ID and cleanup associated images.
-        """
         try:
             # Delete associated images from database and filesystem
             images_deleted = 0

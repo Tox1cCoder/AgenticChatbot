@@ -74,6 +74,11 @@
         "NODE_OPTIONS": "--no-warnings"
       },
       "enabled": true
+    },
+    "youtube": {
+      "enabled": true,
+      "transport": "streamable_http",
+      "url": "https://server.smithery.ai/youtube"
     }
   }
 }

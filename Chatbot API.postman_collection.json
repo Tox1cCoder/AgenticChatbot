@@ -494,6 +494,77 @@
           "response": []
         },
         {
+          "name": "Send Message (Streaming)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Response is SSE stream', function () {",
+                  "    pm.expect(pm.response.headers.get('Content-Type')).to.include('text/event-stream');",
+                  "});",
+                  "",
+                  "// Parse SSE events from response",
+                  "const responseText = pm.response.text();",
+                  "const events = [];",
+                  "const lines = responseText.split('\\n\\n');",
+                  "",
+                  "for (const line of lines) {",
+                  "    if (line.startsWith('data: ')) {",
+                  "        try {",
+                  "            const jsonStr = line.substring(6);",
+                  "            const event = JSON.parse(jsonStr);",
+                  "            events.push(event);",
+                  "        } catch (e) {",
+                  "            // Skip invalid JSON",
+                  "        }",
+                  "    }",
+                  "}",
+                  "",
+                  "console.log('Parsed events:', events);",
+                  "",
+                  "// Store the last complete message if available",
+                  "const completeEvent = events.find(e => e.type === 'complete');",
+                  "if (completeEvent && completeEvent.message) {",
+                  "    pm.collectionVariables.set('message_id', completeEvent.message.id);",
+                  "}",
+                  "",
+                  "pm.test('Stream contains events', function () {",
+                  "    pm.expect(events.length).to.be.above(0);",
+                  "});"
+                ],
+                "type": "text/javascript",
+                "packages": {}
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversation_id\": \"{{conversation_id}}\",\n  \"content\": \"What can you tell me about the uploaded documents?\",\n  \"role\": \"user\"\n}"
+            },
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/stream",
+              "host": ["{{HOST}}"],
+              "port": "{{PORT}}",
+              "path": ["messages", "stream"]
+            },
+            "description": "Sends a message and receives a streaming SSE response. The response includes:\n- agent_selected: Which agent is handling the request\n- token: Real-time text chunks as they're generated\n- thinking: AI reasoning (if supported)\n- tool: Tool execution events (start/end)\n- complete: Final message with metadata\n- error: Any errors that occur\n\nSee STREAMING_RESPONSE_EXAMPLES.md for detailed event examples."
+          },
+          "response": []
+        },
+        {
           "name": "Get Conversation Messages",
           "event": [
             {

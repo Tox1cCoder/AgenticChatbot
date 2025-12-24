@@ -13,6 +13,7 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import BaseTool
 
+from .base_agent import BaseAgent
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_chat_prompt, CHAT_SYSTEM_PROMPT, TOOL_CONTEXT_SUFFIX
 from ..utils import (
@@ -25,86 +26,42 @@ from ..mcp_integration import get_global_mcp_manager
 logger = logging.getLogger(__name__)
 
 
-class ChatAgent:
+class ChatAgent(BaseAgent):
 
     def __init__(self):
-        self.model_name = settings.chat_agent_model
-        self.gemini_client = None
-        self.langchain_model = None
-        self.mcp_manager = None
-        self.tools = []
-        self._init_gemini()
+        super().__init__(model_name=settings.chat_agent_model)
 
-    def _init_gemini(self):
-        api_key = settings.gemini_api_key
-        if not api_key:
-            logger.error("Gemini API key not configured")
-            return
+    def _init_gemini(self) -> None:
+        super()._init_gemini()
+        # Override model kwargs to add thinking_level if enabled
+        if settings.enable_thinking and hasattr(settings, "thinking_level"):
+            api_key = settings.gemini_api_key
+            if api_key.startswith("GEMINI_API_KEY="):
+                api_key = api_key.split("=", 1)[-1].strip()
+            model_kwargs = {
+                "model": self.model_name,
+                "google_api_key": api_key,
+                "temperature": 1.0,
+                "thinking_level": settings.thinking_level,
+            }
+            self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
-        if api_key.startswith("GEMINI_API_KEY="):
-            api_key = api_key.split("=", 1)[-1].strip()
+    @property
+    def agent_type(self) -> AgentType:
+        return AgentType.CHAT
 
-        self.gemini_client = genai.Client(api_key=api_key)
+    @property
+    def agent_id(self) -> str:
+        return "chat_agent"
 
-        # Build LangChain model with optional thinking support
-        model_kwargs = {
-            "model": self.model_name,
-            "google_api_key": api_key,
-            "temperature": 1.0,
-        }
-        if settings.enable_thinking:
-            model_kwargs["thinking_level"] = settings.thinking_level
-
-        self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
-
-    async def _init_tools(self):
-        """Initialize MCP manager and load general-purpose tools using global singleton"""
-        if self.mcp_manager is not None:
-            return  # Already initialized
-
-        try:
-            # Use global singleton MCP manager for performance
-            self.mcp_manager = await get_global_mcp_manager()
-            all_tools = await self.mcp_manager.get_tools()
-        except Exception as e:
-            logger.error(
-                "Failed to get global MCP manager for ChatAgent: %s",
-                e,
-                exc_info=True,
-            )
-            self.tools = []
-            return
-
-        self.tools = self._deduplicate_tools(all_tools)
-
-        server_status = self.mcp_manager.get_servers_status()
-        active_servers = [
-            name for name, status in server_status.items() if status.get("enabled")
-        ]
-        if self.tools:
-            logger.info(
-                "Loaded %d MCP tools for ChatAgent from %d servers",
-                len(self.tools),
-                len(active_servers),
-            )
-        else:
-            logger.warning(
-                "No MCP tools available for ChatAgent; running without tools"
-            )
-
-    def _deduplicate_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
-        """Ensure the tool list does not contain duplicates by name."""
-        unique_tools: Dict[str, BaseTool] = {}
-        for tool in tools or []:
-            unique_tools.setdefault(tool.name, tool)
-        return list(unique_tools.values())
+    def _get_base_system_prompt(self) -> str:
+        return CHAT_SYSTEM_PROMPT
 
     async def process_message(
         self,
         message: AgentMessage,
         conversation_id: Optional[str] = None,
     ) -> AgentResponse:
-        """Process message and return response with potential tool calls."""
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
 
@@ -168,19 +125,11 @@ class ChatAgent:
             logger.error(
                 "Error while processing message in ChatAgent: %s", exc, exc_info=True
             )
-            response_text = await self._handle_generation_error(prompt, exc)
-
-            return AgentResponse(
-                agent_type=AgentType.CHAT,
-                agent_id="chat_agent",
-                message=AgentMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=coerce_response_text(response_text),
-                ),
+            return self._build_error_response(
+                error_message=f"{type(exc).__name__}: {exc}",
                 metadata={
-                    "model": self.model_name,
                     "conversation_id": conversation_id,
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "context_messages": len(conversation_history),
                 },
             )
 
@@ -207,87 +156,21 @@ class ChatAgent:
         # Configure tool calling based on global setting; allow the model to decide
         llm_with_tools = self._get_llm_with_tools()
 
-        try:
-            # Invoke model
-            response = await llm_with_tools.ainvoke([HumanMessage(content=prompt)])
+        # Invoke model
+        response = await llm_with_tools.ainvoke([HumanMessage(content=prompt)])
 
-            tool_calls = []
-            if hasattr(response, "tool_calls") and response.tool_calls:
-                tool_calls = response.tool_calls
+        tool_calls = []
+        if hasattr(response, "tool_calls") and response.tool_calls:
+            tool_calls = response.tool_calls
 
-            # Create response metadata
-            metadata = {
-                "model": self.model_name,
-                "conversation_id": conversation_id,
-                "context_messages": len(conversation_history),
-                "tools_available": len(self.tools),
-                "persona_used": persona,
-            }
-
-            return AgentResponse(
-                agent_type=AgentType.CHAT,
-                agent_id="chat_agent",
-                message=AgentMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=coerce_response_text(response.content),
-                    tool_calls=tool_calls if tool_calls else None,
-                ),
-                metadata=metadata,
-            )
-
-        except Exception as e:
-            logger.error(f"Error invoking chat agent model: {e}", exc_info=True)
-            error_text = await self._handle_generation_error(prompt, e)
-            return AgentResponse(
-                agent_type=AgentType.CHAT,
-                agent_id="chat_agent",
-                message=AgentMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=coerce_response_text(error_text),
-                ),
-                metadata={
-                    "model": self.model_name,
-                    "conversation_id": conversation_id,
-                    "error": f"{type(e).__name__}: {e}",
-                },
-            )
-
-    async def invoke_model_with_history(
-        self,
-        messages: List[BaseMessage],
-        conversation_history: List[Any],
-        persona: Optional[str],
-        conversation_id: Optional[str] = None,
-    ) -> AgentResponse:
-        if self.mcp_manager is None:
-            await self._init_tools()
-
-        llm_with_tools = self._get_llm_with_tools()
-
-        # Check if there are already tool results in the message history
-        has_tool_context = any(
-            isinstance(m, ToolMessage) or (hasattr(m, "tool_calls") and m.tool_calls)
-            for m in messages
-        )
-
-        system_prompt = CHAT_SYSTEM_PROMPT
-        if has_tool_context:
-            system_prompt = system_prompt + TOOL_CONTEXT_SUFFIX
-        if persona and persona.strip():
-            system_prompt = (
-                f"Custom Persona:\n{persona.strip()}\n\n---\n{system_prompt}"
-            )
-
-        langchain_messages: List[BaseMessage] = [SystemMessage(content=system_prompt)]
-        langchain_messages.extend(messages)
-
-        response = await llm_with_tools.ainvoke(langchain_messages)
-
-        tool_calls = (
-            response.tool_calls
-            if hasattr(response, "tool_calls") and response.tool_calls
-            else []
-        )
+        # Create response metadata
+        metadata = {
+            "model": self.model_name,
+            "conversation_id": conversation_id,
+            "context_messages": len(conversation_history),
+            "tools_available": len(self.tools),
+            "persona_used": persona,
+        }
 
         return AgentResponse(
             agent_type=AgentType.CHAT,
@@ -297,32 +180,7 @@ class ChatAgent:
                 content=coerce_response_text(response.content),
                 tool_calls=tool_calls if tool_calls else None,
             ),
-            metadata={
-                "model": self.model_name,
-                "conversation_id": conversation_id,
-                "context_messages": len(conversation_history),
-                "tools_available": len(self.tools),
-                "persona_used": persona,
-            },
-        )
-
-    def _get_llm_with_tools(self):
-        tool_choice = (
-            settings.tool_choice_mode
-            if hasattr(settings, "tool_choice_mode")
-            else "auto"
-        )
-        return self.langchain_model.bind_tools(
-            self.tools,
-            tool_config={
-                "function_calling_config": {
-                    "mode": (
-                        tool_choice.upper()
-                        if tool_choice in ["auto", "any", "none"]
-                        else "AUTO"
-                    )
-                }
-            },
+            metadata=metadata,
         )
 
     async def _generate(self, prompt: str) -> str:
@@ -338,7 +196,6 @@ class ChatAgent:
             raise RuntimeError(f"Gemini API error: {exc}") from exc
 
     async def _handle_generation_error(self, prompt: str, error: Exception) -> str:
-        """Ask the base LLM to craft a user-facing reply that acknowledges an internal error."""
         error_message = f"{type(error).__name__}: {error}"
         recovery_hint = get_error_recovery_hint(error, "chat_agent", {})
 
@@ -371,9 +228,6 @@ class ChatAgent:
                 parts.append(
                     types.Part.from_bytes(data=image_data, mime_type=mime_type)
                 )
-                logger.info(
-                    f"Added image to vision request: {attachment.get('name', 'unknown')}"
-                )
             except Exception as img_err:
                 logger.error(f"Failed to process image attachment: {img_err}")
 
@@ -384,7 +238,4 @@ class ChatAgent:
         return response.text if hasattr(response, "text") else str(response)
 
     async def cleanup(self):
-        """Cleanup agent resources (MCP manager is shared and cleaned up globally)"""
-        self.mcp_manager = None
-        self.tools = []
-        logger.debug("ChatAgent cleanup completed (MCP manager is shared)")
+        await super().cleanup()
