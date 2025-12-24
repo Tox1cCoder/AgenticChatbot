@@ -267,19 +267,141 @@ class SearchAgent:
         )
 
         llm_with_tools = self.langchain_model.bind_tools(self.tools)
+        accumulated_content = ""
+        accumulated_thinking = ""
+        current_tool_calls = {}  # Track tool call chunks
 
         try:
+            # Use astream_events for LangChain model streaming
+            # Note: LangGraph's stream_mode="messages" only works with compiled graphs,
+            # so we use astream_events for direct model calls
             async for event in llm_with_tools.astream_events(
-                [HumanMessage(content=prompt)], version="v1"
+                [HumanMessage(content=prompt)], version="v2"
             ):
                 event_type = event.get("event")
 
+                # Handle LLM token streaming
                 if event_type == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
-                    if chunk and hasattr(chunk, "content") and chunk.content:
+                    if not chunk:
+                        continue
+
+                    # Use content_blocks for better content handling (latest pattern)
+                    if hasattr(chunk, "content_blocks") and chunk.content_blocks:
+                        for block in chunk.content_blocks:
+                            block_type = block.get("type")
+
+                            if block_type == "text":
+                                token = block.get("text", "")
+                                if not token:
+                                    continue
+
+                                # Check for thinking/reasoning markers
+                                additional_kwargs = getattr(
+                                    chunk, "additional_kwargs", {}
+                                )
+                                is_thinking = additional_kwargs.get(
+                                    "thought"
+                                ) or additional_kwargs.get("thinking")
+
+                                if is_thinking:
+                                    accumulated_thinking += token
+                                    yield {"type": "thinking", "content": token}
+                                else:
+                                    accumulated_content += token
+                                    yield {"type": "token", "content": token}
+
+                            elif block_type == "tool_call_chunk":
+                                # Accumulate tool call chunks
+                                tool_index = block.get("index", 0)
+                                if tool_index not in current_tool_calls:
+                                    current_tool_calls[tool_index] = {
+                                        "id": block.get("id"),
+                                        "name": block.get("name"),
+                                        "args": "",
+                                    }
+                                if block.get("args"):
+                                    current_tool_calls[tool_index]["args"] += block.get(
+                                        "args"
+                                    )
+                                if (
+                                    block.get("name")
+                                    and not current_tool_calls[tool_index]["name"]
+                                ):
+                                    current_tool_calls[tool_index]["name"] = block.get(
+                                        "name"
+                                    )
+                                if (
+                                    block.get("id")
+                                    and not current_tool_calls[tool_index]["id"]
+                                ):
+                                    current_tool_calls[tool_index]["id"] = block.get(
+                                        "id"
+                                    )
+
+                    # Fallback: Handle legacy content attribute
+                    elif hasattr(chunk, "content"):
                         token = coerce_response_text(chunk.content)
-                        if token:
+                        if not token:
+                            continue
+
+                        # Check for thinking/reasoning markers
+                        additional_kwargs = getattr(chunk, "additional_kwargs", {})
+                        is_thinking = additional_kwargs.get(
+                            "thought"
+                        ) or additional_kwargs.get("thinking")
+
+                        if is_thinking:
+                            accumulated_thinking += token
+                            yield {"type": "thinking", "content": token}
+                        else:
+                            accumulated_content += token
                             yield {"type": "token", "content": token}
+
+                    # Check for chunk completion
+                    if (
+                        hasattr(chunk, "chunk_position")
+                        and chunk.chunk_position == "last"
+                    ):
+                        # Emit accumulated tool calls
+                        for tool_call in current_tool_calls.values():
+                            if tool_call["name"]:
+                                try:
+                                    import json
+
+                                    args = (
+                                        json.loads(tool_call["args"])
+                                        if tool_call["args"]
+                                        else {}
+                                    )
+                                except:
+                                    args = tool_call["args"]
+
+                                yield {
+                                    "type": "tool_start",
+                                    "name": tool_call["name"],
+                                    "tool_call_id": tool_call["id"],
+                                    "args": args,
+                                }
+                        current_tool_calls = {}
+
+                # Handle tool execution events
+                elif event_type == "on_tool_end":
+                    tool_name = event.get("name", "unknown")
+                    tool_output = event.get("data", {}).get("output")
+                    tool_call_id = event.get("run_id")
+                    yield {
+                        "type": "tool_end",
+                        "name": tool_name,
+                        "tool_call_id": str(tool_call_id) if tool_call_id else None,
+                        "result": tool_output,
+                    }
+
+            # Yield completion with accumulated data
+            logger.debug(
+                f"Search agent stream complete: {len(accumulated_content)} chars, "
+                f"{len(accumulated_thinking)} thinking chars"
+            )
 
         except Exception as e:
             logger.error(f"Error streaming search agent: {e}", exc_info=True)

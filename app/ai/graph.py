@@ -1,3 +1,4 @@
+import logging
 from typing import Optional, TYPE_CHECKING, List, Dict, Any
 from uuid import UUID
 
@@ -26,6 +27,8 @@ from .memory import get_memory_manager
 from ..core.config import settings
 from .hitl_config import build_interrupt_response, requires_human_approval
 from .utils import normalize_tool_call, coerce_response_text, make_json_safe
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..repositories.document import DocumentRepository
@@ -102,7 +105,7 @@ class MultiAgentWorkflow:
         """Retrieve conversation history from memory manager."""
         if not conversation_id or not user_id:
             return []
-        
+
         try:
             memory_manager = get_memory_manager()
             conv_memory = await memory_manager.get_memory(
@@ -123,11 +126,14 @@ class MultiAgentWorkflow:
         """Check if there are tool-related messages after the last human message."""
         if last_human_idx is None:
             return False
-        
+
         return any(
             isinstance(m, (AIMessage, ToolMessage))
-            and (isinstance(m, ToolMessage) or (hasattr(m, "tool_calls") and m.tool_calls))
-            for m in messages[last_human_idx + 1:]
+            and (
+                isinstance(m, ToolMessage)
+                or (hasattr(m, "tool_calls") and m.tool_calls)
+            )
+            for m in messages[last_human_idx + 1 :]
         )
 
     def _merge_tool_artifacts(
@@ -140,7 +146,7 @@ class MultiAgentWorkflow:
 
         if tool_artifacts:
             response.tool_artifacts = tool_artifacts
-        
+
         if tool_images:
             if not response.metadata:
                 response.metadata = {}
@@ -268,7 +274,7 @@ class MultiAgentWorkflow:
         )
 
         workflow.add_edge("rag_agent", END)
-        
+
         # Planning agent ReAct loop: planning_agent → planning_tools → planning_agent OR end
         workflow.add_conditional_edges(
             "planning_agent",
@@ -278,7 +284,7 @@ class MultiAgentWorkflow:
                 "end": END,
             },
         )
-        
+
         workflow.add_conditional_edges(
             "planning_tools",
             self._should_continue_planning,
@@ -324,7 +330,6 @@ class MultiAgentWorkflow:
         if self.checkpointer:
             return workflow.compile(checkpointer=self.checkpointer)
         return workflow.compile()
-
 
     async def _tool_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
@@ -794,11 +799,13 @@ class MultiAgentWorkflow:
         current_task = state.get("current_task")
         all_tasks = state.get("all_tasks")
         plan_context_str = self._build_plan_context_string(current_task, all_tasks)
-        
+
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
-        conversation_history = await self._get_conversation_history(conversation_id, user_id)
-        
+        conversation_history = await self._get_conversation_history(
+            conversation_id, user_id
+        )
+
         last_human_idx = self._find_last_human_message_index(messages)
         has_tool_context = self._has_tool_context(messages, last_human_idx)
 
@@ -812,16 +819,28 @@ class MultiAgentWorkflow:
             )
         else:
             last_message = messages[-1]
-            content = last_message.content if hasattr(last_message, "content") else str(last_message)
+            content = (
+                last_message.content
+                if hasattr(last_message, "content")
+                else str(last_message)
+            )
             user_content = (
                 messages[last_human_idx].content
-                if last_human_idx is not None and hasattr(messages[last_human_idx], "content")
+                if last_human_idx is not None
+                and hasattr(messages[last_human_idx], "content")
                 else content
             )
 
-            enriched_content = f"{plan_context_str}\n\n{user_content}" if plan_context_str else user_content
+            enriched_content = (
+                f"{plan_context_str}\n\n{user_content}"
+                if plan_context_str
+                else user_content
+            )
             context = state.get("context", {})
-            metadata = {"history": conversation_history, "persona": state.get("persona")}
+            metadata = {
+                "history": conversation_history,
+                "persona": state.get("persona"),
+            }
             if current_task:
                 metadata["task_context"] = current_task
 
@@ -900,11 +919,13 @@ class MultiAgentWorkflow:
         current_task = state.get("current_task")
         all_tasks = state.get("all_tasks")
         plan_context_str = self._build_plan_context_string(current_task, all_tasks)
-        
+
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
-        conversation_history = await self._get_conversation_history(conversation_id, user_id)
-        
+        conversation_history = await self._get_conversation_history(
+            conversation_id, user_id
+        )
+
         last_human_idx = self._find_last_human_message_index(messages)
         has_tool_context = self._has_tool_context(messages, last_human_idx)
 
@@ -918,16 +939,28 @@ class MultiAgentWorkflow:
             )
         else:
             last_message = messages[-1]
-            content = last_message.content if hasattr(last_message, "content") else str(last_message)
+            content = (
+                last_message.content
+                if hasattr(last_message, "content")
+                else str(last_message)
+            )
             user_content = (
                 messages[last_human_idx].content
-                if last_human_idx is not None and hasattr(messages[last_human_idx], "content")
+                if last_human_idx is not None
+                and hasattr(messages[last_human_idx], "content")
                 else content
             )
 
-            enriched_content = f"{plan_context_str}\n\n{user_content}" if plan_context_str else user_content
+            enriched_content = (
+                f"{plan_context_str}\n\n{user_content}"
+                if plan_context_str
+                else user_content
+            )
             context = state.get("context", {})
-            metadata = {"history": conversation_history, "persona": state.get("persona")}
+            metadata = {
+                "history": conversation_history,
+                "persona": state.get("persona"),
+            }
             if current_task:
                 metadata["task_context"] = current_task
 
@@ -937,7 +970,9 @@ class MultiAgentWorkflow:
                 metadata=metadata,
                 attachments=context.get("attachments"),
             )
-            response = await self.search_agent.process_message(agent_msg, conversation_id)
+            response = await self.search_agent.process_message(
+                agent_msg, conversation_id
+            )
 
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)
@@ -951,15 +986,19 @@ class MultiAgentWorkflow:
         current_task = state.get("current_task")
         all_tasks = state.get("all_tasks")
         plan_context_str = self._build_plan_context_string(current_task, all_tasks)
-        
+
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
-        conversation_history = await self._get_conversation_history(conversation_id, user_id)
-        
+        conversation_history = await self._get_conversation_history(
+            conversation_id, user_id
+        )
+
         last_human_idx = self._find_last_human_message_index(messages)
         has_tool_context = self._has_tool_context(messages, last_human_idx)
-        
-        last_human_message = messages[last_human_idx] if last_human_idx is not None else None
+
+        last_human_message = (
+            messages[last_human_idx] if last_human_idx is not None else None
+        )
         content = last_human_message.content if last_human_message else ""
 
         if has_tool_context:
@@ -973,7 +1012,9 @@ class MultiAgentWorkflow:
         else:
             full_history = conversation_history + messages[:-1]
             context = state.get("context", {})
-            enriched_content = f"{plan_context_str}\n\n{content}" if plan_context_str else content
+            enriched_content = (
+                f"{plan_context_str}\n\n{content}" if plan_context_str else content
+            )
             metadata = {"history": full_history, "persona": state.get("persona")}
             if current_task:
                 metadata["task_context"] = current_task
@@ -984,7 +1025,9 @@ class MultiAgentWorkflow:
                 metadata=metadata,
                 attachments=context.get("attachments"),
             )
-            response = await self.image_generator_agent.invoke_model(agent_msg, conversation_id)
+            response = await self.image_generator_agent.invoke_model(
+                agent_msg, conversation_id
+            )
 
         # Use append_images=True since image generator produces its own images
         self._merge_tool_artifacts(state, response, append_images=True)
@@ -993,7 +1036,7 @@ class MultiAgentWorkflow:
     async def _planning_node(self, state: GraphState) -> GraphState:
         """
         Planning agent node with tool-calling ReAct pattern.
-        
+
         Uses invoke_model_with_history to get responses that may include tool calls
         for the write_todos tool. Supports both initial plan creation and
         ongoing task management.
@@ -1018,17 +1061,17 @@ class MultiAgentWorkflow:
 
         context = state.get("context", {})
         existing_tasks = context.get("existing_tasks", [])
-        
+
         # Get current todos from state (may have been updated by planning_tools)
         todos = state.get("todos", [])
         current_task_index = state.get("current_task_index")
-        
+
         # Increment planning call count for budget tracking
         planning_call_count = (state.get("planning_call_count") or 0) + 1
         state["planning_call_count"] = planning_call_count
 
         persona = state.get("persona")
-        
+
         # Get only current turn messages for the model
         current_turn_messages = self._get_current_turn_messages(messages)
 
@@ -1043,7 +1086,7 @@ class MultiAgentWorkflow:
         )
 
         state["response"] = response
-        
+
         # Add AI message to state (with tool calls if present)
         ai_kwargs = {"content": response.message.content or ""}
         if response.message.tool_calls:
@@ -1059,66 +1102,76 @@ class MultiAgentWorkflow:
     async def _planning_tools_node(self, state: GraphState) -> GraphState:
         """
         Execute write_todos tool calls from the planning agent.
-        
+
         Handles the actual todo state updates based on tool call arguments.
         """
         from .schemas import TodoAction, TodoStatus
-        
+
         messages = state.get("messages", [])
         if not messages:
             return state
-            
+
         last_message = messages[-1]
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return state
-        
+
         todos = list(state.get("todos", []))  # Make a copy
         current_task_index = state.get("current_task_index")
         tool_outputs = []
-        
+
         for tool_call in last_message.tool_calls:
             tool_call_data = normalize_tool_call(tool_call)
             tool_name = tool_call_data.get("name")
             tool_id = tool_call_data.get("id")
             tool_args = tool_call_data.get("args", {})
-            
+
             if tool_name != "write_todos":
                 # Execute MCP tool
                 try:
                     # Find the tool in the planning agent's tools
                     tool = None
-                    if self.planning_agent and hasattr(self.planning_agent, 'tools'):
+                    if self.planning_agent and hasattr(self.planning_agent, "tools"):
                         for t in self.planning_agent.tools:
                             if t.name == tool_name:
                                 tool = t
                                 break
-                    
+
                     if tool:
                         # Execute the tool
                         result = await tool.ainvoke(tool_args)
-                        tool_outputs.append({
-                            "tool_call_id": tool_id,
-                            "name": tool_name,
-                            "content": str(result) if result else "Tool executed successfully",
-                        })
+                        tool_outputs.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "content": (
+                                    str(result)
+                                    if result
+                                    else "Tool executed successfully"
+                                ),
+                            }
+                        )
                     else:
-                        tool_outputs.append({
-                            "tool_call_id": tool_id,
-                            "name": tool_name,
-                            "content": f"Tool not found: {tool_name}",
-                        })
+                        tool_outputs.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "content": f"Tool not found: {tool_name}",
+                            }
+                        )
                 except Exception as e:
                     logger.error(f"Error executing MCP tool {tool_name}: {e}")
-                    tool_outputs.append({
-                        "tool_call_id": tool_id,
-                        "name": tool_name,
-                        "content": f"Error executing tool: {str(e)}",
-                    })
+                    tool_outputs.append(
+                        {
+                            "tool_call_id": tool_id,
+                            "name": tool_name,
+                            "content": f"Error executing tool: {str(e)}",
+                        }
+                    )
                 continue
-            
+
             action = tool_args.get("action")
             result = ""
-            
+
             try:
                 if action == TodoAction.SET_TODOS.value or action == "set_todos":
                     # Replace all todos
@@ -1126,7 +1179,7 @@ class MultiAgentWorkflow:
                     todos = new_todos
                     current_task_index = 0 if todos else None
                     result = f"Set {len(todos)} todos in the plan."
-                
+
                 elif action == TodoAction.ADD_TODO.value or action == "add_todo":
                     # Add a single todo
                     new_todo = tool_args.get("todo", {})
@@ -1136,21 +1189,31 @@ class MultiAgentWorkflow:
                         result = f"Added todo: {new_todo.get('description', 'unknown')}"
                     else:
                         result = "Error: No todo provided for ADD_TODO"
-                
-                elif action == TodoAction.COMPLETE_TODO.value or action == "complete_todo":
+
+                elif (
+                    action == TodoAction.COMPLETE_TODO.value
+                    or action == "complete_todo"
+                ):
                     # Mark todo as completed
                     todo_id = tool_args.get("todo_id")
                     for i, todo in enumerate(todos):
                         if todo.get("id") == todo_id:
                             todo["status"] = TodoStatus.COMPLETED.value
-                            result = f"Completed todo: {todo.get('description', todo_id)}"
+                            result = (
+                                f"Completed todo: {todo.get('description', todo_id)}"
+                            )
                             # Move to next task
-                            if current_task_index is not None and i == current_task_index:
-                                current_task_index = self._find_next_ready_task(todos, i)
+                            if (
+                                current_task_index is not None
+                                and i == current_task_index
+                            ):
+                                current_task_index = self._find_next_ready_task(
+                                    todos, i
+                                )
                             break
                     else:
                         result = f"Todo with id {todo_id} not found"
-                
+
                 elif action == TodoAction.START_TODO.value or action == "start_todo":
                     # Mark todo as in progress
                     todo_id = tool_args.get("todo_id")
@@ -1162,7 +1225,7 @@ class MultiAgentWorkflow:
                             break
                     else:
                         result = f"Todo with id {todo_id} not found"
-                
+
                 elif action == TodoAction.UPDATE_TODO.value or action == "update_todo":
                     # Update a todo
                     updated_todo = tool_args.get("todo", {})
@@ -1174,7 +1237,7 @@ class MultiAgentWorkflow:
                             break
                     else:
                         result = f"Todo with id {todo_id} not found"
-                
+
                 elif action == TodoAction.REMOVE_TODO.value or action == "remove_todo":
                     # Remove a todo
                     todo_id = tool_args.get("todo_id")
@@ -1187,23 +1250,27 @@ class MultiAgentWorkflow:
                                 if i < current_task_index:
                                     current_task_index -= 1
                                 elif i == current_task_index:
-                                    current_task_index = self._find_next_ready_task(todos, max(0, i - 1))
+                                    current_task_index = self._find_next_ready_task(
+                                        todos, max(0, i - 1)
+                                    )
                             break
                     else:
                         result = f"Todo with id {todo_id} not found"
-                
+
                 else:
                     result = f"Unknown action: {action}"
-                    
+
             except Exception as e:
                 result = f"Error executing {action}: {str(e)}"
-            
-            tool_outputs.append({
-                "tool_call_id": tool_id,
-                "name": tool_name,
-                "content": result,
-            })
-        
+
+            tool_outputs.append(
+                {
+                    "tool_call_id": tool_id,
+                    "name": tool_name,
+                    "content": result,
+                }
+            )
+
         # Add tool messages to state
         for output in tool_outputs:
             state.setdefault("messages", []).append(
@@ -1213,28 +1280,25 @@ class MultiAgentWorkflow:
                     name=output["name"],
                 )
             )
-        
+
         # Update state with new todos
         state["todos"] = todos
         state["current_task_index"] = current_task_index
-        
+
         # Increment iteration count for budget tracking
         current_iteration = state.get("iteration_count") or 0
         state["iteration_count"] = current_iteration + 1
-        
+
         return state
 
-    def _find_next_ready_task(
-        self, todos: list, start_index: int = 0
-    ) -> Optional[int]:
+    def _find_next_ready_task(self, todos: list, start_index: int = 0) -> Optional[int]:
         """Find the next task that is ready to execute (pending with all deps completed)."""
         from .schemas import TodoStatus
-        
+
         completed_ids = {
-            t.get("id") for t in todos 
-            if t.get("status") == TodoStatus.COMPLETED.value
+            t.get("id") for t in todos if t.get("status") == TodoStatus.COMPLETED.value
         }
-        
+
         for i in range(start_index, len(todos)):
             todo = todos[i]
             if todo.get("status") == TodoStatus.PENDING.value:
@@ -1248,32 +1312,32 @@ class MultiAgentWorkflow:
         messages = state.get("messages", [])
         if not messages:
             return "end"
-        
+
         last_message = messages[-1]
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return "end"
-        
+
         # Route to planning_tools for ANY tool call (write_todos or MCP tools)
         if last_message.tool_calls:
             return "planning_tools"
-        
+
         # No tool calls - end
         return "end"
 
     def _should_continue_planning(self, state: GraphState) -> str:
         """Determine if planning agent should continue after tool execution.
-        
+
         Continues until:
         - All tasks are completed, OR
         - Max iterations reached (respects LLM rate limits), OR
         - Agent decides to stop (no more tool calls)
         """
         from .schemas import TodoStatus
-        
+
         # Check iteration/call budget (higher limit for agentic behavior)
         planning_call_count = state.get("planning_call_count", 0)
         max_iterations = getattr(settings, "planning_max_iterations", 15)
-        
+
         # Check if we've exceeded the budget
         if planning_call_count >= max_iterations:
             context = state.get("context", {})
@@ -1281,24 +1345,30 @@ class MultiAgentWorkflow:
             context["pause_reason"] = "max_iterations_reached"
             state["context"] = context
             return "end"
-        
+
         # Check if all tasks are completed
         todos = state.get("todos", [])
         if todos:
-            pending_count = sum(1 for t in todos if t.get("status") in (
-                TodoStatus.PENDING.value, "pending",
-                TodoStatus.IN_PROGRESS.value, "in_progress"
-            ))
+            pending_count = sum(
+                1
+                for t in todos
+                if t.get("status")
+                in (
+                    TodoStatus.PENDING.value,
+                    "pending",
+                    TodoStatus.IN_PROGRESS.value,
+                    "in_progress",
+                )
+            )
             if pending_count == 0:
                 # All tasks completed - stop naturally
                 context = state.get("context", {})
                 context["all_tasks_completed"] = True
                 state["context"] = context
                 return "end"
-        
+
         # Continue to planning agent for more processing
         return "planning_agent"
-
 
     def _should_continue(self, state: GraphState) -> str:
         selected_agent = state.get("selected_agent")
@@ -1563,14 +1633,16 @@ class MultiAgentWorkflow:
             todos = []
             if existing_tasks:
                 for i, task in enumerate(existing_tasks):
-                    todos.append({
-                        "id": task.get("id", str(i)),
-                        "description": task.get("description", ""),
-                        "status": task.get("status", "pending"),
-                        "order": task.get("task_order", i),
-                        "dependencies": task.get("dependencies", []),
-                        "complexity": task.get("estimated_complexity"),
-                    })
+                    todos.append(
+                        {
+                            "id": task.get("id", str(i)),
+                            "description": task.get("description", ""),
+                            "status": task.get("status", "pending"),
+                            "order": task.get("task_order", i),
+                            "dependencies": task.get("dependencies", []),
+                            "complexity": task.get("estimated_complexity"),
+                        }
+                    )
 
             # Set up initial state for graph execution
             initial_state["todos"] = todos
@@ -1587,25 +1659,27 @@ class MultiAgentWorkflow:
             try:
                 # Use ainvoke for planning agent since it doesn't stream internally
                 result = await self.graph.ainvoke(initial_state, config=config)
-                
+
                 response = result.get("response")
                 final_todos = result.get("todos", [])
-                
+
                 # Ensure we have a valid response with todos in metadata
                 if response:
                     if response.metadata is None:
                         response.metadata = {}
                     if final_todos:
                         response.metadata["todos"] = final_todos
-                    response.metadata["planning_call_count"] = result.get("planning_call_count", 0)
-                    
+                    response.metadata["planning_call_count"] = result.get(
+                        "planning_call_count", 0
+                    )
+
                     # Check context for completion status
                     context = result.get("context", {})
                     if context.get("all_tasks_completed"):
                         response.metadata["all_tasks_completed"] = True
                     if context.get("planning_budget_reached"):
                         response.metadata["planning_budget_reached"] = True
-                    
+
                     # If response content is empty, try to extract from last AI message
                     if not response.message.content:
                         messages = result.get("messages", [])
@@ -1613,11 +1687,11 @@ class MultiAgentWorkflow:
                             if isinstance(msg, AIMessage) and msg.content:
                                 response.message.content = msg.content
                                 break
-                
+
                 # Yield the content as tokens for UI compatibility
                 if response and response.message and response.message.content:
                     yield {"type": "token", "content": response.message.content}
-                
+
                 if response:
                     yield {"type": "complete", "response": response}
                 else:
@@ -1626,51 +1700,167 @@ class MultiAgentWorkflow:
                 yield {"type": "error", "error": str(e)}
             return
 
-
         accumulated_content = ""
         accumulated_thinking = ""  # Track thinking content for non-RAG agents
+        current_tool_calls = {}  # Track tool call chunks by index
+
         try:
-            async for event in self.graph.astream_events(
-                initial_state, config=config, version="v1"
+            # Use recommended LangGraph streaming approach with multiple modes
+            # - "messages": Stream LLM tokens with metadata (includes tool_call_chunks)
+            # - "updates": Stream state updates after each node (includes completed messages)
+            async for chunk in self.graph.astream(
+                initial_state, config=config, stream_mode=["messages", "updates"]
             ):
-                kind = event["event"]
+                # Handle tuple format from multiple stream modes
+                if isinstance(chunk, tuple) and len(chunk) == 2:
+                    mode, data = chunk
 
-                if kind == "on_chat_model_stream":
-                    chunk = event["data"]["chunk"]
-                    if hasattr(chunk, "content") and chunk.content:
-                        content = coerce_response_text(chunk.content)
+                    if mode == "messages":
+                        # LLM token streaming - data is (message_chunk, metadata)
+                        message_chunk, metadata = data
 
-                        if content:
-                            additional_kwargs = getattr(chunk, "additional_kwargs", {})
-                            if additional_kwargs.get(
-                                "thought"
-                            ) or additional_kwargs.get("thinking"):
-                                accumulated_thinking += content
-                                yield {"type": "thinking", "content": content}
-                            else:
-                                accumulated_content += content
-                                yield {"type": "token", "content": content}
+                        # Handle text content using content_blocks (latest pattern)
+                        if (
+                            hasattr(message_chunk, "content_blocks")
+                            and message_chunk.content_blocks
+                        ):
+                            for block in message_chunk.content_blocks:
+                                block_type = block.get("type")
 
-                elif kind == "on_tool_start":
-                    data = event.get("data") or {}
-                    tool_call_id = event.get("run_id") or event.get("id")
-                    tool_input = data.get("input") if isinstance(data, dict) else None
-                    yield {
-                        "type": "tool_start",
-                        "name": event.get("name", "unknown"),
-                        "tool_call_id": str(tool_call_id) if tool_call_id else None,
-                        "args": make_json_safe(tool_input),
-                    }
-                elif kind == "on_tool_end":
-                    data = event.get("data") or {}
-                    tool_call_id = event.get("run_id") or event.get("id")
-                    tool_output = data.get("output") if isinstance(data, dict) else None
-                    yield {
-                        "type": "tool_end",
-                        "name": event.get("name", "unknown"),
-                        "tool_call_id": str(tool_call_id) if tool_call_id else None,
-                        "result": make_json_safe(tool_output),
-                    }
+                                if block_type == "text":
+                                    text_content = block.get("text", "")
+                                    if text_content:
+                                        # Check for thinking/reasoning markers
+                                        additional_kwargs = getattr(
+                                            message_chunk, "additional_kwargs", {}
+                                        )
+                                        is_thinking = additional_kwargs.get(
+                                            "thought"
+                                        ) or additional_kwargs.get("thinking")
+
+                                        if is_thinking:
+                                            accumulated_thinking += text_content
+                                            yield {
+                                                "type": "thinking",
+                                                "content": text_content,
+                                            }
+                                        else:
+                                            accumulated_content += text_content
+                                            yield {
+                                                "type": "token",
+                                                "content": text_content,
+                                            }
+
+                                elif block_type == "tool_call_chunk":
+                                    # Stream tool call chunks as they arrive
+                                    tool_index = block.get("index", 0)
+                                    tool_id = block.get("id")
+                                    tool_name = block.get("name")
+                                    tool_args = block.get("args", "")
+
+                                    # Initialize or update tool call tracking
+                                    if tool_index not in current_tool_calls:
+                                        current_tool_calls[tool_index] = {
+                                            "id": tool_id,
+                                            "name": tool_name,
+                                            "args": "",
+                                        }
+
+                                    # Accumulate args
+                                    if tool_args:
+                                        current_tool_calls[tool_index][
+                                            "args"
+                                        ] += tool_args
+
+                                    # Update name/id if present
+                                    if (
+                                        tool_name
+                                        and not current_tool_calls[tool_index]["name"]
+                                    ):
+                                        current_tool_calls[tool_index][
+                                            "name"
+                                        ] = tool_name
+                                    if (
+                                        tool_id
+                                        and not current_tool_calls[tool_index]["id"]
+                                    ):
+                                        current_tool_calls[tool_index]["id"] = tool_id
+
+                        # Fallback: Handle legacy content attribute
+                        elif (
+                            hasattr(message_chunk, "content") and message_chunk.content
+                        ):
+                            content = coerce_response_text(message_chunk.content)
+                            if content:
+                                additional_kwargs = getattr(
+                                    message_chunk, "additional_kwargs", {}
+                                )
+                                is_thinking = additional_kwargs.get(
+                                    "thought"
+                                ) or additional_kwargs.get("thinking")
+
+                                if is_thinking:
+                                    accumulated_thinking += content
+                                    yield {"type": "thinking", "content": content}
+                                else:
+                                    accumulated_content += content
+                                    yield {"type": "token", "content": content}
+
+                        # Check for chunk completion and emit complete tool calls
+                        if (
+                            hasattr(message_chunk, "chunk_position")
+                            and message_chunk.chunk_position == "last"
+                        ):
+                            # Emit accumulated tool calls
+                            for tool_call in current_tool_calls.values():
+                                if tool_call["name"]:  # Only emit if we have a name
+                                    try:
+                                        # Parse args if it's a JSON string
+                                        import json
+
+                                        args = (
+                                            json.loads(tool_call["args"])
+                                            if tool_call["args"]
+                                            else {}
+                                        )
+                                    except:
+                                        args = tool_call["args"]
+
+                                    yield {
+                                        "type": "tool_start",
+                                        "name": tool_call["name"],
+                                        "tool_call_id": tool_call["id"],
+                                        "args": make_json_safe(args),
+                                    }
+                            # Clear for next message
+                            current_tool_calls = {}
+
+                    elif mode == "updates":
+                        # State updates - check for completed tool messages
+                        for node_name, node_state in data.items():
+                            if "messages" in node_state:
+                                messages = node_state["messages"]
+                                if messages:
+                                    last_msg = (
+                                        messages[-1]
+                                        if isinstance(messages, list)
+                                        else messages
+                                    )
+                                    # Check if this is a tool message (result)
+                                    if isinstance(last_msg, ToolMessage):
+                                        yield {
+                                            "type": "tool_end",
+                                            "name": getattr(
+                                                last_msg, "name", "unknown"
+                                            ),
+                                            "tool_call_id": getattr(
+                                                last_msg, "tool_call_id", None
+                                            ),
+                                            "result": make_json_safe(last_msg.content),
+                                        }
+                else:
+                    # Single mode or legacy format - try to handle gracefully
+                    logger.warning(f"Unexpected stream chunk format: {type(chunk)}")
 
         except Exception as e:
             yield {"type": "error", "error": str(e)}

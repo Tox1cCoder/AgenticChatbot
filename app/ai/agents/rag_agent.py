@@ -672,27 +672,49 @@ class RAGAgent:
             agent_executor = self._create_agent_executor(self.tools, prompt)
 
             accumulated_text = ""
+            tools_used = []
+            tool_artifacts = []
 
-            # Stream agent execution
+            # Stream agent execution using recommended astream_events v2
             async for event in agent_executor.astream_events(
-                {"messages": [HumanMessage(content=prompt)]}, version="v1"
+                {"messages": [HumanMessage(content=prompt)]}, version="v2"
             ):
                 event_type = event.get("event")
 
-                # Extract tokens from LLM events
+                # Extract tokens from LLM events with thinking support
                 if event_type == "on_chat_model_stream":
                     chunk = event.get("data", {}).get("chunk")
-                    if chunk and hasattr(chunk, "content") and chunk.content:
-                        token = coerce_response_text(chunk.content)
-                        if token:  # Only yield non-empty tokens
-                            accumulated_text += token
-                            yield {"type": "token", "content": token}
+                    if not chunk or not hasattr(chunk, "content"):
+                        continue
+
+                    token = coerce_response_text(chunk.content)
+                    if not token:
+                        continue
+
+                    # Check if this is thinking/reasoning content
+                    additional_kwargs = getattr(chunk, "additional_kwargs", {})
+                    is_thinking = additional_kwargs.get(
+                        "thought"
+                    ) or additional_kwargs.get("thinking")
+
+                    if is_thinking:
+                        # This is thinking content
+                        yield {"type": "thinking", "content": token}
+                    else:
+                        # Regular token
+                        accumulated_text += token
+                        yield {"type": "token", "content": token}
 
                 # Track tool execution
                 elif event_type == "on_tool_start":
                     tool_name = event.get("name", "unknown_tool")
                     tool_input = event.get("data", {}).get("input")
                     tool_call_id = event.get("run_id")
+
+                    # Track tool usage
+                    if tool_name not in tools_used:
+                        tools_used.append(tool_name)
+
                     yield {
                         "type": "tool_start",
                         "name": tool_name,
@@ -704,6 +726,16 @@ class RAGAgent:
                     tool_name = event.get("name", "unknown_tool")
                     tool_output = event.get("data", {}).get("output")
                     tool_call_id = event.get("run_id")
+
+                    # Track tool artifacts
+                    tool_artifacts.append(
+                        {
+                            "tool_name": tool_name,
+                            "tool_input": event.get("data", {}).get("input"),
+                            "tool_output": tool_output,
+                        }
+                    )
+
                     yield {
                         "type": "tool_end",
                         "name": tool_name,
@@ -711,22 +743,10 @@ class RAGAgent:
                         "result": tool_output,
                     }
 
-            # Get final response for complete extraction
-            agent_response = await agent_executor.ainvoke(
-                {"messages": [HumanMessage(content=prompt)]}
-            )
-
-            # Extract execution info
-            execution_info = extract_agent_execution_info(agent_response)
-
-            response_text = execution_info["response_text"]
-            tools_used = execution_info["tools_used"]
-            tool_artifacts = execution_info["tool_artifacts"]
-
-            # Yield result info
+            # Yield result info (no need to re-invoke, we already have the data from streaming)
             yield {
                 "type": "result",
-                "response_text": response_text,
+                "response_text": accumulated_text,
                 "tools_used": tools_used,
                 "tool_artifacts": tool_artifacts,
             }
@@ -860,11 +880,21 @@ class RAGAgent:
                         candidate = chunk.candidates[0]
                         if hasattr(candidate, "content") and candidate.content:
                             for part in candidate.content.parts:
-                                if not hasattr(part, "text") or not part.text:
+                                # Check if this part has thinking/thought marker
+                                has_thought = hasattr(part, "thought") and part.thought
+                                has_text = hasattr(part, "text") and part.text
+
+                                # Per Gemini docs: thought signatures may be in empty text parts
+                                # Only skip if there's no text AND no thought marker
+                                if not has_text and not has_thought:
                                     continue
-                                if hasattr(part, "thought") and part.thought:
-                                    yield {"type": "thinking", "content": part.text}
-                                else:
+
+                                if has_thought:
+                                    # This is thinking content
+                                    if has_text:
+                                        yield {"type": "thinking", "content": part.text}
+                                elif has_text:
+                                    # Regular content
                                     yield {"type": "token", "content": part.text}
                     elif hasattr(chunk, "text") and chunk.text:
                         yield {"type": "token", "content": chunk.text}
