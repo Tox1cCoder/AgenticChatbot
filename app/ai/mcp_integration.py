@@ -195,6 +195,12 @@ class MCPManager:
             session = await session_context.__aenter__()
 
             tools = list(await load_mcp_tools(session))
+            
+            for tool in tools:
+                if hasattr(tool, "name") and ":" in tool.name:
+                    # Remove the prefix before the colon
+                    tool.name = tool.name.split(":", 1)[-1]
+            
             cleaned_tools = self._clean_tool_schemas(tools)
 
             # Store context and session for proper cleanup

@@ -33,8 +33,7 @@ class ChatAgent(BaseAgent):
 
     def _init_gemini(self) -> None:
         super()._init_gemini()
-        # Override model kwargs to add thinking_level if enabled
-        if settings.enable_thinking and hasattr(settings, "thinking_level"):
+        if settings.enable_thinking:
             api_key = settings.gemini_api_key
             if api_key.startswith("GEMINI_API_KEY="):
                 api_key = api_key.split("=", 1)[-1].strip()
@@ -42,8 +41,16 @@ class ChatAgent(BaseAgent):
                 "model": self.model_name,
                 "google_api_key": api_key,
                 "temperature": 1.0,
-                "thinking_level": settings.thinking_level,
             }
+            # Enable thought output in responses
+            if settings.include_thoughts_in_response:
+                model_kwargs["include_thoughts"] = True
+                
+            # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3
+            if "2.5" in self.model_name or "flash-latest" in self.model_name.lower():
+                model_kwargs["thinking_budget"] = settings.thinking_budget
+            else:
+                model_kwargs["thinking_level"] = settings.thinking_level
             self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
     @property

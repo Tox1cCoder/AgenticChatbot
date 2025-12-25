@@ -43,7 +43,7 @@ class Settings(BaseSettings):
         description="API port",
     )
     api_debug: bool = Field(
-        default=False,
+        default=True,
         description="Debug mode",
     )
 
@@ -410,7 +410,7 @@ class Settings(BaseSettings):
 
     # Gemini Thinking Configuration
     enable_thinking: bool = Field(
-        default=False,
+        default=True,
         description="Enable Gemini thinking mode for models that support it",
     )
     include_thoughts_in_response: bool = Field(
@@ -419,7 +419,11 @@ class Settings(BaseSettings):
     )
     thinking_level: str = Field(
         default="high",
-        description="Thinking level for Gemini 3 models.",
+        description="Thinking level for Gemini 3 models (minimal, low, medium, high).",
+    )
+    thinking_budget: int = Field(
+        default=-1,
+        description="Thinking budget for Gemini 2.5 models (-1 for dynamic, 0 to disable, or specific token count like 1024).",
     )
 
 

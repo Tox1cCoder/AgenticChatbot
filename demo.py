@@ -680,6 +680,39 @@ APP_STYLE = """
         box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
         filter: brightness(1.05);
     }
+    
+    /* Follow-up suggestion buttons */
+    .suggestion-container {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+        margin-bottom: 8px;
+    }
+    
+    .suggestion-btn {
+        background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+        border: 1px solid #bae6fd;
+        border-radius: 20px;
+        padding: 8px 16px;
+        font-size: 0.9rem;
+        color: #0369a1;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        text-align: left;
+        max-width: 280px;
+    }
+    
+    .suggestion-btn:hover {
+        background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 100%);
+        border-color: #7dd3fc;
+        transform: translateY(-1px);
+        box-shadow: 0 2px 8px rgba(3, 105, 161, 0.15);
+    }
+    
+    .suggestion-btn:active {
+        transform: translateY(0);
+    }
 </style>
 """
 
@@ -2396,6 +2429,32 @@ def render_thinking_summary(message_metadata: Dict[str, Any]):
             )
 
 
+def render_suggestion_buttons(suggestions: List[str], msg_id: str):
+    """
+    Render follow-up question suggestions as clickable buttons.
+    When clicked, the suggestion is stored in session state and used to populate the input.
+    """
+    if not suggestions:
+        return
+    
+    # Create columns for horizontal layout
+    cols = st.columns(min(len(suggestions), 3))
+    
+    for idx, suggestion in enumerate(suggestions[:3]):
+        with cols[idx]:
+            # Use a unique key based on message ID and suggestion index
+            button_key = f"suggestion_{msg_id}_{idx}"
+            if st.button(
+                f"💡 {suggestion}",
+                key=button_key,
+                use_container_width=True,
+                help="Click to use this question",
+            ):
+                # Store in session state so the chat input can pick it up
+                st.session_state.pending_suggestion = suggestion
+                st.rerun()
+
+
 def render_message_bubble(msg: Dict[str, Any], is_user: bool):
     content_text = msg.get("content", "")
     timestamp = format_time(msg.get("createdAt", ""))
@@ -3630,10 +3689,25 @@ def render_chat_view():
     if not messages_to_display and conversation_id not in (None, "pending_new"):
         st.info("💬 No messages yet. Start the conversation!")
 
+    # Find the last assistant message for showing suggestions
+    last_assistant_msg_id = None
+    for msg in reversed(messages_to_display):
+        sender_value = msg.get("sender")
+        if sender_value not in (1, "user", "USER", "User"):
+            last_assistant_msg_id = msg.get("id")
+            break
+
     for msg in messages_to_display:
         sender_value = msg.get("sender")
         is_user_message = sender_value in (1, "user", "USER", "User")
         render_message_bubble(msg, is_user_message)
+        
+        # Show suggestion buttons for the last assistant message only
+        if not is_user_message and msg.get("id") == last_assistant_msg_id:
+            metadata = msg.get("messageMetadata", {})
+            suggestions = msg.get("suggestedQuestions") or metadata.get("suggested_questions")
+            if suggestions:
+                render_suggestion_buttons(suggestions, str(msg.get("id", "")))
 
     st.divider()
 
@@ -3679,12 +3753,16 @@ def render_chat_view():
                 _handle_new_image_attachments(uploaded_files)
 
         # Message form
+        # Check for pending suggestion from suggestion buttons
+        pending_suggestion = st.session_state.pop("pending_suggestion", "")
+        
         with st.form("message_form", clear_on_submit=True):
             col1, col2, col3 = st.columns([6, 1, 1])
 
             with col1:
                 message_content = st.text_area(
                     "Message",
+                    value=pending_suggestion,
                     placeholder="Type your message...",
                     height=100,
                     label_visibility="collapsed",

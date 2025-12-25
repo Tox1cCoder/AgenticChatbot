@@ -91,7 +91,15 @@ class RAGAgent:
             "temperature": 1.0,
         }
         if settings.enable_thinking:
-            model_kwargs["thinking_level"] = settings.thinking_level
+            # Enable thought output in responses
+            if settings.include_thoughts_in_response:
+                model_kwargs["include_thoughts"] = True
+                
+            # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3
+            if "2.5" in self.model_name or "flash-latest" in self.model_name.lower():
+                model_kwargs["thinking_budget"] = settings.thinking_budget
+            else:
+                model_kwargs["thinking_level"] = settings.thinking_level
 
         self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
@@ -684,17 +692,15 @@ class RAGAgent:
                     if not token:
                         continue
 
-                    # Check if this is thinking/reasoning content
                     additional_kwargs = getattr(chunk, "additional_kwargs", {})
-                    is_thinking = additional_kwargs.get(
-                        "thought"
-                    ) or additional_kwargs.get("thinking")
+                    is_thinking = (
+                        additional_kwargs.get("thought") or 
+                        additional_kwargs.get("thinking")
+                    )
 
                     if is_thinking:
-                        # This is thinking content
                         yield {"type": "thinking", "content": token}
                     else:
-                        # Regular token
                         accumulated_text += token
                         yield {"type": "token", "content": token}
 
@@ -814,10 +820,16 @@ class RAGAgent:
         try:
             config_kwargs = {}
             if settings.enable_thinking:
+                # Build ThinkingConfig based on model version
                 thinking_config_kwargs = {
                     "include_thoughts": settings.include_thoughts_in_response,
-                    "thinking_level": settings.thinking_level,
                 }
+                # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3
+                if "2.5" in self.model_name or "flash-latest" in self.model_name.lower():
+                    thinking_config_kwargs["thinking_budget"] = settings.thinking_budget
+                else:
+                    thinking_config_kwargs["thinking_level"] = settings.thinking_level
+                    
                 config_kwargs["thinking_config"] = types.ThinkingConfig(
                     **thinking_config_kwargs
                 )
@@ -1126,8 +1138,13 @@ class RAGAgent:
             if settings.enable_thinking:
                 thinking_config_kwargs = {
                     "include_thoughts": settings.include_thoughts_in_response,
-                    "thinking_level": settings.thinking_level,
                 }
+                # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3
+                if "2.5" in self.model_name or "flash-latest" in self.model_name.lower():
+                    thinking_config_kwargs["thinking_budget"] = settings.thinking_budget
+                else:
+                    thinking_config_kwargs["thinking_level"] = settings.thinking_level
+                    
                 config_kwargs["thinking_config"] = types.ThinkingConfig(
                     **thinking_config_kwargs
                 )

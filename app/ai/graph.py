@@ -332,6 +332,36 @@ class MultiAgentWorkflow:
 
         import json
 
+        def _extract_content_from_result(result: Any) -> Any:
+            """
+            Extract actual content from LangChain Content objects.
+            MCP tools often return results wrapped in Content format:
+            [{'type': 'text', 'text': '...', 'id': '...'}]
+            """
+            # Handle list of Content objects
+            if isinstance(result, list):
+                cleaned = []
+                for item in result:
+                    if isinstance(item, dict):
+                        # Extract text from LangChain Content objects
+                        if "type" in item and item.get("type") == "text" and "text" in item:
+                            cleaned.append(item["text"])
+                        else:
+                            cleaned.append(item)
+                    else:
+                        cleaned.append(item)
+                # Unwrap single-item lists
+                if len(cleaned) == 1:
+                    return cleaned[0]
+                return cleaned
+            
+            # Handle single Content object
+            if isinstance(result, dict):
+                if "type" in result and result.get("type") == "text" and "text" in result:
+                    return result["text"]
+            
+            return result
+
         for tool_call in last_message.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
@@ -345,6 +375,8 @@ class MultiAgentWorkflow:
                         if tool.coroutine
                         else tool.invoke(tool_args)
                     )
+                    # Extract actual content from Content objects
+                    result = _extract_content_from_result(result)
                     result_str = str(result)
                     tool_outputs.append(
                         {
@@ -1540,6 +1572,7 @@ class MultiAgentWorkflow:
         accumulated_content = ""
         accumulated_thinking = ""  # Track thinking content for non-RAG agents
         current_tool_calls = {}  # Track tool call chunks by index
+        emitted_tool_call_ids = set()  # Track which tool calls have had tool_start emitted
 
         try:
             # Use recommended LangGraph streaming approach with multiple modes
@@ -1567,26 +1600,31 @@ class MultiAgentWorkflow:
                                 if block_type == "text":
                                     text_content = block.get("text", "")
                                     if text_content:
-                                        # Check for thinking/reasoning markers
-                                        additional_kwargs = getattr(
-                                            message_chunk, "additional_kwargs", {}
-                                        )
-                                        is_thinking = additional_kwargs.get(
-                                            "thought"
-                                        ) or additional_kwargs.get("thinking")
-
-                                        if is_thinking:
-                                            accumulated_thinking += text_content
-                                            yield {
-                                                "type": "thinking",
-                                                "content": text_content,
-                                            }
-                                        else:
-                                            accumulated_content += text_content
-                                            yield {
-                                                "type": "token",
-                                                "content": text_content,
-                                            }
+                                        accumulated_content += text_content
+                                        yield {
+                                            "type": "token",
+                                            "content": text_content,
+                                        }
+                                
+                                # Handle thinking block type
+                                elif block_type == "thinking":
+                                    thinking_content = block.get("thinking", "") or block.get("text", "")
+                                    if thinking_content:
+                                        accumulated_thinking += thinking_content
+                                        yield {
+                                            "type": "thinking",
+                                            "content": thinking_content,
+                                        }
+                                
+                                # Handle reasoning block type (LangChain Google GenAI)
+                                elif block_type == "reasoning":
+                                    reasoning_content = block.get("reasoning", "") or block.get("text", "")
+                                    if reasoning_content:
+                                        accumulated_thinking += reasoning_content
+                                        yield {
+                                            "type": "thinking",
+                                            "content": reasoning_content,
+                                        }
 
                                 elif block_type == "tool_call_chunk":
                                     # Stream tool call chunks as they arrive
@@ -1623,25 +1661,53 @@ class MultiAgentWorkflow:
                                     ):
                                         current_tool_calls[tool_index]["id"] = tool_id
 
-                        # Fallback: Handle legacy content attribute
+                        # Handle content as list (when include_thoughts=True)
+                        # LangChain returns content as list with thinking/reasoning and text parts
+                        elif (
+                            hasattr(message_chunk, "content") 
+                            and isinstance(message_chunk.content, list)
+                        ):
+                            for part in message_chunk.content:
+                                if isinstance(part, dict):
+                                    part_type = part.get("type", "")
+                                    
+                                    if part_type == "thinking":
+                                        thinking_content = part.get("thinking", "") or part.get("text", "")
+                                        if thinking_content:
+                                            accumulated_thinking += thinking_content
+                                            yield {
+                                                "type": "thinking",
+                                                "content": thinking_content,
+                                            }
+                                    elif part_type == "reasoning":
+                                        reasoning_content = part.get("reasoning", "") or part.get("text", "")
+                                        if reasoning_content:
+                                            accumulated_thinking += reasoning_content
+                                            yield {
+                                                "type": "thinking",
+                                                "content": reasoning_content,
+                                            }
+                                    elif part_type == "text":
+                                        text_content = part.get("text", "")
+                                        if text_content:
+                                            accumulated_content += text_content
+                                            yield {
+                                                "type": "token",
+                                                "content": text_content,
+                                            }
+                                elif isinstance(part, str) and part:
+                                    accumulated_content += part
+                                    yield {"type": "token", "content": part}
+
+                        # Fallback: Handle legacy string content attribute
                         elif (
                             hasattr(message_chunk, "content") and message_chunk.content
+                            and isinstance(message_chunk.content, str)
                         ):
                             content = coerce_response_text(message_chunk.content)
                             if content:
-                                additional_kwargs = getattr(
-                                    message_chunk, "additional_kwargs", {}
-                                )
-                                is_thinking = additional_kwargs.get(
-                                    "thought"
-                                ) or additional_kwargs.get("thinking")
-
-                                if is_thinking:
-                                    accumulated_thinking += content
-                                    yield {"type": "thinking", "content": content}
-                                else:
-                                    accumulated_content += content
-                                    yield {"type": "token", "content": content}
+                                accumulated_content += content
+                                yield {"type": "token", "content": content}
 
                         # Check for chunk completion and emit complete tool calls
                         if (
@@ -1651,6 +1717,13 @@ class MultiAgentWorkflow:
                             # Emit accumulated tool calls
                             for tool_call in current_tool_calls.values():
                                 if tool_call["name"]:  # Only emit if we have a name
+                                    tool_call_id = tool_call["id"]
+                                    # Skip if already emitted
+                                    if tool_call_id and tool_call_id in emitted_tool_call_ids:
+                                        continue
+                                    if tool_call_id:
+                                        emitted_tool_call_ids.add(tool_call_id)
+                                        
                                     try:
                                         # Parse args if it's a JSON string
                                         import json
@@ -1666,14 +1739,14 @@ class MultiAgentWorkflow:
                                     yield {
                                         "type": "tool_start",
                                         "name": tool_call["name"],
-                                        "tool_call_id": tool_call["id"],
+                                        "tool_call_id": tool_call_id,
                                         "args": make_json_safe(args),
                                     }
                             # Clear for next message
                             current_tool_calls = {}
 
                     elif mode == "updates":
-                        # State updates - check for completed tool messages
+                        # State updates - check for completed messages with thinking/tools
                         for node_name, node_state in data.items():
                             if "messages" in node_state:
                                 messages = node_state["messages"]
@@ -1683,8 +1756,57 @@ class MultiAgentWorkflow:
                                         if isinstance(messages, list)
                                         else messages
                                     )
-                                    # Check if this is a tool message (result)
-                                    if isinstance(last_msg, ToolMessage):
+                                    
+                                    # Handle AIMessage - extract thinking and/or tool_calls
+                                    if isinstance(last_msg, AIMessage):
+                                        # Extract thinking from AIMessage.content when it's a list
+                                        if isinstance(last_msg.content, list):
+                                            for part in last_msg.content:
+                                                if isinstance(part, dict):
+                                                    part_type = part.get("type", "")
+                                                    if part_type == "thinking":
+                                                        thinking_content = part.get("thinking", "") or part.get("text", "")
+                                                        if thinking_content:
+                                                            accumulated_thinking += thinking_content
+                                                            yield {
+                                                                "type": "thinking",
+                                                                "content": thinking_content,
+                                                            }
+                                                    elif part_type == "reasoning":
+                                                        reasoning_content = part.get("reasoning", "") or part.get("text", "")
+                                                        if reasoning_content:
+                                                            accumulated_thinking += reasoning_content
+                                                            yield {
+                                                                "type": "thinking",
+                                                                "content": reasoning_content,
+                                                            }
+                                                    elif part_type == "text":
+                                                        # Text is already streamed via messages mode for streaming models
+                                                        # But for non-streaming ainvoke(), we need to emit it here
+                                                        text_content = part.get("text", "")
+                                                        if text_content and text_content not in accumulated_content:
+                                                            accumulated_content += text_content
+                                                            yield {
+                                                                "type": "token",
+                                                                "content": text_content,
+                                                            }
+                                        
+                                        # Handle tool calls
+                                        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                                            for tool_call in last_msg.tool_calls:
+                                                tool_call_id = tool_call.get("id")
+                                                # Only emit if not already emitted from messages mode
+                                                if tool_call_id and tool_call_id not in emitted_tool_call_ids:
+                                                    emitted_tool_call_ids.add(tool_call_id)
+                                                    yield {
+                                                        "type": "tool_start",
+                                                        "name": tool_call.get("name", "unknown"),
+                                                        "tool_call_id": tool_call_id,
+                                                        "args": make_json_safe(tool_call.get("args", {})),
+                                                    }
+                                    
+                                    # Handle ToolMessage (result)
+                                    elif isinstance(last_msg, ToolMessage):
                                         yield {
                                             "type": "tool_end",
                                             "name": getattr(

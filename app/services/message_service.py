@@ -25,6 +25,7 @@ from app.ai.schemas import (
 from app.utils.text_processing import sanitize_persona, fix_markdown_code_blocks
 from app.core.config import settings
 from app.core.exceptions import PauseReason
+from app.ai.suggestion_generator import generate_follow_up_suggestions
 
 if TYPE_CHECKING:
     from app.interfaces.task_plan_service_interface import ITaskPlanService
@@ -325,6 +326,17 @@ class MessageService(IMessageService):
                     }
                     return
 
+                # Generate follow-up suggestions for auto-execute path
+                try:
+                    suggestions = await generate_follow_up_suggestions(
+                        user_query=message_create_data.content,
+                        response_content=bot_response_content,
+                    )
+                    if suggestions:
+                        bot_metadata["suggested_questions"] = suggestions
+                except Exception:
+                    pass
+
                 bot_response_entity = MessageFactory.create_bot_response(
                     conversation_id=message_create_data.conversation_id,
                     content=bot_response_content,
@@ -538,6 +550,17 @@ class MessageService(IMessageService):
                                 }
                     except Exception:
                         pass
+
+                # Generate follow-up question suggestions
+                try:
+                    suggestions = await generate_follow_up_suggestions(
+                        user_query=message_create_data.content,
+                        response_content=bot_response_content,
+                    )
+                    if suggestions:
+                        bot_metadata["suggested_questions"] = suggestions
+                except Exception:
+                    pass
 
                 # Create and persist bot response message
                 bot_response_entity = MessageFactory.create_bot_response(

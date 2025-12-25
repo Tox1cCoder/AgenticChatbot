@@ -110,6 +110,10 @@ class AgentResponse(BaseModel):
         description="Optional list of artifacts produced while executing tools",
     )
     error: Optional[str] = None
+    suggested_questions: Optional[List[str]] = Field(
+        default=None,
+        description="0-3 follow-up question suggestions for continuing the conversation",
+    )
 
 
 class GraphState(TypedDict):

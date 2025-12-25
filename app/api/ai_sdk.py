@@ -118,7 +118,7 @@ def _coerce_json_object(value: Any) -> Any:
     if value is None:
         return None
 
-    # Return dicts and lists as-is - they'll be properly serialized by json.dumps
+    # Return dicts and lists as-is
     if isinstance(value, (dict, list)):
         return value
 

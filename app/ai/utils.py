@@ -25,12 +25,22 @@ def coerce_response_text(content: Any) -> str:
         text_parts = []
         for item in content:
             if isinstance(item, dict):
+                item_type = item.get("type", "")
+                # Skip thinking/reasoning blocks - they should not be in text output
+                if item_type == "thinking":
+                    continue
+                # Extract text from text blocks
                 if "text" in item:
                     text_parts.append(item["text"])
-                elif item.get("type") == "text":
+                elif item_type == "text":
                     text_parts.append(item.get("text", ""))
+                # Skip other known non-text types (tool_call_chunk, etc.)
+                elif item_type in ("tool_call_chunk", "tool_use", "tool_result"):
+                    continue
                 else:
-                    text_parts.append(str(item))
+                    # Only stringify unknown items if they don't look like structured content
+                    if not item_type:
+                        text_parts.append(str(item))
             elif hasattr(item, "text"):
                 # Handle objects with text attribute
                 text_parts.append(item.text)
@@ -40,10 +50,17 @@ def coerce_response_text(content: Any) -> str:
                 text_parts.append(str(item))
         return "".join(text_parts)
     elif isinstance(content, dict):
+        content_type = content.get("type", "")
+        # Skip thinking blocks
+        if content_type == "thinking":
+            return ""
         if "text" in content:
             return content["text"]
-        if content.get("type") == "text":
+        if content_type == "text":
             return content.get("text", "")
+        # Skip other non-text types
+        if content_type in ("tool_call_chunk", "tool_use", "tool_result"):
+            return ""
         return str(content)
     else:
         return str(content) if content is not None else ""

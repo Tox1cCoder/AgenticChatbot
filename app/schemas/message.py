@@ -93,11 +93,19 @@ class MessageRead(BaseModel):
         default=None,
         description="Interrupt information when tool execution requires human approval",
     )
+    suggested_questions: Optional[List[str]] = Field(
+        default=None,
+        description="0-3 follow-up question suggestions for continuing the conversation",
+    )
 
     @model_validator(mode="after")
-    def _populate_interrupt_from_metadata(self):
-        # Persisted interrupts are stored inside message_metadata["interrupt"].
-        if self.interrupt is None and isinstance(self.message_metadata, dict):
+    def _populate_from_metadata(self):
+        # Populate fields from message_metadata for persisted messages
+        if not isinstance(self.message_metadata, dict):
+            return self
+            
+        # Populate interrupt from metadata
+        if self.interrupt is None:
             payload = self.message_metadata.get("interrupt")
             if payload:
                 try:
@@ -108,6 +116,15 @@ class MessageRead(BaseModel):
                     )
                 except Exception:
                     pass
+        
+        # Populate suggested_questions from metadata
+        if self.suggested_questions is None:
+            suggestions = self.message_metadata.get("suggested_questions")
+            if isinstance(suggestions, list):
+                self.suggested_questions = [
+                    s for s in suggestions if isinstance(s, str)
+                ]
+        
         return self
 
 

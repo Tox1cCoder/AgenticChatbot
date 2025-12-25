@@ -124,8 +124,7 @@ class SearchAgent(BaseAgent):
 
         try:
             # Use astream_events for LangChain model streaming
-            # LangGraph's stream_mode="messages" only works with compiled graphs,
-            # so use astream_events for direct model calls
+
             async for event in llm_with_tools.astream_events(
                 [HumanMessage(content=prompt)], version="v2"
             ):
@@ -161,6 +160,13 @@ class SearchAgent(BaseAgent):
                                 else:
                                     accumulated_content += token
                                     yield {"type": "token", "content": token}
+                            
+                            # Handle explicit thinking block type
+                            elif block_type == "thinking":
+                                thinking_content = block.get("thinking", "")
+                                if thinking_content:
+                                    accumulated_thinking += thinking_content
+                                    yield {"type": "thinking", "content": thinking_content}
 
                             elif block_type == "tool_call_chunk":
                                 # Accumulate tool call chunks

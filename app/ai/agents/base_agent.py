@@ -48,8 +48,22 @@ class BaseAgent(ABC):
                 "temperature": 1.0,
             }
 
+            # Configure thinking based on model version
             if settings.enable_thinking:
-                model_kwargs["thinking"] = True
+                # Enable thought output in responses
+                if settings.include_thoughts_in_response:
+                    model_kwargs["include_thoughts"] = True
+
+                if (
+                    "2.5" in self.model_name
+                    or "flash-latest" in self.model_name.lower()
+                ):
+                    thinking_budget = settings.thinking_budget
+                    if thinking_budget == -1:
+                        thinking_budget = 8192
+                    model_kwargs["thinking_budget"] = thinking_budget
+                else:
+                    model_kwargs["thinking_level"] = settings.thinking_level
 
             self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
 
