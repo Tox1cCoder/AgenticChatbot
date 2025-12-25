@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 from google import genai
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage, HumanMessage, AIMessage
 from langchain_core.tools import BaseTool
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
@@ -124,6 +124,31 @@ class BaseAgent(ABC):
             self.tools, tool_config={"function_calling_config": {"mode": mode}}
         )
 
+    def _convert_history_to_langchain_messages(
+        self, conversation_history: List[Any]
+    ) -> List[BaseMessage]:
+        """
+        Convert AgentMessage history to LangChain BaseMessage format.
+        
+        Args:
+            conversation_history: List of AgentMessage objects from memory
+            
+        Returns:
+            List of HumanMessage/AIMessage objects for LangChain
+        """
+        langchain_history = []
+        for msg in conversation_history:
+            if hasattr(msg, "role") and hasattr(msg, "content"):
+                role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
+                content = msg.content or ""
+                
+                if role == "user":
+                    langchain_history.append(HumanMessage(content=content))
+                elif role == "assistant":
+                    langchain_history.append(AIMessage(content=content))
+                # Skip system messages as we add our own system prompt
+        return langchain_history
+
     async def invoke_model_with_history(
         self,
         messages: List[BaseMessage],
@@ -149,7 +174,17 @@ class BaseAgent(ABC):
 
             system_prompt = self._build_system_prompt(persona, has_tool_context)
 
+            # Build message list: System + History + Current Turn
             langchain_messages = [SystemMessage(content=system_prompt)]
+            
+            # Convert and prepend conversation history (from database)
+            if conversation_history:
+                history_messages = self._convert_history_to_langchain_messages(
+                    conversation_history
+                )
+                langchain_messages.extend(history_messages)
+            
+            # Add current turn messages
             langchain_messages.extend(messages)
 
             response = await llm_with_tools.ainvoke(langchain_messages)

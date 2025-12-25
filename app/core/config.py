@@ -86,6 +86,10 @@ class Settings(BaseSettings):
         default="",
         description="Tavily API Key for web search",
     )
+    smithery_api_key: str = Field(
+        default="",
+        description="Smithery API Key for MCP server access",
+    )
 
     # LangSmith Configuration
     langsmith_api_key: str = Field(
