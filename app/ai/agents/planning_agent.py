@@ -532,5 +532,108 @@ class PlanningAgent(BaseAgent):
 
         return "\n".join(parts)
 
+    async def stream_message(
+        self,
+        message: AgentMessage,
+        conversation_id: Optional[str] = None,
+        todos: Optional[List[Dict[str, Any]]] = None,
+        current_task_index: Optional[int] = None,
+    ):
+        """Stream planning agent responses with proper token streaming."""
+        if not self.langchain_model:
+            yield {
+                "type": "error",
+                "error": "Planning service is not properly configured.",
+            }
+            return
+
+        try:
+            # Initialize MCP tools if not done yet
+            if self.mcp_manager is None:
+                await self._init_tools()
+
+            llm_with_tools = self._get_llm_with_tools()
+            system_prompt = self._build_system_prompt(
+                None, False, todos, current_task_index
+            )
+
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=message.content),
+            ]
+
+            accumulated_content = ""
+            accumulated_thinking = ""
+            tool_calls = []
+
+            # Stream using astream_events
+            async for event in llm_with_tools.astream_events(messages, version="v2"):
+                event_type = event.get("event")
+
+                if event_type == "on_chat_model_stream":
+                    chunk = event.get("data", {}).get("chunk")
+                    if not chunk:
+                        continue
+
+                    # Handle content blocks
+                    if hasattr(chunk, "content_blocks") and chunk.content_blocks:
+                        for block in chunk.content_blocks:
+                            block_type = block.get("type")
+
+                            if block_type == "text":
+                                token = block.get("text", "")
+                                if token:
+                                    accumulated_content += token
+                                    yield {"type": "token", "content": token}
+
+                            elif block_type in ("thinking", "reasoning"):
+                                thinking_token = block.get(block_type, "") or block.get(
+                                    "text", ""
+                                )
+                                if thinking_token:
+                                    accumulated_thinking += thinking_token
+                                    yield {
+                                        "type": "thinking",
+                                        "content": thinking_token,
+                                    }
+
+                    # Handle string content
+                    elif hasattr(chunk, "content") and isinstance(chunk.content, str):
+                        token = coerce_response_text(chunk.content)
+                        if token:
+                            accumulated_content += token
+                            yield {"type": "token", "content": token}
+
+                    # Handle tool calls
+                    if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
+                        for tc_chunk in chunk.tool_call_chunks:
+                            if tc_chunk:
+                                tool_calls.append(tc_chunk)
+
+            # Build final response
+            response = AgentResponse(
+                agent_type=AgentType.PLANNING,
+                agent_id="planning_agent",
+                message=AgentMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=accumulated_content,
+                    tool_calls=tool_calls if tool_calls else None,
+                ),
+                metadata={
+                    "model": self.model_name,
+                    "conversation_id": conversation_id,
+                    "has_tool_calls": bool(tool_calls),
+                },
+            )
+
+            if accumulated_thinking:
+                response.metadata["thinking"] = accumulated_thinking
+
+            yield {"type": "complete", "response": response}
+
+        except Exception as e:
+            logger.error(f"Error streaming planning response: {e}", exc_info=True)
+            yield {"type": "error", "error": str(e)}
+
     async def cleanup(self):
         await super().cleanup()
