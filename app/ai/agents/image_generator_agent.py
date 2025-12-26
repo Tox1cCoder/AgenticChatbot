@@ -39,7 +39,7 @@ class ImageGeneratorAgent(BaseAgent):
         if api_key.startswith("GEMINI_API_KEY="):
             api_key = api_key.split("=", 1)[-1].strip()
         model_kwargs = {
-            "model": "gemini-flash-latest",
+            "model": "gemini-3-flash-preview",
             "google_api_key": api_key,
             "temperature": 1.0,
         }

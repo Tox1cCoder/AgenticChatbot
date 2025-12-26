@@ -47,11 +47,24 @@ async def init_checkpoint_tables():
     await checkpoint_manager.setup()
 
 
+async def init_agents():
+    """Pre-warm agents by initializing their tools at startup."""
+    try:
+        container = get_container()
+        ai_service = container.ai_service()
+        
+        await ai_service.workflow.initialize()
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize agents: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
     # Startup
     await init_checkpoint_tables()
+    await init_agents()
     yield
     # Shutdown (add cleanup code here if needed in the future)
 

@@ -139,10 +139,6 @@ class PlanningAgent(BaseAgent):
         if write_todos_tool.name not in tool_names:
             self.tools.insert(0, write_todos_tool)
 
-        logger.info(
-            f"PlanningAgent loaded {len(self.tools)} tools (including write_todos)"
-        )
-
     def _build_system_prompt(
         self,
         persona: Optional[str] = None,

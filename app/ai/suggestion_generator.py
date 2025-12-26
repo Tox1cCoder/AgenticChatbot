@@ -1,6 +1,7 @@
 import json
-import logging
+import hashlib
 from typing import List, Optional
+from functools import lru_cache
 
 from google import genai
 
@@ -13,17 +14,19 @@ User asked: {user_query}
 Assistant responded: {response_summary}
 
 Rules:
-- Generate 0-3 concise follow-up questions
+- Generate 0-3 COMPLETE follow-up questions (never truncate or use "...")
+- Each question must be a full, grammatically correct sentence
+- Keep questions concise (maximum 30 words per question)
+- Match the language of the conversation (if user speaks Vietnamese, respond in Vietnamese)
 - Only suggest if genuinely useful for continuing the conversation
-- Keep each question under 60 characters
-- Make them natural and conversational
 - Return EMPTY array [] if no good suggestions (e.g., for greetings, simple acknowledgments)
 - Questions should explore different aspects or go deeper into the topic
 
 Return ONLY a JSON array of strings, nothing else. Examples:
 ["Tell me more about X", "How does this compare to Y?"]
 []
-["What are the benefits?", "Can you give an example?", "How do I get started?"]"""
+["What are the benefits?", "Can you give an example?", "How do I get started?"]
+["Bạn có thể giải thích thêm không?", "Có ví dụ nào khác không?"]"""
 
 
 class SuggestionGenerator:
@@ -47,6 +50,53 @@ class SuggestionGenerator:
             self.client = genai.Client(api_key=api_key)
         except Exception as e:
             self.client = None
+
+    def _create_cache_key(self, user_query: str, response_content: str) -> str:
+        """Create a hash-based cache key for query and response."""
+        # Truncate as done in generate_suggestions for consistency
+        truncated_query = user_query[:200]
+        truncated_response = response_content[:500]
+        
+        # Create deterministic hash
+        content = f"{truncated_query}||{truncated_response}"
+        return hashlib.md5(content.encode()).hexdigest()
+
+    @lru_cache(maxsize=100)
+    def _get_cached_suggestions(self, cache_key: str, prompt: str) -> Optional[List[str]]:
+        """Internal cached method for LLM calls."""
+        if not self.client:
+            return None
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config={
+                    "temperature": 1,
+                    "max_output_tokens": 256,
+                },
+            )
+
+            if not response or not hasattr(response, "text"):
+                return None
+
+            # Parse JSON response
+            text = response.text.strip()
+            
+            # Handle potential markdown code blocks
+            if text.startswith("```"):
+                lines = text.split("\n")
+                text = "\n".join(lines[1:-1]) if len(lines) > 2 else ""
+            
+            suggestions = json.loads(text)
+
+            if not isinstance(suggestions, list):
+                return None
+
+            return suggestions
+
+        except (json.JSONDecodeError, Exception):
+            return None
 
     async def generate_suggestions(
         self,
@@ -79,29 +129,11 @@ class SuggestionGenerator:
                 response_summary=response_summary,
             )
 
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config={
-                    "temperature": 0.7,
-                    "max_output_tokens": 256,
-                },
-            )
+            # Create cache key and get cached result
+            cache_key = self._create_cache_key(user_query, response_content)
+            suggestions = self._get_cached_suggestions(cache_key, prompt)
 
-            if not response or not hasattr(response, "text"):
-                return []
-
-            # Parse JSON response
-            text = response.text.strip()
-            
-            # Handle potential markdown code blocks
-            if text.startswith("```"):
-                lines = text.split("\n")
-                text = "\n".join(lines[1:-1]) if len(lines) > 2 else ""
-            
-            suggestions = json.loads(text)
-
-            if not isinstance(suggestions, list):
+            if suggestions is None:
                 return []
 
             # Validate and clean suggestions
@@ -110,13 +142,11 @@ class SuggestionGenerator:
                 if isinstance(s, str) and s.strip():
                     # Clean and validate length
                     clean = s.strip()
-                    if len(clean) <= 100:  # Max 100 chars per suggestion
+                    if len(clean) <= 150:  # Max 150 chars per suggestion
                         valid_suggestions.append(clean)
 
             return valid_suggestions
 
-        except json.JSONDecodeError as e:
-            return []
         except Exception as e:
             return []
 

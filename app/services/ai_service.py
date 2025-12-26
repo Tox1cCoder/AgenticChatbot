@@ -321,7 +321,7 @@ class AIService:
                 api_key = api_key.split("=", 1)[-1].strip()
 
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash-exp",
+                model="gemini-3-flash-preview",
                 google_api_key=api_key,
                 temperature=0.3,  # Lower temperature for more consistent titles
             )

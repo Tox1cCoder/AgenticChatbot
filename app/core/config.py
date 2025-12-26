@@ -106,9 +106,9 @@ class Settings(BaseSettings):
     )
 
     # Agent Model Configuration
-    rag_agent_model: str = Field(default="gemini-flash-latest")
-    chat_agent_model: str = Field(default="gemini-flash-latest")
-    search_agent_model: str = Field(default="gemini-flash-latest")
+    rag_agent_model: str = Field(default="gemini-3-flash-preview")
+    chat_agent_model: str = Field(default="gemini-3-flash-preview")
+    search_agent_model: str = Field(default="gemini-3-flash-preview")
 
     # Image Generation Configuration
     enable_image_generation: bool = Field(
