@@ -1296,6 +1296,21 @@ class MultiAgentWorkflow:
                     return interrupt_agent_response
 
         agent_response = result.get("response")
+
+        final_todos = result.get("todos", [])
+        if agent_response and final_todos:
+            if agent_response.metadata is None:
+                agent_response.metadata = {}
+            agent_response.metadata["todos"] = final_todos
+            context = result.get("context", {})
+            if context.get("all_tasks_completed"):
+                agent_response.metadata["all_tasks_completed"] = True
+            if context.get("planning_budget_reached"):
+                agent_response.metadata["planning_budget_reached"] = True
+            agent_response.metadata["planning_call_count"] = result.get(
+                "planning_call_count", 0
+            )
+
         if (
             agent_response
             and isinstance(agent_response.metadata, dict)
