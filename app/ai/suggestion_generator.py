@@ -56,13 +56,15 @@ class SuggestionGenerator:
         # Truncate as done in generate_suggestions for consistency
         truncated_query = user_query[:200]
         truncated_response = response_content[:500]
-        
+
         # Create deterministic hash
         content = f"{truncated_query}||{truncated_response}"
         return hashlib.md5(content.encode()).hexdigest()
 
     @lru_cache(maxsize=100)
-    def _get_cached_suggestions(self, cache_key: str, prompt: str) -> Optional[List[str]]:
+    def _get_cached_suggestions(
+        self, cache_key: str, prompt: str
+    ) -> Optional[List[str]]:
         """Internal cached method for LLM calls."""
         if not self.client:
             return None
@@ -82,12 +84,12 @@ class SuggestionGenerator:
 
             # Parse JSON response
             text = response.text.strip()
-            
+
             # Handle potential markdown code blocks
             if text.startswith("```"):
                 lines = text.split("\n")
                 text = "\n".join(lines[1:-1]) if len(lines) > 2 else ""
-            
+
             suggestions = json.loads(text)
 
             if not isinstance(suggestions, list):

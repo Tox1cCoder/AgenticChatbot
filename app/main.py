@@ -52,9 +52,9 @@ async def init_agents():
     try:
         container = get_container()
         ai_service = container.ai_service()
-        
+
         await ai_service.workflow.initialize()
-        
+
     except Exception as e:
         logger.error(f"Failed to initialize agents: {e}")
 

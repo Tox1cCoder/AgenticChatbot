@@ -59,7 +59,11 @@ class Router:
 
         # CRITICAL: When planning mode is enabled AND there's an existing plan,
         # ALWAYS route to planning_agent to ensure tasks are managed properly
-        if planning_mode_enabled and has_existing_plan and "planning_agent" in available_agents:
+        if (
+            planning_mode_enabled
+            and has_existing_plan
+            and "planning_agent" in available_agents
+        ):
             return "planning_agent"
 
         response = await asyncio.to_thread(
