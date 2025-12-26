@@ -14,8 +14,8 @@ class SummarizationConfig:
     """Configuration for summarization behavior."""
 
     # Trigger thresholds
-    trigger_tokens: int = 8000  # Trigger when estimated tokens exceed this
-    trigger_messages: int = 20  # OR when message count exceeds this
+    trigger_tokens: int = 12000  # Trigger when estimated tokens exceed this
+    trigger_messages: int = 28  # OR when message count exceeds this
 
     # What to keep after summarization
     keep_messages: int = 10  # Keep the last N messages (most recent context)
@@ -46,9 +46,9 @@ Provide a clear, structured summary:"""
 def _get_config() -> SummarizationConfig:
     """Get summarization config from settings."""
     return SummarizationConfig(
-        trigger_tokens=getattr(settings, "summarization_trigger_tokens", 4000),
-        trigger_messages=getattr(settings, "summarization_trigger_messages", 20),
-        keep_messages=getattr(settings, "summarization_keep_messages", 10),
+        trigger_tokens=getattr(settings, "summarization_trigger_tokens"),
+        trigger_messages=getattr(settings, "summarization_trigger_messages"),
+        keep_messages=getattr(settings, "summarization_keep_messages"),
         model=getattr(settings, "summarization_model"),
         temperature=1,
     )
@@ -186,9 +186,7 @@ async def summarize_messages_if_needed(
 
     # Generate summary
     summary = await _generate_summary(messages_to_summarize, config)
-
-    # Create a system-style message with the summary
-    summary_message = SystemMessage(
+    summary_message = HumanMessage(
         content=f"[Summary of previous conversation]\n{summary}\n[End of summary]"
     )
 
