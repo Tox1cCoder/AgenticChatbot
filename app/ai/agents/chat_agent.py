@@ -2,9 +2,7 @@
 import base64
 from typing import Optional, List, Dict, Any
 
-from google import genai
 from google.genai import types
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
@@ -20,7 +18,7 @@ from ..utils import (
     coerce_response_text,
     get_error_recovery_hint,
 )
-from ...core.config import settings
+from ..agent_config import create_gemini_client
 from ..mcp_integration import get_global_mcp_manager
 
 logger = logging.getLogger(__name__)
@@ -29,29 +27,7 @@ logger = logging.getLogger(__name__)
 class ChatAgent(BaseAgent):
 
     def __init__(self):
-        super().__init__(model_name=settings.chat_agent_model)
-
-    def _init_gemini(self) -> None:
-        super()._init_gemini()
-        if settings.enable_thinking:
-            api_key = settings.gemini_api_key
-            if api_key.startswith("GEMINI_API_KEY="):
-                api_key = api_key.split("=", 1)[-1].strip()
-            model_kwargs = {
-                "model": self.model_name,
-                "google_api_key": api_key,
-                "temperature": 1.0,
-            }
-            # Enable thought output in responses
-            if settings.include_thoughts_in_response:
-                model_kwargs["include_thoughts"] = True
-                
-            # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3
-            if "2.5" in self.model_name or "flash-latest" in self.model_name.lower():
-                model_kwargs["thinking_budget"] = settings.thinking_budget
-            else:
-                model_kwargs["thinking_level"] = settings.thinking_level
-            self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
+        super().__init__(agent_config_key="chat")
 
     @property
     def agent_type(self) -> AgentType:

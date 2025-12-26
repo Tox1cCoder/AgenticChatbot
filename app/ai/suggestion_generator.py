@@ -5,7 +5,7 @@ from functools import lru_cache
 
 from google import genai
 
-from ..core.config import settings
+from .agent_config import create_gemini_client, AGENT_CONFIG
 
 SUGGESTION_PROMPT = """Based on this conversation exchange, generate follow-up questions the user might want to ask next.
 
@@ -33,21 +33,15 @@ class SuggestionGenerator:
     """Generates follow-up question suggestions using Gemini."""
 
     def __init__(self, model_name: Optional[str] = None):
-        self.model_name = model_name or "gemini-2.0-flash"
+        config = AGENT_CONFIG["suggestion"]
+        self.model_name = model_name or config["model"]
         self.client: Optional[genai.Client] = None
         self._init_client()
 
     def _init_client(self) -> None:
         """Initialize Gemini client."""
         try:
-            api_key = settings.gemini_api_key
-            if not api_key:
-                return
-
-            if api_key.startswith("GEMINI_API_KEY="):
-                api_key = api_key.split("=", 1)[1].strip()
-
-            self.client = genai.Client(api_key=api_key)
+            self.client = create_gemini_client()
         except Exception as e:
             self.client = None
 

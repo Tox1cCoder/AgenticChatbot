@@ -183,6 +183,28 @@ class Settings(BaseSettings):
         description="Approximate maximum tokens of RAG history to include in prompts (0 = no limit)",
     )
 
+    # Summarization Middleware Configuration
+    enable_summarization: bool = Field(
+        default=True,
+        description="Enable automatic conversation summarization for long conversations",
+    )
+    summarization_trigger_tokens: int = Field(
+        default=4000,
+        description="Trigger summarization when estimated tokens exceed this threshold",
+    )
+    summarization_trigger_messages: int = Field(
+        default=20,
+        description="Trigger summarization when message count exceeds this threshold",
+    )
+    summarization_keep_messages: int = Field(
+        default=10,
+        description="Number of recent messages to keep after summarization",
+    )
+    summarization_model: str = Field(
+        default="gemini-3-flash-preview",
+        description="Model to use for generating conversation summaries",
+    )
+
     # Redis Configuration
     redis_url: str = Field(
         default="",

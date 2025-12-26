@@ -2,7 +2,6 @@ import logging
 from typing import Optional, List, Dict, Any
 from abc import ABC, abstractmethod
 
-from google import genai
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage, HumanMessage, AIMessage
 from langchain_core.tools import BaseTool
@@ -10,8 +9,10 @@ from langchain_core.tools import BaseTool
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import TOOL_CONTEXT_SUFFIX
 from ..utils import coerce_response_text
+from ..agent_config import create_langchain_model, create_gemini_client, AGENT_CONFIG
 from ...core.config import settings
 from ..mcp_integration import get_global_mcp_manager
+from ..summarization_middleware import summarize_messages_if_needed
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +20,11 @@ logger = logging.getLogger(__name__)
 class BaseAgent(ABC):
     """Abstract base class for all agents. Child classes must implement: agent_type, agent_id, _get_base_system_prompt()."""
 
-    def __init__(self, model_name: Optional[str] = None):
-        self.model_name = model_name or settings.chat_agent_model
-        self.gemini_client: Optional[genai.Client] = None
-        self.langchain_model: Optional[ChatGoogleGenerativeAI] = None
+    def __init__(self, model_name: Optional[str] = None, agent_config_key: str = "chat"):
+        self.agent_config_key = agent_config_key
+        self.model_name = model_name or AGENT_CONFIG[agent_config_key]["model"]
+        self.gemini_client = None
+        self.langchain_model = None
         self.mcp_manager = None
         self.tools: List[BaseTool] = []
 
@@ -30,47 +32,14 @@ class BaseAgent(ABC):
 
     def _init_gemini(self) -> None:
         try:
-            gemini_api_key = settings.gemini_api_key
-            if not gemini_api_key:
-                logger.error("GEMINI_API_KEY is not set")
-                raise ValueError("GEMINI_API_KEY is not set")
-
-            if gemini_api_key.startswith("GEMINI_API_KEY="):
-                api_key = gemini_api_key.split("=", 1)[1].strip()
-            else:
-                api_key = gemini_api_key
-
-            self.gemini_client = genai.Client(api_key=api_key)
-
-            model_kwargs = {
-                "model": self.model_name,
-                "google_api_key": api_key,
-                "temperature": 1.0,
-            }
-
-            # Configure thinking based on model version
-            if settings.enable_thinking:
-                # Enable thought output in responses
-                if settings.include_thoughts_in_response:
-                    model_kwargs["include_thoughts"] = True
-
-                if (
-                    "2.5" in self.model_name
-                    or "flash-latest" in self.model_name.lower()
-                ):
-                    thinking_budget = settings.thinking_budget
-                    if thinking_budget == -1:
-                        thinking_budget = 8192
-                    model_kwargs["thinking_budget"] = thinking_budget
-                else:
-                    model_kwargs["thinking_level"] = settings.thinking_level
-
-            self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
-
+            self.gemini_client = create_gemini_client()
+            self.langchain_model = create_langchain_model(
+                agent_type=self.agent_config_key,
+                model_override=self.model_name,
+            )
             logger.info(
                 f"Initialized Gemini client and LangChain model with model: {self.model_name}"
             )
-
         except Exception as e:
             logger.error(f"Error initializing Gemini client: {e}")
             raise
@@ -186,6 +155,10 @@ class BaseAgent(ABC):
             
             # Add current turn messages
             langchain_messages.extend(messages)
+
+            # Apply summarization for long conversations (only if needed)
+            if settings.enable_summarization:
+                langchain_messages = await summarize_messages_if_needed(langchain_messages)
 
             response = await llm_with_tools.ainvoke(langchain_messages)
 

@@ -6,7 +6,6 @@ from typing import Optional, List, Dict, Any, AsyncIterator
 from uuid import UUID
 from pathlib import Path
 
-from google import genai
 from google.genai import types
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -16,16 +15,15 @@ from qdrant_client.models import (
     FilterSelector,
 )
 from sentence_transformers import SentenceTransformer, CrossEncoder
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import BaseTool
 from langchain.agents import create_agent
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_rag_prompt
-from ...core.config import Settings
+from ..agent_config import create_langchain_model, create_gemini_client, AGENT_CONFIG
 from ..mcp_integration import get_global_mcp_manager
-from ...core.config import settings
+from ...core.config import settings, Settings
 from ..utils import (
     coerce_response_text,
     extract_agent_execution_info,
@@ -52,7 +50,7 @@ class RAGAgent:
 
         self.collection_name = collection_name
         self.embedding_dimension = settings.embedding_dimension
-        self.model_name = settings.rag_agent_model
+        self.model_name = AGENT_CONFIG["rag"]["model"]
         self.gemini_client = None
         self.langchain_model = None
         self.mcp_manager = None
@@ -74,34 +72,12 @@ class RAGAgent:
             self._init_reranker()
 
     def _init_gemini(self):
-        api_key = self.settings.gemini_api_key
-        if not api_key:
-            logger.error("Gemini API key not configured")
-            return
-
-        if api_key.startswith("GEMINI_API_KEY="):
-            api_key = api_key.split("=", 1)[-1].strip()
-
-        self.gemini_client = genai.Client(api_key=api_key)
-
-        # Build LangChain model with optional thinking support
-        model_kwargs = {
-            "model": self.model_name,
-            "google_api_key": api_key,
-            "temperature": 1.0,
-        }
-        if settings.enable_thinking:
-            # Enable thought output in responses
-            if settings.include_thoughts_in_response:
-                model_kwargs["include_thoughts"] = True
-                
-            # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3
-            if "2.5" in self.model_name or "flash-latest" in self.model_name.lower():
-                model_kwargs["thinking_budget"] = settings.thinking_budget
-            else:
-                model_kwargs["thinking_level"] = settings.thinking_level
-
-        self.langchain_model = ChatGoogleGenerativeAI(**model_kwargs)
+        try:
+            self.gemini_client = create_gemini_client()
+            self.langchain_model = create_langchain_model(agent_type="rag")
+            logger.info(f"RAGAgent initialized with model: {self.model_name}")
+        except Exception as e:
+            logger.error(f"Error initializing Gemini for RAGAgent: {e}")
 
     def _init_reranker(self):
         self.reranker = CrossEncoder(self.settings.reranker_model)

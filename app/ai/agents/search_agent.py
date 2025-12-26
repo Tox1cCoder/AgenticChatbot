@@ -1,7 +1,6 @@
 import logging
 from typing import Optional, List, Dict, Any, AsyncIterator
 
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
@@ -14,7 +13,6 @@ from .base_agent import BaseAgent
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT, TOOL_CONTEXT_SUFFIX
 from ..utils import coerce_response_text
-from ...core.config import settings
 from ..mcp_integration import get_global_mcp_manager
 
 logger = logging.getLogger(__name__)
@@ -23,7 +21,7 @@ logger = logging.getLogger(__name__)
 class SearchAgent(BaseAgent):
 
     def __init__(self):
-        super().__init__(model_name=settings.search_agent_model)
+        super().__init__(agent_config_key="search")
 
     @property
     def agent_type(self) -> AgentType:

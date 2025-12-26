@@ -17,7 +17,6 @@ from ..repositories.conversation import ConversationRepository
 from ..repositories.document import DocumentRepository
 from ..utils.text_processing import sanitize_persona
 from ..ai.utils import make_json_safe
-from langchain_google_genai import ChatGoogleGenerativeAI
 from ..core.config import settings
 
 
@@ -315,15 +314,11 @@ class AIService:
             A short, descriptive title (max 50 characters)
         """
         try:
-            # Initialize a lightweight model for title generation
-            api_key = settings.gemini_api_key
-            if api_key.startswith("GEMINI_API_KEY="):
-                api_key = api_key.split("=", 1)[-1].strip()
+            from ..ai.agent_config import create_langchain_model
 
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-3-flash-preview",
-                google_api_key=api_key,
-                temperature=0.3,  # Lower temperature for more consistent titles
+            llm = create_langchain_model(
+                agent_type="title_generator",
+                include_thinking=False,
             )
 
             prompt = f"""Generate a very short, concise title (max 50 characters) for a conversation that starts with this user message:
