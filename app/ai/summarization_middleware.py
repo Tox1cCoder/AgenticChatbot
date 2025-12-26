@@ -1,22 +1,7 @@
-"""
-Summarization Middleware for Long Conversations.
-
-This module provides conversation summarization to handle long conversations
-that may exceed the LLM's context window. It only triggers when the conversation
-exceeds configured token or message thresholds.
-
-Usage:
-    from app.ai.summarization_middleware import summarize_messages_if_needed
-
-    # In agent's invoke_model_with_history:
-    messages = await summarize_messages_if_needed(messages)
-"""
-
-import logging
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from dataclasses import dataclass
 
-from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from ..core.config import settings
@@ -173,11 +158,6 @@ async def summarize_messages_if_needed(
 ) -> List[BaseMessage]:
     """
     Summarize older messages if the conversation exceeds thresholds.
-
-    This function:
-    1. Checks if summarization is needed based on token/message thresholds
-    2. If needed, summarizes older messages while keeping recent ones
-    3. Returns a new message list with the summary prepended
 
     Args:
         messages: List of LangChain messages (excluding system message)

@@ -40,13 +40,12 @@ async def generate_title_from_message(user_message: str) -> str:
         A short, descriptive title (max 50 characters)
     """
     try:
-        # Initialize a lightweight model for title generation
         api_key = settings.gemini_api_key
         if api_key.startswith("GEMINI_API_KEY="):
             api_key = api_key.split("=", 1)[-1].strip()
 
         llm = ChatGoogleGenerativeAI(
-            model="gemini-3-flash-preview",
+            model="gemini-flash-latest",
             google_api_key=api_key,
             temperature=1
         )

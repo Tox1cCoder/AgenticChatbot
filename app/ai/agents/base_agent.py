@@ -132,6 +132,7 @@ class BaseAgent(ABC):
         conversation_history: List[Any],
         persona: Optional[str],
         conversation_id: Optional[str] = None,
+        **system_prompt_kwargs: Any,
     ) -> AgentResponse:
         try:
             if self.mcp_manager is None:
@@ -149,7 +150,9 @@ class BaseAgent(ABC):
                 for msg in messages
             )
 
-            system_prompt = self._build_system_prompt(persona, has_tool_context)
+            system_prompt = self._build_system_prompt(
+                persona, has_tool_context, **system_prompt_kwargs
+            )
 
             # Build message list: System + History + Current Turn
             langchain_messages = [SystemMessage(content=system_prompt)]
@@ -212,7 +215,7 @@ class BaseAgent(ABC):
             )
 
     def _build_system_prompt(
-        self, persona: Optional[str], has_tool_context: bool
+        self, persona: Optional[str], has_tool_context: bool, **_: Any
     ) -> str:
         system_prompt = self._get_base_system_prompt()
 

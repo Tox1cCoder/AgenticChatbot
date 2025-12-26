@@ -189,7 +189,7 @@ class Settings(BaseSettings):
         description="Enable automatic conversation summarization for long conversations",
     )
     summarization_trigger_tokens: int = Field(
-        default=4000,
+        default=8000,
         description="Trigger summarization when estimated tokens exceed this threshold",
     )
     summarization_trigger_messages: int = Field(
