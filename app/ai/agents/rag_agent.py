@@ -669,10 +669,9 @@ class RAGAgent:
                         continue
 
                     additional_kwargs = getattr(chunk, "additional_kwargs", {})
-                    is_thinking = (
-                        additional_kwargs.get("thought") or 
-                        additional_kwargs.get("thinking")
-                    )
+                    is_thinking = additional_kwargs.get(
+                        "thought"
+                    ) or additional_kwargs.get("thinking")
 
                     if is_thinking:
                         yield {"type": "thinking", "content": token}
@@ -801,11 +800,14 @@ class RAGAgent:
                     "include_thoughts": settings.include_thoughts_in_response,
                 }
                 # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3
-                if "2.5" in self.model_name or "flash-latest" in self.model_name.lower():
+                if (
+                    "2.5" in self.model_name
+                    or "flash-latest" in self.model_name.lower()
+                ):
                     thinking_config_kwargs["thinking_budget"] = settings.thinking_budget
                 else:
                     thinking_config_kwargs["thinking_level"] = settings.thinking_level
-                    
+
                 config_kwargs["thinking_config"] = types.ThinkingConfig(
                     **thinking_config_kwargs
                 )
@@ -1116,11 +1118,14 @@ class RAGAgent:
                     "include_thoughts": settings.include_thoughts_in_response,
                 }
                 # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3
-                if "2.5" in self.model_name or "flash-latest" in self.model_name.lower():
+                if (
+                    "2.5" in self.model_name
+                    or "flash-latest" in self.model_name.lower()
+                ):
                     thinking_config_kwargs["thinking_budget"] = settings.thinking_budget
                 else:
                     thinking_config_kwargs["thinking_level"] = settings.thinking_level
-                    
+
                 config_kwargs["thinking_config"] = types.ThinkingConfig(
                     **thinking_config_kwargs
                 )

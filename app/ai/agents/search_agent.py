@@ -158,13 +158,16 @@ class SearchAgent(BaseAgent):
                                 else:
                                     accumulated_content += token
                                     yield {"type": "token", "content": token}
-                            
+
                             # Handle explicit thinking block type
                             elif block_type == "thinking":
                                 thinking_content = block.get("thinking", "")
                                 if thinking_content:
                                     accumulated_thinking += thinking_content
-                                    yield {"type": "thinking", "content": thinking_content}
+                                    yield {
+                                        "type": "thinking",
+                                        "content": thinking_content,
+                                    }
 
                             elif block_type == "tool_call_chunk":
                                 # Accumulate tool call chunks

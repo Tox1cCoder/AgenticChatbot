@@ -3,7 +3,13 @@ from typing import Optional, List, Dict, Any
 from abc import ABC, abstractmethod
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage, HumanMessage, AIMessage
+from langchain_core.messages import (
+    BaseMessage,
+    SystemMessage,
+    ToolMessage,
+    HumanMessage,
+    AIMessage,
+)
 from langchain_core.tools import BaseTool
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
@@ -20,7 +26,9 @@ logger = logging.getLogger(__name__)
 class BaseAgent(ABC):
     """Abstract base class for all agents. Child classes must implement: agent_type, agent_id, _get_base_system_prompt()."""
 
-    def __init__(self, model_name: Optional[str] = None, agent_config_key: str = "chat"):
+    def __init__(
+        self, model_name: Optional[str] = None, agent_config_key: str = "chat"
+    ):
         self.agent_config_key = agent_config_key
         self.model_name = model_name or AGENT_CONFIG[agent_config_key]["model"]
         self.gemini_client = None
@@ -98,10 +106,10 @@ class BaseAgent(ABC):
     ) -> List[BaseMessage]:
         """
         Convert AgentMessage history to LangChain BaseMessage format.
-        
+
         Args:
             conversation_history: List of AgentMessage objects from memory
-            
+
         Returns:
             List of HumanMessage/AIMessage objects for LangChain
         """
@@ -110,7 +118,7 @@ class BaseAgent(ABC):
             if hasattr(msg, "role") and hasattr(msg, "content"):
                 role = msg.role.value if hasattr(msg.role, "value") else str(msg.role)
                 content = msg.content or ""
-                
+
                 if role == "user":
                     langchain_history.append(HumanMessage(content=content))
                 elif role == "assistant":
@@ -145,20 +153,22 @@ class BaseAgent(ABC):
 
             # Build message list: System + History + Current Turn
             langchain_messages = [SystemMessage(content=system_prompt)]
-            
+
             # Convert and prepend conversation history (from database)
             if conversation_history:
                 history_messages = self._convert_history_to_langchain_messages(
                     conversation_history
                 )
                 langchain_messages.extend(history_messages)
-            
+
             # Add current turn messages
             langchain_messages.extend(messages)
 
             # Apply summarization for long conversations (only if needed)
             if settings.enable_summarization:
-                langchain_messages = await summarize_messages_if_needed(langchain_messages)
+                langchain_messages = await summarize_messages_if_needed(
+                    langchain_messages
+                )
 
             response = await llm_with_tools.ainvoke(langchain_messages)
 
