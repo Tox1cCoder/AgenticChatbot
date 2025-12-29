@@ -4,6 +4,7 @@ from typing import Optional, List, Tuple, Any, Dict, TYPE_CHECKING
 from uuid import UUID, uuid4
 import redis
 
+
 from app.repositories.message import MessageRepository
 from app.repositories.tool_approval import ToolApprovalRepository
 from app.repositories.utils.pagination import Paginator
@@ -26,6 +27,15 @@ from app.utils.text_processing import sanitize_persona, fix_markdown_code_blocks
 from app.core.config import settings
 from app.core.exceptions import PauseReason
 from app.ai.suggestion_generator import generate_follow_up_suggestions
+from app.core.response_constants import (
+    extract_response_content,
+    build_bot_metadata,
+    normalize_message_content,
+    NO_RESPONSE_GENERATED,
+    ERROR_NO_RESPONSE,
+    ERROR_RESPONSE_AFTER_RESUME,
+    UNKNOWN_ERROR,
+)
 
 if TYPE_CHECKING:
     from app.interfaces.task_plan_service_interface import ITaskPlanService
@@ -279,7 +289,7 @@ class MessageService(IMessageService):
             )
 
             # Stream bot response generation
-            bot_response_content = "Error: No response generated"
+            bot_response_content = ERROR_NO_RESPONSE
             bot_response = None
 
             if auto_execute_plan:
@@ -444,59 +454,29 @@ class MessageService(IMessageService):
                     elif event_type == "complete":
                         # Store final response
                         bot_response = event.get("response")
-                        if bot_response and bot_response.message:
-                            content = bot_response.message.content
-                            # Ensure content is not empty
-                            bot_response_content = (
-                                content
-                                if content and content.strip()
-                                else "No response generated"
-                            )
-                        else:
-                            bot_response_content = "Error: No response generated"
-
+                        bot_response_content = extract_response_content(
+                            bot_response, NO_RESPONSE_GENERATED
+                        )
                         break
 
                     elif event_type == "error":
                         # Handle error
                         bot_response = event.get("response")
-                        error_msg = event.get("error", "Unknown error")
-                        if bot_response and bot_response.message:
-                            content = bot_response.message.content
-                            bot_response_content = (
-                                content
-                                if content and content.strip()
-                                else f"Error: {error_msg}"
-                            )
-                        else:
-                            bot_response_content = f"Error: {error_msg}"
-
+                        error_msg = event.get("error", UNKNOWN_ERROR)
+                        bot_response_content = extract_response_content(
+                            bot_response, f"Error: {error_msg}"
+                        )
                         break
 
                 # Ensure content is valid (not empty)
                 if not bot_response_content or not bot_response_content.strip():
-                    bot_response_content = "No response generated"
+                    bot_response_content = NO_RESPONSE_GENERATED
 
                 # Fix markdown code blocks that may be missing newlines
                 bot_response_content = fix_markdown_code_blocks(bot_response_content)
 
                 # Create metadata for bot response
-                bot_metadata = dict(bot_response.metadata) if bot_response else {}
-                if sanitized_persona:
-                    bot_metadata.setdefault("persona_used", sanitized_persona)
-
-                if bot_response and bot_response.tool_artifacts:
-                    bot_metadata.setdefault(
-                        "tool_artifacts", bot_response.tool_artifacts
-                    )
-
-                # Extract images from bot response metadata (from Search or Image Generator agents)
-                if (
-                    bot_response
-                    and bot_response.metadata
-                    and "images" in bot_response.metadata
-                ):
-                    bot_metadata["images"] = bot_response.metadata["images"]
+                bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
 
                 plan_saved, has_existing_plan = self._sync_plan_from_response_metadata(
                     conversation_id=message_create_data.conversation_id,
@@ -677,7 +657,6 @@ class MessageService(IMessageService):
 
         bot_response = await self.ai_service.resume_interrupted_execution(
             thread_id=thread_id,
-            conversation_id=conversation_id,
             decisions=decisions,
             interrupt_id=interrupt_id,
         )
@@ -730,23 +709,12 @@ class MessageService(IMessageService):
             )
             return persisted
 
-        bot_response_content = (
-            bot_response.message.content
-            if bot_response and bot_response.message
-            else "Error: No response after resuming"
+        bot_response_content = extract_response_content(
+            bot_response, ERROR_RESPONSE_AFTER_RESUME
         )
 
         # Create metadata for bot response
-        bot_metadata = dict(bot_response.metadata) if bot_response else {}
-        if sanitized_persona:
-            bot_metadata.setdefault("persona_used", sanitized_persona)
-
-        if bot_response and bot_response.tool_artifacts:
-            bot_metadata.setdefault("tool_artifacts", bot_response.tool_artifacts)
-
-        # Extract images from bot response metadata
-        if bot_response and bot_response.metadata and "images" in bot_response.metadata:
-            bot_metadata["images"] = bot_response.metadata["images"]
+        bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
 
         # Create and persist bot response message
         bot_response_entity = MessageFactory.create_bot_response(
@@ -761,10 +729,8 @@ class MessageService(IMessageService):
     def get_by_id(self, message_id: UUID, user_id: UUID) -> MessageRead:
         self.message_validation_utils.validate_message_access(user_id, message_id)
         message_entity = self.repository.get_by_id(message_id)
-        if hasattr(message_entity, "content") and (
-            not message_entity.content or not message_entity.content.strip()
-        ):
-            message_entity.content = "[Empty message]"
+        if hasattr(message_entity, "content"):
+            message_entity.content = normalize_message_content(message_entity.content)
         return MessageRead.model_validate(message_entity)
 
     def get_conversation_messages(
@@ -793,8 +759,8 @@ class MessageService(IMessageService):
         )
         message_reads = []
         for msg in paginated_messages.items:
-            if hasattr(msg, "content") and (not msg.content or not msg.content.strip()):
-                msg.content = "[Empty message]"
+            if hasattr(msg, "content"):
+                msg.content = normalize_message_content(msg.content)
             message_reads.append(MessageRead.model_validate(msg))
 
         # Return new Paginator with converted items
@@ -824,8 +790,8 @@ class MessageService(IMessageService):
         )
         message_reads = []
         for msg in paginated_messages.items:
-            if hasattr(msg, "content") and (not msg.content or not msg.content.strip()):
-                msg.content = "[Empty message]"
+            if hasattr(msg, "content"):
+                msg.content = normalize_message_content(msg.content)
             message_reads.append(MessageRead.model_validate(msg))
 
         # Return new Paginator with converted items
@@ -866,18 +832,11 @@ class MessageService(IMessageService):
             rejection_messages=rejection_messages,
         )
 
-        bot_response_content = (
-            bot_response.message.content
-            if bot_response and bot_response.message
-            else "No response generated after resume"
+        bot_response_content = extract_response_content(
+            bot_response, NO_RESPONSE_GENERATED
         )
 
-        bot_metadata = dict(bot_response.metadata) if bot_response else {}
-        if bot_response and bot_response.tool_artifacts:
-            bot_metadata.setdefault("tool_artifacts", bot_response.tool_artifacts)
-
-        if bot_response and bot_response.metadata and "images" in bot_response.metadata:
-            bot_metadata["images"] = bot_response.metadata["images"]
+        bot_metadata = build_bot_metadata(bot_response)
 
         bot_response_entity = MessageFactory.create_bot_response(
             conversation_id=conversation_id,
@@ -1071,25 +1030,9 @@ class MessageService(IMessageService):
                 bot_response.metadata["interrupt"],
             )
 
-        bot_response_content = (
-            bot_response.message.content
-            if bot_response and bot_response.message
-            else "No response generated"
-        )
+        bot_response_content = extract_response_content(bot_response)
 
-        bot_metadata = dict(bot_response.metadata) if bot_response else {}
-        if sanitized_persona:
-            bot_metadata.setdefault("persona_used", sanitized_persona)
-
-        if bot_response and bot_response.tool_artifacts:
-            bot_metadata.setdefault("tool_artifacts", bot_response.tool_artifacts)
-
-        if (
-            bot_response
-            and bot_response.metadata
-            and "images" in bot_response.metadata
-        ):
-            bot_metadata["images"] = bot_response.metadata["images"]
+        bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
 
         # Sync plan from response metadata (legacy and new format)
         plan_saved, has_plan = self._sync_plan_from_response_metadata(
@@ -1198,6 +1141,6 @@ class MessageService(IMessageService):
                         if hasattr(self.task_plan_service, "mark_task_in_progress"):
                             self.task_plan_service.mark_task_in_progress(task.id, user_id)
 
-        except Exception:
+        except Exception as e:
             pass
 

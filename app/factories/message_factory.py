@@ -10,6 +10,7 @@ from uuid import uuid4, UUID
 from app.schemas.message import MessageCreate
 from app.models.enums import MessageRole
 from app.utils.timestamp_utils import TimestampUtils
+from app.core.response_constants import normalize_message_content
 
 
 class MessageFactory:
@@ -61,11 +62,8 @@ class MessageFactory:
 
     @staticmethod
     def _normalize_content(content: str) -> str:
-        """Ensure message content is not empty (Pydantic requires >=1 char)."""
-        if content is None:
-            return "[Empty message]"
-        trimmed = content.strip()
-        return trimmed if trimmed else "[Empty message]"
+        """Wrapper for backward compatibility."""
+        return normalize_message_content(content)
 
     @staticmethod
     def create_bot_response(

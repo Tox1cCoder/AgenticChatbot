@@ -18,6 +18,13 @@ from ..repositories.document import DocumentRepository
 from ..utils.text_processing import sanitize_persona
 from ..ai.utils import make_json_safe
 from ..core.config import settings
+from ..core.response_constants import (
+    ERROR_NO_RESPONSE,
+    ERROR_NO_RESPONSE_RESUME,
+    ERROR_NO_RESPONSE_DECISIONS,
+    UNKNOWN_ERROR,
+    WORKFLOW_PAUSED_MESSAGE,
+)
 
 
 class AIService:
@@ -48,7 +55,7 @@ class AIService:
         except Exception as e:
             return None
 
-    def _build_error_response(self, message: str) -> AgentResponse:
+    def _build_error_response(self, message: str = ERROR_NO_RESPONSE) -> AgentResponse:
         return AgentResponse(
             agent_type=AgentType.CHAT,
             agent_id="chat_agent",
@@ -96,7 +103,7 @@ class AIService:
                 return response
             return response
 
-        return self._build_error_response("Error: No response generated")
+        return self._build_error_response()
 
     async def generate_bot_response(
         self,
@@ -126,7 +133,7 @@ class AIService:
             )
             if response:
                 return response
-            return self._build_error_response("Error: No response generated")
+            return self._build_error_response()
 
         return await self.process_message(
             conversation_id=conversation_id,
@@ -163,12 +170,11 @@ class AIService:
         if response:
             return response
 
-        return self._build_error_response("Error: No response generated after resume")
+        return self._build_error_response(ERROR_NO_RESPONSE_RESUME)
 
     async def resume_interrupted_execution(
         self,
         thread_id: str,
-        conversation_id: UUID,
         decisions: List[InterruptDecision],
         interrupt_id: Optional[str] = None,
     ) -> AgentResponse:
@@ -186,9 +192,7 @@ class AIService:
         if response:
             return response
 
-        return self._build_error_response(
-            "Error: No response generated after resuming with decisions"
-        )
+        return self._build_error_response(ERROR_NO_RESPONSE_DECISIONS)
 
     async def generate_bot_response_stream(
         self,
@@ -272,7 +276,7 @@ class AIService:
                 final_response = event.get("response")
 
             elif event_type == "error":
-                error_msg = event.get("error", "Unknown error")
+                error_msg = event.get("error", UNKNOWN_ERROR)
                 yield {"type": "error", "error": error_msg}
 
             elif event_type == "interrupt":
@@ -284,13 +288,13 @@ class AIService:
                     "thread_id": thread_id,
                     "pending_tool_calls": pending_tool_calls,
                     "interrupt": event.get("interrupt"),
-                    "message": "Workflow paused - awaiting approval for tool execution",
+                    "message": WORKFLOW_PAUSED_MESSAGE,
                 }
 
         if final_response:
             yield {"type": "complete", "response": final_response}
         else:
-            error_response = self._build_error_response("Error: No response generated")
+            error_response = self._build_error_response()
             yield {"type": "complete", "response": error_response}
 
     def get_bot_response_sync(

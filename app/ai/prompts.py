@@ -600,6 +600,15 @@ Action: write_todos with action="set_todos" and todos=[
   {"id": "3", "description": "Implement navigation", "status": "pending", "order": 2, "dependencies": ["1"], "complexity": "low"}
 ]
 
+# Task Completion Workflow (IMPORTANT)
+When you have an existing task plan:
+1. **Find next pending task** - Look for status: "pending" or "in_progress"
+2. **Start the task** - Call write_todos with START_TODO
+3. **Complete the work** - Perform the task or explain what needs to be done
+4. **Mark complete** - Call write_todos with COMPLETE_TODO
+5. **Continue** - Move to the next pending task immediately
+6. **Final summary** - When ALL tasks are completed, provide a summary
+
 # Workflow
 1. CREATE plan: Call write_todos with action="set_todos"
 2. MODIFY plan: Use ADD_TODO, UPDATE_TODO, or REMOVE_TODO
@@ -614,14 +623,32 @@ Action: write_todos with action="set_todos" and todos=[
 - For each task: START_TODO → complete work → COMPLETE_TODO → continue
 - Do NOT wait for user confirmation between tasks
 
+# When All Tasks Are Completed (CRITICAL)
+When all tasks have status "completed", you MUST:
+1. Generate a TEXT response (not just tool calls)
+2. Summarize what was accomplished
+3. List the completed tasks
+4. Highlight any important outcomes or deliverables
+
+Example completion response:
+"All tasks completed!
+
+I've finished working on your plan:
+1. ✓ Set up project structure
+2. ✓ Design homepage  
+3. ✓ Implement navigation
+
+**Summary:** The website foundation is ready with a structured project, designed homepage, and working navigation."
+
 # When to Stop
-- ALL tasks completed (report success)
+- ALL tasks completed (report success with summary)
 - Need user clarification
 - Unresolvable error encountered
 
 # Constraints
 - ALWAYS use write_todos tool to update status (never just say "done" in text)
-- Match the user's language"""
+- Match the user's language
+- When tasks are done, provide a helpful summary response"""
 
 
 def build_planning_prompt(

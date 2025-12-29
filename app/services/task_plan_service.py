@@ -286,6 +286,21 @@ class TaskPlanService(ITaskPlanService):
 
         return TaskPlanRead.model_validate(updated_task)
 
+    def mark_task_in_progress(self, task_id: UUID, user_id: UUID) -> TaskPlanRead:
+        """Mark a task as in progress."""
+        self.task_plan_validation_utils.validate_task_access(user_id, task_id)
+
+        updated_task = self.task_plan_repository.update(
+            task_id, TaskPlanUpdate(status=TaskStatus.in_progress)
+        )
+        if not updated_task:
+            raise ResourceNotFoundException(
+                detail="Task plan not found",
+                error_code="TASK_PLAN_NOT_FOUND",
+            )
+
+        return TaskPlanRead.model_validate(updated_task)
+
     def delete_task(self, task_id: UUID, user_id: UUID) -> bool:
         self.task_plan_validation_utils.validate_task_access(user_id, task_id)
         return self.task_plan_repository.delete(task_id)

@@ -27,6 +27,7 @@ from .memory import get_memory_manager
 from ..core.config import settings
 from .hitl_config import build_interrupt_response, requires_human_approval
 from .utils import normalize_tool_call, coerce_response_text, make_json_safe
+from ..core.response_constants import NO_RESPONSE_GENERATED
 
 logger = logging.getLogger(__name__)
 
@@ -202,8 +203,26 @@ class MultiAgentWorkflow:
         initial_state["context"]["has_existing_plan"] = has_existing_plan
         if existing_tasks:
             initial_state["context"]["existing_tasks"] = existing_tasks
+            # CRITICAL: Initialize todos from existing tasks for planning agent
+            initial_state["todos"] = existing_tasks
+            initial_state["current_task_index"] = self._find_first_pending_task(
+                existing_tasks
+            )
+
+        # Initialize planning call count for budget tracking
+        initial_state["planning_call_count"] = 0
 
         return initial_state
+
+    def _find_first_pending_task(
+        self, tasks: List[Dict[str, Any]]
+    ) -> Optional[int]:
+        """Find the first pending or in-progress task index in the task list."""
+        for i, task in enumerate(tasks):
+            status = task.get("status", "pending")
+            if status in ("pending", "in_progress"):
+                return i
+        return None
 
     async def initialize(self) -> None:
         if self._initialized:
@@ -996,6 +1015,11 @@ class MultiAgentWorkflow:
         if response.metadata.get("todos"):
             state["todos"] = response.metadata["todos"]
 
+        # Mark that final summary was generated if this was a summary call
+        if context.get("generate_final_summary") and not response.message.tool_calls:
+            context["final_summary_generated"] = True
+            state["context"] = context
+
         return state
 
     async def _planning_tools_node(self, state: GraphState) -> GraphState:
@@ -1235,7 +1259,15 @@ class MultiAgentWorkflow:
                 context = state.get("context", {})
                 context["all_tasks_completed"] = True
                 state["context"] = context
-                return "end"
+
+                # Check if we've already generated the final summary
+                if context.get("final_summary_generated"):
+                    return "end"
+
+                # Need one more iteration to generate completion summary
+                context["generate_final_summary"] = True
+                state["context"] = context
+                return "planning_agent"
 
         return "planning_agent"
 
@@ -1579,7 +1611,7 @@ class MultiAgentWorkflow:
                 if response:
                     yield {"type": "complete", "response": response}
                 else:
-                    yield {"type": "error", "error": "No response generated"}
+                    yield {"type": "error", "error": NO_RESPONSE_GENERATED}
             except Exception as e:
                 yield {"type": "error", "error": str(e)}
             return
@@ -1900,7 +1932,7 @@ class MultiAgentWorkflow:
                     )
                     yield {"type": "complete", "response": response}
                 else:
-                    yield {"type": "error", "error": "No response generated"}
+                    yield {"type": "error", "error": NO_RESPONSE_GENERATED}
             except Exception as e:
                 yield {"type": "error", "error": str(e)}
         else:
@@ -1921,7 +1953,7 @@ class MultiAgentWorkflow:
                 )
                 yield {"type": "complete", "response": response}
             else:
-                yield {"type": "error", "error": "No response generated"}
+                yield {"type": "error", "error": NO_RESPONSE_GENERATED}
 
     async def get_state(self, thread_id: str) -> dict:
         if not self.checkpointer:
