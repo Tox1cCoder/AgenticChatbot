@@ -144,9 +144,50 @@ class PlanningAgent(BaseAgent):
         has_tool_context: bool = False,
         todos: Optional[List[Dict[str, Any]]] = None,
         current_task_index: Optional[int] = None,
+        planning_phase: Optional[str] = None,
+        should_describe_plan: bool = False,
     ) -> str:
         # Call parent to get base prompt with persona and tool context
         base_prompt = super()._build_system_prompt(persona, has_tool_context)
+
+        # Add phase-specific instructions
+        phase = planning_phase or "planning"
+        
+        if phase == "planning":
+            phase_prompt = """
+# CURRENT PHASE: PLANNING
+You are in the PLANNING phase. Your role is to:
+- Create or modify the task plan using SET_TODOS, ADD_TODO, UPDATE_TODO, or REMOVE_TODO
+- DO NOT start executing tasks (no START_TODO or COMPLETE_TODO)
+- Wait for the user to explicitly ask to implement/execute/start before working on tasks
+
+When the user asks to "implement", "execute", "start working", "work on this", or similar:
+- You should switch to EXECUTION phase and begin working through tasks
+- Set planning_phase: "executing" in your response metadata"""
+        else:  # executing
+            phase_prompt = """
+# CURRENT PHASE: EXECUTING
+You are in the EXECUTION phase. Work through tasks autonomously:
+1. Find the next pending task
+2. Use START_TODO to mark it in progress
+3. Complete the task work
+4. Use COMPLETE_TODO to mark it done
+5. Continue to the next task
+
+Continue until all tasks are complete or you need user clarification."""
+
+        base_prompt = f"{base_prompt}\n{phase_prompt}"
+
+        # Add instruction to describe the plan after creation/modification
+        if should_describe_plan:
+            base_prompt += """
+
+# IMPORTANT: You just created or modified the plan.
+Now provide a clear, helpful response that:
+1. Describes the tasks you created/modified
+2. Lists the key tasks in the plan
+3. Asks if the user wants to make any changes before starting execution
+DO NOT make any tool calls - just respond with text describing the plan."""
 
         # Append todo context if provided
         if todos:

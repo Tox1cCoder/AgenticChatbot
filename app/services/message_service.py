@@ -1095,6 +1095,7 @@ class MessageService(IMessageService):
                 conversation_id, user_id, include_completed=True
             )
             
+            # No existing tasks - create new plan from todos
             if not existing_tasks:
                 plan_payload = {
                     "tasks": [
@@ -1116,31 +1117,86 @@ class MessageService(IMessageService):
                 )
                 return
 
+            # Build lookup maps for existing tasks
             task_by_id = {str(task.id): task for task in existing_tasks}
-            task_by_order = {task.task_order: task for task in existing_tasks}
-            tasks_by_index = {i: task for i, task in enumerate(existing_tasks)}
+            existing_task_ids = set(task_by_id.keys())
+            
+            # Track which todos are new vs updates
+            todo_ids_in_response = set()
             
             for i, todo in enumerate(todos):
                 todo_id = str(todo.get("id", ""))
                 todo_status = todo.get("status", "pending")
-                todo_order = todo.get("order")
+                todo_description = todo.get("description", "")
                 
+                todo_ids_in_response.add(todo_id)
+                
+                # Try to find matching existing task
                 task = task_by_id.get(todo_id)
                 
-                if not task and todo_order is not None:
-                    task = task_by_order.get(todo_order)
-                
-                if not task:
-                    task = tasks_by_index.get(i)
-                
                 if task:
+                    # Update existing task
                     task_status_str = task.status.value if hasattr(task.status, "value") else str(task.status)
+                    needs_update = False
+                    update_data = {}
+                    
+                    # Check if description changed
+                    if todo_description and todo_description != task.description:
+                        update_data["description"] = todo_description
+                        needs_update = True
+                    
+                    # Check if status changed
                     if todo_status in ("completed", "COMPLETED") and task_status_str != "completed":
                         self.task_plan_service.mark_task_completed(task.id, user_id)
                     elif todo_status in ("in_progress", "IN_PROGRESS") and task_status_str == "pending":
                         if hasattr(self.task_plan_service, "mark_task_in_progress"):
                             self.task_plan_service.mark_task_in_progress(task.id, user_id)
+                    
+                    # Apply description update if needed
+                    if needs_update and update_data:
+                        from app.schemas.task_plan import TaskPlanUpdate
+                        try:
+                            self.task_plan_service.update_task(
+                                task.id, user_id, TaskPlanUpdate(**update_data)
+                            )
+                        except Exception as update_error:
+                            logger.warning(f"Failed to update task {task.id}: {update_error}")
+                else:
+                    # This is a new task - add it
+                    # Note: Dependencies from agent are string IDs that may not map to DB UUIDs
+                    # For new tasks, we start with no dependencies (they use order-based deps)
+                    try:
+                        from app.schemas.task_plan import TaskPlanCreate
+                        self.task_plan_service.task_plan_repository.create(
+                            TaskPlanCreate(
+                                conversation_id=conversation_id,
+                                description=todo_description,
+                                task_order=i,
+                                dependencies=[],  # New tasks start with no deps
+                            )
+                        )
+                        logger.info(f"Created new task: {todo_description[:50]}...")
+                    except Exception as create_error:
+                        logger.warning(f"Failed to create new task: {create_error}")
+            
+            # Handle removed tasks - delete tasks that are in DB but not in todos
+            # Only if we have valid IDs to compare (skip if todos have generated IDs)
+            if todo_ids_in_response and all(
+                todo_id not in ("", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
+                for todo_id in todo_ids_in_response
+            ):
+                for task_id in existing_task_ids:
+                    if task_id not in todo_ids_in_response:
+                        try:
+                            self.task_plan_service.delete_task(
+                                UUID(task_id), user_id
+                            )
+                        except Exception as delete_error:
+                            logger.warning(f"Failed to delete task {task_id}: {delete_error}")
 
         except Exception as e:
-            pass
+            logger.error(
+                f"Failed to sync todos to database for conversation {conversation_id}: {e}",
+                exc_info=True,
+            )
 

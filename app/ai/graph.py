@@ -16,6 +16,7 @@ from .schemas import (
     AgentType,
     MessageRole,
     InterruptDecision,
+    TodoStatus
 )
 from .agents.router import Router
 from .agents.chat_agent import ChatAgent
@@ -211,6 +212,9 @@ class MultiAgentWorkflow:
 
         # Initialize planning call count for budget tracking
         initial_state["planning_call_count"] = 0
+        
+        # Default to "planning" phase - only switch to "executing" when user requests
+        initial_state["planning_phase"] = "planning"
 
         return initial_state
 
@@ -980,6 +984,15 @@ class MultiAgentWorkflow:
 
         context = state.get("context", {})
         existing_tasks = context.get("existing_tasks", [])
+        
+        # Get planning phase and check if we need to generate plan response
+        planning_phase = state.get("planning_phase", "planning")
+        should_generate_plan_response = context.get("generate_plan_response", False)
+        
+        # Clear the flag after reading
+        if should_generate_plan_response:
+            context["generate_plan_response"] = False
+            state["context"] = context
 
         # Get current todos from state (may have been updated by planning_tools)
         todos = state.get("todos", [])
@@ -1002,9 +1015,15 @@ class MultiAgentWorkflow:
             conversation_id=conversation_id,
             todos=todos,
             current_task_index=current_task_index,
+            planning_phase=planning_phase,
+            should_describe_plan=should_generate_plan_response,
         )
 
         state["response"] = response
+
+        # Check if agent switched to executing phase via response metadata
+        if response.metadata.get("planning_phase"):
+            state["planning_phase"] = response.metadata["planning_phase"]
 
         # Add AI message to state (with tool calls if present)
         ai_kwargs = {"content": response.message.content or ""}
@@ -1193,6 +1212,39 @@ class MultiAgentWorkflow:
         state["todos"] = todos
         state["current_task_index"] = current_task_index
 
+        # Check if plan was modified (SET_TODOS, ADD_TODO, UPDATE_TODO, REMOVE_TODO)
+        # and mark context so we can return to agent for response generation
+        context = state.get("context", {})
+        plan_modifying_actions = {"set_todos", "add_todo", "update_todo", "remove_todo"}
+        execution_actions = {"start_todo", "complete_todo"}
+        
+        for tool_call in last_message.tool_calls:
+            tool_call_data = normalize_tool_call(tool_call)
+            if tool_call_data.get("name") == "write_todos":
+                action = tool_call_data.get("args", {}).get("action", "")
+                
+                # Plan modification actions - return to agent for confirmation
+                if action in plan_modifying_actions:
+                    context["plan_just_modified"] = True
+                    state["context"] = context
+                
+                # Execution actions - switch to executing phase
+                if action in execution_actions:
+                    state["planning_phase"] = "executing"
+                    logger.info(f"Switched to executing phase due to {action} action")
+
+        # Add tool artifacts to response for UI visibility
+        response = state.get("response")
+        if response and tool_outputs:
+            if response.tool_artifacts is None:
+                response.tool_artifacts = []
+            for output in tool_outputs:
+                response.tool_artifacts.append({
+                    "tool": output["name"],
+                    "result": output["content"],
+                })
+            state["response"] = response
+
         # Increment iteration count for budget tracking
         current_iteration = state.get("iteration_count") or 0
         state["iteration_count"] = current_iteration + 1
@@ -1230,10 +1282,8 @@ class MultiAgentWorkflow:
         return "end"
 
     def _should_continue_planning(self, state: GraphState) -> str:
-        from .schemas import TodoStatus
-
         planning_call_count = state.get("planning_call_count", 0)
-        max_iterations = getattr(settings, "planning_max_iterations", 15)
+        max_iterations = getattr(settings, "planning_max_iterations", 20)
 
         if planning_call_count >= max_iterations:
             context = state.get("context", {})
@@ -1242,6 +1292,21 @@ class MultiAgentWorkflow:
             state["context"] = context
             return "end"
 
+        context = state.get("context", {})
+        planning_phase = state.get("planning_phase", "planning")
+
+        # If plan was just created/modified, return to agent for confirmation response
+        if context.get("plan_just_modified"):
+            context["plan_just_modified"] = False
+            context["generate_plan_response"] = True
+            state["context"] = context
+            return "planning_agent"
+
+        # In planning phase, don't auto-execute - just end after plan response
+        if planning_phase == "planning":
+            return "end"
+
+        # === EXECUTING PHASE LOGIC ===
         todos = state.get("todos", [])
         if todos:
             pending_count = sum(
@@ -1256,7 +1321,6 @@ class MultiAgentWorkflow:
                 )
             )
             if pending_count == 0:
-                context = state.get("context", {})
                 context["all_tasks_completed"] = True
                 state["context"] = context
 

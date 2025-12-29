@@ -136,6 +136,8 @@ class GraphState(TypedDict):
     todos: NotRequired[Optional[List[Dict[str, Any]]]]
     current_task_index: NotRequired[Optional[int]]
     planning_call_count: NotRequired[Optional[int]]
+    # Planning phase: "planning" = create/edit only, "executing" = work through tasks
+    planning_phase: NotRequired[Optional[str]]
 
 
 

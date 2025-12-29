@@ -318,7 +318,7 @@ class Settings(BaseSettings):
 
     # ReAct Agent Configuration
     react_agent_max_iterations: int = Field(
-        default=5,
+        default=24,
         description="Maximum number of refinement iterations before stopping",
     )
     react_agent_quality_threshold: float = Field(
