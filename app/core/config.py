@@ -106,9 +106,15 @@ class Settings(BaseSettings):
     )
 
     # Agent Model Configuration
-    rag_agent_model: str = Field(default="gemini-3-flash-preview")
+    rag_agent_model: str = Field(default="gemini-3-pro-preview")
     chat_agent_model: str = Field(default="gemini-3-flash-preview")
     search_agent_model: str = Field(default="gemini-3-flash-preview")
+
+    # Media Resolution Configuration (for vision models)
+    media_resolution: str = Field(
+        default="high",
+        description="Media resolution for vision models: low, medium, high (Gemini 3 supports per-part resolution)",
+    )
 
     # Image Generation Configuration
     enable_image_generation: bool = Field(

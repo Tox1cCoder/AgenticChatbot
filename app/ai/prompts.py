@@ -320,6 +320,9 @@ def build_rag_prompt(
 
             doc_groups[doc_key]["chunks"].append(doc)
 
+        for doc_key in doc_groups:
+            doc_groups[doc_key]["chunks"].sort(key=lambda x: x.get("chunk_index", 0))
+
         total_tokens = 0
         chunks_used = 0
         num_documents = len(doc_groups)

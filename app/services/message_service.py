@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple, Any, Dict, TYPE_CHECKING
-from uuid import UUID, uuid4
+from uuid import UUID
 import redis
 
 
@@ -17,6 +17,7 @@ from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.pagination_validation import validate_pagination_params
 from app.interfaces.message_service_interface import IMessageService
 from app.services.ai_service import AIService
+from app.schemas.task_plan import TaskPlanCreate, TaskPlanUpdate
 from app.ai.schemas import (
     AgentResponse,
     InterruptDecision,
@@ -137,7 +138,7 @@ class MessageService(IMessageService):
             planning_mode_enabled = (
                 conversation.planning_mode_enabled if conversation else False
             )
-            
+
             # Use shared helper to prepare planning context
             planning_ctx = await self._prepare_planning_context(
                 conversation_id=message_create_data.conversation_id,
@@ -200,12 +201,16 @@ class MessageService(IMessageService):
                         interrupt_payload=interrupt_payload,
                         sanitized_persona=sanitized_persona,
                         thread_id=getattr(interrupt_payload, "thread_id", None),
-                        pending_tool_calls=[
-                            r.model_dump(mode="json")
-                            for r in getattr(interrupt_payload, "action_requests", [])
-                        ]
-                        if isinstance(interrupt_payload, InterruptResponse)
-                        else None,
+                        pending_tool_calls=(
+                            [
+                                r.model_dump(mode="json")
+                                for r in getattr(
+                                    interrupt_payload, "action_requests", []
+                                )
+                            ]
+                            if isinstance(interrupt_payload, InterruptResponse)
+                            else None
+                        ),
                     )
                 except Exception:
                     pass
@@ -261,7 +266,7 @@ class MessageService(IMessageService):
             planning_mode_enabled = (
                 conversation.planning_mode_enabled if conversation else False
             )
-            
+
             # Use shared helper to prepare planning context
             planning_ctx = await self._prepare_planning_context(
                 conversation_id=message_create_data.conversation_id,
@@ -904,7 +909,7 @@ class MessageService(IMessageService):
     ) -> Dict[str, Any]:
         """
         Prepare task planning context for message creation.
-        
+
         Returns a dict with keys:
         - planning_mode_enabled: bool
         - has_existing_plan: bool
@@ -919,10 +924,10 @@ class MessageService(IMessageService):
             "current_task_context": None,
             "existing_tasks_dict": None,
         }
-        
+
         if not self.task_plan_service or not user_id:
             return result
-        
+
         try:
             existing_tasks = self.task_plan_service.get_conversation_tasks(
                 conversation_id, user_id, include_completed=True
@@ -969,7 +974,7 @@ class MessageService(IMessageService):
                 ]
         except Exception:
             pass
-        
+
         return result
 
     async def _run_plan_execution_loop(
@@ -995,7 +1000,7 @@ class MessageService(IMessageService):
     ]:
         """
         Execute planning workflow with graph-driven ReAct loop.
-        
+
         The graph now handles iteration internally via the planning_tools node.
         This function makes a single call and syncs todo state afterward.
         """
@@ -1090,113 +1095,103 @@ class MessageService(IMessageService):
         if not self.task_plan_service or not todos or not user_id:
             return
 
-        try:
-            existing_tasks = self.task_plan_service.get_conversation_tasks(
-                conversation_id, user_id, include_completed=True
+        existing_tasks = self.task_plan_service.get_conversation_tasks(
+            conversation_id, user_id, include_completed=True
+        )
+
+        # No existing tasks - create new plan from todos
+        if not existing_tasks:
+            plan_payload = {
+                "tasks": [
+                    {
+                        "description": todo.get("description", ""),
+                        "dependencies": [
+                            int(d)
+                            for d in todo.get("dependencies", [])
+                            if isinstance(d, int)
+                            or (isinstance(d, str) and d.isdigit())
+                        ],
+                        "estimated_complexity": todo.get("complexity"),
+                    }
+                    for todo in todos
+                ]
+            }
+            self.task_plan_service.sync_plan_from_agent(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                plan_payload=plan_payload,
             )
-            
-            # No existing tasks - create new plan from todos
-            if not existing_tasks:
-                plan_payload = {
-                    "tasks": [
-                        {
-                            "description": todo.get("description", ""),
-                            "dependencies": [
-                                int(d) for d in todo.get("dependencies", []) 
-                                if isinstance(d, int) or (isinstance(d, str) and d.isdigit())
-                            ],
-                            "estimated_complexity": todo.get("complexity"),
-                        }
-                        for todo in todos
-                    ]
-                }
-                self.task_plan_service.sync_plan_from_agent(
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    plan_payload=plan_payload,
+            return
+
+        # Build lookup maps for existing tasks
+        task_by_id = {str(task.id): task for task in existing_tasks}
+        existing_task_ids = set(task_by_id.keys())
+
+        # Track which todos are new vs updates
+        todo_ids_in_response = set()
+
+        for i, todo in enumerate(todos):
+            todo_id = str(todo.get("id", ""))
+            todo_status = todo.get("status", "pending")
+            todo_description = todo.get("description", "")
+
+            todo_ids_in_response.add(todo_id)
+
+            # Try to find matching existing task
+            task = task_by_id.get(todo_id)
+
+            if task:
+                # Update existing task
+                task_status_str = (
+                    task.status.value
+                    if hasattr(task.status, "value")
+                    else str(task.status)
                 )
-                return
+                needs_update = False
+                update_data = {}
 
-            # Build lookup maps for existing tasks
-            task_by_id = {str(task.id): task for task in existing_tasks}
-            existing_task_ids = set(task_by_id.keys())
-            
-            # Track which todos are new vs updates
-            todo_ids_in_response = set()
-            
-            for i, todo in enumerate(todos):
-                todo_id = str(todo.get("id", ""))
-                todo_status = todo.get("status", "pending")
-                todo_description = todo.get("description", "")
-                
-                todo_ids_in_response.add(todo_id)
-                
-                # Try to find matching existing task
-                task = task_by_id.get(todo_id)
-                
-                if task:
-                    # Update existing task
-                    task_status_str = task.status.value if hasattr(task.status, "value") else str(task.status)
-                    needs_update = False
-                    update_data = {}
-                    
-                    # Check if description changed
-                    if todo_description and todo_description != task.description:
-                        update_data["description"] = todo_description
-                        needs_update = True
-                    
-                    # Check if status changed
-                    if todo_status in ("completed", "COMPLETED") and task_status_str != "completed":
-                        self.task_plan_service.mark_task_completed(task.id, user_id)
-                    elif todo_status in ("in_progress", "IN_PROGRESS") and task_status_str == "pending":
-                        if hasattr(self.task_plan_service, "mark_task_in_progress"):
-                            self.task_plan_service.mark_task_in_progress(task.id, user_id)
-                    
-                    # Apply description update if needed
-                    if needs_update and update_data:
-                        from app.schemas.task_plan import TaskPlanUpdate
-                        try:
-                            self.task_plan_service.update_task(
-                                task.id, user_id, TaskPlanUpdate(**update_data)
-                            )
-                        except Exception as update_error:
-                            logger.warning(f"Failed to update task {task.id}: {update_error}")
-                else:
-                    # This is a new task - add it
-                    # Note: Dependencies from agent are string IDs that may not map to DB UUIDs
-                    # For new tasks, we start with no dependencies (they use order-based deps)
-                    try:
-                        from app.schemas.task_plan import TaskPlanCreate
-                        self.task_plan_service.task_plan_repository.create(
-                            TaskPlanCreate(
-                                conversation_id=conversation_id,
-                                description=todo_description,
-                                task_order=i,
-                                dependencies=[],  # New tasks start with no deps
-                            )
-                        )
-                        logger.info(f"Created new task: {todo_description[:50]}...")
-                    except Exception as create_error:
-                        logger.warning(f"Failed to create new task: {create_error}")
-            
-            # Handle removed tasks - delete tasks that are in DB but not in todos
-            # Only if we have valid IDs to compare (skip if todos have generated IDs)
-            if todo_ids_in_response and all(
-                todo_id not in ("", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
-                for todo_id in todo_ids_in_response
-            ):
-                for task_id in existing_task_ids:
-                    if task_id not in todo_ids_in_response:
-                        try:
-                            self.task_plan_service.delete_task(
-                                UUID(task_id), user_id
-                            )
-                        except Exception as delete_error:
-                            logger.warning(f"Failed to delete task {task_id}: {delete_error}")
+                # Check if description changed
+                if todo_description and todo_description != task.description:
+                    update_data["description"] = todo_description
+                    needs_update = True
 
-        except Exception as e:
-            logger.error(
-                f"Failed to sync todos to database for conversation {conversation_id}: {e}",
-                exc_info=True,
-            )
+                # Check if status changed
+                if (
+                    todo_status in ("completed", "COMPLETED")
+                    and task_status_str != "completed"
+                ):
+                    self.task_plan_service.mark_task_completed(task.id, user_id)
+                elif (
+                    todo_status in ("in_progress", "IN_PROGRESS")
+                    and task_status_str == "pending"
+                ):
+                    if hasattr(self.task_plan_service, "mark_task_in_progress"):
+                        self.task_plan_service.mark_task_in_progress(task.id, user_id)
 
+                # Apply description update if needed
+                if needs_update and update_data:
+                    self.task_plan_service.update_task(
+                        task.id, user_id, TaskPlanUpdate(**update_data)
+                    )
+            else:
+                # This is a new task - add it
+                # Note: Dependencies from agent are string IDs that may not map to DB UUIDs
+                # For new tasks, we start with no dependencies (they use order-based deps)
+                self.task_plan_service.task_plan_repository.create(
+                    TaskPlanCreate(
+                        conversation_id=conversation_id,
+                        description=todo_description,
+                        task_order=i,
+                        dependencies=[],  # New tasks start with no deps
+                    )
+                )
+
+        # Handle removed tasks - delete tasks that are in DB but not in todos
+        # Only if we have valid IDs to compare (skip if todos have generated IDs)
+        if todo_ids_in_response and all(
+            todo_id not in ("", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
+            for todo_id in todo_ids_in_response
+        ):
+            for task_id in existing_task_ids:
+                if task_id not in todo_ids_in_response:
+                    self.task_plan_service.delete_task(UUID(task_id), user_id)

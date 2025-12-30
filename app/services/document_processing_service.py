@@ -11,7 +11,7 @@ import mimetypes
 import unicodedata
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from uuid import UUID
 
 from PIL import Image
@@ -57,9 +57,6 @@ class DocumentProcessingService:
     def _init_gemini(self):
         api_key = self.settings.gemini_api_key
         if not api_key:
-            logger.error(
-                "Gemini API key not configured - image captioning will be skipped"
-            )
             self.gemini_client = None
             return
 
@@ -68,9 +65,7 @@ class DocumentProcessingService:
 
         try:
             self.gemini_client = genai.Client(api_key=api_key)
-            logger.info("Gemini client initialized successfully for image captioning")
         except Exception as e:
-            logger.error(f"Failed to initialize Gemini client: {e}", exc_info=True)
             self.gemini_client = None
 
     async def validate_upload_file(
@@ -162,7 +157,6 @@ class DocumentProcessingService:
             }
 
         except Exception as e:
-            logger.error(f"Failed to get task status for {task_id}: {str(e)}")
             return {"task_id": task_id, "status": "UNKNOWN", "error": str(e)}
 
     async def process_document(
@@ -380,8 +374,6 @@ class DocumentProcessingService:
             max_chunk_size = self.settings.document_chunk_size
         if overlap is None:
             overlap = self.settings.document_chunk_overlap
-
-        # Initialize text splitter
         separators = ["\n\n", "\n", " ", ""]
 
         text_splitter = RecursiveCharacterTextSplitter(
@@ -390,8 +382,6 @@ class DocumentProcessingService:
             length_function=len,
             separators=separators,
         )
-
-        # Split documents and extract text content
         split_docs = text_splitter.split_documents(documents)
         return [doc.page_content for doc in split_docs]
 

@@ -1081,14 +1081,23 @@ class RAGAgent:
 
         return images
 
+    def _get_media_resolution(self) -> types.MediaResolution:
+        """Map config media_resolution value to Gemini types.MediaResolution enum."""
+        resolution_map = {
+            "low": types.MediaResolution.MEDIA_RESOLUTION_LOW,
+            "medium": types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+            "high": types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+        }
+        config_value = self.settings.media_resolution
+        return resolution_map.get(config_value, types.MediaResolution.MEDIA_RESOLUTION_HIGH)
+
     async def _generate_with_vision(
         self, prompt: str, images: List[Dict[str, Any]]
     ) -> str:
         try:
             parts = []
-
-            parts.append(types.Part(text=prompt))
-
+            media_resolution = self._get_media_resolution()
+            
             for index, image in enumerate(images, start=1):
                 image_data = base64.b64decode(image["data"])
 
@@ -1096,9 +1105,14 @@ class RAGAgent:
                 if mime_type.lower() == "image/jpg":
                     mime_type = "image/jpeg"
                 parts.append(
-                    types.Part.from_bytes(data=image_data, mime_type=mime_type)
+                    types.Part.from_bytes(
+                        data=image_data,
+                        mime_type=mime_type,
+                        media_resolution=media_resolution
+                    )
                 )
 
+            parts.append(types.Part(text=prompt))
             response = self.gemini_client.models.generate_content(
                 model=self.model_name, contents=parts
             )
