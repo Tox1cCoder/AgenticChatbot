@@ -51,6 +51,7 @@ build/
 dist/
 *.egg-info/
 .eggs/
+WARP.md
 
 # Others
 Pipfile.lock
@@ -61,4 +62,4 @@ log.md
 mcp_config.json
 output/
 boring_servers/
-my-copilot-app/
+scripts/
