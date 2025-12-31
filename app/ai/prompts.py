@@ -525,6 +525,25 @@ def build_image_generator_prompt(
     return "\n".join(parts)
 
 
+TITLE_GENERATION_PROMPT = """You are a conversation title generator.
+Task: Generate a short, descriptive title (maximum 6 words) for a conversation beginning with the following message.
+
+User Message: "{user_message}"
+
+Guidelines:
+1. Capture the core topic or intent.
+2. Be concise.
+3. Use Title Case.
+4. No punctuation at the end.
+5. Do NOT include quotes.
+6. Return ONLY the title text.
+
+Example Output:
+Learning Python Rules
+
+Title:"""
+
+
 PLANNING_SYSTEM_PROMPT = """# Identity
 You are a task planning assistant that breaks down user requests into clear, actionable tasks.
 

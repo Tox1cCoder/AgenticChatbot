@@ -49,11 +49,11 @@ AGENT_CONFIG = {
     },
     "title_generator": {
         "model": "gemini-3-flash-preview",
-        "temperature": 0.3,
+        "temperature": 1,
     },
     "summarization": {
         "model": settings.summarization_model if hasattr(settings, "summarization_model") else "gemini-3-flash-preview",
-        "temperature": 0.3,
+        "temperature": 1,
     },
 }
 

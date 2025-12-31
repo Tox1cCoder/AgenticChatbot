@@ -2,7 +2,7 @@ from typing import Any, List
 from uuid import UUID
 from fastapi import APIRouter, status, Query
 from pydantic import BaseModel
-from langchain_google_genai import ChatGoogleGenerativeAI
+from app.services.ai_service import AIService
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.conversation_service_interface import IConversationService
@@ -29,80 +29,18 @@ class GenerateTitleResponse(BaseModel):
     title: str
 
 
-async def generate_title_from_message(user_message: str) -> str:
-    """
-    Generate a concise, descriptive title for a conversation based on the first user message.
 
-    Args:
-        user_message: The first message from the user
-
-    Returns:
-        A short, descriptive title (max 50 characters)
-    """
-    try:
-        api_key = settings.gemini_api_key
-        if api_key.startswith("GEMINI_API_KEY="):
-            api_key = api_key.split("=", 1)[-1].strip()
-
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-flash-latest",
-            google_api_key=api_key,
-            temperature=1
-        )
-
-        prompt = f"""Generate a very short, concise title (max 50 characters) for a conversation that starts with this user message:
-
-"{user_message}"
-
-Requirements:
-- Maximum 50 characters
-- Capture the main topic or intent
-- No quotes, no punctuation at the end
-- Should be clear and descriptive
-- Use title case
-
-Examples:
-User: "How do I learn Python?" → Title: "Learning Python"
-User: "What are the health benefits of exercise?" → Title: "Health Benefits of Exercise"
-User: "Can you help me plan a trip to Japan?" → Title: "Japan Trip Planning"
-
-Title:"""
-
-        response = await llm.ainvoke(prompt)
-        title = response.content.strip()
-
-        # Clean up the title
-        title = title.strip("\"'")  # Remove quotes
-        title = title.rstrip(".")  # Remove trailing period
-
-        # Ensure it's not too long
-        if len(title) > 50:
-            title = title[:47] + "..."
-
-        # Fallback to truncated message if generation fails
-        if not title or len(title) < 3:
-            title = user_message[:50]
-            if len(user_message) > 50:
-                title = title[:47] + "..."
-
-        return title
-
-    except Exception as e:
-        # Fallback: use truncated user message
-        title = user_message[:50]
-        if len(user_message) > 50:
-            title = title[:47] + "..."
-        return title
 
 
 @router.post("/generate-title", response_model=ApiResponse[GenerateTitleResponse])
 @AppAutoInjector.auto_inject()
 async def generate_conversation_title(
     request: GenerateTitleRequest,
+    ai_service: AIService,
     user_id: UUID,
 ) -> ApiResponse[GenerateTitleResponse]:
     """Generate a concise title for a conversation based on the first message"""
-    title = await generate_title_from_message(request.message)
+    title = await ai_service.generate_conversation_title(request.message)
     return ApiResponse(
         success=True,
         message="Title generated successfully",

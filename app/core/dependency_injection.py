@@ -27,6 +27,7 @@ from app.repositories.task_plan import TaskPlanRepository
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.mcp_service import MCPService
 from app.services.jwt_service import JwtService
+from app.services.ai_service import AIService
 from app.utils.validation.user_validation import UserValidationUtils
 from app.utils.validation.conversation_validation import (
     ConversationValidationUtils,
@@ -127,6 +128,7 @@ class AppAutoInjector(AutoInjector):
             ),
             MCPService: getattr(container_ref, "mcp_service"),
             JwtService: getattr(container_ref, "jwt_service"),
+            AIService: getattr(container_ref, "ai_service"),
         }
 
     @classmethod
@@ -229,6 +231,7 @@ class AppContainerInjector(ContainerInjector):
                 container_ref, "document_processing_service"
             ),
             JwtService: getattr(container_ref, "jwt_service"),
+            AIService: getattr(container_ref, "ai_service"),
             # Repositories
             UserRepository: getattr(container_ref, "user_repository"),
             ConversationRepository: getattr(container_ref, "conversation_repository"),

@@ -25,6 +25,7 @@ from ..core.response_constants import (
     UNKNOWN_ERROR,
     WORKFLOW_PAUSED_MESSAGE,
 )
+from ..ai.prompts import TITLE_GENERATION_PROMPT
 
 
 class AIService:
@@ -325,26 +326,22 @@ class AIService:
                 include_thinking=False,
             )
 
-            prompt = f"""Generate a very short, concise title (max 50 characters) for a conversation that starts with this user message:
-
-"{user_message}"
-
-Requirements:
-- Maximum 50 characters
-- Capture the main topic or intent
-- No quotes, no punctuation at the end
-- Should be clear and descriptive
-- Use title case
-
-Examples:
-User: "How do I learn Python?" → Title: "Learning Python"
-User: "What are the health benefits of exercise?" → Title: "Health Benefits of Exercise"
-User: "Can you help me plan a trip to Japan?" → Title: "Japan Trip Planning"
-
-Title:"""
+            prompt = TITLE_GENERATION_PROMPT.format(user_message=user_message)
 
             response = await llm.ainvoke(prompt)
-            title = response.content.strip()
+            raw_title = response.content
+            
+            if isinstance(raw_title, list):
+                # Handle list content (e.g. from Gemini)
+                title_text = ""
+                for part in raw_title:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        title_text += part.get("text", "")
+                    elif isinstance(part, str):
+                        title_text += part
+                raw_title = title_text
+
+            title = str(raw_title).strip()
 
             # Clean up the title
             title = title.strip("\"'")  # Remove quotes
