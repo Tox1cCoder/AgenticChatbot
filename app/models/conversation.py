@@ -1,18 +1,34 @@
-from sqlalchemy import Column, String, Integer, ForeignKey
+import uuid
+
+from sqlalchemy import Column, String, Text, ForeignKey, DateTime, Boolean, func
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
-from app.models.base import BaseModel
+from app.models.base import Base
 
 
-class Conversation(BaseModel):
+class Conversation(Base):
     __tablename__ = "conversations"
-    
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    title = Column(String(255), nullable=True)
-    
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
+    )
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
+    owner_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
+    title = Column(String(255), nullable=False)
+    persona_prompt = Column(Text, nullable=True)
+    planning_mode_enabled = Column(Boolean, default=False, nullable=False)
+
     # Relationships
     user = relationship("User", back_populates="conversations")
-    messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
-    
+    messages = relationship("Message", back_populates="conversation")
+    documents = relationship("Document", back_populates="conversation")
+    task_plans = relationship("TaskPlan", back_populates="conversation")
+
     def __repr__(self) -> str:
-        return f"<Conversation(id={self.id}, user_id={self.user_id}, title='{self.title}')>"
+        return f"<Conversation(id={self.id}, title='{self.title}', owner_id={self.owner_id})>"

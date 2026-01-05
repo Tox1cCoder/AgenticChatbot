@@ -1,19 +1,8 @@
-from datetime import datetime
-from typing import Optional
+"""
+Shared declarative base for all models.
+Enables relationship resolution without inheritance.
+"""
 
-from sqlalchemy import Column, Integer, String, DateTime, func
-from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy.orm import declarative_base
 
-
-class Base(DeclarativeBase):
-    """Base class for all SQLAlchemy models"""
-    pass
-
-
-# Define a base model class with common fields
-class BaseModel(Base):
-    __abstract__ = True
-    
-    id = Column(Integer, primary_key=True, index=True)
-    created_at = Column(DateTime, default=func.now(), nullable=False)
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+Base = declarative_base()

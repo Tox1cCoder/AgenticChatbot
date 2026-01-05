@@ -1,62 +1,281 @@
-from typing import List
-from sqlalchemy.orm import Session
-from sqlalchemy import select
+from typing import List, Optional
+from uuid import UUID
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import select, asc, desc, or_
 
 from app.models.message import Message
-from app.repositories.base import BaseRepository
+from app.models.conversation import Conversation
+from app.repositories.command_strategy import DefaultCommandStrategy
+from app.repositories.query_strategy import DefaultQueryStrategy
+from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate
 
+from app.utils.validation.pagination_validation import validate_pagination_params
 
-class MessageRepository(BaseRepository[Message, MessageCreate, MessageUpdate]):
-    """Repository for Message model with custom methods"""
-    
-    def __init__(self, db: Session):
-        super().__init__(Message, db)
-    
-    def get_by_conversation_id(self, conversation_id: int, skip: int = 0, limit: int = 100) -> List[Message]:
-        """Get messages by conversation ID ordered by creation time"""
-        stmt = (
+
+class MessageCRUDStrategy(
+    DefaultCommandStrategy[Message, MessageCreate, MessageUpdate],
+    DefaultQueryStrategy[Message],
+):
+    """Custom CRUD strategy for Message operations"""
+
+    def __init__(self, model: type[Message]):
+        DefaultCommandStrategy.__init__(self, model)
+        DefaultQueryStrategy.__init__(self, model)
+
+    def get_by_conversation_id(
+        self,
+        db: Session,
+        conversation_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: str = "created_at",
+        order_direction: str = "asc",
+        include_feedback: bool = False,
+    ) -> Paginator[Message]:
+        """Get messages by conversation ID with page-based pagination and ordering"""
+
+        validate_pagination_params(page, limit)
+
+        # Get total count first
+        total = self.count_by_conversation_id(db, conversation_id)
+
+        # Get paginated items
+        offset = (page - 1) * limit
+        statement = select(Message).where(Message.conversation_id == conversation_id)
+
+        # Apply eager loading if requested
+        if include_feedback:
+            statement = statement.options(joinedload(Message.feedback))
+
+        # Apply ordering if specified
+        if hasattr(Message, order_by):
+            order_column = getattr(Message, order_by)
+            statement = statement.order_by(
+                asc(order_column)
+                if order_direction.lower() == "asc"
+                else desc(order_column)
+            )
+        else:
+            # Default ordering
+            statement = statement.order_by(Message.created_at.asc())
+
+        statement = statement.offset(offset).limit(limit)
+
+        # Use unique() when eager loading to handle joined loads
+        if include_feedback:
+            items = list(db.execute(statement).scalars().unique().all())
+        else:
+            items = list(db.execute(statement).scalars().all())
+
+        return Paginator.create(items, total, page, limit)
+
+    def count_by_conversation_id(self, db: Session, conversation_id: UUID) -> int:
+        """Count messages by conversation ID"""
+        statement = select(Message).where(Message.conversation_id == conversation_id)
+        return len(list(db.execute(statement).scalars().all()))
+
+    def get_by_user_id(
+        self,
+        db: Session,
+        user_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: str = "created_at",
+        order_direction: str = "desc",
+        include_feedback: bool = False,
+    ) -> Paginator[Message]:
+        """Get messages by conversation owner (user_id) with page-based pagination and ordering"""
+
+        validate_pagination_params(page, limit)
+
+        # Get total count first
+        total = self.count_by_user_id(db, user_id)
+
+        # Get paginated items
+        offset = (page - 1) * limit
+        # Join with conversations to get messages from user's conversations
+        statement = (
             select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.asc())
-            .offset(skip)
-            .limit(limit)
+            .join(Message.conversation)
+            .where(Message.conversation.has(owner_id=user_id))
         )
-        return list(self.db.execute(stmt).scalars().all())
-    
-    def get_conversation_history(self, conversation_id: int, limit: int = 50) -> List[Message]:
-        """Get recent conversation history"""
-        stmt = (
+
+        # Apply eager loading if requested
+        if include_feedback:
+            statement = statement.options(joinedload(Message.feedback))
+
+        # Apply ordering if specified
+        if hasattr(Message, order_by):
+            order_column = getattr(Message, order_by)
+            statement = statement.order_by(
+                asc(order_column)
+                if order_direction.lower() == "asc"
+                else desc(order_column)
+            )
+        else:
+            # Default ordering
+            statement = statement.order_by(Message.created_at.asc())
+
+        statement = statement.offset(offset).limit(limit)
+
+        # Use unique() when eager loading to handle joined loads
+        if include_feedback:
+            items = list(db.execute(statement).scalars().unique().all())
+        else:
+            items = list(db.execute(statement).scalars().all())
+
+        return Paginator.create(items, total, page, limit)
+
+    def count_by_user_id(self, db: Session, user_id: UUID) -> int:
+        """Count messages by user ID"""
+        statement = (
             select(Message)
-            .where(Message.conversation_id == conversation_id)
+            .join(Message.conversation)
+            .where(Message.conversation.has(owner_id=user_id))
+        )
+        return len(list(db.execute(statement).scalars().all()))
+
+    def search_by_content(
+        self,
+        db: Session,
+        conversation_id: UUID,
+        query: str,
+        limit: int = 10,
+    ) -> List[Message]:
+        """
+        Search messages by content in a specific conversation.
+
+        Args:
+            db: Database session
+            conversation_id: ID of the conversation to search in
+            query: Search query string
+            limit: Maximum number of results to return
+
+        Returns:
+            List of matching messages ordered by relevance (most recent first)
+        """
+        # Use case-insensitive pattern matching
+        search_pattern = f"%{query}%"
+
+        statement = (
+            select(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.content.ilike(search_pattern),
+            )
             .order_by(Message.created_at.desc())
             .limit(limit)
         )
-        messages = list(self.db.execute(stmt).scalars().all())
-        return list(reversed(messages))  # Return in chronological order
-    
-    def get_messages_by_user(self, user_id: int, skip: int = 0, limit: int = 100) -> List[Message]:
-        """Get messages by user ID"""
-        stmt = (
-            select(Message)
-            .where(Message.user_id == user_id)
-            .order_by(Message.created_at.desc())
-            .offset(skip)
-            .limit(limit)
-        )
-        return list(self.db.execute(stmt).scalars().all())
-    
-    def get_conversation_message_count(self, conversation_id: int) -> int:
-        """Get count of messages in a conversation"""
-        stmt = select(Message.id).where(Message.conversation_id == conversation_id)
-        return len(list(self.db.execute(stmt).scalars().all()))
-    
-    def get_latest_message(self, conversation_id: int) -> Message | None:
-        """Get the latest message in a conversation"""
-        stmt = (
-            select(Message)
-            .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at.desc())
-            .limit(1)
-        )
-        return self.db.execute(stmt).scalar_one_or_none()
+
+        return list(db.execute(statement).scalars().all())
+
+
+class MessageRepository:
+    """Repository for Message model using session factory pattern"""
+
+    def __init__(self, session_factory: callable):
+        """Initialize repository with session factory for dependency injection."""
+        self.session_factory = session_factory
+        self._crud_strategy = MessageCRUDStrategy(Message)
+
+    def get_by_conversation_id(
+        self,
+        conversation_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "asc",
+        include_feedback: bool = False,
+    ) -> Paginator[Message]:
+        """Get messages by conversation ID with page-based pagination and ordering"""
+        with self.session_factory() as session:
+            return self._crud_strategy.get_by_conversation_id(
+                session,
+                conversation_id,
+                page,
+                limit,
+                order_by,
+                order_direction,
+                include_feedback,
+            )
+
+    def count_by_conversation_id(self, conversation_id: UUID) -> int:
+        """Count messages by conversation ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.count_by_conversation_id(
+                session, conversation_id
+            )
+
+    def get_by_user_id(
+        self,
+        user_id: UUID,
+        page: int = 1,
+        limit: int = 10,
+        order_by: Optional[str] = None,
+        order_direction: str = "desc",
+        include_feedback: bool = False,
+    ) -> Paginator[Message]:
+        """Get messages by user ID with page-based pagination and ordering"""
+        with self.session_factory() as session:
+            return self._crud_strategy.get_by_user_id(
+                session,
+                user_id,
+                page,
+                limit,
+                order_by,
+                order_direction,
+                include_feedback,
+            )
+
+    def count_by_user_id(self, user_id: UUID) -> int:
+        """Count messages by user ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.count_by_user_id(session, user_id)
+
+    def create(self, input_schema: MessageCreate) -> Message:
+        """Create a new message with eager loading of feedback"""
+        with self.session_factory() as session:
+            created_message = self._crud_strategy.create(session, input_schema)
+            return created_message
+
+    def get_by_id(self, id: UUID) -> Optional[Message]:
+        """Get message by ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.get_by_id(session, id)
+
+    def get_all(self, page: int = 1, limit: int = 10) -> list[Message]:
+        """Get all messages with page-based pagination"""
+        with self.session_factory() as session:
+            return self._crud_strategy.get_all(session, page, limit)
+
+    def update(self, id: UUID, input_schema: MessageUpdate) -> Optional[Message]:
+        """Update message by ID"""
+        with self.session_factory() as session:
+            db_obj = self._crud_strategy.get_by_id(session, id)
+            if db_obj is None:
+                return None
+            return self._crud_strategy.update(session, db_obj, input_schema)
+
+    def delete(self, id: UUID) -> bool:
+        """Delete message by ID"""
+        with self.session_factory() as session:
+            return self._crud_strategy.delete(session, id)
+
+    def get_latest_by_conversation(
+        self, conversation_id: UUID
+    ) -> Optional[Message]:
+        """Retrieve the most recent message in a conversation."""
+        with self.session_factory() as session:
+            statement = (
+                select(Message)
+                .where(Message.conversation_id == conversation_id)
+                .order_by(Message.created_at.desc())
+                .limit(1)
+            )
+            return session.execute(statement).scalars().first()
+
+    def exists(self, id: UUID) -> bool:
+        """Check if message exists"""
+        with self.session_factory() as session:
+            return self._crud_strategy.exists(session, id)

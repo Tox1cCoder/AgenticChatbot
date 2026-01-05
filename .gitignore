@@ -25,10 +25,6 @@ venv.bak/
 Thumbs.db
 Desktop.ini
 
-# Alembic
-alembic/versions/*.py
-!alembic/versions/__init__.py
-
 # Database
 *.db
 *.sqlite
@@ -41,6 +37,9 @@ alembic/versions/*.py
 *.bak
 *.tmp
 
+# Storage (user uploaded content)
+app/storage/document_images/
+
 # Test output
 .pytest_cache/
 .coverage
@@ -52,7 +51,15 @@ build/
 dist/
 *.egg-info/
 .eggs/
+WARP.md
 
 # Others
 Pipfile.lock
 poetry.lock
+tasksync
+log.md
+.traycer/
+mcp_config.json
+output/
+boring_servers/
+scripts/

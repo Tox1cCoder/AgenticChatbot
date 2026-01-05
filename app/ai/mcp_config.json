@@ -1,0 +1,89 @@
+{
+  "mcp_servers": {
+    "calculator": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "app/ai/mcp_servers/calculator_server.py"
+      ],
+      "description": "Basic calculator operations (add, subtract, multiply, divide, power)"
+    },
+    "tavily": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "app/ai/mcp_servers/tavily_server.py"
+      ],
+      "description": "Web search using Tavily API for real-time information retrieval"
+    },
+    "time": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "app/ai/mcp_servers/time_server.py"
+      ],
+      "description": "Current time lookup utility with timezone support"
+    },
+    "form_filler": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "app/ai/mcp_servers/form_filler_server.py"
+      ],
+      "description": "Natural language incident report form filler - extracts structured data from Vietnamese/English descriptions"
+    },
+    "boring": {
+      "enabled": false,
+      "transport": "stdio",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "conda",
+        "run",
+        "-n",
+        "chatbot",
+        "--no-capture-output",
+        "python",
+        "app/ai/mcp_servers/boring_servers/boring_reader_server.py"
+      ],
+      "description": "Borehole PDF data extractor - extracts structured borehole log data from PDF files"
+    },
+    "weather": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@timlukahorstmann/mcp-weather"
+      ],
+      "env": {
+        "ACCUWEATHER_API_KEY": "zpka_a60ac65c742a4a70b34530754b2c3010_ca64d211"
+      },
+      "enabled": true
+    },
+    "desktop-commander": {
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "C:\\Users\\Vina32\\AppData\\Roaming\\npm\\node_modules\\@wonderwhy-er\\desktop-commander\\dist\\index.js"
+      ],
+      "env": {
+        "NODE_OPTIONS": "--no-warnings"
+      },
+      "enabled": true
+    },
+    "postgres": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-postgres",
+        "postgresql://postgres:123123123@localhost:5432/chatbot"
+      ],
+      "enabled": true
+    }
+  }
+}

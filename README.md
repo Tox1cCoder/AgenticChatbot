@@ -1,258 +1,158 @@
-## Architecture
+# Sample Chatbot
+
+Backend for a multi-agent chatbot (FastAPI + LangGraph) with PostgreSQL persistence, optional Qdrant RAG, and Celery workers for document processing.
+
+## Project Structure
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   API Layer     │    │  Service Layer  │    │ Repository Layer│    │  Database Layer │
-│                 │    │                 │    │                 │    │                 │
-│ FastAPI Routes  │───▶│ Business Logic  │───▶│  Data Access    │───▶│   PostgreSQL    │
-│ Request/Response│    │ Validation      │    │  CRUD Operations│    │   SQLAlchemy    │
-│ Pydantic Schemas│    │ Domain Rules    │    │  Query Building │    │   Alembic       │
-└─────────────────┘    └─────────────────┘    └─────────────────┘    └─────────────────┘
+app/
+  ai/                 # LangGraph agent graph, prompts, HITL, memory
+  api/                # FastAPI route handlers
+  core/               # Settings, DI container, auth dependencies, security utils
+  database/           # DB session/engine wiring
+  models/             # SQLAlchemy ORM models
+  repositories/       # Data access layer (Repository pattern)
+  schemas/            # Pydantic request/response models
+  services/           # Business logic (AI, messages, documents, auth, etc.)
+  workers/            # Celery background tasks
+  main.py             # FastAPI application entry point
 ```
 
-## Prerequisites
+## Quickstart
 
-- Python 3.10 or higher
-- PostgreSQL 12 or higher
-- Git (for cloning the repository)
-
-## Installation
-
-1. **Clone the repository**
-
-   ```bash
-   git clone <repository-url>
-   cd sample-chatbot
-   ```
-
-2. **Create a virtual environment**
-
-   ```bash
-   python -m venv venv
-   # On Windows
-   venv\Scripts\activate
-   # On macOS/Linux
-   source venv/bin/activate
-   ```
-
-3. **Install dependencies**
-
-   ```bash
-   pip install -e .
-   ```
-
-4. **Set up environment variables**
-
-   ```bash
-   copy .env.example .env
-   ```
-
-   Edit `.env` file with your database configuration:
-
-   ```
-   DATABASE_URL=postgresql://username:password@localhost:5432/chatbot
-   API_HOST=0.0.0.0
-   API_PORT=8000
-   API_DEBUG=true
-   ```
-
-5. **Set up the database**
-
-   Create a PostgreSQL database:
-
-   ```sql
-   CREATE DATABASE chatbot;
-   ```
-
-   Run database migrations:
-
-   ```bash
-   alembic upgrade head
-   ```
-
-## Running the Application
-
-1. **Start the development server**
-
-   ```bash
-   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-   ```
-
-2. **Access the API**
-   - API Documentation: http://localhost:8000/docs
-   - Alternative Docs: http://localhost:8000/redoc
-   - Health Check: http://localhost:8000/health
-
-## API Endpoints
-
-### Health Endpoints
-
-- `GET /health/` - Basic health check
-- `GET /health/db` - Database health check
-
-### User Management
-
-- `POST /users/` - Create a new user
-- `GET /users/{user_id}` - Get user by ID
-- `GET /users/` - List all users (paginated)
-- `GET /users/email/{email}` - Get user by email
-- `GET /users/username/{username}` - Get user by username
-- `PUT /users/{user_id}` - Update user
-- `DELETE /users/{user_id}` - Delete user
-
-### Conversation Management
-
-- `POST /conversations/` - Create a new conversation
-- `GET /conversations/{conversation_id}` - Get conversation by ID
-- `GET /conversations/user/{user_id}` - Get user's conversations
-- `PUT /conversations/{conversation_id}` - Update conversation
-- `DELETE /conversations/{conversation_id}` - Delete conversation
-
-### Message Management
-
-- `POST /messages/` - Create a new message (auto-generates bot response)
-- `GET /messages/{message_id}` - Get message by ID
-- `GET /messages/conversation/{conversation_id}` - Get conversation messages
-- `GET /messages/conversation/{conversation_id}/history` - Get conversation history
-- `GET /messages/user/{user_id}` - Get user's messages
-- `PUT /messages/{message_id}` - Update message
-- `DELETE /messages/{message_id}` - Delete message
-
-## Testing with Postman
-
-### 1. Create a User
-
-```http
-POST http://localhost:8000/users/
-Content-Type: application/json
-
-{
-    "username": "testuser",
-    "email": "test@example.com"
-}
-```
-
-### 2. Create a Conversation
-
-```http
-POST http://localhost:8000/conversations/
-Content-Type: application/json
-
-{
-    "user_id": 1,
-    "title": "My First Chat"
-}
-```
-
-### 3. Send a Message (Triggers Bot Response)
-
-```http
-POST http://localhost:8000/messages/
-Content-Type: application/json
-
-{
-    "conversation_id": 1,
-    "user_id": 1,
-    "content": "Hello, how are you?",
-    "role": "user"
-}
-```
-
-### 4. Get Conversation History
-
-```http
-GET http://localhost:8000/messages/conversation/1/history?user_id=1
-```
-
-## Database Schema
-
-### Users Table
-
-- `id` (Primary Key)
-- `username` (Unique)
-- `email` (Unique)
-- `created_at`
-- `updated_at`
-
-### Conversations Table
-
-- `id` (Primary Key)
-- `user_id` (Foreign Key → Users)
-- `title`
-- `created_at`
-- `updated_at`
-
-### Messages Table
-
-- `id` (Primary Key)
-- `conversation_id` (Foreign Key → Conversations)
-- `user_id` (Foreign Key → Users)
-- `content`
-- `role` (user/assistant)
-- `created_at`
-
-## Development
-
-### Database Migrations
-
-Generate a new migration:
+### 1. Setup
 
 ```bash
-alembic revision --autogenerate -m "Description of changes"
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e .
 ```
 
-Apply migrations:
+For the demo UI:
+
+```bash
+pip install -r demo_requirements.txt
+streamlit run demo.py
+```
+
+### 2. External Services
+
+#### PostgreSQL
+
+```sql
+CREATE DATABASE chatbot;
+\c chatbot;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+```
+
+#### Qdrant (optional, for RAG)
+
+```bash
+docker pull qdrant/qdrant
+docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+```
+
+#### Redis (optional, for Celery + HITL timeouts)
+
+```bash
+docker run -d -p 6379:6379 redis
+```
+
+### 3. DB migrations
 
 ```bash
 alembic upgrade head
 ```
 
-View migration history:
+### 4. Run
 
 ```bash
-alembic history
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-## Project Structure
+Celery worker (for document processing):
 
+```bash
+python -m app.workers.start_worker
 ```
-sample-chatbot/
-├── app/
-│   ├── api/                    # FastAPI routes
-│   │   ├── health.py          # Health check endpoints
-│   │   ├── users.py           # User management endpoints
-│   │   ├── conversations.py   # Conversation endpoints
-│   │   └── messages.py        # Message endpoints
-│   ├── core/                  # Core configuration
-│   │   └── config.py          # Application settings
-│   ├── db/                    # Database configuration
-│   │   ├── base.py            # SQLAlchemy base and models import
-│   │   └── session.py         # Database session management
-│   ├── models/                # SQLAlchemy ORM models
-│   │   ├── user.py            # User model
-│   │   ├── conversation.py    # Conversation model
-│   │   └── message.py         # Message model
-│   ├── repositories/          # Data access layer
-│   │   ├── base.py            # Base repository with common CRUD
-│   │   ├── user.py            # User repository
-│   │   ├── conversation.py    # Conversation repository
-│   │   └── message.py         # Message repository
-│   ├── schemas/               # Pydantic schemas
-│   │   ├── user.py            # User schemas
-│   │   ├── conversation.py    # Conversation schemas
-│   │   └── message.py         # Message schemas
-│   ├── services/              # Business logic layer
-│   │   ├── user.py            # User service
-│   │   ├── conversation.py    # Conversation service
-│   │   └── message.py         # Message service
-│   └── main.py                # FastAPI application entry point
-├── alembic/                   # Database migrations
-│   ├── versions/              # Migration files
-│   ├── env.py                 # Alembic environment
-│   └── script.py.mako         # Migration template
-├── alembic.ini               # Alembic configuration
-├── pyproject.toml            # Project configuration
-├── .env.example              # Environment variables template
-├── .gitignore               # Git ignore file
-└── README.md                # This file
-```
+
+### Access Points
+
+- API Docs: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+
+---
+
+## Authentication
+
+Authenticated endpoints expect a JWT access token via `Authorization: Bearer <token>`.
+
+- `POST /auth/signup`
+- `POST /auth/login`
+- `POST /auth/refresh` (expects the **refresh** token in `Authorization` header)
+- `POST /auth/logout`
+
+---
+
+## API Endpoints
+
+### Health
+
+- `GET /health` (basic status)
+- `GET /health/celery`
+- `GET /health/redis`
+- `GET /health/qdrant`
+- `GET /health/all`
+
+### Users
+
+- `GET /users/{user_id}`
+
+### Conversations (require authentication)
+
+- `POST /conversations/`
+- `GET /conversations/{conversation_id}`
+- `GET /conversations/` (paginated: `page`, `limit`)
+- `GET /conversations/{conversation_id}/messages` (paginated: `page`, `limit`)
+- `PATCH /conversations/{conversation_id}`
+- `DELETE /conversations/{conversation_id}`
+
+### Messages (require authentication)
+
+- `POST /messages/`
+- `POST /messages/stream` (SSE of internal events)
+- `POST /messages/resume-interrupt` (resume HITL approvals)
+- `GET /messages/{message_id}`
+- `GET /messages/` (paginated: `page`, `limit`)
+
+### AI Chat (assistant-ui / Vercel AI SDK)
+
+UI Message Stream (SSE) compatible with `@ai-sdk/react` / assistant-ui defaults:
+
+- `POST /api/chat` (alias: `POST /ai/chat`)
+  - Requires `Authorization: Bearer <access_token>`
+  - URL: `/api/chat/{conversation_id}`
+  - Body: `{ "messages": [...] }`
+  - Response includes `x-vercel-ai-ui-message-stream: v1`
+  - Emits custom data parts:
+    - `data-user-message` (DB-persisted user message)
+    - `data-assistant-message` (DB-persisted assistant message)
+    - `data-agent-selected` (which agent answered)
+    - `data-interrupt` (HITL approval needed)
+
+### Documents (require authentication)
+
+- `POST /documents/upload` (multipart: `file`, `conversation_id`)
+- `GET /documents/task/{task_id}`
+- `GET /documents/{document_id}`
+- `GET /documents/conversation/{conversation_id}` (paginated: `page`, `page_size`)
+- `PUT /documents/{document_id}`
+- `DELETE /documents/{document_id}`
+
+### Feedbacks
+
+- `POST /messages/{message_id}/feedbacks` (auth)
+- `GET /messages/{message_id}/feedbacks/user` (auth)
+- `PUT /messages/{message_id}/feedbacks/{feedback_id}` (auth)
+- `GET /messages/{message_id}/feedbacks` (public)
+- `GET /messages/{message_id}/feedbacks/stats` (public)

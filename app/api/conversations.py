@@ -1,74 +1,169 @@
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from typing import Any, List
+from uuid import UUID
+from fastapi import APIRouter, status, Query
+from pydantic import BaseModel
+from app.services.ai_service import AIService
 
-from app.db.session import get_db
-from app.services.conversation import ConversationService
-from app.schemas.conversation import ConversationCreate, ConversationUpdate, ConversationRead
+from app.core.dependency_injection import AppAutoInjector
+from app.interfaces.conversation_service_interface import IConversationService
+from app.schemas.conversation import (
+    ConversationCreate,
+    ConversationUpdate,
+    ConversationRead,
+)
+from app.interfaces.message_service_interface import IMessageService
+from app.schemas.message import MessageRead
+from app.schemas.responses import ApiResponse
+from app.schemas.responses.paginated_response import PaginatedApiResponse
+from app.schemas.pagination import ConversationPaginationParams, MessagePaginationParams
+from app.core.config import settings
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
-def get_conversation_service(db: Session = Depends(get_db)) -> ConversationService:
-    """Dependency to get ConversationService instance"""
-    return ConversationService(db)
+class GenerateTitleRequest(BaseModel):
+    message: str
 
 
-@router.post("/", response_model=ConversationRead, status_code=status.HTTP_201_CREATED)
+class GenerateTitleResponse(BaseModel):
+    title: str
+
+
+
+
+
+@router.post("/generate-title", response_model=ApiResponse[GenerateTitleResponse])
+@AppAutoInjector.auto_inject()
+async def generate_conversation_title(
+    request: GenerateTitleRequest,
+    ai_service: AIService,
+    user_id: UUID,
+) -> ApiResponse[GenerateTitleResponse]:
+    """Generate a concise title for a conversation based on the first message"""
+    title = await ai_service.generate_conversation_title(request.message)
+    return ApiResponse(
+        success=True,
+        message="Title generated successfully",
+        data=GenerateTitleResponse(title=title),
+    )
+
+
+@router.post(
+    "/",
+    response_model=ApiResponse[ConversationRead],
+    status_code=status.HTTP_201_CREATED,
+)
+@AppAutoInjector.auto_inject()
 async def create_conversation(
     conversation_data: ConversationCreate,
-    conversation_service: ConversationService = Depends(get_conversation_service)
-) -> ConversationRead:
-    """Create a new conversation"""
-    return conversation_service.create_conversation(conversation_data)
+    conversation_service: IConversationService,
+    user_id: UUID,
+) -> ApiResponse[ConversationRead]:
+    """Create a new conversation for authenticated user"""
+    result = conversation_service.create_conversation(conversation_data, user_id)
+    return ApiResponse(
+        success=True, message="Conversation created successfully", data=result
+    )
 
 
-@router.get("/{conversation_id}", response_model=ConversationRead)
+@router.get("/{conversation_id}", response_model=ApiResponse[ConversationRead])
+@AppAutoInjector.auto_inject()
 async def get_conversation(
-    conversation_id: int,
-    conversation_service: ConversationService = Depends(get_conversation_service)
-) -> ConversationRead:
+    conversation_id: UUID,
+    conversation_service: IConversationService,
+    user_id: UUID,
+) -> ApiResponse[ConversationRead]:
     """Get conversation by ID"""
-    return conversation_service.get_conversation_by_id(conversation_id)
+    result = conversation_service.get_by_id_for_user(conversation_id, user_id)
+    return ApiResponse(
+        success=True, message="Conversation retrieved successfully", data=result
+    )
 
 
-@router.get("/user/{user_id}", response_model=List[ConversationRead])
-async def get_user_conversations(
-    user_id: int,
-    skip: int = 0,
-    limit: int = 100,
-    conversation_service: ConversationService = Depends(get_conversation_service)
-) -> List[ConversationRead]:
-    """Get all conversations for a user"""
-    return conversation_service.get_user_conversations(user_id, skip=skip, limit=limit)
+@router.get("/", response_model=PaginatedApiResponse[ConversationRead])
+@AppAutoInjector.auto_inject()
+async def get_conversations(
+    conversation_service: IConversationService,
+    user_id: UUID,
+    pagination: ConversationPaginationParams,
+    include: List[str] = Query(
+        default=[], description="Array of includes e.g. ['messages', 'feedback']"
+    ),
+    latest_messages: int = Query(
+        3,
+        alias="latestMessages",
+        description="Number of latest messages to include",
+    ),
+) -> PaginatedApiResponse[ConversationRead]:
+    """Get all conversations for authenticated user"""
+    paginated_result = conversation_service.get_by_user_id(
+        user_id,
+        page=pagination.page,
+        limit=pagination.limit,
+        order_by=pagination.order_by.to_snake_case(),
+        order_direction=pagination.order_direction.value,
+        include=include,
+        latest_messages=latest_messages,
+    )
+    return PaginatedApiResponse.from_paginator(
+        paginated_result, "Conversations retrieved successfully"
+    )
 
 
-@router.get("/{conversation_id}/with-messages", response_model=ConversationRead)
-async def get_conversation_with_messages(
-    conversation_id: int,
-    user_id: int,
-    conversation_service: ConversationService = Depends(get_conversation_service)
-) -> ConversationRead:
-    """Get conversation with messages (requires user ownership)"""
-    return conversation_service.get_conversation_with_messages(conversation_id, user_id)
+@router.get(
+    "/{conversation_id}/messages",
+    response_model=PaginatedApiResponse[MessageRead],
+)
+@AppAutoInjector.auto_inject()
+async def get_conversation_messages(
+    conversation_id: UUID,
+    message_service: IMessageService,
+    user_id: UUID,
+    pagination: MessagePaginationParams,
+    include: List[str] = Query(
+        default=[], description="Array of includes e.g. ['feedback']"
+    ),
+) -> PaginatedApiResponse[MessageRead]:
+    """Get conversation's messages (requires user ownership)"""
+    include_feedback = "feedback" in include
+    paginated_result = message_service.get_conversation_messages(
+        conversation_id,
+        user_id,
+        page=pagination.page,
+        limit=pagination.limit,
+        order_by=pagination.order_by.to_snake_case(),
+        order_direction=pagination.order_direction.value,
+        include_feedback=include_feedback,
+    )
+    return PaginatedApiResponse.from_paginator(
+        paginated_result, "Conversation messages retrieved successfully"
+    )
 
 
-@router.put("/{conversation_id}", response_model=ConversationRead)
+@router.patch("/{conversation_id}", response_model=ApiResponse[ConversationRead])
+@AppAutoInjector.auto_inject()
 async def update_conversation(
-    conversation_id: int,
-    user_id: int,
+    conversation_id: UUID,
     conversation_data: ConversationUpdate,
-    conversation_service: ConversationService = Depends(get_conversation_service)
-) -> ConversationRead:
+    conversation_service: IConversationService,
+    user_id: UUID,
+) -> ApiResponse[ConversationRead]:
     """Update conversation (requires user ownership)"""
-    return conversation_service.update_conversation(conversation_id, user_id, conversation_data)
+    result = conversation_service.update_conversation(
+        conversation_id, user_id, conversation_data
+    )
+    return ApiResponse(
+        success=True, message="Conversation updated successfully", data=result
+    )
 
 
-@router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{conversation_id}", response_model=ApiResponse[Any])
+@AppAutoInjector.auto_inject()
 async def delete_conversation(
-    conversation_id: int,
-    user_id: int,
-    conversation_service: ConversationService = Depends(get_conversation_service)
-) -> None:
+    conversation_id: UUID,
+    conversation_service: IConversationService,
+    user_id: UUID,
+) -> ApiResponse[Any]:
     """Delete conversation (requires user ownership)"""
     conversation_service.delete_conversation(conversation_id, user_id)
+    return ApiResponse(success=True, message="Conversation deleted successfully")

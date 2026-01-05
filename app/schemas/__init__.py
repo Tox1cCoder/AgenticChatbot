@@ -1,13 +1,77 @@
-# Import all schemas for easy access
-from app.schemas.user import UserBase, UserCreate, UserUpdate, UserRead, UserInDB
-from app.schemas.conversation import ConversationBase, ConversationCreate, ConversationUpdate, ConversationRead, ConversationInDB
-from app.schemas.message import MessageBase, MessageCreate, MessageUpdate, MessageRead, MessageInDB
+from app.schemas.user import (
+    UserCreate,
+    UserUpdate,
+    UserRead,
+    UserInDB,
+)
+from app.schemas.conversation import (
+    ConversationCreate,
+    ConversationUpdate,
+    ConversationRead,
+    ConversationInDB,
+)
+from app.schemas.message import (
+    MessageCreate,
+    MessageUpdate,
+    MessageRead,
+    MessageInDB,
+)
+from app.schemas.feedback import (
+    FeedbackCreate,
+    FeedbackUpdate,
+    FeedbackRead,
+    FeedbackInDB,
+)
+from app.schemas.document import (
+    DocumentCreate,
+    DocumentResponse,
+    DocumentUpdate,
+    DocumentListResponse,
+    DocumentStatus,
+)
+from app.schemas.task_plan import (
+    TaskPlanCreate,
+    TaskPlanUpdate,
+    TaskPlanRead,
+    TaskPlanInDB,
+    TaskPlanGenerateRequest,
+    TaskPlanManualCreateRequest,
+    PlanningStatusResponse,
+)
 
 __all__ = [
     # User schemas
-    "UserBase", "UserCreate", "UserUpdate", "UserRead", "UserInDB",
+    "UserCreate",
+    "UserUpdate",
+    "UserRead",
+    "UserInDB",
     # Conversation schemas
-    "ConversationBase", "ConversationCreate", "ConversationUpdate", "ConversationRead", "ConversationInDB",
+    "ConversationCreate",
+    "ConversationUpdate",
+    "ConversationRead",
+    "ConversationInDB",
     # Message schemas
-    "MessageBase", "MessageCreate", "MessageUpdate", "MessageRead", "MessageInDB",
+    "MessageCreate",
+    "MessageUpdate",
+    "MessageRead",
+    "MessageInDB",
+    # Feedback schemas
+    "FeedbackCreate",
+    "FeedbackUpdate",
+    "FeedbackRead",
+    "FeedbackInDB",
+    # Document schemas
+    "DocumentCreate",
+    "DocumentResponse",
+    "DocumentUpdate",
+    "DocumentListResponse",
+    "DocumentStatus",
+    # TaskPlan schemas
+    "TaskPlanCreate",
+    "TaskPlanUpdate",
+    "TaskPlanRead",
+    "TaskPlanInDB",
+    "TaskPlanGenerateRequest",
+    "TaskPlanManualCreateRequest",
+    "PlanningStatusResponse",
 ]

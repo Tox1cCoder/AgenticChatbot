@@ -1,87 +1,158 @@
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from uuid import UUID
+import json
+from fastapi import APIRouter, status, Query, Response
+from fastapi.responses import StreamingResponse
 
-from app.db.session import get_db
-from app.services.message import MessageService
-from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
+from app.core.dependency_injection import AppAutoInjector
+from app.interfaces.message_service_interface import IMessageService
+from app.schemas.message import MessageCreate, MessageRead, InterruptResumeRequest
+from app.schemas.responses import ApiResponse
+from app.schemas.responses.paginated_response import PaginatedApiResponse
+from app.schemas.pagination import MessagePaginationParams
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
 
-def get_message_service(db: Session = Depends(get_db)) -> MessageService:
-    """Dependency to get MessageService instance"""
-    return MessageService(db)
-
-
-@router.post("/", response_model=MessageRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/",
+    response_model=ApiResponse[MessageRead],
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        201: {"description": "Message created successfully"},
+        202: {"description": "Message created, tool execution requires approval"},
+    },
+)
+@AppAutoInjector.auto_inject()
 async def create_message(
     message_data: MessageCreate,
-    message_service: MessageService = Depends(get_message_service)
-) -> MessageRead:
-    """Create a new message (will auto-generate bot response if role is 'user')"""
-    return message_service.create_message(message_data)
+    message_service: IMessageService,
+    response: Response,
+    user_id: UUID,
+) -> ApiResponse[MessageRead]:
+    """
+    Create a new message.
+    """
+    result = await message_service.create_message(message_data, user_id)
+
+    # Check if result contains interrupt information
+    if result.interrupt:
+        response.status_code = status.HTTP_202_ACCEPTED
+        return ApiResponse(
+            success=True,
+            message="Tool execution requires approval",
+            data=result,
+        )
+
+    return ApiResponse(
+        success=True, message="Message created successfully", data=result
+    )
 
 
-@router.get("/{message_id}", response_model=MessageRead)
+@router.post("/stream", status_code=status.HTTP_200_OK)
+@AppAutoInjector.auto_inject()
+async def create_message_stream(
+    message_data: MessageCreate,
+    message_service: IMessageService,
+    user_id: UUID,
+):
+    """
+    Create a new message and stream the bot response.
+    """
+
+    async def event_generator():
+        """Generate Server-Sent Events (SSE) from the message stream"""
+        try:
+            async for event in message_service.create_message_stream(
+                message_data, user_id
+            ):
+                event_type = event.get("type")
+
+                # Format as SSE: data: {json}\n\n
+                event_json = json.dumps(event)
+                yield f"data: {event_json}\n\n"
+
+                if event_type in ["complete", "error", "interrupt"]:
+                    break
+
+        except Exception as exc:
+            # Send error event
+            error_event = {"type": "error", "error": str(exc)}
+            yield f"data: {json.dumps(error_event)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable buffering in nginx
+        },
+    )
+
+
+@router.post(
+    "/resume-interrupt",
+    response_model=ApiResponse[MessageRead],
+    status_code=status.HTTP_200_OK,
+)
+@AppAutoInjector.auto_inject()
+async def resume_interrupt(
+    resume_request: InterruptResumeRequest,
+    message_service: IMessageService,
+    user_id: UUID,
+) -> ApiResponse[MessageRead]:
+    """
+    Resume execution after handling tool execution interrupts.
+    """
+    result = await message_service.resume_message_creation(
+        thread_id=resume_request.thread_id,
+        conversation_id=resume_request.conversation_id,
+        user_id=user_id,
+        interrupt_id=resume_request.interrupt_id,
+        decisions=resume_request.decisions,
+    )
+    return ApiResponse(
+        success=True,
+        message="Message creation resumed successfully",
+        data=result,
+    )
+
+
+@router.get("/{message_id}", response_model=ApiResponse[MessageRead])
+@AppAutoInjector.auto_inject()
 async def get_message(
-    message_id: int,
-    message_service: MessageService = Depends(get_message_service)
-) -> MessageRead:
+    message_id: UUID,
+    message_service: IMessageService,
+    user_id: UUID,
+) -> ApiResponse[MessageRead]:
     """Get message by ID"""
-    return message_service.get_message_by_id(message_id)
+    result = message_service.get_by_id(message_id, user_id)
+    return ApiResponse(
+        success=True, message="Message retrieved successfully", data=result
+    )
 
 
-@router.get("/conversation/{conversation_id}", response_model=List[MessageRead])
-async def get_conversation_messages(
-    conversation_id: int,
-    user_id: int,
-    skip: int = 0,
-    limit: int = 100,
-    message_service: MessageService = Depends(get_message_service)
-) -> List[MessageRead]:
-    """Get messages for a conversation (requires user ownership)"""
-    return message_service.get_conversation_messages(conversation_id, user_id, skip=skip, limit=limit)
-
-
-@router.get("/conversation/{conversation_id}/history", response_model=List[MessageRead])
-async def get_conversation_history(
-    conversation_id: int,
-    user_id: int,
-    limit: int = 50,
-    message_service: MessageService = Depends(get_message_service)
-) -> List[MessageRead]:
-    """Get recent conversation history (requires user ownership)"""
-    return message_service.get_conversation_history(conversation_id, user_id, limit=limit)
-
-
-@router.get("/user/{user_id}", response_model=List[MessageRead])
+@router.get("/", response_model=PaginatedApiResponse[MessageRead])
+@AppAutoInjector.auto_inject()
 async def get_user_messages(
-    user_id: int,
-    skip: int = 0,
-    limit: int = 100,
-    message_service: MessageService = Depends(get_message_service)
-) -> List[MessageRead]:
-    """Get messages by user"""
-    return message_service.get_user_messages(user_id, skip=skip, limit=limit)
-
-
-@router.put("/{message_id}", response_model=MessageRead)
-async def update_message(
-    message_id: int,
-    user_id: int,
-    message_data: MessageUpdate,
-    message_service: MessageService = Depends(get_message_service)
-) -> MessageRead:
-    """Update message (requires user ownership)"""
-    return message_service.update_message(message_id, user_id, message_data)
-
-
-@router.delete("/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_message(
-    message_id: int,
-    user_id: int,
-    message_service: MessageService = Depends(get_message_service)
-) -> None:
-    """Delete message (requires user ownership)"""
-    message_service.delete_message(message_id, user_id)
+    message_service: IMessageService,
+    user_id: UUID,
+    pagination: MessagePaginationParams,
+    include: List[str] = Query(
+        default=[], description="Array of includes e.g. ['feedback']"
+    ),
+) -> PaginatedApiResponse[MessageRead]:
+    """Get all messages for authenticated user with pagination"""
+    include_feedback = "feedback" in include
+    paginated_result = message_service.get_user_messages(
+        user_id,
+        page=pagination.page,
+        limit=pagination.limit,
+        order_by=pagination.order_by.to_snake_case(),
+        order_direction=pagination.order_direction.value,
+        include_feedback=include_feedback,
+    )
+    return PaginatedApiResponse.from_paginator(
+        paginated_result, "User messages retrieved successfully"
+    )
