@@ -177,15 +177,3 @@ async def generate_follow_up_suggestions(
     return await generator.generate_suggestions(user_query, response_content)
 
 
-# Prewarm: Initialize the suggestion generator at module load time
-# This ensures the Gemini client is ready before the first request
-def _prewarm_suggestion_generator() -> None:
-    """Initialize suggestion generator eagerly to reduce first-request latency."""
-    try:
-        get_suggestion_generator()
-    except Exception:
-        pass  # Silently ignore prewarm failures
-
-
-_prewarm_suggestion_generator()
-

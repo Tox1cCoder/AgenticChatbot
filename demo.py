@@ -3989,12 +3989,9 @@ def render_chat_view():
                                 # Update conversation title in real-time
                                 new_title = event.get("title")
                                 if new_title:
-                                    # Update current conversation in session state
-                                    if "current_conversation" in st.session_state:
-                                        st.session_state.current_conversation["title"] = new_title
                                     # Update in conversations list
-                                    if "conversations" in st.session_state:
-                                        for conv in st.session_state.conversations:
+                                    if "conversations_list" in st.session_state:
+                                        for conv in st.session_state.conversations_list:
                                             if conv.get("id") == conversation_id:
                                                 conv["title"] = new_title
                                                 break

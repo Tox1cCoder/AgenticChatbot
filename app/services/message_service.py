@@ -408,6 +408,11 @@ class MessageService(IMessageService):
                 )
             )
 
+        def _cancel_title_task():
+            """Cancel title task if running to prevent resource leaks."""
+            if title_task and not title_task.done():
+                title_task.cancel()
+
         if message_create_data.role == MessageRole.user:
             # Get the user_id and persona from the conversation
             user_id, persona = self._get_conversation_context(
@@ -497,6 +502,7 @@ class MessageService(IMessageService):
                         "interrupt": interrupt_payload,
                         "message": persisted.model_dump(mode="json"),
                     }
+                    _cancel_title_task()
                     return
 
                 # Generate follow-up suggestions for auto-execute path
@@ -518,6 +524,7 @@ class MessageService(IMessageService):
                     "type": "complete",
                     "message": bot_message.model_dump(mode="json"),
                 }
+                _cancel_title_task()
                 return
 
             try:
@@ -589,6 +596,7 @@ class MessageService(IMessageService):
                         }
                         # Workflow is paused - don't create a bot message yet
                         # The resume endpoint will handle that
+                        _cancel_title_task()
                         return
 
                     elif event_type == "complete":
@@ -694,6 +702,7 @@ class MessageService(IMessageService):
                     "error": str(exc),
                     "message": error_message.model_dump(mode="json"),
                 }
+                _cancel_title_task()
 
     async def resume_message_creation(
         self,
