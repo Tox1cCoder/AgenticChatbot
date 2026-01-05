@@ -66,14 +66,22 @@ class MessageService(IMessageService):
             return None
         return redis.from_url(redis_url)
 
-    def _get_conversation_context(self, conversation_id: UUID, user_id: Optional[UUID] = None) -> Tuple[Optional[UUID], Optional[str]]:
+    def _get_conversation_context(
+        self, conversation_id: UUID, user_id: Optional[UUID] = None
+    ) -> Tuple[Optional[UUID], Optional[str]]:
         """Get user_id and persona from conversation."""
-        conversation = self.conversation_validation_utils.conversation_repository.get_by_id(conversation_id)
+        conversation = (
+            self.conversation_validation_utils.conversation_repository.get_by_id(
+                conversation_id
+            )
+        )
         resolved_user_id = user_id or (conversation.owner_id if conversation else None)
         persona = conversation.persona_prompt if conversation else None
         return resolved_user_id, persona
 
-    def _create_bot_response_message(self, conversation_id: UUID, content: str, metadata: Dict[str, Any]) -> MessageRead:
+    def _create_bot_response_message(
+        self, conversation_id: UUID, content: str, metadata: Dict[str, Any]
+    ) -> MessageRead:
         """Create and persist a bot response message."""
         bot_response_entity = MessageFactory.create_bot_response(
             conversation_id=conversation_id,
@@ -83,7 +91,9 @@ class MessageService(IMessageService):
         bot_message = self.repository.create(bot_response_entity)
         return MessageRead.model_validate(bot_message)
 
-    async def _generate_and_add_suggestions(self, user_query: str, response_content: str, metadata: Dict[str, Any]) -> None:
+    async def _generate_and_add_suggestions(
+        self, user_query: str, response_content: str, metadata: Dict[str, Any]
+    ) -> None:
         """Generate follow-up suggestions and add to metadata."""
         try:
             suggestions = await generate_follow_up_suggestions(
@@ -95,18 +105,27 @@ class MessageService(IMessageService):
         except Exception:
             pass
 
-    def _handle_task_completion(self, conversation_id: UUID, user_id: UUID, current_task: Any, plan_saved: bool, metadata: Dict[str, Any]) -> None:
+    def _handle_task_completion(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        current_task: Any,
+        plan_saved: bool,
+        metadata: Dict[str, Any],
+    ) -> None:
         """Mark current task as completed and add next task to metadata."""
         if not self.task_plan_service or not current_task or not user_id or plan_saved:
             return
-        
+
         try:
             # Re-fetch task to verify status is still pending before marking complete
             fresh_task = self.task_plan_service.get_by_id(current_task.id, user_id)
             if fresh_task and fresh_task.status == TaskStatus.pending:
                 self.task_plan_service.mark_task_completed(current_task.id, user_id)
                 # Get next task for metadata
-                next_task = self.task_plan_service.get_next_task(conversation_id, user_id)
+                next_task = self.task_plan_service.get_next_task(
+                    conversation_id, user_id
+                )
                 if next_task:
                     metadata["next_task"] = {
                         "id": str(next_task.id),
@@ -116,27 +135,36 @@ class MessageService(IMessageService):
         except Exception:
             pass
 
-    def _handle_redis_interrupt_storage(self, conversation_id: UUID, interrupt_id: Optional[str], interrupt_response: Dict[str, Any]) -> None:
+    def _handle_redis_interrupt_storage(
+        self,
+        conversation_id: UUID,
+        interrupt_id: Optional[str],
+        interrupt_response: Dict[str, Any],
+    ) -> None:
         """Store interrupt information in Redis with timeout."""
         if not self.redis_client or not interrupt_response or not interrupt_id:
             return
-        
+
         key = f"interrupt:{conversation_id}:{interrupt_id}"
         timeout_seconds = settings.hitl_approval_timeout_minutes * 60
         try:
             self.redis_client.setex(key, timeout_seconds, datetime.utcnow().isoformat())
-            deadline = datetime.utcnow() + timedelta(minutes=settings.hitl_approval_timeout_minutes)
+            deadline = datetime.utcnow() + timedelta(
+                minutes=settings.hitl_approval_timeout_minutes
+            )
             if "metadata" not in interrupt_response:
                 interrupt_response["metadata"] = {}
             interrupt_response["metadata"]["timeout_deadline"] = deadline.isoformat()
         except Exception:
             pass
 
-    def _clear_redis_interrupt(self, conversation_id: UUID, interrupt_id: Optional[str]) -> None:
+    def _clear_redis_interrupt(
+        self, conversation_id: UUID, interrupt_id: Optional[str]
+    ) -> None:
         """Clear interrupt information from Redis."""
         if not self.redis_client or not interrupt_id:
             return
-        
+
         key = f"interrupt:{conversation_id}:{interrupt_id}"
         try:
             self.redis_client.delete(key)
@@ -200,14 +228,20 @@ class MessageService(IMessageService):
 
         if message_create_data.role == MessageRole.user:
             # Get the user_id and persona from the conversation
-            user_id, persona = self._get_conversation_context(message_create_data.conversation_id, user_id)
+            user_id, persona = self._get_conversation_context(
+                message_create_data.conversation_id, user_id
+            )
             sanitized_persona = sanitize_persona(persona)
 
             # Get conversation for planning mode check
-            conversation = self.conversation_validation_utils.conversation_repository.get_by_id(
-                message_create_data.conversation_id
+            conversation = (
+                self.conversation_validation_utils.conversation_repository.get_by_id(
+                    message_create_data.conversation_id
+                )
             )
-            planning_mode_enabled = conversation.planning_mode_enabled if conversation else False
+            planning_mode_enabled = (
+                conversation.planning_mode_enabled if conversation else False
+            )
 
             # Use shared helper to prepare planning context
             planning_ctx = await self._prepare_planning_context(
@@ -322,14 +356,20 @@ class MessageService(IMessageService):
 
         if message_create_data.role == MessageRole.user:
             # Get the user_id and persona from the conversation
-            user_id, persona = self._get_conversation_context(message_create_data.conversation_id, user_id)
+            user_id, persona = self._get_conversation_context(
+                message_create_data.conversation_id, user_id
+            )
             sanitized_persona = sanitize_persona(persona)
 
             # Get conversation for planning mode check
-            conversation = self.conversation_validation_utils.conversation_repository.get_by_id(
-                message_create_data.conversation_id
+            conversation = (
+                self.conversation_validation_utils.conversation_repository.get_by_id(
+                    message_create_data.conversation_id
+                )
             )
-            planning_mode_enabled = conversation.planning_mode_enabled if conversation else False
+            planning_mode_enabled = (
+                conversation.planning_mode_enabled if conversation else False
+            )
 
             # Use shared helper to prepare planning context
             planning_ctx = await self._prepare_planning_context(
@@ -406,7 +446,9 @@ class MessageService(IMessageService):
                     return
 
                 # Generate follow-up suggestions for auto-execute path
-                await self._generate_and_add_suggestions(message_create_data.content, bot_response_content, bot_metadata)
+                await self._generate_and_add_suggestions(
+                    message_create_data.content, bot_response_content, bot_metadata
+                )
 
                 bot_message = self._create_bot_response_message(
                     conversation_id=message_create_data.conversation_id,
@@ -463,8 +505,16 @@ class MessageService(IMessageService):
                     elif event_type == "interrupt":
                         # Yield interrupt event - workflow paused for human approval
                         interrupt_response = event.get("interrupt")
-                        interrupt_id = interrupt_response.get("interrupt_id") if interrupt_response else None
-                        self._handle_redis_interrupt_storage(message_create_data.conversation_id, interrupt_id, interrupt_response)
+                        interrupt_id = (
+                            interrupt_response.get("interrupt_id")
+                            if interrupt_response
+                            else None
+                        )
+                        self._handle_redis_interrupt_storage(
+                            message_create_data.conversation_id,
+                            interrupt_id,
+                            interrupt_response,
+                        )
 
                         yield {
                             "type": "interrupt",
@@ -539,10 +589,18 @@ class MessageService(IMessageService):
                 # Mark current task as completed if planning mode is active
                 # Skip if plan was just replaced (old task IDs are invalid)
                 if planning_mode_enabled:
-                    self._handle_task_completion(message_create_data.conversation_id, user_id, current_task, plan_saved, bot_metadata)
+                    self._handle_task_completion(
+                        message_create_data.conversation_id,
+                        user_id,
+                        current_task,
+                        plan_saved,
+                        bot_metadata,
+                    )
 
                 # Generate follow-up question suggestions
-                await self._generate_and_add_suggestions(message_create_data.content, bot_response_content, bot_metadata)
+                await self._generate_and_add_suggestions(
+                    message_create_data.content, bot_response_content, bot_metadata
+                )
 
                 # Create and persist bot response message
                 bot_message = self._create_bot_response_message(

@@ -45,14 +45,18 @@ AGENT_CONFIG = {
     "suggestion": {
         "model": "gemini-3-flash-preview",
         "temperature": 1.0,
-        "max_output_tokens": 512, 
+        "max_output_tokens": 512,
     },
     "title_generator": {
         "model": "gemini-3-flash-preview",
         "temperature": 1,
     },
     "summarization": {
-        "model": settings.summarization_model if hasattr(settings, "summarization_model") else "gemini-3-flash-preview",
+        "model": (
+            settings.summarization_model
+            if hasattr(settings, "summarization_model")
+            else "gemini-3-flash-preview"
+        ),
         "temperature": 1,
     },
 }
@@ -63,18 +67,18 @@ def get_api_key() -> str:
     api_key = settings.gemini_api_key
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not set")
-    
+
     # Handle legacy format
     if api_key.startswith("GEMINI_API_KEY="):
         api_key = api_key.split("=", 1)[1].strip()
-    
+
     return api_key
 
 
 def create_gemini_client() -> genai.Client:
     """
     Create a raw GenAI Client instance.
-    
+
     Returns:
         genai.Client: Initialized Gemini client
     """
@@ -90,37 +94,43 @@ def create_langchain_model(
 ) -> ChatGoogleGenerativeAI:
     """
     Create a ChatGoogleGenerativeAI instance with proper configuration.
-    
+
     Args:
         agent_type: One of the keys in AGENT_CONFIG (e.g., "chat", "rag", "search")
         model_override: Optional model name to override the config
         temperature_override: Optional temperature to override the config
         include_thinking: Whether to include thinking configuration (default True)
-    
+
     Returns:
         ChatGoogleGenerativeAI: Configured LangChain model
     """
     if agent_type not in AGENT_CONFIG:
-        raise ValueError(f"Unknown agent type: {agent_type}. Valid types: {list(AGENT_CONFIG.keys())}")
-    
+        raise ValueError(
+            f"Unknown agent type: {agent_type}. Valid types: {list(AGENT_CONFIG.keys())}"
+        )
+
     config = AGENT_CONFIG[agent_type]
     api_key = get_api_key()
-    
+
     model_name = model_override or config["model"]
-    temperature = temperature_override if temperature_override is not None else config["temperature"]
-    
+    temperature = (
+        temperature_override
+        if temperature_override is not None
+        else config["temperature"]
+    )
+
     model_kwargs = {
         "model": model_name,
         "google_api_key": api_key,
         "temperature": temperature,
     }
-    
+
     # Configure thinking based on settings and model version
     if include_thinking and settings.enable_thinking:
         # Enable thought output in responses
         if settings.include_thoughts_in_response:
             model_kwargs["include_thoughts"] = True
-        
+
         # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3
         if "2.5" in model_name or "flash-latest" in model_name.lower():
             thinking_budget = settings.thinking_budget
