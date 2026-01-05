@@ -2445,7 +2445,7 @@ def render_suggestion_buttons(suggestions: List[str], msg_id: str):
             # Use a unique key based on message ID and suggestion index
             button_key = f"suggestion_{msg_id}_{idx}"
             if st.button(
-                f"💡 {suggestion}",
+                f"{suggestion}",
                 key=button_key,
                 use_container_width=True,
                 help="Click to use this question",
@@ -3896,7 +3896,7 @@ def render_chat_view():
                                 # Track which agent was selected for processing
                                 selected_agent = event.get("agent", "unknown")
                                 status.update(
-                                    label=f"{selected_agent.replace('_', ' ').title()} processing...",
+                                    label=f"{selected_agent.replace('_', ' ').title()} is processing...",
                                     state="running",
                                 )
 

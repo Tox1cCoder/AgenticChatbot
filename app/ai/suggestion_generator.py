@@ -69,7 +69,7 @@ class SuggestionGenerator:
                 contents=prompt,
                 config={
                     "temperature": 1,
-                    "max_output_tokens": 256,
+                    "max_output_tokens": 512,
                 },
             )
 
@@ -143,7 +143,7 @@ class SuggestionGenerator:
 
             return valid_suggestions
 
-        except Exception as e:
+        except Exception:
             return []
 
 

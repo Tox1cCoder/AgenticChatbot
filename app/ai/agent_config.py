@@ -45,7 +45,7 @@ AGENT_CONFIG = {
     "suggestion": {
         "model": "gemini-3-flash-preview",
         "temperature": 1.0,
-        "max_output_tokens": 256,
+        "max_output_tokens": 512, 
     },
     "title_generator": {
         "model": "gemini-3-flash-preview",
@@ -129,6 +129,4 @@ def create_langchain_model(
             model_kwargs["thinking_budget"] = thinking_budget
         else:
             model_kwargs["thinking_level"] = settings.thinking_level
-    
-    logger.debug(f"Creating LangChain model for {agent_type}: {model_name}")
     return ChatGoogleGenerativeAI(**model_kwargs)
