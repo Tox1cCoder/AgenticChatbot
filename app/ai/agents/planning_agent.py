@@ -3,7 +3,7 @@ import uuid
 from typing import Optional, List, Dict, Any
 
 from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from .base_agent import BaseAgent
 
@@ -22,8 +22,6 @@ from ..schemas import (
 from ..prompts import build_planning_prompt, PLANNING_EXECUTION_PROMPT
 from ..utils import coerce_response_text
 from ...core.config import settings
-
-logger = logging.getLogger(__name__)
 
 
 PLAN_MODIFICATION_PROMPT = """You are a planning assistant. The user wants to modify an existing task plan.
@@ -349,7 +347,6 @@ DO NOT make any tool calls - just respond with text describing the plan."""
             )
 
         except Exception as e:
-            logger.error(f"Error generating plan: {e}", exc_info=True)
             error_msg = (
                 f"Issue while creating the plan: {str(e)}. Please try rephrasing your request."
                 if isinstance(e, ValueError)
@@ -413,7 +410,6 @@ DO NOT make any tool calls - just respond with text describing the plan."""
             )
 
         except ValueError as e:
-            logger.error(f"Error modifying plan: {e}", exc_info=True)
             error_msg = (
                 f"Issue while modifying the plan: {str(e)}. Please try rephrasing your request."
                 if isinstance(e, ValueError)
@@ -673,7 +669,6 @@ DO NOT make any tool calls - just respond with text describing the plan."""
             yield {"type": "complete", "response": response}
 
         except Exception as e:
-            logger.error(f"Error streaming planning response: {e}", exc_info=True)
             yield {"type": "error", "error": str(e)}
 
     async def cleanup(self):

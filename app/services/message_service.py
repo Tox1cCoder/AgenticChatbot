@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple, Any, Dict, TYPE_CHECKING
 from uuid import UUID
@@ -134,6 +135,48 @@ class MessageService(IMessageService):
                     }
         except Exception:
             pass
+
+    def _is_first_user_message(self, conversation_id: UUID) -> bool:
+        """Check if this is the first user message in the conversation."""
+        try:
+            # Check if conversation has a default title (needs generation)
+            conversation = (
+                self.conversation_validation_utils.conversation_repository.get_by_id(
+                    conversation_id
+                )
+            )
+            if not conversation:
+                return False
+            # Check for default/placeholder titles that need generation
+            default_titles = {"New Conversation", "Untitled", ""}
+            return conversation.title in default_titles or conversation.title is None
+        except Exception:
+            return False
+
+    async def _generate_title_async(
+        self,
+        conversation_id: UUID,
+        user_message: str,
+    ) -> Optional[str]:
+        """
+        Generate and update conversation title asynchronously.
+        
+        Returns:
+            The generated title if successful, None otherwise.
+        """
+        try:
+            title = await self.ai_service.generate_conversation_title(user_message)
+            if title:
+                # Update conversation with generated title
+                from app.schemas.conversation import ConversationUpdate
+                self.conversation_validation_utils.conversation_repository.update(
+                    conversation_id,
+                    ConversationUpdate(title=title)
+                )
+                return title
+        except Exception:
+            pass
+        return None
 
     def _handle_redis_interrupt_storage(
         self,
@@ -353,6 +396,17 @@ class MessageService(IMessageService):
                 mode="json"
             ),
         }
+
+        # Start async title generation if this is the first user message
+        title_task = None
+        needs_title = self._is_first_user_message(message_create_data.conversation_id)
+        if needs_title:
+            title_task = asyncio.create_task(
+                self._generate_title_async(
+                    message_create_data.conversation_id,
+                    message_create_data.content
+                )
+            )
 
         if message_create_data.role == MessageRole.user:
             # Get the user_id and persona from the conversation
@@ -614,6 +668,16 @@ class MessageService(IMessageService):
                     "type": "complete",
                     "message": bot_message.model_dump(mode="json"),
                 }
+
+                # Yield title update event if title was generated in parallel
+                if title_task:
+                    generated_title = await title_task
+                    if generated_title:
+                        yield {
+                            "type": "title_updated",
+                            "title": generated_title,
+                            "conversation_id": str(message_create_data.conversation_id),
+                        }
 
             except Exception as exc:
                 error_content = f"Error generating response: {str(exc)}"

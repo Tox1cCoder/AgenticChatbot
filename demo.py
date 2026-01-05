@@ -3800,32 +3800,13 @@ def render_chat_view():
 
                     if conversation_id == "pending_new":
                         saved_attachments = list(pending_attachments)
-                        conversation_title_source = stripped_message or message_to_send
 
                         with st.status(
                             "Creating conversation...", expanded=True
                         ) as status:
-                            # Generate AI-powered title
-                            status.update(label="Generating title...", state="running")
-                            title_response = make_api_request(
-                                "POST",
-                                "/conversations/generate-title",
-                                {"message": conversation_title_source},
-                            )
-
-                            if title_response and title_response.get("data"):
-                                generated_title = title_response["data"].get(
-                                    "title", conversation_title_source[:50]
-                                )
-                            else:
-                                # Fallback to truncated message if title generation fails
-                                generated_title = (
-                                    conversation_title_source[:50] + "..."
-                                    if len(conversation_title_source) > 50
-                                    else conversation_title_source
-                                )
-
-                            conversation_data = {"title": generated_title}
+                            # Use placeholder title - backend will generate and update it in parallel
+                            # with the first message response for better perceived performance
+                            conversation_data = {"title": "New Conversation"}
                             pending_persona = st.session_state.get(
                                 "pending_persona_prompt", ""
                             )
@@ -4003,6 +3984,20 @@ def render_chat_view():
                                 )
                                 st.toast(f"Error: {error_msg}", icon="❌")
                                 break
+
+                            elif event_type == "title_updated":
+                                # Update conversation title in real-time
+                                new_title = event.get("title")
+                                if new_title:
+                                    # Update current conversation in session state
+                                    if "current_conversation" in st.session_state:
+                                        st.session_state.current_conversation["title"] = new_title
+                                    # Update in conversations list
+                                    if "conversations" in st.session_state:
+                                        for conv in st.session_state.conversations:
+                                            if conv.get("id") == conversation_id:
+                                                conv["title"] = new_title
+                                                break
 
                         # Handle interrupt - show approval UI
                         if st.session_state.get("pending_interrupt"):
