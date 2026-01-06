@@ -53,9 +53,7 @@ AGENT_CONFIG = {
     },
     "summarization": {
         "model": (
-            settings.summarization_model
-            if hasattr(settings, "summarization_model")
-            else "gemini-3-flash-preview"
+            getattr(settings, "summarization_model", None) or "gemini-3-flash-preview"
         ),
         "temperature": 1,
     },

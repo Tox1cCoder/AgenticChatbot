@@ -13,8 +13,6 @@ from app.interfaces.message_service_interface import IMessageService
 from app.interfaces.conversation_service_interface import IConversationService
 from app.models.enums import MessageRole
 from app.schemas.message import MessageCreate
-from app.schemas.conversation import ConversationCreate, ConversationUpdate
-
 
 router = APIRouter(tags=["ai-sdk"])
 

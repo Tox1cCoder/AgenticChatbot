@@ -1,6 +1,6 @@
 from __future__ import annotations
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Tuple, Any, Dict, TYPE_CHECKING
 from uuid import UUID
 import redis
@@ -191,8 +191,8 @@ class MessageService(IMessageService):
         key = f"interrupt:{conversation_id}:{interrupt_id}"
         timeout_seconds = settings.hitl_approval_timeout_minutes * 60
         try:
-            self.redis_client.setex(key, timeout_seconds, datetime.utcnow().isoformat())
-            deadline = datetime.utcnow() + timedelta(
+            self.redis_client.setex(key, timeout_seconds, datetime.now(timezone.utc).isoformat())
+            deadline = datetime.now(timezone.utc) + timedelta(
                 minutes=settings.hitl_approval_timeout_minutes
             )
             if "metadata" not in interrupt_response:
@@ -450,82 +450,9 @@ class MessageService(IMessageService):
                 else None
             )
 
-            auto_execute_plan = (
-                planning_mode_enabled
-                and has_existing_plan
-                and current_task_context is not None
-            )
-
             # Stream bot response generation
             bot_response_content = ERROR_NO_RESPONSE
             bot_response = None
-
-            if auto_execute_plan:
-                (
-                    bot_response_content,
-                    bot_metadata,
-                    bot_response,
-                    execution_count,
-                    interrupt_payload,
-                ) = await self._run_plan_execution_loop(
-                    message_content=message_create_data.content,
-                    conversation_id=message_create_data.conversation_id,
-                    user_id=user_id,
-                    sanitized_persona=sanitized_persona,
-                    planning_mode_enabled=planning_mode_enabled,
-                    has_existing_plan=has_existing_plan,
-                    current_task=current_task,
-                    current_task_context=current_task_context,
-                    existing_tasks_dict=existing_tasks_dict,
-                    attachments=attachments,
-                    auto_execute_plan=True,
-                )
-
-                if interrupt_payload:
-                    if isinstance(interrupt_payload, dict):
-                        interrupt_payload = InterruptResponse.model_validate(
-                            interrupt_payload
-                        )
-
-                    persisted = self._persist_interrupt_bot_message(
-                        conversation_id=message_create_data.conversation_id,
-                        interrupt_payload=interrupt_payload,
-                        sanitized_persona=sanitized_persona,
-                        thread_id=interrupt_payload.thread_id,
-                        next_nodes=None,
-                    )
-                    yield {
-                        "type": "interrupt",
-                        "thread_id": interrupt_payload.thread_id,
-                        "next": None,
-                        "pending_tool_calls": None,
-                        "interrupt": interrupt_payload,
-                        "message": persisted.model_dump(mode="json"),
-                    }
-                    _cancel_title_task()
-                    return
-
-                # Generate follow-up suggestions for auto-execute path
-                await self._generate_and_add_suggestions(
-                    message_create_data.content, bot_response_content, bot_metadata
-                )
-
-                bot_message = self._create_bot_response_message(
-                    conversation_id=message_create_data.conversation_id,
-                    content=bot_response_content,
-                    metadata=bot_metadata,
-                )
-
-                # Emit simplified events (no token streaming) for auto-execution
-                agent_name = bot_response.agent_id if bot_response else "chat_agent"
-                yield {"type": "agent_selected", "agent": agent_name}
-                yield {"type": "token", "content": bot_response_content}
-                yield {
-                    "type": "complete",
-                    "message": bot_message.model_dump(mode="json"),
-                }
-                _cancel_title_task()
-                return
 
             try:
                 async for event in self.ai_service.generate_bot_response_stream(
