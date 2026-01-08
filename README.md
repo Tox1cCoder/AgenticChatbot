@@ -58,13 +58,36 @@ docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
 docker run -d -p 6379:6379 redis
 ```
 
-### 3. DB migrations
+### 3. External Services
+
+#### PostgreSQL
+
+```sql
+CREATE DATABASE chatbot;
+\c chatbot;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+```
+
+#### Qdrant (optional, for RAG)
+
+```bash
+docker pull qdrant/qdrant
+docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+```
+
+#### Redis (optional, for Celery + HITL timeouts)
+
+```bash
+docker run -d -p 6379:6379 redis
+```
+
+### 4. DB migrations
 
 ```bash
 alembic upgrade head
 ```
 
-### 4. Run
+### 5. Run
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

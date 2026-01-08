@@ -1,5 +1,6 @@
 import logging
-from typing import Optional, TYPE_CHECKING, List, Dict, Any
+from datetime import datetime
+from typing import Optional, TYPE_CHECKING, List, Dict, Any, Tuple
 from uuid import UUID
 
 from langgraph.graph import StateGraph, END, START
@@ -98,20 +99,50 @@ class MultiAgentWorkflow:
     # Shared Helper Methods (reduce duplication across agent nodes)
     # ============================================================
 
+    # Conversation history cache: conversation_id -> (history, timestamp)
+    _history_cache: Dict[str, Tuple[List, datetime]] = {}
+    _history_cache_ttl_seconds: int = 60  # Cache for 60 seconds
+
     async def _get_conversation_history(
         self, conversation_id: Optional[str], user_id: Optional[str]
     ) -> List:
+        """
+        Get conversation history with caching.
+        
+        Caches history per conversation_id with TTL to avoid
+        redundant database queries within a single graph execution.
+        """
         if not conversation_id or not user_id:
             return []
+
+        # Check cache first
+        cache_key = conversation_id
+        now = datetime.utcnow()
+        
+        if cache_key in self._history_cache:
+            cached_history, cached_time = self._history_cache[cache_key]
+            age_seconds = (now - cached_time).total_seconds()
+            
+            if age_seconds < self._history_cache_ttl_seconds:
+                return cached_history
 
         try:
             memory_manager = get_memory_manager()
             conv_memory = await memory_manager.get_memory(
                 UUID(conversation_id), UUID(user_id), force_refresh=True
             )
-            return conv_memory.get_recent_messages(limit=None, exclude_last=1)
+            history = conv_memory.get_recent_messages(limit=None, exclude_last=1)
+            
+            # Cache the result
+            self._history_cache[cache_key] = (history, now)
+            
+            return history
         except Exception:
             return []
+
+    def invalidate_history_cache(self, conversation_id: str) -> None:
+        """Invalidate cached history for a conversation (call when new messages added)."""
+        self._history_cache.pop(conversation_id, None)
 
     def _find_last_human_message_index(self, messages: List) -> Optional[int]:
         for idx in range(len(messages) - 1, -1, -1):
@@ -246,6 +277,8 @@ class MultiAgentWorkflow:
     def _build_graph(self) -> StateGraph:
         workflow = StateGraph(GraphState)
 
+        # Add summarization node first - runs ONCE at start of each request
+        workflow.add_node("summarize", self._summarization_node)
         workflow.add_node("route", self._route_node)
         workflow.add_node("chat_agent", self._chat_node)
         workflow.add_node("rag_agent", self._rag_node)
@@ -256,7 +289,10 @@ class MultiAgentWorkflow:
         workflow.add_node("approval", self._approval_node)
         workflow.add_node("tools", self._tool_node)
 
-        workflow.add_edge(START, "route")
+        # Route: START -> summarize -> route -> agents
+        # Summarization runs ONCE before routing, not on every agent iteration
+        workflow.add_edge(START, "summarize")
+        workflow.add_edge("summarize", "route")
 
         workflow.add_conditional_edges(
             "route",
@@ -702,6 +738,30 @@ class MultiAgentWorkflow:
             metadata={"interrupt": interrupt_response},
         )
 
+    async def _summarization_node(self, state: GraphState) -> GraphState:
+        """
+        Summarization node that runs ONCE at the start of each user request.
+        
+        This node checks if the conversation history exceeds thresholds and,
+        if so, summarizes older messages and REPLACES them in state.
+        
+        Key design principles:
+        - Runs once per request, not per agent iteration
+        - Mutates state in place (replaces old messages, doesn't append)
+        - Prevents context bloat during ReAct loops
+        """
+        from .summarization_middleware import summarize_if_needed_for_state
+        
+        try:
+            # This will check thresholds and apply summarization if needed
+            # The function mutates state by replacing old messages with summary
+            state = await summarize_if_needed_for_state(state)
+        except Exception as e:
+            # Log but don't fail the request if summarization errors
+            logger.warning(f"Summarization node error (continuing anyway): {e}")
+        
+        return state
+
     async def _route_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
         if not messages:
@@ -810,8 +870,6 @@ class MultiAgentWorkflow:
         # RAG agent handles its own history internally via build_rag_prompt
         # We pass minimal metadata; history is fetched by the service layer if needed
         metadata = {"persona": state.get("persona")}
-        if current_task:
-            metadata["task_context"] = current_task
 
         agent_msg = AgentMessage(
             role=MessageRole.USER,
@@ -973,6 +1031,10 @@ class MultiAgentWorkflow:
         todos = list(state.get("todos", []))  # Make a copy
         current_task_index = state.get("current_task_index")
         tool_outputs = []
+        
+        # Track errors for circuit breaker
+        context = state.get("context", {})
+        had_error = False
 
         for tool_call in last_message.tool_calls:
             tool_call_data = normalize_tool_call(tool_call)
@@ -1019,6 +1081,7 @@ class MultiAgentWorkflow:
                             "content": f"Error executing tool: {str(e)}",
                         }
                     )
+                    had_error = True  # Mark error for circuit breaker
                 continue
 
             action = tool_args.get("action")
@@ -1027,9 +1090,21 @@ class MultiAgentWorkflow:
             try:
                 if action == TodoAction.SET_TODOS.value or action == "set_todos":
                     new_todos = tool_args.get("todos", [])
-                    todos = new_todos
-                    current_task_index = 0 if todos else None
-                    result = f"Set {len(todos)} todos in the plan."
+                    
+                    # Validate max todos limit
+                    max_todos = getattr(settings, "max_todos_per_plan", 50)
+                    if len(new_todos) > max_todos:
+                        result = f"Error: Plan exceeds maximum of {max_todos} todos (requested {len(new_todos)}). Please reduce the number of tasks."
+                        logger.warning(f"Rejected plan with {len(new_todos)} todos (max: {max_todos})")
+                    else:
+                        # Validate for circular dependencies
+                        if self._validate_todo_dependencies(new_todos):
+                            todos = new_todos
+                            current_task_index = 0 if todos else None
+                            result = f"Set {len(todos)} todos in the plan."
+                        else:
+                            result = "Error: Circular dependency detected in todo list. Please fix dependencies."
+                            logger.warning("Rejected plan with circular dependencies")
 
                 elif action == TodoAction.ADD_TODO.value or action == "add_todo":
                     new_todo = tool_args.get("todo", {})
@@ -1107,6 +1182,7 @@ class MultiAgentWorkflow:
 
             except Exception as e:
                 result = f"Error executing {action}: {str(e)}"
+                had_error = True  # Mark error for circuit breaker
 
             tool_outputs.append(
                 {
@@ -1169,6 +1245,17 @@ class MultiAgentWorkflow:
         current_iteration = state.get("iteration_count") or 0
         state["iteration_count"] = current_iteration + 1
 
+        # Update consecutive_errors counter for circuit breaker
+        if had_error:
+            context["consecutive_errors"] = context.get("consecutive_errors", 0) + 1
+            logger.warning(
+                f"Planning consecutive errors: {context['consecutive_errors']}"
+            )
+        else:
+            # Reset on successful iteration
+            context["consecutive_errors"] = 0
+        state["context"] = context
+
         return state
 
     def _find_next_ready_task(self, todos: list, start_index: int = 0) -> Optional[int]:
@@ -1186,6 +1273,54 @@ class MultiAgentWorkflow:
                 if all(dep in completed_ids for dep in deps):
                     return i
         return None
+
+    def _validate_todo_dependencies(self, todos: List[Dict[str, Any]]) -> bool:
+        """
+        Validate that todo dependencies don't contain circular references.
+        Uses DFS to detect cycles in the dependency graph.
+        
+        Args:
+            todos: List of todo dictionaries with 'id' and 'dependencies' keys
+            
+        Returns:
+            True if no cycles detected, False if circular dependency found
+        """
+        # Build adjacency list from todos
+        todo_ids = {t.get("id") for t in todos if t.get("id")}
+        graph: Dict[str, List[str]] = {}
+        
+        for todo in todos:
+            todo_id = todo.get("id")
+            if todo_id:
+                deps = todo.get("dependencies", [])
+                # Filter to only include valid dependencies
+                graph[todo_id] = [d for d in deps if d in todo_ids]
+        
+        # DFS with color marking: 0=white (unvisited), 1=gray (in progress), 2=black (done)
+        colors: Dict[str, int] = {node: 0 for node in graph}
+        
+        def has_cycle(node: str) -> bool:
+            if colors[node] == 1:  # Back edge found (cycle)
+                return True
+            if colors[node] == 2:  # Already processed
+                return False
+                
+            colors[node] = 1  # Mark as in progress
+            
+            for neighbor in graph.get(node, []):
+                if neighbor in colors and has_cycle(neighbor):
+                    return True
+                    
+            colors[node] = 2  # Mark as done
+            return False
+        
+        # Check each node for cycles
+        for node in graph:
+            if colors[node] == 0:
+                if has_cycle(node):
+                    return False
+        
+        return True
 
     def _should_call_planning_tools(self, state: GraphState) -> str:
         messages = state.get("messages", [])
@@ -1205,11 +1340,25 @@ class MultiAgentWorkflow:
         planning_call_count = state.get("planning_call_count", 0)
         max_iterations = getattr(settings, "planning_max_iterations", 20)
 
+        # Check iteration budget
         if planning_call_count >= max_iterations:
             context = state.get("context", {})
             context["planning_budget_reached"] = True
             context["pause_reason"] = "max_iterations_reached"
             state["context"] = context
+            logger.warning(f"Planning budget exceeded: {planning_call_count} >= {max_iterations}")
+            return "end"
+
+        # Circuit breaker: check consecutive errors
+        context = state.get("context", {})
+        consecutive_errors = context.get("consecutive_errors", 0)
+        max_consecutive_errors = getattr(settings, "planning_consecutive_errors_limit", 3)
+        
+        if consecutive_errors >= max_consecutive_errors:
+            context["planning_budget_reached"] = True
+            context["pause_reason"] = "consecutive_errors_limit"
+            state["context"] = context
+            logger.warning(f"Planning circuit breaker triggered: {consecutive_errors} consecutive errors")
             return "end"
 
         context = state.get("context", {})
@@ -1474,6 +1623,10 @@ class MultiAgentWorkflow:
         config = self._build_graph_config(thread_id)
 
         try:
+            # Run summarization ONCE at the start (same as graph-level behavior)
+            # This ensures streaming path matches regular execute() path
+            initial_state = await self._summarization_node(initial_state)
+            
             routed_state = await self._route_node(initial_state)
             selected_agent = routed_state.get("selected_agent")
             initial_state["selected_agent"] = selected_agent

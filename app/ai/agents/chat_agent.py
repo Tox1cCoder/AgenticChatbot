@@ -1,25 +1,19 @@
 ﻿import logging
 import base64
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 
 from google.genai import types
 from langchain_core.messages import (
-    HumanMessage,
-    SystemMessage,
-    BaseMessage,
-    ToolMessage,
+    HumanMessage
 )
-from langchain_core.tools import BaseTool
 
 from .base_agent import BaseAgent
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import build_chat_prompt, CHAT_SYSTEM_PROMPT, TOOL_CONTEXT_SUFFIX
+from ..prompts import build_chat_prompt, CHAT_SYSTEM_PROMPT
 from ..utils import (
     coerce_response_text,
     get_error_recovery_hint,
 )
-from ..agent_config import create_gemini_client
-from ..mcp_integration import get_global_mcp_manager
 
 logger = logging.getLogger(__name__)
 

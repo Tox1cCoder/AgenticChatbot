@@ -18,7 +18,7 @@ from ..utils import coerce_response_text
 from ..agent_config import create_langchain_model, create_gemini_client, AGENT_CONFIG
 from ...core.config import settings
 from ..mcp_integration import get_global_mcp_manager
-from ..summarization_middleware import summarize_messages_if_needed
+# NOTE: summarization_middleware import removed - summarization now handled at graph level
 
 logger = logging.getLogger(__name__)
 
@@ -167,11 +167,9 @@ class BaseAgent(ABC):
             # Add current turn messages
             langchain_messages.extend(messages)
 
-            # Apply summarization for long conversations (only if needed)
-            if settings.enable_summarization:
-                langchain_messages = await summarize_messages_if_needed(
-                    langchain_messages
-                )
+            # NOTE: Summarization is now handled at the graph level via _summarization_node
+            # This ensures it runs ONCE per request, not on every agent iteration
+            # (prevents context bloat during ReAct loops)
 
             response = await llm_with_tools.ainvoke(langchain_messages)
 

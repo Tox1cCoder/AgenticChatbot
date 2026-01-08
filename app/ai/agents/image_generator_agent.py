@@ -3,19 +3,11 @@ import logging
 from typing import Optional, List, Dict, Any, AsyncIterator
 
 from google.genai import types
-from langchain_core.messages import (
-    HumanMessage,
-    SystemMessage,
-    BaseMessage,
-    ToolMessage,
-)
 
 from .base_agent import BaseAgent
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import TOOL_CONTEXT_SUFFIX
 from ..agent_config import create_langchain_model, create_gemini_client, AGENT_CONFIG
 from ...core.config import settings
-from ..mcp_integration import get_global_mcp_manager
 from ..utils import coerce_response_text
 
 logger = logging.getLogger(__name__)

@@ -1,19 +1,14 @@
 import logging
-from typing import Optional, List, Dict, Any, AsyncIterator
+from typing import Optional, Dict, Any, AsyncIterator
 
 from langchain_core.messages import (
-    HumanMessage,
-    SystemMessage,
-    BaseMessage,
-    ToolMessage,
+    HumanMessage
 )
-from langchain_core.tools import BaseTool
 
 from .base_agent import BaseAgent
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT, TOOL_CONTEXT_SUFFIX
+from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT
 from ..utils import coerce_response_text
-from ..mcp_integration import get_global_mcp_manager
 
 logger = logging.getLogger(__name__)
 

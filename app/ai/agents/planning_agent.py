@@ -1,4 +1,3 @@
-import logging
 import uuid
 from typing import Optional, List, Dict, Any
 
@@ -21,7 +20,6 @@ from ..schemas import (
 
 from ..prompts import build_planning_prompt, PLANNING_EXECUTION_PROMPT
 from ..utils import coerce_response_text
-from ...core.config import settings
 
 
 PLAN_MODIFICATION_PROMPT = """You are a planning assistant. The user wants to modify an existing task plan.

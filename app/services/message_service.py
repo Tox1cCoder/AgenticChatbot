@@ -160,7 +160,7 @@ class MessageService(IMessageService):
     ) -> Optional[str]:
         """
         Generate and update conversation title asynchronously.
-        
+
         Returns:
             The generated title if successful, None otherwise.
         """
@@ -169,9 +169,9 @@ class MessageService(IMessageService):
             if title:
                 # Update conversation with generated title
                 from app.schemas.conversation import ConversationUpdate
+
                 self.conversation_validation_utils.conversation_repository.update(
-                    conversation_id,
-                    ConversationUpdate(title=title)
+                    conversation_id, ConversationUpdate(title=title)
                 )
                 return title
         except Exception:
@@ -191,7 +191,9 @@ class MessageService(IMessageService):
         key = f"interrupt:{conversation_id}:{interrupt_id}"
         timeout_seconds = settings.hitl_approval_timeout_minutes * 60
         try:
-            self.redis_client.setex(key, timeout_seconds, datetime.now(timezone.utc).isoformat())
+            self.redis_client.setex(
+                key, timeout_seconds, datetime.now(timezone.utc).isoformat()
+            )
             deadline = datetime.now(timezone.utc) + timedelta(
                 minutes=settings.hitl_approval_timeout_minutes
             )
@@ -403,8 +405,7 @@ class MessageService(IMessageService):
         if needs_title:
             title_task = asyncio.create_task(
                 self._generate_title_async(
-                    message_create_data.conversation_id,
-                    message_create_data.content
+                    message_create_data.conversation_id, message_create_data.content
                 )
             )
 
@@ -652,7 +653,7 @@ class MessageService(IMessageService):
                         stored_timestamp.decode("utf-8")
                     )
                     elapsed_minutes = (
-                        datetime.utcnow() - stored_time
+                        datetime.now(timezone.utc) - stored_time
                     ).total_seconds() / 60
                     if elapsed_minutes > settings.hitl_approval_timeout_minutes:
                         # Clean up the expired key
