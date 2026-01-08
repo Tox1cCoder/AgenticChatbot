@@ -60,7 +60,7 @@
         "@timlukahorstmann/mcp-weather"
       ],
       "env": {
-        "ACCUWEATHER_API_KEY": "zpka_a60ac65c742a4a70b34530754b2c3010_ca64d211"
+        "ACCUWEATHER_API_KEY": "zpka_b368669f60f74d56a0b9c9b3ef5941b7_3e4cf19e"
       },
       "enabled": true
     },
@@ -84,6 +84,11 @@
         "postgresql://postgres:123123123@localhost:5432/chatbot"
       ],
       "enabled": true
+    },
+    "mcp": {
+      "enabled": true,
+      "transport": "streamable_http",
+      "url": "https://mcp.context7.com/mcp"
     }
   }
 }

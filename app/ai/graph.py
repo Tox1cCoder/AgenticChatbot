@@ -767,70 +767,10 @@ class MultiAgentWorkflow:
 
         return config or None
 
-    def _build_plan_context_string(
-        self,
-        current_task: Optional[Dict[str, Any]],
-        all_tasks: Optional[List[Dict[str, Any]]] = None,
-    ) -> Optional[str]:
-        if not current_task or not current_task.get("description"):
-            return None
-
-        parts = ["=== TASK EXECUTION CONTEXT ==="]
-
-        if all_tasks:
-            completed = [t for t in all_tasks if t.get("status") == "completed"]
-            pending = [t for t in all_tasks if t.get("status") == "pending"]
-            in_progress = [t for t in all_tasks if t.get("status") == "in_progress"]
-
-            parts.append(
-                f"\nPlan Progress: {len(completed)}/{len(all_tasks)} tasks completed"
-            )
-
-            if completed:
-                parts.append("\n✅ COMPLETED TASKS:")
-                for t in completed:
-                    order = t.get("task_order", t.get("order", 0))
-                    parts.append(
-                        f"  {order + 1}. {t.get('description', 'No description')}"
-                    )
-
-            current_order = current_task.get("order", current_task.get("task_order", 0))
-            parts.append(f"\n🔄 CURRENT TASK (#{current_order + 1}):")
-            parts.append(f"  {current_task.get('description', '')}")
-            parts.append(
-                "\n  ** You are executing THIS task now. Focus on completing it. **"
-            )
-
-            remaining = [
-                t
-                for t in pending
-                if t.get("task_order", t.get("order", 0)) > current_order
-            ]
-            if remaining:
-                parts.append("\n⏳ REMAINING TASKS:")
-                for t in remaining:
-                    order = t.get("task_order", t.get("order", 0))
-                    parts.append(
-                        f"  {order + 1}. {t.get('description', 'No description')}"
-                    )
-
-        else:
-            order = current_task.get("order", current_task.get("task_order", 0))
-            parts.append(f"\n🔄 CURRENT TASK (#{order + 1}):")
-            parts.append(f"  {current_task.get('description', '')}")
-            parts.append("\n  ** Focus on completing this specific task. **")
-
-        parts.append("\n=== END TASK CONTEXT ===\n")
-        return "\n".join(parts)
-
     async def _chat_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
         if not messages:
             return state
-
-        current_task = state.get("current_task")
-        all_tasks = state.get("all_tasks")
-        plan_context_str = self._build_plan_context_string(current_task, all_tasks)
 
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
@@ -838,7 +778,6 @@ class MultiAgentWorkflow:
             conversation_id, user_id
         )
 
-        last_human_idx = self._find_last_human_message_index(messages)
         current_turn_messages = self._get_current_turn_messages(messages)
 
         response = await self.chat_agent.invoke_model_with_history(
@@ -856,10 +795,6 @@ class MultiAgentWorkflow:
         if not messages:
             return state
 
-        current_task = state.get("current_task")
-        all_tasks = state.get("all_tasks")
-        plan_context_str = self._build_plan_context_string(current_task, all_tasks)
-
         last_message = messages[-1]
         content = (
             last_message.content
@@ -867,27 +802,14 @@ class MultiAgentWorkflow:
             else str(last_message)
         )
 
-        conversation_history = []
         conversation_id = state.get("conversation_id")
-        user_id = state.get("user_id")
-
-        if conversation_id and user_id:
-            memory_manager = get_memory_manager()
-            conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=True
-            )
-            # Get all messages from history without limit
-            conversation_history = conv_memory.get_recent_messages(
-                limit=None, exclude_last=1
-            )
-
         context = state.get("context", {})
 
         enriched_content = content
-        if plan_context_str:
-            enriched_content = f"{plan_context_str}\n\n{content}"
 
-        metadata = {"history": conversation_history, "persona": state.get("persona")}
+        # RAG agent handles its own history internally via build_rag_prompt
+        # We pass minimal metadata; history is fetched by the service layer if needed
+        metadata = {"persona": state.get("persona")}
         if current_task:
             metadata["task_context"] = current_task
 
@@ -911,17 +833,12 @@ class MultiAgentWorkflow:
         if not messages:
             return state
 
-        current_task = state.get("current_task")
-        all_tasks = state.get("all_tasks")
-        plan_context_str = self._build_plan_context_string(current_task, all_tasks)
-
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         conversation_history = await self._get_conversation_history(
             conversation_id, user_id
         )
 
-        last_human_idx = self._find_last_human_message_index(messages)
         current_turn_messages = self._get_current_turn_messages(messages)
 
         response = await self.search_agent.invoke_model_with_history(
@@ -939,17 +856,12 @@ class MultiAgentWorkflow:
         if not messages:
             return state
 
-        current_task = state.get("current_task")
-        all_tasks = state.get("all_tasks")
-        plan_context_str = self._build_plan_context_string(current_task, all_tasks)
-
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         conversation_history = await self._get_conversation_history(
             conversation_id, user_id
         )
 
-        last_human_idx = self._find_last_human_message_index(messages)
         current_turn_messages = self._get_current_turn_messages(messages)
 
         response = await self.image_generator_agent.invoke_model_with_history(
@@ -1666,6 +1578,10 @@ class MultiAgentWorkflow:
                     if mode == "messages":
                         # LLM token streaming - data is (message_chunk, metadata)
                         message_chunk, metadata = data
+
+                        # Skip ToolMessage - tool results are handled in updates mode
+                        if isinstance(message_chunk, ToolMessage):
+                            continue
 
                         # Handle text content using content_blocks (latest pattern)
                         if (

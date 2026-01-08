@@ -195,12 +195,20 @@ class Settings(BaseSettings):
         description="Enable automatic conversation summarization for long conversations",
     )
     summarization_trigger_tokens: int = Field(
-        default=8000,
+        default=20000,
         description="Trigger summarization when estimated tokens exceed this threshold",
     )
     summarization_trigger_messages: int = Field(
         default=20,
         description="Trigger summarization when message count exceeds this threshold",
+    )
+    summarization_trigger_fraction: float = Field(
+        default=0.8,
+        description="Trigger summarization when context usage exceeds this fraction of model's context window (0.0-1.0)",
+    )
+    summarization_model_context_size: int = Field(
+        default=1000000,
+        description="Model context window size in tokens",
     )
     summarization_keep_messages: int = Field(
         default=10,

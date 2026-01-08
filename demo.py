@@ -2947,22 +2947,7 @@ def render_tools_tab():
                             st.error(f"Error: {e}")
 
         with tab3:
-            st.markdown("Add a server using a URL. Supports two formats:")
-            st.markdown(
-                """
-**Local NPX Command:**
-```
-npx @smithery/cli@latest run @ThinkFar/clear-thought-mcp
-```
-
-**Remote HTTP/HTTPS URL:**
-```
-https://server.smithery.ai/reddit/mcp
-```
-
-> **Note:** Flags like `--playground`, `--verbose`, and `--debug` are automatically removed to prevent non-JSON output that breaks the MCP protocol.
-"""
-            )
+            st.markdown("Add a server using a URL")
 
             url_input = st.text_input(
                 "MCP Server URL*",
