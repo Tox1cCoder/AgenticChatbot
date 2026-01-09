@@ -32,9 +32,7 @@ class TaskPlanFactory:
             "task_order": task_data.task_order,
             "description": task_data.description,
             "status": TaskStatus.pending,
-            "dependencies": TaskPlanFactory._serialize_dependencies(
-                task_data.dependencies or []
-            ),
+
             "task_metadata": task_data.task_metadata or {},
             "created_at": TimestampUtils.now(),
             "updated_at": TimestampUtils.now(),
@@ -49,9 +47,6 @@ class TaskPlanFactory:
         task_id: UUID = None,
     ) -> Dict[str, Any]:
         """Create TaskPlan data from planning agent's Task schema.
-
-        Note: Dependencies are stored as indices initially. The caller is responsible
-        for resolving these indices to UUIDs after all tasks are created.
 
         Args:
             conversation_id: The conversation this task belongs to
@@ -70,7 +65,7 @@ class TaskPlanFactory:
             "task_order": task_order,
             "description": task.description,
             "status": TaskStatus.pending,
-            "dependencies": [],
+
             "task_metadata": metadata,
             "created_at": TimestampUtils.now(),
             "updated_at": TimestampUtils.now(),
@@ -83,10 +78,7 @@ class TaskPlanFactory:
     ) -> List[Dict[str, Any]]:
         """Create multiple TaskPlan entities from a Plan.
 
-        This method handles dependency resolution by:
-        1. Pre-generating UUIDs for all tasks
-        2. Mapping task indices to their UUIDs
-        3. Resolving dependency indices to UUIDs
+        This method creates tasks from a Plan.
 
         Args:
             conversation_id: The conversation these tasks belong to
@@ -118,16 +110,7 @@ class TaskPlanFactory:
 
         return task_plans
 
-    @staticmethod
-    def _serialize_dependencies(dependencies: List[UUID | str]) -> List[str]:
-        """Convert dependency identifiers to strings for JSON storage."""
-        serialized: List[str] = []
-        for dep in dependencies:
-            if isinstance(dep, UUID):
-                serialized.append(str(dep))
-            elif dep:
-                serialized.append(str(dep))
-        return serialized
+
 
     @staticmethod
     def create_from_descriptions(
@@ -136,7 +119,7 @@ class TaskPlanFactory:
     ) -> List[Dict[str, Any]]:
         """Create TaskPlan entities from a list of descriptions.
 
-        Creates tasks with sequential ordering and no dependencies.
+        Creates tasks with sequential ordering.
 
         Args:
             conversation_id: The conversation these tasks belong to
@@ -154,7 +137,7 @@ class TaskPlanFactory:
                     "task_order": idx,
                     "description": description,
                     "status": TaskStatus.pending,
-                    "dependencies": [],
+
                     "task_metadata": {},
                     "created_at": TimestampUtils.now(),
                     "updated_at": TimestampUtils.now(),

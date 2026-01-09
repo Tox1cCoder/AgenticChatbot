@@ -13,8 +13,8 @@ class TaskPlan(Base):
     """
     Track task plans for conversations with planning mode enabled.
 
-    This model stores individual tasks with their status, dependencies,
-    and metadata for structured task management within conversations.
+    This model stores individual tasks with their status and metadata
+    for structured task management within conversations.
     """
 
     __tablename__ = "task_plans"
@@ -29,9 +29,7 @@ class TaskPlan(Base):
     task_order = Column(Integer, nullable=False)
     description = Column(Text, nullable=False)
     status = Column(TaskStatusType, nullable=False, default=TaskStatus.pending)
-    dependencies = Column(
-        JSONB, nullable=True, default=None, server_default="'[]'::jsonb"
-    )
+
     task_metadata = Column(
         JSONB, nullable=True, default=None, server_default="'{}'::jsonb"
     )

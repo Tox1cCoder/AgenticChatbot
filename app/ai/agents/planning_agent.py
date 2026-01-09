@@ -34,12 +34,11 @@ INSTRUCTIONS:
 1. Analyze the user's request to understand what changes they want
 2. Apply the requested modifications to the plan
 3. Supported operations:
-   - Add new tasks (place them in appropriate order with correct dependencies)
-   - Remove tasks (update dependencies of tasks that depended on removed tasks)
+   - Add new tasks
+   - Remove tasks
    - Modify task descriptions
-   - Reorder tasks (update dependencies accordingly)
-   - Update task dependencies
-4. Ensure the modified plan is valid (no circular dependencies, valid dependency indices)
+   - Reorder tasks
+4. Ensure the modified plan is valid
 5. Return the complete modified plan
 
 Return the updated plan with all tasks."""
@@ -428,8 +427,6 @@ DO NOT make any tool calls - just respond with text describing the plan."""
                     "description": task.description,
                     "status": TodoStatus.PENDING.value,
                     "order": i,
-                    "dependencies": [str(d) for d in task.dependencies],
-                    "complexity": task.estimated_complexity,
                 }
             )
         return todos
@@ -442,11 +439,7 @@ DO NOT make any tool calls - just respond with text describing the plan."""
         for i, task in enumerate(existing_tasks):
             desc = task.get("description", "No description")
             status = task.get("status", "pending")
-            deps = task.get("dependencies", [])
-            dep_str = (
-                f" (depends on: {', '.join(str(d) for d in deps)})" if deps else ""
-            )
-            lines.append(f"Task {i + 1}: {desc} [{status}]{dep_str}")
+            lines.append(f"Task {i + 1}: {desc} [{status}]")
 
         return "\n".join(lines)
 
@@ -477,67 +470,12 @@ DO NOT make any tool calls - just respond with text describing the plan."""
 
         for i, task in enumerate(modified_plan.tasks):
             task_line = f"**Task {i + 1}:** {task.description}"
-
-            details = []
-            if task.estimated_complexity:
-                details.append(f"Complexity: {task.estimated_complexity}")
-            if task.dependencies:
-                dep_str = ", ".join(f"Task {d + 1}" for d in task.dependencies)
-                details.append(f"Depends on: {dep_str}")
-
-            if details:
-                task_line += f" ({', '.join(details)})"
-
             parts.append(task_line)
             parts.append("")
 
         return "\n".join(parts)
 
-    def _validate_and_order_tasks(self, tasks: List[Task]) -> List[Task]:
-        if not tasks:
-            return tasks
 
-        num_tasks = len(tasks)
-
-        for i, task in enumerate(tasks):
-            for dep_idx in task.dependencies:
-                if dep_idx < 0 or dep_idx >= num_tasks:
-                    raise ValueError(
-                        f"Task {i} has invalid dependency index {dep_idx}. "
-                        f"Valid indices are 0 to {num_tasks - 1}."
-                    )
-                if dep_idx >= i:
-                    raise ValueError(
-                        f"Task {i} depends on task {dep_idx}, but dependencies "
-                        f"must reference earlier tasks (lower indices)."
-                    )
-
-        visited = [False] * num_tasks
-        rec_stack = [False] * num_tasks
-
-        def has_cycle(node: int) -> bool:
-            visited[node] = True
-            rec_stack[node] = True
-
-            for dep_idx in tasks[node].dependencies:
-                if not visited[dep_idx]:
-                    if has_cycle(dep_idx):
-                        return True
-                elif rec_stack[dep_idx]:
-                    return True
-
-            rec_stack[node] = False
-            return False
-
-        for i in range(num_tasks):
-            if not visited[i]:
-                if has_cycle(i):
-                    raise ValueError(
-                        "Circular dependencies detected in the task plan. "
-                        "Please ensure tasks are ordered correctly."
-                    )
-
-        return tasks
 
     def _format_plan_response(self, plan: Plan) -> str:
         parts = []
@@ -551,17 +489,6 @@ DO NOT make any tool calls - just respond with text describing the plan."""
 
         for i, task in enumerate(plan.tasks):
             task_line = f"**Task {i + 1}:** {task.description}"
-
-            details = []
-            if task.estimated_complexity:
-                details.append(f"Complexity: {task.estimated_complexity}")
-            if task.dependencies:
-                dep_str = ", ".join(f"Task {d + 1}" for d in task.dependencies)
-                details.append(f"Depends on: {dep_str}")
-
-            if details:
-                task_line += f" ({', '.join(details)})"
-
             parts.append(task_line)
             parts.append("")
 

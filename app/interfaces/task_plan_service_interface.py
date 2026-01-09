@@ -115,7 +115,7 @@ class ITaskPlanService(ABC):
     def get_next_task(
         self, conversation_id: UUID, user_id: UUID
     ) -> Optional[TaskPlanRead]:
-        """Get next pending task considering dependencies.
+        """Get next pending task.
 
         Args:
             conversation_id: The conversation to get next task for

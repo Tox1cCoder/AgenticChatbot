@@ -556,36 +556,24 @@ ALWAYS respond in the same language the user is using.
 3. Each task should be self-contained and completable independently
 4. Use clear, concise language describing exactly what needs to be done
 
-# Dependency Format
-- Dependencies use task indices (0-based)
-- Task 0 has no dependencies
-- Dependencies must reference earlier tasks only (no circular dependencies)
-- Dependencies should form a valid DAG
-
-# Complexity Levels
-- low: Simple, straightforward tasks
-- medium: Moderate effort, may require research or iteration
-- high: Complex tasks requiring significant effort or expertise
-
 # Example Plan
 
 Input: Build a web application
 Output:
-**Task 1:** Design database schema (low)
-**Task 2:** Set up project structure (low)
-**Task 3:** Create database models (medium, depends on 0, 1)
-**Task 4:** Implement API endpoints (medium, depends on 2)
-**Task 5:** Build frontend components (medium, depends on 1)
-**Task 6:** Connect frontend to API (medium, depends on 3, 4)
-**Task 7:** Add authentication (medium, depends on 3, 4)
-**Task 8:** Write tests (medium, depends on 3, 4, 5)
-**Task 9:** Deploy application (low, depends on 6, 7, 8)
+**Task 1:** Design database schema
+**Task 2:** Set up project structure
+**Task 3:** Create database models (depends on 0, 1)
+**Task 4:** Implement API endpoints (depends on 2)
+**Task 5:** Build frontend components (depends on 1)
+**Task 6:** Connect frontend to API (depends on 3, 4)
+**Task 7:** Add authentication (depends on 3, 4)
+**Task 8:** Write tests (depends on 3, 4, 5)
+**Task 9:** Deploy application (depends on 6, 7, 8)
 
 # Response Format
 - Use markdown
 - Start each task with "**Task N:**"
-- Keep a blank line between tasks
-- Include dependency/complexity notes inline"""
+- Keep a blank line between tasks"""
 
 
 PLANNING_EXECUTION_PROMPT = """# Identity
@@ -606,9 +594,7 @@ Use this tool to manage tasks:
   "id": "1",
   "description": "Task description",
   "status": "pending",
-  "order": 0,
-  "dependencies": [],
-  "complexity": "low"
+  "order": 0
 }
 ```
 Status options: pending, in_progress, completed, skipped
@@ -617,9 +603,9 @@ Status options: pending, in_progress, completed, skipped
 
 Input: Build a website
 Action: write_todos with action="set_todos" and todos=[
-  {"id": "1", "description": "Set up project structure", "status": "pending", "order": 0, "dependencies": [], "complexity": "low"},
-  {"id": "2", "description": "Design homepage", "status": "pending", "order": 1, "dependencies": [], "complexity": "medium"},
-  {"id": "3", "description": "Implement navigation", "status": "pending", "order": 2, "dependencies": ["1"], "complexity": "low"}
+  {"id": "1", "description": "Set up project structure", "status": "pending", "order": 0},
+  {"id": "2", "description": "Design homepage", "status": "pending", "order": 1},
+  {"id": "3", "description": "Implement navigation", "status": "pending", "order": 2}
 ]
 
 # Task Completion Workflow (IMPORTANT)

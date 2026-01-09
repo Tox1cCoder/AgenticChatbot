@@ -402,7 +402,7 @@ class MCPManager:
         for server_name, session_info in list(self._session_contexts.items()):
             try:
                 context = session_info["context"]
-                await context.__aexit__(None, None, None)
+                await asyncio.shield(context.__aexit__(None, None, None))
                 logger.debug(f"Closed session for server: {server_name}")
             except Exception as e:
                 logger.warning(f"Error closing session for {server_name}: {e}")
@@ -485,8 +485,15 @@ class MCPManager:
         if server_name in self._session_contexts:
             try:
                 context = self._session_contexts[server_name]["context"]
-                await context.__aexit__(None, None, None)
+                await asyncio.shield(context.__aexit__(None, None, None))
                 logger.debug(f"Closed session for server: {server_name}")
+            except RuntimeError as e:
+                if "different task" in str(e) or "already running" in str(e):
+                    logger.warning(
+                        f"Cannot close session for {server_name} from different task"
+                    )
+                else:
+                    logger.warning(f"Error closing session for {server_name}: {e}")
             except Exception as e:
                 logger.warning(f"Error closing session for {server_name}: {e}")
             del self._session_contexts[server_name]

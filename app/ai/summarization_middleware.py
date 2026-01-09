@@ -198,13 +198,6 @@ def apply_summarization_to_state(
     summary: str,
     config: Optional[SummarizationConfig] = None,
 ) -> Dict[str, Any]:
-    """
-    Apply summarization by REPLACING old messages in state.
-
-    This is the key difference from the old approach:
-    - Old: Prepend summary as new message (bloats context over iterations)
-    - New: Replace old messages with summary (clean context)
-    """
     if config is None:
         config = _get_config()
 
@@ -218,16 +211,10 @@ def apply_summarization_to_state(
     messages_to_keep = non_system[-config.keep_messages:]
 
     # Create summary message as SystemMessage
-    # Using SystemMessage because:
-    # 1. It's context, not user input
-    # 2. Won't be confused as part of the conversation flow
-    # 3. Semantically correct
     summary_message = SystemMessage(
         content=f"[Summary of previous conversation]\n{summary}\n[End of summary]"
     )
 
-    # REPLACE state messages (not append)
-    # Order: System prompts -> Summary -> Recent messages
     state["messages"] = system_messages + [summary_message] + messages_to_keep
 
     # Mark that summarization happened in context
@@ -236,11 +223,6 @@ def apply_summarization_to_state(
     context["summary_text"] = summary
     context["messages_summarized_count"] = len(non_system) - len(messages_to_keep)
     state["context"] = context
-
-    logger.info(
-        f"Applied summarization: replaced {len(non_system) - len(messages_to_keep)} "
-        f"messages with summary, keeping {len(messages_to_keep)} recent messages"
-    )
 
     return state
 
@@ -289,31 +271,3 @@ async def summarize_if_needed_for_state(
 
     # Apply to state (REPLACE, not append)
     return apply_summarization_to_state(state, summary, config)
-
-
-# =============================================================================
-# DEPRECATED: Old per-call middleware (kept for backward compatibility)
-# =============================================================================
-
-async def summarize_messages_if_needed(
-    messages: List[BaseMessage],
-    config: Optional[SummarizationConfig] = None,
-    conversation_id: Optional[str] = None,
-) -> List[BaseMessage]:
-    """
-    DEPRECATED: Use summarize_if_needed_for_state() instead.
-
-    This function is kept for backward compatibility but should not be used
-    in new code. It operates at the wrong abstraction level (per-LLM-call)
-    which causes context bloat during ReAct loops.
-
-    The new approach uses graph-level summarization via the summarize node.
-    """
-    logger.warning(
-        "summarize_messages_if_needed() is deprecated. "
-        "Use graph-level summarization via summarize_if_needed_for_state() instead."
-    )
-
-    # For backward compatibility, just return messages unchanged
-    # The new graph-level summarization handles this properly
-    return messages

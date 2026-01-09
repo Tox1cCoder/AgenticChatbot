@@ -145,13 +145,7 @@ class Task(BaseModel):
     """Represents a single task in a plan."""
 
     description: str = Field(..., description="Clear, actionable task description")
-    dependencies: List[int] = Field(
-        default_factory=list,
-        description="List of task indices (0-based) this task depends on",
-    )
-    estimated_complexity: Optional[str] = Field(
-        None, description="Complexity estimate: 'low', 'medium', or 'high'"
-    )
+
 
 
 class Plan(BaseModel):
@@ -195,13 +189,7 @@ class TodoItem(BaseModel):
         default=TodoStatus.PENDING, description="Current status of the todo"
     )
     order: int = Field(..., description="Order/position in the todo list (0-indexed)")
-    dependencies: List[str] = Field(
-        default_factory=list,
-        description="List of todo IDs this item depends on",
-    )
-    complexity: Optional[str] = Field(
-        None, description="Complexity estimate: 'low', 'medium', or 'high'"
-    )
+
 
 
 class WriteTodosInput(BaseModel):

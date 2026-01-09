@@ -23,13 +23,10 @@ class TaskPlanCreate(BaseModel):
     description: str = Field(
         ..., min_length=1, description="Clear, actionable task description"
     )
-    dependencies: List[UUID] = Field(
-        default_factory=list,
-        description="List of task IDs this task depends on",
-    )
+
     task_metadata: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Additional metadata for the task (e.g., complexity, notes)",
+        description="Additional metadata for the task (e.g., notes)",
     )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
@@ -45,9 +42,7 @@ class TaskPlanUpdate(BaseModel):
         None,
         description="Task status: pending, in_progress, completed, skipped",
     )
-    dependencies: Optional[List[UUID]] = Field(
-        None, description="Updated list of task IDs this task depends on"
-    )
+
     task_metadata: Optional[Dict[str, Any]] = Field(
         None, description="Updated metadata for the task"
     )
@@ -74,9 +69,7 @@ class TaskPlanRead(BaseModel):
     status: TaskStatus = Field(
         ..., description="Task status: pending, in_progress, completed, skipped"
     )
-    dependencies: Optional[List[UUID]] = Field(
-        default_factory=list, description="List of task IDs this task depends on"
-    )
+
     task_metadata: Optional[Dict[str, Any]] = Field(
         default_factory=dict, description="Additional task metadata"
     )
@@ -99,7 +92,7 @@ class TaskPlanInDB(BaseModel):
     task_order: int
     description: str
     status: TaskStatus
-    dependencies: Optional[List[UUID]] = Field(default_factory=list)
+
     task_metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime

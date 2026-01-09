@@ -35,7 +35,7 @@ async def create_task_plan(
     """
     Create a task plan from a user's request using the planning agent.
     The planning agent will analyze the request and generate a structured plan
-    with ordered tasks and dependencies.
+    with ordered tasks.
     """
     result = await task_plan_service.create_task_plan(
         conversation_id=conversation_id,
@@ -63,7 +63,7 @@ async def create_task_plan_manual(
 ) -> ApiResponse[List[TaskPlanRead]]:
     """
     Create a task plan from a manual list of task descriptions.
-    Tasks will be created in order without dependencies.
+    Tasks will be created in order.
     """
     result = task_plan_service.create_task_plan_from_list(
         conversation_id=conversation_id,
@@ -137,7 +137,7 @@ async def update_task_plan(
 ) -> ApiResponse[TaskPlanRead]:
     """
     Update a task plan.
-    Can update description, status, dependencies, and metadata.
+    Can update description, status, and metadata.
     """
     result = task_plan_service.update_task(
         task_id=task_id,

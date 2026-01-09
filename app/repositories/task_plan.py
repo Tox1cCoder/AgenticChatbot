@@ -205,10 +205,6 @@ class TaskPlanRepository:
             Created TaskPlan
         """
         payload = dict(input_data)
-        if "dependencies" in payload:
-            payload["dependencies"] = self._serialize_dependencies(
-                payload.get("dependencies")
-            )
 
         with self.session_factory() as session:
             return self._crud_strategy.create(session, payload)
@@ -257,7 +253,7 @@ class TaskPlanRepository:
             return self._crud_strategy.get_pending_tasks(session, conversation_id)
 
     def get_next_task(self, conversation_id: UUID) -> Optional[TaskPlan]:
-        """Get the first pending task whose dependencies are all completed.
+        """Get the first pending task.
 
         Args:
             conversation_id: The conversation ID to filter by
@@ -330,10 +326,7 @@ class TaskPlanRepository:
         else:
             update_payload = dict(getattr(input_schema, "__dict__", {}))
 
-        if "dependencies" in update_payload and update_payload["dependencies"] is not None:
-            update_payload["dependencies"] = self._serialize_dependencies(
-                update_payload["dependencies"]
-            )
+
 
         class _UpdateWrapper:
             def __init__(self, data: Dict[str, Any]):
@@ -374,16 +367,4 @@ class TaskPlanRepository:
         with self.session_factory() as session:
             return self._crud_strategy.exists(session, id)
 
-    @staticmethod
-    def _serialize_dependencies(dependencies: Optional[List[Any]]) -> List[str]:
-        """Convert dependency identifiers to strings for JSON storage."""
-        if not dependencies:
-            return []
 
-        serialized: List[str] = []
-        for dep in dependencies:
-            if isinstance(dep, UUID):
-                serialized.append(str(dep))
-            elif dep is not None:
-                serialized.append(str(dep))
-        return serialized

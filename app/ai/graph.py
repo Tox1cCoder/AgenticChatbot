@@ -266,6 +266,7 @@ class MultiAgentWorkflow:
             self.search_agent,
             self.image_generator_agent,
             self.rag_agent,
+            self.planning_agent,
         ]:
             if hasattr(agent, "_init_tools"):
                 await agent._init_tools()
@@ -1097,14 +1098,9 @@ class MultiAgentWorkflow:
                         result = f"Error: Plan exceeds maximum of {max_todos} todos (requested {len(new_todos)}). Please reduce the number of tasks."
                         logger.warning(f"Rejected plan with {len(new_todos)} todos (max: {max_todos})")
                     else:
-                        # Validate for circular dependencies
-                        if self._validate_todo_dependencies(new_todos):
-                            todos = new_todos
-                            current_task_index = 0 if todos else None
-                            result = f"Set {len(todos)} todos in the plan."
-                        else:
-                            result = "Error: Circular dependency detected in todo list. Please fix dependencies."
-                            logger.warning("Rejected plan with circular dependencies")
+                        todos = new_todos
+                        current_task_index = 0 if todos else None
+                        result = f"Set {len(todos)} todos in the plan."
 
                 elif action == TodoAction.ADD_TODO.value or action == "add_todo":
                     new_todo = tool_args.get("todo", {})
@@ -1259,68 +1255,14 @@ class MultiAgentWorkflow:
         return state
 
     def _find_next_ready_task(self, todos: list, start_index: int = 0) -> Optional[int]:
-        """Find the next task that is ready to execute (pending with all deps completed)."""
+        """Find the next task that is ready to execute (pending)."""
         from .schemas import TodoStatus
-
-        completed_ids = {
-            t.get("id") for t in todos if t.get("status") == TodoStatus.COMPLETED.value
-        }
 
         for i in range(start_index, len(todos)):
             todo = todos[i]
             if todo.get("status") == TodoStatus.PENDING.value:
-                deps = todo.get("dependencies", [])
-                if all(dep in completed_ids for dep in deps):
-                    return i
+                return i
         return None
-
-    def _validate_todo_dependencies(self, todos: List[Dict[str, Any]]) -> bool:
-        """
-        Validate that todo dependencies don't contain circular references.
-        Uses DFS to detect cycles in the dependency graph.
-        
-        Args:
-            todos: List of todo dictionaries with 'id' and 'dependencies' keys
-            
-        Returns:
-            True if no cycles detected, False if circular dependency found
-        """
-        # Build adjacency list from todos
-        todo_ids = {t.get("id") for t in todos if t.get("id")}
-        graph: Dict[str, List[str]] = {}
-        
-        for todo in todos:
-            todo_id = todo.get("id")
-            if todo_id:
-                deps = todo.get("dependencies", [])
-                # Filter to only include valid dependencies
-                graph[todo_id] = [d for d in deps if d in todo_ids]
-        
-        # DFS with color marking: 0=white (unvisited), 1=gray (in progress), 2=black (done)
-        colors: Dict[str, int] = {node: 0 for node in graph}
-        
-        def has_cycle(node: str) -> bool:
-            if colors[node] == 1:  # Back edge found (cycle)
-                return True
-            if colors[node] == 2:  # Already processed
-                return False
-                
-            colors[node] = 1  # Mark as in progress
-            
-            for neighbor in graph.get(node, []):
-                if neighbor in colors and has_cycle(neighbor):
-                    return True
-                    
-            colors[node] = 2  # Mark as done
-            return False
-        
-        # Check each node for cycles
-        for node in graph:
-            if colors[node] == 0:
-                if has_cycle(node):
-                    return False
-        
-        return True
 
     def _should_call_planning_tools(self, state: GraphState) -> str:
         messages = state.get("messages", [])
@@ -1692,8 +1634,6 @@ class MultiAgentWorkflow:
                             "description": task.get("description", ""),
                             "status": task.get("status", "pending"),
                             "order": task.get("task_order", i),
-                            "dependencies": task.get("dependencies", []),
-                            "complexity": task.get("estimated_complexity"),
                         }
                     )
 
@@ -2057,6 +1997,12 @@ class MultiAgentWorkflow:
                         "thinking_summary"
                     ):
                         response.metadata["thinking_summary"] = accumulated_thinking
+
+                    # CRITICAL: Use accumulated_content if we streamed content
+                    # This ensures the final response matches what was actually streamed
+                    # and prevents duplicate content issues
+                    if accumulated_content:
+                        response.message.content = accumulated_content
 
                     # For planning agent, include todos in metadata
                     if selected_agent == "planning_agent":

@@ -1198,14 +1198,11 @@ class MessageService(IMessageService):
                     )
             else:
                 # This is a new task - add it
-                # Note: Dependencies from agent are string IDs that may not map to DB UUIDs
-                # For new tasks, we start with no dependencies (they use order-based deps)
                 self.task_plan_service.task_plan_repository.create(
                     TaskPlanCreate(
                         conversation_id=conversation_id,
                         description=todo_description,
                         task_order=i,
-                        dependencies=[],  # New tasks start with no deps
                     )
                 )
 
