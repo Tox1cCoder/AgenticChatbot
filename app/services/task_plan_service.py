@@ -139,7 +139,6 @@ class TaskPlanService(ITaskPlanService):
                     else str(task.status)
                 ),
                 "task_order": task.task_order,
-                "dependencies": [str(d) for d in (task.dependencies or [])],
             }
             for task in existing_tasks
         ]
@@ -256,14 +255,6 @@ class TaskPlanService(ITaskPlanService):
         self.task_plan_validation_utils.validate_task_access(user_id, task_id)
 
         task = self.task_plan_repository.get_by_id(task_id)
-
-        if task_update_data.dependencies is not None:
-            self.task_plan_validation_utils.validate_dependencies(
-                task.conversation_id, task_update_data.dependencies
-            )
-            self.task_plan_validation_utils.validate_no_circular_dependencies(
-                task.conversation_id, task_id, task_update_data.dependencies
-            )
 
         updated_task = self.task_plan_repository.update(task_id, task_update_data)
         if not updated_task:

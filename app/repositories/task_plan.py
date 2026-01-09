@@ -79,7 +79,7 @@ class TaskPlanCRUDStrategy(
         return list(db.execute(statement).scalars().all())
 
     def get_next_task(self, db: Session, conversation_id: UUID) -> Optional[TaskPlan]:
-        """Get the first pending task whose dependencies are all completed.
+        """Get the first pending task by task_order.
 
         Args:
             db: Database session
@@ -88,28 +88,8 @@ class TaskPlanCRUDStrategy(
         Returns:
             The next TaskPlan to work on, or None if all tasks are complete
         """
-        # Get all completed task IDs for this conversation
-        completed_statement = select(self.model.id).where(
-            self.model.conversation_id == conversation_id,
-            self.model.status == TaskStatus.completed,
-        )
-        completed_task_ids = {
-            str(task_id) for task_id in db.execute(completed_statement).scalars().all()
-        }
-
-        # Get all pending tasks ordered by task_order
         pending_tasks = self.get_pending_tasks(db, conversation_id)
-
-        for task in pending_tasks:
-            dependencies = task.dependencies or []
-            # Check if all dependencies are completed
-            all_deps_completed = all(
-                str(dep_id) in completed_task_ids for dep_id in dependencies
-            )
-            if all_deps_completed:
-                return task
-
-        return None
+        return pending_tasks[0] if pending_tasks else None
 
     def mark_completed(self, db: Session, task_id: UUID) -> Optional[TaskPlan]:
         """Update task status to completed and set completed_at timestamp.

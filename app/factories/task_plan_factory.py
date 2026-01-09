@@ -63,11 +63,6 @@ class TaskPlanFactory:
             Dictionary ready for database insertion
         """
         metadata = {}
-        if task.estimated_complexity:
-            metadata["complexity"] = task.estimated_complexity
-
-        # Store dependency indices temporarily - will be resolved to UUIDs by caller
-        metadata["dependency_indices"] = task.dependencies
 
         return {
             "id": task_id or uuid4(),
@@ -75,7 +70,7 @@ class TaskPlanFactory:
             "task_order": task_order,
             "description": task.description,
             "status": TaskStatus.pending,
-            "dependencies": [],  # Will be populated after all tasks are created
+            "dependencies": [],
             "task_metadata": metadata,
             "created_at": TimestampUtils.now(),
             "updated_at": TimestampUtils.now(),
@@ -113,16 +108,6 @@ class TaskPlanFactory:
                 task=task,
                 task_order=idx,
                 task_id=task_ids[idx],
-            )
-
-            # Resolve dependency indices to UUIDs
-            resolved_dependencies = []
-            for dep_idx in task.dependencies:
-                if 0 <= dep_idx < len(task_ids):
-                    resolved_dependencies.append(task_ids[dep_idx])
-
-            task_data["dependencies"] = TaskPlanFactory._serialize_dependencies(
-                resolved_dependencies
             )
 
             # Store overall_goal in first task's metadata

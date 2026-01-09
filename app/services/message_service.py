@@ -926,7 +926,6 @@ class MessageService(IMessageService):
             "id": str(task.id),
             "description": task.description,
             "order": getattr(task, "task_order", getattr(task, "order", 0)),
-            "dependencies": [str(dep) for dep in (task.dependencies or [])],
             "status": (
                 task.status.value if hasattr(task.status, "value") else str(task.status)
             ),
@@ -1000,7 +999,6 @@ class MessageService(IMessageService):
                             else str(task.status)
                         ),
                         "task_order": task.task_order,
-                        "dependencies": [str(d) for d in (task.dependencies or [])],
                     }
                     for task in existing_tasks
                 ]
@@ -1137,13 +1135,6 @@ class MessageService(IMessageService):
                 "tasks": [
                     {
                         "description": todo.get("description", ""),
-                        "dependencies": [
-                            int(d)
-                            for d in todo.get("dependencies", [])
-                            if isinstance(d, int)
-                            or (isinstance(d, str) and d.isdigit())
-                        ],
-                        "estimated_complexity": todo.get("complexity"),
                     }
                     for todo in todos
                 ]
