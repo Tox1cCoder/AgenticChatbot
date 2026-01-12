@@ -562,13 +562,13 @@ Input: Build a web application
 Output:
 **Task 1:** Design database schema
 **Task 2:** Set up project structure
-**Task 3:** Create database models (depends on 0, 1)
-**Task 4:** Implement API endpoints (depends on 2)
-**Task 5:** Build frontend components (depends on 1)
-**Task 6:** Connect frontend to API (depends on 3, 4)
-**Task 7:** Add authentication (depends on 3, 4)
-**Task 8:** Write tests (depends on 3, 4, 5)
-**Task 9:** Deploy application (depends on 6, 7, 8)
+**Task 3:** Create database models
+**Task 4:** Implement API endpoints
+**Task 5:** Build frontend components
+**Task 6:** Connect frontend to API
+**Task 7:** Add authentication
+**Task 8:** Write tests
+**Task 9:** Deploy application
 
 # Response Format
 - Use markdown

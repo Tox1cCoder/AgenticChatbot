@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, TYPE_CHECKING, List, Dict, Any, Tuple
 from uuid import UUID
 
@@ -69,6 +69,10 @@ class MultiAgentWorkflow:
         self.checkpointer = checkpointer
         self.document_repository = document_repository
 
+        # Conversation history cache: conversation_id -> (history, timestamp)
+        self._history_cache: Dict[str, Tuple[List, datetime]] = {}
+        self._history_cache_ttl_seconds: int = 60  # Cache for 60 seconds
+
         self.graph = self._build_graph()
         self._cleanup_agents = [
             self.chat_agent,
@@ -96,19 +100,15 @@ class MultiAgentWorkflow:
         return messages[last_human_idx:]
 
     # ============================================================
-    # Shared Helper Methods (reduce duplication across agent nodes)
+    # Shared Helper Methods 
     # ============================================================
-
-    # Conversation history cache: conversation_id -> (history, timestamp)
-    _history_cache: Dict[str, Tuple[List, datetime]] = {}
-    _history_cache_ttl_seconds: int = 60  # Cache for 60 seconds
 
     async def _get_conversation_history(
         self, conversation_id: Optional[str], user_id: Optional[str]
     ) -> List:
         """
         Get conversation history with caching.
-        
+
         Caches history per conversation_id with TTL to avoid
         redundant database queries within a single graph execution.
         """
@@ -117,12 +117,12 @@ class MultiAgentWorkflow:
 
         # Check cache first
         cache_key = conversation_id
-        now = datetime.utcnow()
-        
+        now = datetime.now(timezone.utc)
+
         if cache_key in self._history_cache:
             cached_history, cached_time = self._history_cache[cache_key]
             age_seconds = (now - cached_time).total_seconds()
-            
+
             if age_seconds < self._history_cache_ttl_seconds:
                 return cached_history
 
@@ -132,10 +132,10 @@ class MultiAgentWorkflow:
                 UUID(conversation_id), UUID(user_id), force_refresh=True
             )
             history = conv_memory.get_recent_messages(limit=None, exclude_last=1)
-            
+
             # Cache the result
             self._history_cache[cache_key] = (history, now)
-            
+
             return history
         except Exception:
             return []
@@ -742,17 +742,17 @@ class MultiAgentWorkflow:
     async def _summarization_node(self, state: GraphState) -> GraphState:
         """
         Summarization node that runs ONCE at the start of each user request.
-        
+
         This node checks if the conversation history exceeds thresholds and,
         if so, summarizes older messages and REPLACES them in state.
-        
+
         Key design principles:
         - Runs once per request, not per agent iteration
         - Mutates state in place (replaces old messages, doesn't append)
         - Prevents context bloat during ReAct loops
         """
         from .summarization_middleware import summarize_if_needed_for_state
-        
+
         try:
             # This will check thresholds and apply summarization if needed
             # The function mutates state by replacing old messages with summary
@@ -760,7 +760,7 @@ class MultiAgentWorkflow:
         except Exception as e:
             # Log but don't fail the request if summarization errors
             logger.warning(f"Summarization node error (continuing anyway): {e}")
-        
+
         return state
 
     async def _route_node(self, state: GraphState) -> GraphState:
@@ -1032,7 +1032,7 @@ class MultiAgentWorkflow:
         todos = list(state.get("todos", []))  # Make a copy
         current_task_index = state.get("current_task_index")
         tool_outputs = []
-        
+
         # Track errors for circuit breaker
         context = state.get("context", {})
         had_error = False
@@ -1091,12 +1091,14 @@ class MultiAgentWorkflow:
             try:
                 if action == TodoAction.SET_TODOS.value or action == "set_todos":
                     new_todos = tool_args.get("todos", [])
-                    
+
                     # Validate max todos limit
                     max_todos = getattr(settings, "max_todos_per_plan", 50)
                     if len(new_todos) > max_todos:
                         result = f"Error: Plan exceeds maximum of {max_todos} todos (requested {len(new_todos)}). Please reduce the number of tasks."
-                        logger.warning(f"Rejected plan with {len(new_todos)} todos (max: {max_todos})")
+                        logger.warning(
+                            f"Rejected plan with {len(new_todos)} todos (max: {max_todos})"
+                        )
                     else:
                         todos = new_todos
                         current_task_index = 0 if todos else None
@@ -1288,19 +1290,25 @@ class MultiAgentWorkflow:
             context["planning_budget_reached"] = True
             context["pause_reason"] = "max_iterations_reached"
             state["context"] = context
-            logger.warning(f"Planning budget exceeded: {planning_call_count} >= {max_iterations}")
+            logger.warning(
+                f"Planning budget exceeded: {planning_call_count} >= {max_iterations}"
+            )
             return "end"
 
         # Circuit breaker: check consecutive errors
         context = state.get("context", {})
         consecutive_errors = context.get("consecutive_errors", 0)
-        max_consecutive_errors = getattr(settings, "planning_consecutive_errors_limit", 3)
-        
+        max_consecutive_errors = getattr(
+            settings, "planning_consecutive_errors_limit", 3
+        )
+
         if consecutive_errors >= max_consecutive_errors:
             context["planning_budget_reached"] = True
             context["pause_reason"] = "consecutive_errors_limit"
             state["context"] = context
-            logger.warning(f"Planning circuit breaker triggered: {consecutive_errors} consecutive errors")
+            logger.warning(
+                f"Planning circuit breaker triggered: {consecutive_errors} consecutive errors"
+            )
             return "end"
 
         context = state.get("context", {})
@@ -1568,7 +1576,7 @@ class MultiAgentWorkflow:
             # Run summarization ONCE at the start (same as graph-level behavior)
             # This ensures streaming path matches regular execute() path
             initial_state = await self._summarization_node(initial_state)
-            
+
             routed_state = await self._route_node(initial_state)
             selected_agent = routed_state.get("selected_agent")
             initial_state["selected_agent"] = selected_agent
@@ -1998,9 +2006,6 @@ class MultiAgentWorkflow:
                     ):
                         response.metadata["thinking_summary"] = accumulated_thinking
 
-                    # CRITICAL: Use accumulated_content if we streamed content
-                    # This ensures the final response matches what was actually streamed
-                    # and prevents duplicate content issues
                     if accumulated_content:
                         response.message.content = accumulated_content
 

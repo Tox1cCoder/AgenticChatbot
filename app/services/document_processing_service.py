@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import logging
 import os
 import time
@@ -238,7 +239,9 @@ class DocumentProcessingService:
                     "-f",
                     "true",
                     "-t",
-                    "false"
+                    "false",
+                    "-b",
+                    "pipeline"
                 ],
                 timeout=self.settings.mineru_timeout,
                 check=True,
@@ -269,14 +272,36 @@ class DocumentProcessingService:
             markdown_file = self._resolve_markdown_file(search_roots, filename_aliases)
             images_dir = markdown_file.parent / "images"
 
-            # Read markdown content
-            with open(markdown_file, "r", encoding="utf-8") as f:
-                markdown_content = f.read()
+            # Try to find content_list.json for structured metadata
+            content_list_path = markdown_file.parent / f"{markdown_file.stem}_content_list.json"
+            content_blocks = None
+            
+            if content_list_path.exists():
+                try:
+                    content_blocks = self._parse_content_list_json(content_list_path)
+                    logger.info(
+                        "Loaded %d content blocks from content_list.json for %s",
+                        len(content_blocks),
+                        original_filename or filename_without_ext,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to parse content_list.json for %s: %s. Falling back to markdown.",
+                        original_filename or filename_without_ext,
+                        str(e),
+                    )
+                    content_blocks = None
+            else:
+                logger.info(
+                    "content_list.json not found for %s, using markdown fallback",
+                    original_filename or filename_without_ext,
+                )
 
-            # Extract images metadata
+            # Extract images metadata from images directory
             images_data = []
-            page_to_images = {}
-            images_without_page = []
+            page_to_images: Dict[int, List[Dict[str, Any]]] = {}
+            images_without_page: List[Dict[str, Any]] = []
+            
             if images_dir.exists():
                 for img_file in images_dir.iterdir():
                     if img_file.is_file() and img_file.suffix.lower() in [
@@ -315,28 +340,44 @@ class DocumentProcessingService:
                                 image_entry
                             )
 
-            # Create chunks from markdown
-            documents = [
-                type(
-                    "Document", (), {"page_content": markdown_content, "metadata": {}}
-                )()
-            ]
-            chunks = self._create_chunks(documents)
-
-            # Build chunks with metadata
-            chunks_with_metadata = []
-            for chunk in chunks:
-                related_images: List[Dict[str, Any]] = []
-                if images_without_page:
-                    related_images = images_without_page.copy()
-
-                chunks_with_metadata.append(
-                    {
-                        "text": chunk,
-                        "has_images": bool(related_images),
-                        "image_count": len(related_images),
-                    }
+            # Build chunks with page metadata
+            if content_blocks:
+                # Use content_list.json for page-aware chunking
+                chunks_with_metadata = self._create_chunks_with_page_metadata(
+                    content_blocks,
+                    page_to_images,
+                    images_without_page,
+                    max_chunk_size=self.settings.document_chunk_size,
                 )
+            else:
+                # Fallback: Read markdown content and create chunks without page metadata
+                with open(markdown_file, "r", encoding="utf-8") as f:
+                    markdown_content = f.read()
+
+                documents = [
+                    type(
+                        "Document", (), {"page_content": markdown_content, "metadata": {}}
+                    )()
+                ]
+                chunks = self._create_chunks(documents)
+
+                chunks_with_metadata = []
+                for chunk in chunks:
+                    related_images: List[Dict[str, Any]] = []
+                    if images_without_page:
+                        related_images = images_without_page.copy()
+
+                    chunks_with_metadata.append(
+                        {
+                            "text": chunk,
+                            "page_start": None,
+                            "page_end": None,
+                            "has_images": bool(related_images),
+                            "image_count": len(related_images),
+                            "has_tables": False,
+                            "table_count": 0,
+                        }
+                    )
 
             # Store images data for later processing
             self._extracted_images = images_data
@@ -384,6 +425,169 @@ class DocumentProcessingService:
         )
         split_docs = text_splitter.split_documents(documents)
         return [doc.page_content for doc in split_docs]
+
+    def _parse_content_list_json(self, content_list_path: Path) -> List[Dict[str, Any]]:
+        """
+        Parse MinerU's content_list.json to extract structured content with metadata.
+        
+        Returns list of content blocks with:
+        - text/content: The actual content
+        - page_idx: Page number (0-indexed)
+        - bbox: Bounding box [x0, y0, x1, y1] (normalized to 0-1000)
+        - type: text, table, image, equation
+        - text_level: Heading level (0=body, 1=h1, 2=h2, etc.)
+        """
+        with open(content_list_path, "r", encoding="utf-8") as f:
+            content_list = json.load(f)
+        
+        return content_list
+
+    def _create_chunks_with_page_metadata(
+        self,
+        content_blocks: List[Dict[str, Any]],
+        page_to_images: Dict[int, List[Dict[str, Any]]],
+        images_without_page: List[Dict[str, Any]],
+        max_chunk_size: int = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Create chunks from content_list.json blocks while preserving page metadata.
+        
+        Strategy:
+        - Accumulate text from consecutive blocks
+        - Split when chunk exceeds max_chunk_size
+        - Track page_start and page_end for chunks spanning multiple pages
+        - Associate images and tables with their source pages
+        """
+        if max_chunk_size is None:
+            max_chunk_size = self.settings.document_chunk_size
+
+        chunks_with_metadata: List[Dict[str, Any]] = []
+        current_chunk_text = ""
+        current_page_start: Optional[int] = None
+        current_page_end: Optional[int] = None
+        current_images: List[Dict[str, Any]] = []
+        current_tables: List[Dict[str, Any]] = []
+        pages_in_current_chunk: set = set()
+
+        def _finalize_chunk():
+            """Save current accumulated chunk if it has content."""
+            nonlocal current_chunk_text, current_page_start, current_page_end
+            nonlocal current_images, current_tables, pages_in_current_chunk
+            
+            if not current_chunk_text.strip():
+                return
+            
+            # Gather images for pages in this chunk
+            chunk_images = current_images.copy()
+            for page in pages_in_current_chunk:
+                if page in page_to_images:
+                    for img in page_to_images[page]:
+                        if img not in chunk_images:
+                            chunk_images.append(img)
+            
+            # Add images without page info to first chunk only
+            if not chunks_with_metadata and images_without_page:
+                for img in images_without_page:
+                    if img not in chunk_images:
+                        chunk_images.append(img)
+            
+            chunks_with_metadata.append({
+                "text": current_chunk_text.strip(),
+                "page_start": current_page_start,
+                "page_end": current_page_end,
+                "has_images": bool(chunk_images),
+                "image_count": len(chunk_images),
+                "images": chunk_images,
+                "has_tables": bool(current_tables),
+                "table_count": len(current_tables),
+                "tables": current_tables,
+            })
+            
+            # Reset for next chunk
+            current_chunk_text = ""
+            current_page_start = None
+            current_page_end = None
+            current_images = []
+            current_tables = []
+            pages_in_current_chunk = set()
+
+        for block in content_blocks:
+            page_idx = block.get("page_idx", 0)
+            block_type = block.get("type", "text")
+            bbox = block.get("bbox")
+            text_level = block.get("text_level", 0)
+            
+            # Extract text content based on block type
+            text = ""
+            if block_type == "text":
+                text = block.get("text", "")
+                # Add markdown heading prefix based on text_level
+                if text_level and text_level > 0:
+                    heading_prefix = "#" * text_level + " "
+                    text = heading_prefix + text
+            elif block_type == "table":
+                # Store table metadata, include body if available
+                table_entry = {
+                    "page": page_idx,
+                    "bbox": bbox,
+                    "caption": block.get("table_caption", []),
+                    "footnote": block.get("table_footnote", []),
+                    "body": block.get("table_body", ""),
+                }
+                current_tables.append(table_entry)
+                # Include caption text in chunk for searchability
+                captions = block.get("table_caption", [])
+                if captions:
+                    text = "[Table: " + " ".join(captions) + "]"
+            elif block_type == "image":
+                # Store image metadata from content_list
+                image_entry = {
+                    "page": page_idx,
+                    "bbox": bbox,
+                    "path": block.get("img_path", ""),
+                    "caption": block.get("image_caption", []),
+                    "footnote": block.get("image_footnote", []),
+                }
+                current_images.append(image_entry)
+                # Include caption text in chunk for searchability
+                captions = block.get("image_caption", [])
+                if captions:
+                    text = "[Image: " + " ".join(captions) + "]"
+            elif block_type == "equation":
+                # Include equation text
+                text = block.get("text", "")
+                if not text:
+                    text = "[Equation]"
+            else:
+                # Fallback for any other block type
+                text = block.get("text", "")
+            
+            # Check if adding this block would exceed chunk size
+            proposed_length = len(current_chunk_text) + len(text) + 1  # +1 for newline
+            if current_chunk_text and proposed_length > max_chunk_size:
+                _finalize_chunk()
+            
+            # Update page tracking
+            if current_page_start is None:
+                current_page_start = page_idx
+            current_page_end = page_idx
+            pages_in_current_chunk.add(page_idx)
+            
+            # Append text
+            if text:
+                current_chunk_text += text + "\n"
+
+        # Finalize the last chunk
+        _finalize_chunk()
+        
+        logger.info(
+            "Created %d page-aware chunks from %d content blocks",
+            len(chunks_with_metadata),
+            len(content_blocks),
+        )
+        
+        return chunks_with_metadata
+
 
     @staticmethod
     def _normalize_filename_token(value: str) -> str:
@@ -709,6 +913,17 @@ class DocumentProcessingService:
                 ):
                     payload["table_count"] = int(chunk_data["table_count"])
 
+                # Add page metadata for citations
+                if "page_start" in chunk_data and chunk_data["page_start"] is not None:
+                    # Convert 0-indexed page_idx to 1-indexed page number for user display
+                    payload["page_start"] = int(chunk_data["page_start"]) + 1
+                if "page_end" in chunk_data and chunk_data["page_end"] is not None:
+                    payload["page_end"] = int(chunk_data["page_end"]) + 1
+                # Also store single page_number for compatibility
+                if "page_start" in chunk_data and chunk_data["page_start"] is not None:
+                    if chunk_data.get("page_start") == chunk_data.get("page_end"):
+                        payload["page_number"] = int(chunk_data["page_start"]) + 1
+
             point = PointStruct(
                 id=safe_point_id,
                 vector=embedding,
@@ -778,17 +993,20 @@ class DocumentProcessingService:
                 chunk_id = None
                 page_number = img_data.get("page_number")
 
-                if page_number and chunk_id_mapping and chunks_with_metadata:
+                if page_number is not None and chunk_id_mapping and chunks_with_metadata:
                     for chunk_idx, chunk_data in enumerate(chunks_with_metadata):
                         page_start = chunk_data.get("page_start")
                         page_end = chunk_data.get("page_end")
 
-                        if page_start and page_end:
-                            if page_start <= page_number <= page_end:
-                                chunk_id = chunk_id_mapping.get(chunk_idx)
-                                break
+                        if (
+                            page_start is not None
+                            and page_end is not None
+                            and page_start <= page_number <= page_end
+                        ):
+                            chunk_id = chunk_id_mapping.get(chunk_idx)
+                            break
 
-                    if not chunk_id and chunk_id_mapping:
+                    if chunk_id is None and chunk_id_mapping:
                         chunk_id = chunk_id_mapping.get(0)
                 elif chunk_id_mapping:
                     chunk_id = chunk_id_mapping.get(0)

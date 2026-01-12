@@ -171,7 +171,9 @@ class RAGAgent:
 
         for doc in retrieved_docs:
             # Use document_id as primary key, fallback to source
-            doc_key = doc.get("document_id") or doc.get("source", "unknown")
+            # Normalize empty strings to None to prevent duplicate grouping
+            raw_doc_id = doc.get("document_id")
+            doc_key = raw_doc_id if raw_doc_id else doc.get("source", "unknown")
 
             if doc_key not in doc_grouping:
                 doc_grouping[doc_key] = {
@@ -405,7 +407,9 @@ class RAGAgent:
         next_doc_num = 1
 
         for doc in retrieved_docs:
-            doc_key = doc.get("document_id") or doc.get("source", "unknown")
+            # Normalize empty strings to None to prevent duplicate grouping
+            raw_doc_id = doc.get("document_id")
+            doc_key = raw_doc_id if raw_doc_id else doc.get("source", "unknown")
 
             if doc_key not in doc_grouping:
                 doc_grouping[doc_key] = {
@@ -968,13 +972,6 @@ class RAGAgent:
             query_filter=search_filter,
         ).points
 
-        if not search_results and conversation_id:
-            search_results = self.qdrant_client.query_points(
-                collection_name=self.collection_name,
-                query=query_embedding,
-                limit=top_k,
-                score_threshold=self.score_threshold,
-            ).points
 
         results = []
         for result in search_results:
@@ -986,8 +983,8 @@ class RAGAgent:
                     "page_number": result.payload.get("page_number"),
                     "page_start": result.payload.get("page_start"),
                     "page_end": result.payload.get("page_end"),
-                    "document_id": result.payload.get("document_id", ""),
-                    "conversation_id": result.payload.get("conversation_id", ""),
+                    "document_id": result.payload.get("document_id") or None,
+                    "conversation_id": result.payload.get("conversation_id") or None,
                     "chunk_index": result.payload.get("chunk_index", 0),
                     "has_tables": result.payload.get("has_tables", False),
                     "table_count": result.payload.get("table_count", 0),

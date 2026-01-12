@@ -399,15 +399,18 @@ class MessageService(IMessageService):
             ),
         }
 
-        # Start async title generation if this is the first user message
+        # Start async title generation only if this is a user message and the first one
         title_task = None
-        needs_title = self._is_first_user_message(message_create_data.conversation_id)
-        if needs_title:
-            title_task = asyncio.create_task(
-                self._generate_title_async(
-                    message_create_data.conversation_id, message_create_data.content
-                )
+        if message_create_data.role == MessageRole.user:
+            needs_title = self._is_first_user_message(
+                message_create_data.conversation_id
             )
+            if needs_title:
+                title_task = asyncio.create_task(
+                    self._generate_title_async(
+                        message_create_data.conversation_id, message_create_data.content
+                    )
+                )
 
         def _cancel_title_task():
             """Cancel title task if running to prevent resource leaks."""
