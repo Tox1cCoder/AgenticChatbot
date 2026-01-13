@@ -86,7 +86,6 @@ def should_summarize(
     if not getattr(settings, "enable_summarization", True):
         return False
 
-    # Don't re-summarize if already done in this request
     if already_summarized:
         return False
 
@@ -96,7 +95,6 @@ def should_summarize(
     # Filter out system messages for threshold checks
     non_system_messages = [m for m in messages if not isinstance(m, SystemMessage)]
 
-    # Don't summarize if we have fewer messages than we'd keep
     if len(non_system_messages) <= config.keep_messages:
         return False
 

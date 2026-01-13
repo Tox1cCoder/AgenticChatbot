@@ -3790,7 +3790,6 @@ def render_chat_view():
                             "Creating conversation...", expanded=True
                         ) as status:
                             # Use placeholder title - backend will generate and update it in parallel
-                            # with the first message response for better perceived performance
                             conversation_data = {"title": "New Conversation"}
                             pending_persona = st.session_state.get(
                                 "pending_persona_prompt", ""

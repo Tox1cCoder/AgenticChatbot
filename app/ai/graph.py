@@ -235,7 +235,6 @@ class MultiAgentWorkflow:
         initial_state["context"]["has_existing_plan"] = has_existing_plan
         if existing_tasks:
             initial_state["context"]["existing_tasks"] = existing_tasks
-            # CRITICAL: Initialize todos from existing tasks for planning agent
             initial_state["todos"] = existing_tasks
             initial_state["current_task_index"] = self._find_first_pending_task(
                 existing_tasks
