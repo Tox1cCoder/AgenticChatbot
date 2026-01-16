@@ -19,7 +19,6 @@ from .schemas import (
     MessageRole,
     InterruptDecision,
     TodoStatus,
-    DocumentAction,
 )
 from .agents.router import Router
 from .agents.chat_agent import ChatAgent
@@ -31,6 +30,8 @@ from .summarization_middleware import summarize_for_state
 from .memory import get_memory_manager
 from ..core.config import settings
 from .hitl_config import build_interrupt_response, requires_human_approval
+from .rag_tool_actions import execute_search_documents_action
+from .todo_actions import apply_write_todos_action
 from .utils import normalize_tool_call, coerce_response_text, make_json_safe, extract_content_from_result
 from ..core.response_constants import NO_RESPONSE_GENERATED
 
@@ -907,38 +908,6 @@ class MultiAgentWorkflow:
         all_images: List[Dict[str, str]] = []
         max_agentic_images = getattr(settings, "agentic_rag_max_images", 6)
 
-        def _merge_agentic_images(new_images: List[Dict[str, Any]]) -> int:
-            """Merge images into agentic_images with dedupe + size cap."""
-            if not new_images:
-                return 0
-
-            existing = context.get("agentic_images") or []
-            existing_ids = {
-                img.get("id")
-                for img in existing
-                if isinstance(img, dict) and img.get("id")
-            }
-
-            added = 0
-            for img in new_images:
-                if not isinstance(img, dict):
-                    continue
-                img_id = img.get("id")
-                if img_id and img_id in existing_ids:
-                    continue
-                existing.append(img)
-                if img_id:
-                    existing_ids.add(img_id)
-                added += 1
-                if len(existing) >= max_agentic_images:
-                    break
-
-            if len(existing) > max_agentic_images:
-                existing = existing[-max_agentic_images:]
-
-            context["agentic_images"] = existing
-            return added
-
         # Track agentic iteration count
         agentic_iteration = context.get("agentic_rag_iteration", 0) + 1
         context["agentic_rag_iteration"] = agentic_iteration
@@ -1108,156 +1077,13 @@ class MultiAgentWorkflow:
                 )
                 continue
 
-            action = tool_args.get("action")
-            if isinstance(action, str):
-                action = action.strip().lower()
-            elif hasattr(action, "value"):
-                action = action.value
-            result = ""
-
-            try:
-                if action == DocumentAction.SCAN_ALL.value:
-                    # Scan all documents and return previews
-                    if conversation_id:
-                        result = await self.rag_agent.scan_all_documents(conversation_id)
-                    else:
-                        result = "Error: No conversation_id available for scan"
-
-                elif action == DocumentAction.READ_DOCUMENT.value:
-                    document_id = tool_args.get("document_id")
-                    if document_id:
-                        content = await self.rag_agent.get_document_full_content(document_id)
-                        if content:
-                            result = f"DOCUMENT CONTENT ({document_id}):\n\n{content}"
-                        else:
-                            result = f"Document {document_id} not found or empty"
-                    else:
-                        result = "Error: document_id required for READ_DOCUMENT"
-
-                elif action == DocumentAction.SEARCH_CHUNKS.value:
-                    query = tool_args.get("query")
-                    if query:
-                        search_results = await self.rag_agent._search(
-                            query, conversation_id=conversation_id
-                        )
-                        if search_results:
-                            attached_count = 0
-                            try:
-                                images_for_chunks = (
-                                    await self.rag_agent._fetch_images_for_chunks(
-                                        search_results
-                                    )
-                                )
-                                attached_count = _merge_agentic_images(images_for_chunks)
-                            except Exception:
-                                attached_count = 0
-
-                            result = "SEARCH RESULTS:\n\n"
-                            for i, doc in enumerate(search_results[:10], 1):
-                                source = doc.get("source", "unknown")
-                                score = doc.get("score", 0)
-                                doc_id = doc.get("document_id") or "unknown"
-
-                                page_number = doc.get("page_number")
-                                page_start = doc.get("page_start")
-                                page_end = doc.get("page_end")
-
-                                image_ids = doc.get("image_ids") or []
-                                image_captions = [
-                                    cap for cap in (doc.get("image_captions") or []) if cap
-                                ]
-
-                                has_tables = bool(doc.get("has_tables", False))
-                                table_count = doc.get("table_count", 0) or 0
-
-                                meta_parts = [f"Document ID: {doc_id}"]
-                                if page_number:
-                                    meta_parts.append(f"Page: {page_number}")
-                                elif page_start or page_end:
-                                    start_label = page_start if page_start is not None else "?"
-                                    end_label = page_end if page_end is not None else "?"
-                                    meta_parts.append(f"Pages: {start_label}-{end_label}")
-
-                                if image_ids:
-                                    meta_parts.append(f"Images: {len(image_ids)}")
-                                    if image_captions:
-                                        preview = ", ".join(image_captions[:3])
-                                        more = "…" if len(image_captions) > 3 else ""
-                                        meta_parts.append(f"Image captions: {preview}{more}")
-
-                                if has_tables or table_count:
-                                    meta_parts.append(f"Tables: {int(table_count)}")
-
-                                content = (doc.get("content") or "")[:500]
-                                result += (
-                                    f"[{i}] {source} (score: {score:.2%})\n"
-                                    f"  {' | '.join(meta_parts)}\n"
-                                    f"{content}\n\n"
-                                )
-
-                            if attached_count:
-                                result += (
-                                    f"(Attached {attached_count} image(s) from matching chunks for multimodal analysis.)\n"
-                                )
-                        else:
-                            result = "No search results found"
-                    else:
-                        result = "Error: query required for SEARCH_CHUNKS"
-
-                elif action == DocumentAction.GREP_DOCUMENT.value:
-                    document_id = tool_args.get("document_id")
-                    pattern = tool_args.get("pattern")
-                    if document_id and pattern:
-                        result = await self.rag_agent.grep_document(document_id, pattern)
-                    else:
-                        result = "Error: document_id and pattern required for GREP_DOCUMENT"
-
-                elif action == DocumentAction.LIST_DOCUMENTS.value:
-                    if conversation_id:
-                        documents = await self.rag_agent.list_conversation_documents(
-                            conversation_id
-                        )
-                        if documents:
-                            result = "AVAILABLE DOCUMENTS:\n\n"
-                            for i, doc in enumerate(documents, 1):
-                                result += (
-                                    f"{i}. {doc['filename']} "
-                                    f"(ID: {doc['document_id']}, "
-                                    f"Chunks: {doc['chunk_count']})\n"
-                                )
-                        else:
-                            result = "No documents found in this conversation"
-                    else:
-                        result = "Error: No conversation_id available"
-
-                elif action == DocumentAction.VIEW_IMAGES.value:
-                    document_id = tool_args.get("document_id")
-                    if document_id:
-                        images = await self.rag_agent.get_document_images(document_id)
-                        if images:
-                            attached_count = _merge_agentic_images(images)
-                            result = (
-                                f"IMAGES ({len(images)} found, {attached_count} added to context):\n\n"
-                            )
-                            for i, img in enumerate(images, 1):
-                                page = img.get("page_number", "?")
-                                caption = img.get("caption") or "No caption"
-                                result += f"[{i}] Page {page}: {caption}\n"
-                        else:
-                            result = f"No images found for document {document_id}"
-                    else:
-                        result = "Error: document_id required for VIEW_IMAGES"
-
-                else:
-                    result = f"Unknown action: {action}"
-
-            except Exception as e:
-                result = f"Error executing {action}: {str(e)}"
-
-            # Log the action for user visibility
-            reason = tool_args.get("reason", "")
-            if reason:
-                logger.debug(f"RAG Agentic: {action} - {reason}")
+            result, _ = await execute_search_documents_action(
+                rag_agent=self.rag_agent,
+                conversation_id=conversation_id,
+                tool_args=tool_args,
+                context=context,
+                max_agentic_images=max_agentic_images,
+            )
 
             tool_outputs.append({
                 "tool_call_id": tool_id,
@@ -1456,8 +1282,6 @@ class MultiAgentWorkflow:
         return state
 
     async def _planning_tools_node(self, state: GraphState) -> GraphState:
-        from .schemas import TodoAction, TodoStatus
-
         messages = state.get("messages", [])
         if not messages:
             return state
@@ -1469,10 +1293,12 @@ class MultiAgentWorkflow:
         todos = list(state.get("todos", []))  # Make a copy
         current_task_index = state.get("current_task_index")
         tool_outputs = []
+        write_todos_actions: List[str] = []
 
         # Track errors for circuit breaker
         context = state.get("context", {})
         had_error = False
+        max_todos = getattr(settings, "max_todos_per_plan", 50)
 
         for tool_call in last_message.tool_calls:
             tool_call_data = normalize_tool_call(tool_call)
@@ -1522,100 +1348,26 @@ class MultiAgentWorkflow:
                     had_error = True  # Mark error for circuit breaker
                 continue
 
-            action = tool_args.get("action")
-            result = ""
-
             try:
-                if action == TodoAction.SET_TODOS.value or action == "set_todos":
-                    new_todos = tool_args.get("todos", [])
+                todos, current_task_index, result, action = apply_write_todos_action(
+                    todos=todos,
+                    current_task_index=current_task_index,
+                    tool_args=tool_args,
+                    max_todos=max_todos,
+                )
+                write_todos_actions.append(action)
 
-                    # Validate max todos limit
-                    max_todos = getattr(settings, "max_todos_per_plan", 50)
-                    if len(new_todos) > max_todos:
-                        result = f"Error: Plan exceeds maximum of {max_todos} todos (requested {len(new_todos)}). Please reduce the number of tasks."
-                        logger.warning(
-                            f"Rejected plan with {len(new_todos)} todos (max: {max_todos})"
-                        )
-                    else:
-                        todos = new_todos
-                        current_task_index = 0 if todos else None
-                        result = f"Set {len(todos)} todos in the plan."
-
-                elif action == TodoAction.ADD_TODO.value or action == "add_todo":
-                    new_todo = tool_args.get("todo", {})
-                    if new_todo:
-                        new_todo["order"] = len(todos)
-                        todos.append(new_todo)
-                        result = f"Added todo: {new_todo.get('description', 'unknown')}"
-                    else:
-                        result = "Error: No todo provided for ADD_TODO"
-
-                elif (
-                    action == TodoAction.COMPLETE_TODO.value
-                    or action == "complete_todo"
+                if action == "set_todos" and result.startswith(
+                    "Error: Plan exceeds maximum"
                 ):
-                    todo_id = tool_args.get("todo_id")
-                    for i, todo in enumerate(todos):
-                        if todo.get("id") == todo_id:
-                            todo["status"] = TodoStatus.COMPLETED.value
-                            result = (
-                                f"Completed todo: {todo.get('description', todo_id)}"
-                            )
-                            if (
-                                current_task_index is not None
-                                and i == current_task_index
-                            ):
-                                current_task_index = self._find_next_ready_task(
-                                    todos, i
-                                )
-                            break
-                    else:
-                        result = f"Todo with id {todo_id} not found"
-
-                elif action == TodoAction.START_TODO.value or action == "start_todo":
-                    todo_id = tool_args.get("todo_id")
-                    for i, todo in enumerate(todos):
-                        if todo.get("id") == todo_id:
-                            todo["status"] = TodoStatus.IN_PROGRESS.value
-                            current_task_index = i
-                            result = f"Started todo: {todo.get('description', todo_id)}"
-                            break
-                    else:
-                        result = f"Todo with id {todo_id} not found"
-
-                elif action == TodoAction.UPDATE_TODO.value or action == "update_todo":
-                    updated_todo = tool_args.get("todo", {})
-                    todo_id = updated_todo.get("id")
-                    for i, todo in enumerate(todos):
-                        if todo.get("id") == todo_id:
-                            todos[i] = {**todo, **updated_todo}
-                            result = f"Updated todo: {todo_id}"
-                            break
-                    else:
-                        result = f"Todo with id {todo_id} not found"
-
-                elif action == TodoAction.REMOVE_TODO.value or action == "remove_todo":
-                    todo_id = tool_args.get("todo_id")
-                    for i, todo in enumerate(todos):
-                        if todo.get("id") == todo_id:
-                            todos.pop(i)
-                            result = f"Removed todo: {todo_id}"
-                            # Adjust current task index if needed
-                            if current_task_index is not None:
-                                if i < current_task_index:
-                                    current_task_index -= 1
-                                elif i == current_task_index:
-                                    current_task_index = self._find_next_ready_task(
-                                        todos, max(0, i - 1)
-                                    )
-                            break
-                    else:
-                        result = f"Todo with id {todo_id} not found"
-
-                else:
-                    result = f"Unknown action: {action}"
+                    requested = len(tool_args.get("todos", []) or [])
+                    logger.warning(
+                        "Rejected plan with %d todos (max: %d)", requested, max_todos
+                    )
 
             except Exception as e:
+                raw_action = tool_args.get("action")
+                action = raw_action.value if hasattr(raw_action, "value") else raw_action
                 result = f"Error executing {action}: {str(e)}"
                 had_error = True  # Mark error for circuit breaker
 
@@ -1647,20 +1399,13 @@ class MultiAgentWorkflow:
         plan_modifying_actions = {"set_todos", "add_todo", "update_todo", "remove_todo"}
         execution_actions = {"start_todo", "complete_todo"}
 
-        for tool_call in last_message.tool_calls:
-            tool_call_data = normalize_tool_call(tool_call)
-            if tool_call_data.get("name") == "write_todos":
-                action = tool_call_data.get("args", {}).get("action", "")
-
-                # Plan modification actions - return to agent for confirmation
-                if action in plan_modifying_actions:
-                    context["plan_just_modified"] = True
-                    state["context"] = context
-
-                # Execution actions - switch to executing phase
-                if action in execution_actions:
-                    state["planning_phase"] = "executing"
-                    logger.debug(f"Switched to executing phase due to {action} action")
+        for action in write_todos_actions:
+            if action in plan_modifying_actions:
+                context["plan_just_modified"] = True
+            if action in execution_actions:
+                state["planning_phase"] = "executing"
+                logger.debug(f"Switched to executing phase due to {action} action")
+        state["context"] = context
 
         # Add tool artifacts to response for UI visibility
         response = state.get("response")
@@ -1692,16 +1437,6 @@ class MultiAgentWorkflow:
         state["context"] = context
 
         return state
-
-    def _find_next_ready_task(self, todos: list, start_index: int = 0) -> Optional[int]:
-        """Find the next task that is ready to execute (pending)."""
-        from .schemas import TodoStatus
-
-        for i in range(start_index, len(todos)):
-            todo = todos[i]
-            if todo.get("status") == TodoStatus.PENDING.value:
-                return i
-        return None
 
     def _should_call_planning_tools(self, state: GraphState) -> str:
         messages = state.get("messages", [])

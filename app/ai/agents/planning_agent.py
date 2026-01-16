@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import json
 import uuid
 from textwrap import dedent
 from typing import Any, Dict, Iterable, List, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.tools import tool
 
 from ...core.config import settings
+from ..planning_tools import create_write_todos_tool
 from ..prompts import PLANNING_EXECUTION_PROMPT
 from ..schemas import (
     AgentMessage,
@@ -17,52 +16,11 @@ from ..schemas import (
     MessageRole,
     Plan,
     Task,
-    TodoAction,
     TodoStatus,
-    TodoItem,
-    WriteTodosInput,
 )
+from ..todo_actions import apply_write_todos_action
 from ..utils import coerce_response_text, normalize_tool_call
 from .base_agent import BaseAgent
-
-
-def create_write_todos_tool():
-    """Expose the write_todos schema to the LLM.
-
-    In the LangGraph workflow, write_todos is executed by `app/ai/graph.py` in the
-    planning tools node. This implementation mainly exists to provide a validated
-    schema (WriteTodosInput) to the model.
-    """
-
-    @tool(args_schema=WriteTodosInput)
-    def write_todos(
-        action: TodoAction,
-        todos: Optional[List[TodoItem]] = None,
-        todo: Optional[TodoItem] = None,
-        todo_id: Optional[str] = None,
-        reason: Optional[str] = None,
-    ) -> str:
-        action_value = action.value if hasattr(action, "value") else str(action)
-        if action == TodoAction.SET_TODOS:
-            return f"Set {len(todos or [])} todos."
-        if action == TodoAction.ADD_TODO:
-            desc = getattr(todo, "description", None) if todo else None
-            return f"Added todo: {desc or 'unknown'}"
-        if action == TodoAction.UPDATE_TODO:
-            ref = getattr(todo, "id", None) if todo else None
-            return f"Updated todo: {ref or 'unknown'}"
-        if action == TodoAction.REMOVE_TODO:
-            return f"Removed todo: {todo_id or 'unknown'}"
-        if action == TodoAction.START_TODO:
-            return f"Started todo: {todo_id or 'unknown'}"
-        if action == TodoAction.COMPLETE_TODO:
-            msg = f"Completed todo: {todo_id or 'unknown'}"
-            if reason:
-                msg += f" ({reason})"
-            return msg
-        return f"Unsupported action: {action_value}"
-
-    return write_todos
 
 
 class PlanningAgent(BaseAgent):
@@ -333,82 +291,20 @@ class PlanningAgent(BaseAgent):
             if tool_call.get("name") != "write_todos":
                 continue
 
-            args = tool_call.get("args") or {}
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    continue
-            if not isinstance(args, dict):
+            try:
+                todos, _, _, _ = apply_write_todos_action(
+                    todos=todos,
+                    current_task_index=None,
+                    tool_args=tool_call.get("args"),
+                    max_todos=max_todos,
+                )
+            except Exception:
                 continue
-
-            action_raw = args.get("action")
-            action = action_raw.value if hasattr(action_raw, "value") else str(action_raw or "")
-
-            if action == TodoAction.SET_TODOS.value:
-                new_todos = args.get("todos") or []
-                if not isinstance(new_todos, list):
-                    continue
-                if len(new_todos) > max_todos:
-                    continue
-                todos = [self._coerce_todo_item(t, i) for i, t in enumerate(new_todos)]
-
-            elif action == TodoAction.ADD_TODO.value:
-                new_todo = args.get("todo")
-                if not new_todo:
-                    continue
-                todos.append(self._coerce_todo_item(new_todo, len(todos)))
-
-            elif action == TodoAction.UPDATE_TODO.value:
-                updated_todo = args.get("todo")
-                if not updated_todo:
-                    continue
-                updated = self._coerce_todo_item(updated_todo, 0)
-                todo_id = updated.get("id")
-                if not todo_id:
-                    continue
-                for i, todo in enumerate(todos):
-                    if str(todo.get("id")) == str(todo_id):
-                        todos[i] = {**todo, **updated}
-                        break
-
-            elif action == TodoAction.REMOVE_TODO.value:
-                todo_id = args.get("todo_id")
-                if not todo_id:
-                    continue
-                todos = [t for t in todos if str(t.get("id")) != str(todo_id)]
-
-            elif action == TodoAction.START_TODO.value:
-                todo_id = args.get("todo_id")
-                for todo in todos:
-                    if str(todo.get("id")) == str(todo_id):
-                        todo["status"] = TodoStatus.IN_PROGRESS.value
-                        break
-
-            elif action == TodoAction.COMPLETE_TODO.value:
-                todo_id = args.get("todo_id")
-                for todo in todos:
-                    if str(todo.get("id")) == str(todo_id):
-                        todo["status"] = TodoStatus.COMPLETED.value
-                        break
 
         if len(todos) > max_todos:
             todos = todos[:max_todos]
 
         return todos
-
-    def _coerce_todo_item(self, raw_todo: Any, fallback_order: int) -> Dict[str, Any]:
-        if hasattr(raw_todo, "model_dump"):
-            todo = raw_todo.model_dump()
-        elif isinstance(raw_todo, dict):
-            todo = dict(raw_todo)
-        else:
-            todo = {"description": str(raw_todo)}
-
-        todo.setdefault("id", str(uuid.uuid4()))
-        todo.setdefault("status", TodoStatus.PENDING.value)
-        todo.setdefault("order", fallback_order)
-        return todo
 
     def _todos_to_plan(self, *, todos: List[Dict[str, Any]], overall_goal: Optional[str]) -> Plan:
         def sort_key(item: Dict[str, Any]) -> int:
