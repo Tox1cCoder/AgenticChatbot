@@ -90,6 +90,11 @@ class MessageService(IMessageService):
             message_metadata=metadata,
         )
         bot_message = self.repository.create(bot_response_entity)
+        try:
+            if getattr(self.ai_service, "workflow", None):
+                self.ai_service.workflow.invalidate_history_cache(str(conversation_id))
+        except Exception:
+            pass
         return MessageRead.model_validate(bot_message)
 
     async def _generate_and_add_suggestions(
@@ -1210,7 +1215,6 @@ class MessageService(IMessageService):
                 )
 
         # Handle removed tasks - delete tasks that are in DB but not in todos
-        # Only if we have valid IDs to compare (skip if todos have generated IDs)
         if todo_ids_in_response and all(
             todo_id not in ("", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
             for todo_id in todo_ids_in_response

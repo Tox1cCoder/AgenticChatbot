@@ -15,13 +15,14 @@ from qdrant_client.models import (
     FilterSelector,
 )
 from sentence_transformers import SentenceTransformer, CrossEncoder
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_core.tools import BaseTool
 from langchain.agents import create_agent
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import build_rag_prompt
+from ..prompts import build_rag_prompt, AGENTIC_RAG_SYSTEM_PROMPT
 from ..agent_config import create_langchain_model, create_gemini_client, AGENT_CONFIG
+from ..rag_tools import create_search_documents_tool
 from ..mcp_integration import get_global_mcp_manager
 from ...core.config import settings, Settings
 from ..utils import (
@@ -65,6 +66,11 @@ class RAGAgent:
         # Thinking support
         self._last_thinking_summary = None
 
+        # Agentic RAG mode
+        self.agentic_mode = settings.agentic_rag_enabled
+        self.agentic_max_iterations = settings.agentic_max_iterations
+        self.agentic_preview_chars = settings.agentic_preview_chars
+
         self._init_gemini()
 
         # Initialize re-ranker if enabled
@@ -87,9 +93,11 @@ class RAGAgent:
         if self.mcp_manager is not None:
             return
 
+        # Try to load MCP tools
         try:
             self.mcp_manager = await get_global_mcp_manager()
             all_tools = await self.mcp_manager.get_tools()
+            self.tools = self._deduplicate_tools(all_tools)
         except Exception as e:
             logger.error(
                 "Failed to get global MCP manager for RAGAgent: %s",
@@ -97,22 +105,36 @@ class RAGAgent:
                 exc_info=True,
             )
             self.tools = []
-            return
+            self.mcp_manager = None  # Mark as failed but continue
 
-        self.tools = self._deduplicate_tools(all_tools)
+        # ALWAYS add search_documents tool for agentic mode (even if MCP failed)
+        if self.agentic_mode:
+            search_documents_tool = create_search_documents_tool()
+            tool_names = {tool.name for tool in self.tools}
+            if search_documents_tool.name not in tool_names:
+                self.tools.insert(0, search_documents_tool)
 
-        server_status = self.mcp_manager.get_servers_status()
-        active_servers = [
-            name for name, status in server_status.items() if status.get("enabled")
-        ]
-        if self.tools:
-            logger.info(
-                "Loaded %d MCP tools for RAGAgent from %d servers",
-                len(self.tools),
-                len(active_servers),
-            )
+        # Log status if MCP manager is available
+        if self.mcp_manager:
+            server_status = self.mcp_manager.get_servers_status()
+            active_servers = [
+                name for name, status in server_status.items() if status.get("enabled")
+            ]
+            if self.tools:
+                logger.debug(
+                    "Loaded %d MCP tools for RAGAgent from %d servers",
+                    len(self.tools),
+                    len(active_servers),
+                )
+            else:
+                logger.warning("No MCP tools available for RAGAgent; running without tools")
         else:
-            logger.warning("No MCP tools available for RAGAgent; running without tools")
+            # MCP failed but we should still have search_documents for agentic mode
+            if self.tools:
+                logger.debug(
+                    "RAGAgent running with %d tools (MCP unavailable)",
+                    len(self.tools),
+                )
 
     def _deduplicate_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
         unique_tools: Dict[str, BaseTool] = {}
@@ -162,11 +184,16 @@ class RAGAgent:
         if self.mcp_manager is None:
             await self._init_tools()
 
+        # === Agentic Mode Path ===
+        # If agentic mode is enabled, use the LLM with search_documents tool
+        # The graph will handle the tool execution and loop back
+        if self.agentic_mode and self.langchain_model:
+            return await self._process_message_agentic(message, conversation_id)
+
+        # === Traditional RAG Path ===
         retrieved_docs = await self._search(query, conversation_id=conversation_id)
 
-        # Create document grouping structure
         doc_grouping = {}
-        doc_id_to_num = {}
         next_doc_num = 1
 
         for doc in retrieved_docs:
@@ -182,7 +209,6 @@ class RAGAgent:
                     "document_number": next_doc_num,
                     "chunks": [],
                 }
-                doc_id_to_num[doc_key] = next_doc_num
                 next_doc_num += 1
 
             # Add chunk details to document group
@@ -205,7 +231,6 @@ class RAGAgent:
             retrieved_docs,
             conversation_history,
             persona=persona,
-            document_grouping=doc_grouping,
             has_images=bool(images),
         )
 
@@ -395,15 +420,18 @@ class RAGAgent:
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
 
-        # Initialize tools if not done yet
         if self.mcp_manager is None:
             await self._init_tools()
 
+        if self.agentic_mode and self.langchain_model:
+            response = await self._process_message_agentic(message, conversation_id)
+            yield {"type": "token", "content": response.message.content}
+            yield {"type": "complete", "response": response}
+            return
+
         retrieved_docs = await self._search(query, conversation_id=conversation_id)
 
-        # Create document grouping structure
         doc_grouping = {}
-        doc_id_to_num = {}
         next_doc_num = 1
 
         for doc in retrieved_docs:
@@ -418,7 +446,6 @@ class RAGAgent:
                     "document_number": next_doc_num,
                     "chunks": [],
                 }
-                doc_id_to_num[doc_key] = next_doc_num
                 next_doc_num += 1
 
             chunk_details = {
@@ -440,7 +467,6 @@ class RAGAgent:
             retrieved_docs,
             conversation_history,
             persona=persona,
-            document_grouping=doc_grouping,
             has_images=bool(images),
         )
 
@@ -721,7 +747,7 @@ class RAGAgent:
                         "result": tool_output,
                     }
 
-            # Yield result info (no need to re-invoke, we already have the data from streaming)
+            # Yield result info
             yield {
                 "type": "result",
                 "response_text": accumulated_text,
@@ -771,18 +797,30 @@ class RAGAgent:
                 else:
                     return []
 
+            # Build mapping from retrieved_docs to document numbers
+            doc_num_map = {}  # Maps (document_id, source) -> document_number
+            for doc_key, doc_info in doc_grouping.items():
+                doc_id = doc_info.get("document_id")
+                source = doc_info.get("source", "unknown")
+                doc_num_map[(doc_id, source)] = doc_info["document_number"]
+
             # Filter citations to only include chunks from referenced documents
             verified_citations = []
-            for citation in all_citations:
-                # Find which document this chunk belongs to
-                source = citation.get("source", "unknown")
-                for doc_key, doc_info in doc_grouping.items():
-                    if doc_info["source"] == source:
-                        if doc_info["document_number"] in referenced_doc_numbers:
-                            citation_copy = citation.copy()
-                            citation_copy["referenced"] = True
-                            verified_citations.append(citation_copy)
-                        break
+            for idx, citation in enumerate(all_citations):
+                # Get the corresponding retrieved doc by index
+                if idx < len(retrieved_docs):
+                    doc = retrieved_docs[idx]
+                    doc_id = doc.get("document_id")
+                    source = doc.get("source", "unknown")
+
+                    # Look up document number using the map
+                    doc_number = doc_num_map.get((doc_id, source))
+
+                    if doc_number and doc_number in referenced_doc_numbers:
+                        citation_copy = citation.copy()
+                        citation_copy["referenced"] = True
+                        citation_copy["document_number"] = doc_number
+                        verified_citations.append(citation_copy)
 
             return verified_citations
 
@@ -1274,3 +1312,356 @@ class RAGAgent:
                 f"Error deleting vectors for document {document_id}: {e}", exc_info=True
             )
             return {"success": False, "document_id": document_id, "error": str(e)}
+
+    # === Agentic RAG Content Retrieval Methods ===
+
+    async def get_document_full_content(self, document_id: str) -> Optional[str]:
+        try:
+            all_results = []
+            offset = None
+
+            while True:
+                results, offset = self.qdrant_client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="document_id", match=MatchValue(value=document_id)
+                            )
+                        ]
+                    ),
+                    limit=1000,
+                    offset=offset,
+                    with_payload=True,
+                )
+
+                all_results.extend(results)
+                if offset is None:
+                    break
+
+            if not all_results:
+                return None
+
+            sorted_results = sorted(
+                all_results, key=lambda r: r.payload.get("chunk_index", 0)
+            )
+
+            content = "\n\n".join(
+                r.payload.get("content", "") for r in sorted_results
+            )
+
+            return content
+
+        except Exception as e:
+            logger.error(
+                f"Error fetching full content for document {document_id}: {e}",
+                exc_info=True,
+            )
+            return None
+
+    async def get_document_preview(
+        self, document_id: str, max_chars: Optional[int] = None
+    ) -> Optional[str]:
+        """
+        Get a preview of a document (first N characters).
+        Used for agentic SCAN_ALL action.
+        """
+        if max_chars is None:
+            max_chars = self.agentic_preview_chars
+
+        content = await self.get_document_full_content(document_id)
+        if not content:
+            return None
+
+        if len(content) > max_chars:
+            preview = content[:max_chars]
+            preview += f"\n\n[PREVIEW - Total: {len(content):,} chars. Use READ_DOCUMENT for full content]"
+            return preview
+
+        return content
+
+    async def list_conversation_documents(
+        self, conversation_id: str
+    ) -> List[Dict[str, Any]]:
+        try:
+            all_results = []
+            offset = None
+
+            while True:
+                results, offset = self.qdrant_client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="conversation_id", match=MatchValue(value=conversation_id)
+                            )
+                        ]
+                    ),
+                    limit=10000,
+                    offset=offset,
+                    with_payload=["document_id", "source", "chunk_index"],
+                )
+
+                all_results.extend(results)
+                if offset is None:
+                    break
+
+            doc_map: Dict[str, Dict[str, Any]] = {}
+            for point in all_results:
+                doc_id = point.payload.get("document_id")
+                if not doc_id:
+                    continue
+
+                if doc_id not in doc_map:
+                    doc_map[doc_id] = {
+                        "document_id": doc_id,
+                        "filename": point.payload.get("source", "unknown"),
+                        "chunk_count": 0,
+                    }
+                doc_map[doc_id]["chunk_count"] += 1
+
+            return list(doc_map.values())
+
+        except Exception as e:
+            logger.error(
+                f"Error listing documents for conversation {conversation_id}: {e}",
+                exc_info=True,
+            )
+            return []
+
+    async def grep_document(
+        self, document_id: str, pattern: str
+    ) -> Optional[str]:
+        """
+        Search for regex pattern in a document's content.
+        Used for agentic GREP_DOCUMENT action.
+        """
+        content = await self.get_document_full_content(document_id)
+        if not content:
+            return f"Error: Document {document_id} not found"
+
+        try:
+            regex = re.compile(pattern, re.MULTILINE | re.IGNORECASE)
+            matches = regex.findall(content)
+
+            if matches:
+                result = f"MATCHES for '{pattern}' in document:\n\n"
+                for i, match in enumerate(matches[:50], 1):  # Limit to 50 matches
+                    result += f"{i}. {match}\n"
+                if len(matches) > 50:
+                    result += f"\n... and {len(matches) - 50} more matches"
+                return result
+            else:
+                return f"No matches found for pattern '{pattern}'"
+
+        except re.error as e:
+            return f"Error: Invalid regex pattern - {e}"
+
+    async def scan_all_documents(
+        self, conversation_id: str
+    ) -> str:
+        """
+        Scan all documents in a conversation and return previews.
+        Used for agentic SCAN_ALL action.
+        """
+        documents = await self.list_conversation_documents(conversation_id)
+
+        if not documents:
+            return f"No documents found in conversation {conversation_id}"
+
+        output = []
+        output.append("═" * 60)
+        output.append(f"  DOCUMENT SCAN: {len(documents)} documents found")
+        output.append("═" * 60)
+        output.append("")
+
+        for i, doc in enumerate(documents, 1):
+            doc_id = doc["document_id"]
+            filename = doc["filename"]
+            chunk_count = doc["chunk_count"]
+
+            output.append("┌" + "─" * 58)
+            output.append(f"│ [{i}/{len(documents)}] {filename}")
+            output.append(f"│ Document ID: {doc_id}")
+            output.append(f"│ Chunks: {chunk_count}")
+            output.append("├" + "─" * 58)
+
+            # Get preview
+            preview = await self.get_document_preview(doc_id)
+            if preview:
+                # Indent preview lines
+                preview_lines = preview.split("\n")
+                for line in preview_lines[:30]:  # Limit preview lines
+                    output.append(f"│ {line}")
+                if len(preview_lines) > 30:
+                    output.append("│ ... (preview truncated)")
+            else:
+                output.append("│ [Preview unavailable]")
+
+            output.append("└" + "─" * 58)
+            output.append("")
+
+        output.append("═" * 60)
+        output.append("  NEXT STEPS:")
+        output.append("  1. Categorize documents as RELEVANT / MAYBE / SKIP")
+        output.append("  2. Use READ_DOCUMENT for deep dive into RELEVANT docs")
+        output.append("  3. Watch for cross-references to other documents")
+        output.append("═" * 60)
+
+        return "\n".join(output)
+
+    async def get_document_images(self, document_id: str) -> List[Dict[str, Any]]:
+        images = []
+        image_repo = DocumentImageRepository(SessionLocal)
+        db_images = image_repo.get_by_document_id(UUID(document_id))
+
+        for image in db_images:
+            image_path = Path(image.image_path)
+            if not image_path.is_absolute():
+                image_path = Path.cwd() / image_path
+
+            if not image_path.exists():
+                continue
+
+            with open(image_path, "rb") as f:
+                base64_data = base64.b64encode(f.read()).decode("utf-8")
+
+            images.append({
+                "id": str(image.id),
+                "data": base64_data,
+                "mime_type": image.mime_type,
+                "caption": image.image_caption,
+                "page_number": image.page_number,
+            })
+
+        return images
+
+    async def _process_message_agentic(
+        self,
+        message: AgentMessage,
+        conversation_id: Optional[str] = None,
+    ) -> AgentResponse:
+        """
+        Process message using agentic document exploration.
+
+        Uses AGENTIC_RAG_SYSTEM_PROMPT and the search_documents tool.
+        Returns AgentResponse with tool_calls if exploration is needed,
+        or a final answer if the LLM decides it has enough information.
+        """
+        query = message.content
+        persona = message.metadata.get("persona")
+        original_query = message.metadata.get("original_query", query)
+        tool_context = message.metadata.get("tool_context", [])
+        conversation_history = message.metadata.get("history", [])
+        agentic_images = message.metadata.get("agentic_images", [])
+
+        system_prompt = AGENTIC_RAG_SYSTEM_PROMPT
+        if persona:
+            system_prompt = f"Custom Persona:\n{persona}\n\n---\n\n{system_prompt}"
+
+        # Ensure tools are initialized (including search_documents)
+        if not self.tools:
+            await self._init_tools()
+
+        llm_with_tools = self.langchain_model.bind_tools(self.tools)
+
+        # Build messages list with conversation history
+        messages = [SystemMessage(content=system_prompt)]
+
+        # Add conversation history (convert AgentMessage to LangChain format)
+        for hist_msg in conversation_history:
+            if hasattr(hist_msg, "role") and hasattr(hist_msg, "content"):
+                role_value = hist_msg.role.value if hasattr(hist_msg.role, "value") else hist_msg.role
+                if role_value == "user":
+                    messages.append(HumanMessage(content=hist_msg.content))
+                elif role_value == "assistant":
+                    messages.append(AIMessage(content=hist_msg.content))
+
+        # Build context for current query
+        context_parts = [f"User Question: {original_query}"]
+        if tool_context:
+            context_parts.append("\nPrevious Tool Results:")
+            for i, result in enumerate(tool_context, 1):
+                context_parts.append(f"\nTool Call {i} Output:\n{result}")
+        context_parts.append(f"\n\nConversation ID: {conversation_id}")
+        context_parts.append("\nUse the search_documents tool to explore documents and find information to answer the question.")
+
+        # Build multimodal content if images are available
+        if agentic_images:
+            # Build content list with text and images
+            human_content = [{"type": "text", "text": "\n".join(context_parts)}]
+            
+            for img in agentic_images:
+                img_data = img.get("data")
+                mime_type = img.get("mime_type", "image/jpeg")
+                caption = img.get("caption", "")
+                page = img.get("page_number", "?")
+                
+                if img_data:
+                    human_content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{img_data}"
+                        }
+                    })
+                    # Add caption as context
+                    if caption:
+                        human_content.append({
+                            "type": "text", 
+                            "text": f"[Image from page {page}: {caption}]"
+                        })
+            
+            messages.append(HumanMessage(content=human_content))
+        else:
+            messages.append(HumanMessage(content="\n".join(context_parts)))
+
+
+        try:
+            response = await llm_with_tools.ainvoke(messages)
+
+            # Extract content and tool calls
+            response_text = coerce_response_text(response.content or "")
+            tool_calls = None
+
+            if hasattr(response, "tool_calls") and response.tool_calls:
+                tool_calls = response.tool_calls
+                logger.info(
+                    f"Agentic RAG returned {len(tool_calls)} tool calls: "
+                    f"{[tc.get('name', tc['name']) for tc in tool_calls]}"
+                )
+
+            response_message = AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content=response_text,
+                tool_calls=tool_calls,
+            )
+
+            return AgentResponse(
+                agent_type=AgentType.RAG,
+                agent_id="rag_agent",
+                message=response_message,
+                metadata={
+                    "model": self.model_name,
+                    "conversation_id": conversation_id,
+                    "agentic_mode": True,
+                    "has_tool_calls": bool(tool_calls),
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"Error in agentic RAG processing: {e}", exc_info=True)
+            return AgentResponse(
+                agent_type=AgentType.RAG,
+                agent_id="rag_agent",
+                message=AgentMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=f"Error during document exploration: {e}",
+                ),
+                metadata={
+                    "model": self.model_name,
+                    "conversation_id": conversation_id,
+                    "agentic_mode": True,
+                    "error": str(e),
+                },
+                error=str(e),
+            )

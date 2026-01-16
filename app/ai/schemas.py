@@ -210,3 +210,35 @@ class WriteTodosInput(BaseModel):
         None, description="Optional reason for the action (e.g., why skipping/completing)"
     )
 
+
+# === Document Exploration Schemas for search_documents tool ===
+
+
+class DocumentAction(str, Enum):
+    """Action types for the search_documents tool."""
+
+    SCAN_ALL = "scan_all"  # Preview all documents in conversation
+    READ_DOCUMENT = "read_document"  # Full content of specific document
+    SEARCH_CHUNKS = "search_chunks"  # Vector search (existing functionality)
+    GREP_DOCUMENT = "grep_document"  # Regex search in a document
+    LIST_DOCUMENTS = "list_documents"  # List all documents in conversation
+    VIEW_IMAGES = "view_images"  # Get images from a document
+
+
+class SearchDocumentsInput(BaseModel):
+    """Input schema for the search_documents tool."""
+
+    action: DocumentAction = Field(..., description="The action to perform")
+    document_id: Optional[str] = Field(
+        None, description="For READ_DOCUMENT, GREP_DOCUMENT: target document ID"
+    )
+    query: Optional[str] = Field(
+        None, description="For SEARCH_CHUNKS: semantic search query"
+    )
+    pattern: Optional[str] = Field(
+        None, description="For GREP_DOCUMENT: regex pattern to search"
+    )
+    reason: Optional[str] = Field(
+        None, description="Reasoning for the action (displayed to user)"
+    )
+

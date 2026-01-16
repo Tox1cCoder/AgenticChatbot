@@ -54,6 +54,7 @@ class DocumentProcessingService:
         self._mineru_output_path = None
         self.gemini_client = None
         self._init_gemini()
+        self._ensure_collection_exists()
 
     def _init_gemini(self):
         api_key = self.settings.gemini_api_key
@@ -68,6 +69,30 @@ class DocumentProcessingService:
             self.gemini_client = genai.Client(api_key=api_key)
         except Exception as e:
             self.gemini_client = None
+
+    def _ensure_collection_exists(self):
+        from qdrant_client.models import Distance, VectorParams
+
+        collections = self.qdrant_client.get_collections()
+        exists = any(c.name == self.collection_name for c in collections.collections)
+
+        if not exists:
+            self.qdrant_client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(
+                    size=self.embedding_dimension,
+                    distance=Distance.COSINE
+                )
+            )
+        else:
+            info = self.qdrant_client.get_collection(self.collection_name)
+            actual_size = info.config.params.vectors.size
+
+            if actual_size != self.embedding_dimension:
+                raise ValueError(
+                    f"Collection '{self.collection_name}' has vector size {actual_size}, "
+                    f"expected {self.embedding_dimension}"
+                )
 
     async def validate_upload_file(
         self, filename: str, file_size: int
@@ -297,11 +322,22 @@ class DocumentProcessingService:
                     original_filename or filename_without_ext,
                 )
 
-            # Extract images metadata from images directory
+            images_by_path: Dict[str, int] = {}
+
+            if content_blocks:
+                for block in content_blocks:
+                    block_type = block.get("type")
+                    if block_type not in ("image", "table"):
+                        continue
+
+                    img_path = block.get("img_path", "")
+                    page_idx = block.get("page_idx")
+                    if img_path and page_idx is not None:
+                        images_by_path[img_path] = page_idx
+
             images_data = []
             page_to_images: Dict[int, List[Dict[str, Any]]] = {}
-            images_without_page: List[Dict[str, Any]] = []
-            
+
             if images_dir.exists():
                 for img_file in images_dir.iterdir():
                     if img_file.is_file() and img_file.suffix.lower() in [
@@ -309,9 +345,8 @@ class DocumentProcessingService:
                         ".jpg",
                         ".jpeg",
                     ]:
-                        # Extract page number from filename
-                        page_match = re.search(r"page_(\d+)", img_file.name)
-                        page_number = int(page_match.group(1)) if page_match else None
+                        relative_path = f"images/{img_file.name}"
+                        page_number = images_by_path.get(relative_path)
 
                         mime_type, _ = mimetypes.guess_type(str(img_file))
                         if not mime_type:
@@ -333,24 +368,18 @@ class DocumentProcessingService:
                         }
                         images_data.append(image_entry)
 
-                        if page_number is None:
-                            images_without_page.append(image_entry)
-                        else:
+                        if page_number is not None:
                             page_to_images.setdefault(page_number, []).append(
                                 image_entry
                             )
 
-            # Build chunks with page metadata
             if content_blocks:
-                # Use content_list.json for page-aware chunking
                 chunks_with_metadata = self._create_chunks_with_page_metadata(
                     content_blocks,
                     page_to_images,
-                    images_without_page,
                     max_chunk_size=self.settings.document_chunk_size,
                 )
             else:
-                # Fallback: Read markdown content and create chunks without page metadata
                 with open(markdown_file, "r", encoding="utf-8") as f:
                     markdown_content = f.read()
 
@@ -361,19 +390,17 @@ class DocumentProcessingService:
                 ]
                 chunks = self._create_chunks(documents)
 
+                unpaged_images = [img for img in images_data if img["page_number"] is None]
+
                 chunks_with_metadata = []
                 for chunk in chunks:
-                    related_images: List[Dict[str, Any]] = []
-                    if images_without_page:
-                        related_images = images_without_page.copy()
-
                     chunks_with_metadata.append(
                         {
                             "text": chunk,
                             "page_start": None,
                             "page_end": None,
-                            "has_images": bool(related_images),
-                            "image_count": len(related_images),
+                            "has_images": bool(unpaged_images),
+                            "image_count": len(unpaged_images),
                             "has_tables": False,
                             "table_count": 0,
                         }
@@ -446,7 +473,6 @@ class DocumentProcessingService:
         self,
         content_blocks: List[Dict[str, Any]],
         page_to_images: Dict[int, List[Dict[str, Any]]],
-        images_without_page: List[Dict[str, Any]],
         max_chunk_size: int = None,
     ) -> List[Dict[str, Any]]:
         """
@@ -484,12 +510,6 @@ class DocumentProcessingService:
                     for img in page_to_images[page]:
                         if img not in chunk_images:
                             chunk_images.append(img)
-            
-            # Add images without page info to first chunk only
-            if not chunks_with_metadata and images_without_page:
-                for img in images_without_page:
-                    if img not in chunk_images:
-                        chunk_images.append(img)
             
             chunks_with_metadata.append({
                 "text": current_chunk_text.strip(),
@@ -537,8 +557,13 @@ class DocumentProcessingService:
                 current_tables.append(table_entry)
                 # Include caption text in chunk for searchability
                 captions = block.get("table_caption", [])
+                footnotes = block.get("table_footnote", [])
                 if captions:
                     text = "[Table: " + " ".join(captions) + "]"
+                elif footnotes:
+                    text = "[Table] " + " ".join(str(note) for note in footnotes if note)
+                else:
+                    text = "[Table]"
             elif block_type == "image":
                 # Store image metadata from content_list
                 image_entry = {
@@ -551,8 +576,13 @@ class DocumentProcessingService:
                 current_images.append(image_entry)
                 # Include caption text in chunk for searchability
                 captions = block.get("image_caption", [])
+                footnotes = block.get("image_footnote", [])
                 if captions:
                     text = "[Image: " + " ".join(captions) + "]"
+                elif footnotes:
+                    text = "[Image] " + " ".join(str(note) for note in footnotes if note)
+                else:
+                    text = "[Image]"
             elif block_type == "equation":
                 # Include equation text
                 text = block.get("text", "")
@@ -1021,7 +1051,7 @@ class DocumentProcessingService:
                     chunk_id=uuid.UUID(chunk_id) if chunk_id else None,
                     image_path=str(relative_image_path),
                     image_caption=caption,
-                    page_number=page_number,
+                    page_number=page_number + 1 if page_number is not None else None,
                     mime_type=img_data["mime_type"],
                 )
                 self.document_image_repository.create(image_record_data)

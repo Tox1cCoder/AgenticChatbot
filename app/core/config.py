@@ -466,6 +466,20 @@ class Settings(BaseSettings):
         description="Thinking budget for Gemini 2.5 models (-1 for dynamic, 0 to disable, or specific token count like 1024).",
     )
 
+    # Agentic RAG Configuration
+    agentic_rag_enabled: bool = Field(
+        default=False,
+        description="Enable agentic document exploration mode for RAG (three-phase: scan, deep dive, backtrack)",
+    )
+    agentic_max_iterations: int = Field(
+        default=10,
+        description="Maximum tool calls in agentic RAG mode before forcing final answer",
+    )
+    agentic_preview_chars: int = Field(
+        default=1500,
+        description="Characters to include in document preview during scan phase (~1 page)",
+    )
+
 
 @lru_cache()
 def get_settings() -> Settings:

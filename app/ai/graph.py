@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional, TYPE_CHECKING, List, Dict, Any, Tuple
@@ -18,6 +19,7 @@ from .schemas import (
     MessageRole,
     InterruptDecision,
     TodoStatus,
+    DocumentAction,
 )
 from .agents.router import Router
 from .agents.chat_agent import ChatAgent
@@ -25,10 +27,11 @@ from .agents.rag_agent import RAGAgent
 from .agents.search_agent import SearchAgent
 from .agents.image_generator_agent import ImageGeneratorAgent
 from .agents.planning_agent import PlanningAgent
+from .summarization_middleware import summarize_for_state
 from .memory import get_memory_manager
 from ..core.config import settings
 from .hitl_config import build_interrupt_response, requires_human_approval
-from .utils import normalize_tool_call, coerce_response_text, make_json_safe
+from .utils import normalize_tool_call, coerce_response_text, make_json_safe, extract_content_from_result
 from ..core.response_constants import NO_RESPONSE_GENERATED
 
 logger = logging.getLogger(__name__)
@@ -286,6 +289,7 @@ class MultiAgentWorkflow:
         workflow.add_node("image_generator_agent", self._image_generator_node)
         workflow.add_node("planning_agent", self._planning_node)
         workflow.add_node("planning_tools", self._planning_tools_node)
+        workflow.add_node("rag_tools", self._rag_tools_node)
         workflow.add_node("approval", self._approval_node)
         workflow.add_node("tools", self._tool_node)
 
@@ -320,7 +324,24 @@ class MultiAgentWorkflow:
                 },
             )
 
-        workflow.add_edge("rag_agent", END)
+        # RAG agent: direct to END if not agentic, or rag_tools loop if agentic
+        workflow.add_conditional_edges(
+            "rag_agent",
+            self._should_call_rag_tools,
+            {
+                "rag_tools": "rag_tools",
+                "end": END,
+            },
+        )
+
+        workflow.add_conditional_edges(
+            "rag_tools",
+            self._should_continue_rag,
+            {
+                "rag_agent": "rag_agent",
+                "end": END,
+            },
+        )
 
         # Planning agent ReAct loop: planning_agent → planning_tools → planning_agent OR end
         workflow.add_conditional_edges(
@@ -387,46 +408,6 @@ class MultiAgentWorkflow:
         tool_artifacts = []
         all_images = []
 
-        import json
-
-        def _extract_content_from_result(result: Any) -> Any:
-            """
-            Extract actual content from LangChain Content objects.
-            MCP tools often return results wrapped in Content format:
-            [{'type': 'text', 'text': '...', 'id': '...'}]
-            """
-            # Handle list of Content objects
-            if isinstance(result, list):
-                cleaned = []
-                for item in result:
-                    if isinstance(item, dict):
-                        # Extract text from LangChain Content objects
-                        if (
-                            "type" in item
-                            and item.get("type") == "text"
-                            and "text" in item
-                        ):
-                            cleaned.append(item["text"])
-                        else:
-                            cleaned.append(item)
-                    else:
-                        cleaned.append(item)
-                # Unwrap single-item lists
-                if len(cleaned) == 1:
-                    return cleaned[0]
-                return cleaned
-
-            # Handle single Content object
-            if isinstance(result, dict):
-                if (
-                    "type" in result
-                    and result.get("type") == "text"
-                    and "text" in result
-                ):
-                    return result["text"]
-
-            return result
-
         for tool_call in last_message.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
@@ -441,7 +422,7 @@ class MultiAgentWorkflow:
                         else tool.invoke(tool_args)
                     )
                     # Extract actual content from Content objects
-                    result = _extract_content_from_result(result)
+                    result = extract_content_from_result(result)
                     result_str = str(result)
                     tool_outputs.append(
                         {
@@ -741,21 +722,11 @@ class MultiAgentWorkflow:
     async def _summarization_node(self, state: GraphState) -> GraphState:
         """
         Summarization node that runs ONCE at the start of each user request.
-
-        This node checks if the conversation history exceeds thresholds and,
-        if so, summarizes older messages and REPLACES them in state.
-
-        Key design principles:
-        - Runs once per request, not per agent iteration
-        - Mutates state in place (replaces old messages, doesn't append)
-        - Prevents context bloat during ReAct loops
         """
-        from .summarization_middleware import summarize_if_needed_for_state
-
         try:
             # This will check thresholds and apply summarization if needed
             # The function mutates state by replacing old messages with summary
-            state = await summarize_if_needed_for_state(state)
+            state = await summarize_for_state(state)
         except Exception as e:
             # Log but don't fail the request if summarization errors
             logger.warning(f"Summarization node error (continuing anyway): {e}")
@@ -763,6 +734,9 @@ class MultiAgentWorkflow:
         return state
 
     async def _route_node(self, state: GraphState) -> GraphState:
+        if state.get("selected_agent"):
+            return state
+
         messages = state.get("messages", [])
         if not messages:
             return state
@@ -863,28 +837,492 @@ class MultiAgentWorkflow:
         )
 
         conversation_id = state.get("conversation_id")
+        user_id = state.get("user_id")
+        conversation_history = await self._get_conversation_history(
+            conversation_id, user_id
+        )
+
         context = state.get("context", {})
 
-        enriched_content = content
+        last_human_idx = self._find_last_human_message_index(messages)
+        original_query = (
+            messages[last_human_idx].content
+            if last_human_idx is not None
+            else content
+        )
 
-        # RAG agent handles its own history internally via build_rag_prompt
-        # We pass minimal metadata; history is fetched by the service layer if needed
-        metadata = {"persona": state.get("persona")}
+        tool_context = []
+        if last_human_idx is not None:
+            for msg in messages[last_human_idx + 1 :]:
+                if isinstance(msg, ToolMessage):
+                    tool_context.append(msg.content)
+
+        metadata = {
+            "persona": state.get("persona"),
+            "history": conversation_history,
+            "original_query": original_query,
+            "tool_context": tool_context,
+            "agentic_images": context.get("agentic_images", []),  # Pass images for multimodal LLM
+        }
 
         agent_msg = AgentMessage(
             role=MessageRole.USER,
-            content=enriched_content,
+            content=original_query,
             metadata=metadata,
             attachments=context.get("attachments"),
         )
 
         response = await self.rag_agent.process_message(agent_msg, conversation_id)
         state["response"] = response
-        state.setdefault("messages", []).append(
-            AIMessage(content=response.message.content)
-        )
+
+        ai_kwargs = {"content": response.message.content or ""}
+        if response.message.tool_calls:
+            ai_kwargs["tool_calls"] = response.message.tool_calls
+        state.setdefault("messages", []).append(AIMessage(**ai_kwargs))
 
         return state
+
+    async def _rag_tools_node(self, state: GraphState) -> GraphState:
+        """
+        Execute RAG document exploration tools (agentic mode).
+
+        - SCAN_ALL: Preview all documents in conversation
+        - READ_DOCUMENT: Full content of specific document
+        - SEARCH_CHUNKS: Vector search
+        - GREP_DOCUMENT: Regex search
+        - LIST_DOCUMENTS: List available documents
+        """
+        messages = state.get("messages", [])
+        if not messages:
+            return state
+
+        last_message = messages[-1]
+        if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+            return state
+
+        conversation_id = state.get("conversation_id")
+        tool_outputs = []
+        context = state.get("context", {})
+        tool_artifacts: List[Dict[str, Any]] = []
+        all_images: List[Dict[str, str]] = []
+        max_agentic_images = getattr(settings, "agentic_rag_max_images", 6)
+
+        def _merge_agentic_images(new_images: List[Dict[str, Any]]) -> int:
+            """Merge images into agentic_images with dedupe + size cap."""
+            if not new_images:
+                return 0
+
+            existing = context.get("agentic_images") or []
+            existing_ids = {
+                img.get("id")
+                for img in existing
+                if isinstance(img, dict) and img.get("id")
+            }
+
+            added = 0
+            for img in new_images:
+                if not isinstance(img, dict):
+                    continue
+                img_id = img.get("id")
+                if img_id and img_id in existing_ids:
+                    continue
+                existing.append(img)
+                if img_id:
+                    existing_ids.add(img_id)
+                added += 1
+                if len(existing) >= max_agentic_images:
+                    break
+
+            if len(existing) > max_agentic_images:
+                existing = existing[-max_agentic_images:]
+
+            context["agentic_images"] = existing
+            return added
+
+        # Track agentic iteration count
+        agentic_iteration = context.get("agentic_rag_iteration", 0) + 1
+        context["agentic_rag_iteration"] = agentic_iteration
+
+        normalized_tool_calls = [
+            normalize_tool_call(tool_call) for tool_call in last_message.tool_calls
+        ]
+
+        non_search_tool_calls = [
+            tc for tc in normalized_tool_calls if tc.get("name") != "search_documents"
+        ]
+        non_search_outputs_by_id: Dict[str, str] = {}
+
+        tool_map: Dict[str, Any] = {}
+        if non_search_tool_calls:
+            tool_calls_to_execute = list(non_search_tool_calls)
+
+            tool_names = [tc.get("name") for tc in non_search_tool_calls]
+            if requires_human_approval(tool_names):
+                human_decisions = interrupt(
+                    {
+                        "action_requests": non_search_tool_calls,
+                        "message": "Tool execution requires human approval",
+                    }
+                )
+
+                if not human_decisions:
+                    for tc in non_search_tool_calls:
+                        non_search_outputs_by_id[tc.get("id")] = (
+                            "Tool execution cancelled: No approval provided"
+                        )
+                    tool_calls_to_execute = []
+                else:
+                    decisions = (
+                        human_decisions
+                        if isinstance(human_decisions, list)
+                        else [human_decisions]
+                    )
+                    decision_map: Dict[str, Any] = {}
+                    for d in decisions:
+                        if isinstance(d, dict):
+                            task_id = d.get("task_id") or d.get("tool_call_id")
+                            if task_id:
+                                decision_map[task_id] = d
+
+                    tool_calls_to_execute = []
+                    for tc in non_search_tool_calls:
+                        tool_call_id = tc.get("id")
+                        tool_name = tc.get("name")
+                        decision = decision_map.get(tool_call_id, {})
+                        decision_type = decision.get("type", "reject")
+
+                        if decision_type in ("accept", "approve"):
+                            tool_calls_to_execute.append(tc)
+                        elif decision_type == "edit":
+                            modified_args = decision.get("args", tc.get("args", {}))
+                            tool_calls_to_execute.append(
+                                {"name": tool_name, "args": modified_args, "id": tool_call_id}
+                            )
+                        else:
+                            feedback = decision.get("args", {}).get(
+                                "message", "Tool execution rejected by user"
+                            )
+                            non_search_outputs_by_id[tool_call_id] = feedback
+
+            if tool_calls_to_execute:
+                selected_agent_name = state.get("selected_agent")
+                agent = (
+                    self.agents.get(selected_agent_name) if selected_agent_name else None
+                )
+                if agent:
+                    if not hasattr(agent, "tools") or not agent.tools:
+                        if hasattr(agent, "_init_mcp"):
+                            await agent._init_mcp()
+                        elif hasattr(agent, "_init_tools"):
+                            await agent._init_tools()
+                    if hasattr(agent, "tools") and agent.tools:
+                        tool_map = {t.name: t for t in agent.tools}
+
+                for tc in tool_calls_to_execute:
+                    tool_name = tc.get("name")
+                    tool_id = tc.get("id")
+                    tool_args = tc.get("args", {})
+
+                    tool = tool_map.get(tool_name) if tool_map else None
+                    if tool:
+                        try:
+                            result = (
+                                await tool.ainvoke(tool_args)
+                                if tool.coroutine
+                                else tool.invoke(tool_args)
+                            )
+                            result = extract_content_from_result(result)
+                            result_str = str(result)
+                            non_search_outputs_by_id[tool_id] = result_str
+                            tool_artifacts.append(
+                                {
+                                    "tool_call_id": tool_id,
+                                    "tool": tool_name,
+                                    "args": tool_args,
+                                    "output": (
+                                        result_str[:1000]
+                                        if len(result_str) > 1000
+                                        else result_str
+                                    ),
+                                    "error": None,
+                                }
+                            )
+                            try:
+                                parsed_result = json.loads(result_str)
+                                if (
+                                    isinstance(parsed_result, dict)
+                                    and "images" in parsed_result
+                                ):
+                                    for img in parsed_result["images"]:
+                                        if isinstance(img, dict):
+                                            img_url = img.get("url")
+                                            img_desc = img.get("description", "")
+                                            if img_url:
+                                                all_images.append(
+                                                    {
+                                                        "url": img_url,
+                                                        "description": img_desc,
+                                                    }
+                                                )
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        except Exception as e:
+                            error_msg = f"Error: {e}"
+                            non_search_outputs_by_id[tool_id] = error_msg
+                            tool_artifacts.append(
+                                {
+                                    "tool_call_id": tool_id,
+                                    "tool": tool_name,
+                                    "args": tool_args,
+                                    "output": None,
+                                    "error": str(e),
+                                }
+                            )
+                    else:
+                        error_msg = f"Error: Tool {tool_name} not found"
+                        non_search_outputs_by_id[tool_id] = error_msg
+                        tool_artifacts.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "tool": tool_name,
+                                "args": tool_args,
+                                "output": None,
+                                "error": f"Tool {tool_name} not found",
+                            }
+                        )
+
+        for tool_call_data in normalized_tool_calls:
+            tool_name = tool_call_data.get("name")
+            tool_id = tool_call_data.get("id")
+            tool_args = tool_call_data.get("args", {})
+
+            if tool_name != "search_documents":
+                tool_outputs.append(
+                    {
+                        "tool_call_id": tool_id,
+                        "name": tool_name,
+                        "content": non_search_outputs_by_id.get(
+                            tool_id, f"Error: Tool {tool_name} not found"
+                        ),
+                    }
+                )
+                continue
+
+            action = tool_args.get("action")
+            if isinstance(action, str):
+                action = action.strip().lower()
+            elif hasattr(action, "value"):
+                action = action.value
+            result = ""
+
+            try:
+                if action == DocumentAction.SCAN_ALL.value:
+                    # Scan all documents and return previews
+                    if conversation_id:
+                        result = await self.rag_agent.scan_all_documents(conversation_id)
+                    else:
+                        result = "Error: No conversation_id available for scan"
+
+                elif action == DocumentAction.READ_DOCUMENT.value:
+                    document_id = tool_args.get("document_id")
+                    if document_id:
+                        content = await self.rag_agent.get_document_full_content(document_id)
+                        if content:
+                            result = f"DOCUMENT CONTENT ({document_id}):\n\n{content}"
+                        else:
+                            result = f"Document {document_id} not found or empty"
+                    else:
+                        result = "Error: document_id required for READ_DOCUMENT"
+
+                elif action == DocumentAction.SEARCH_CHUNKS.value:
+                    query = tool_args.get("query")
+                    if query:
+                        search_results = await self.rag_agent._search(
+                            query, conversation_id=conversation_id
+                        )
+                        if search_results:
+                            attached_count = 0
+                            try:
+                                images_for_chunks = (
+                                    await self.rag_agent._fetch_images_for_chunks(
+                                        search_results
+                                    )
+                                )
+                                attached_count = _merge_agentic_images(images_for_chunks)
+                            except Exception:
+                                attached_count = 0
+
+                            result = "SEARCH RESULTS:\n\n"
+                            for i, doc in enumerate(search_results[:10], 1):
+                                source = doc.get("source", "unknown")
+                                score = doc.get("score", 0)
+                                doc_id = doc.get("document_id") or "unknown"
+
+                                page_number = doc.get("page_number")
+                                page_start = doc.get("page_start")
+                                page_end = doc.get("page_end")
+
+                                image_ids = doc.get("image_ids") or []
+                                image_captions = [
+                                    cap for cap in (doc.get("image_captions") or []) if cap
+                                ]
+
+                                has_tables = bool(doc.get("has_tables", False))
+                                table_count = doc.get("table_count", 0) or 0
+
+                                meta_parts = [f"Document ID: {doc_id}"]
+                                if page_number:
+                                    meta_parts.append(f"Page: {page_number}")
+                                elif page_start or page_end:
+                                    start_label = page_start if page_start is not None else "?"
+                                    end_label = page_end if page_end is not None else "?"
+                                    meta_parts.append(f"Pages: {start_label}-{end_label}")
+
+                                if image_ids:
+                                    meta_parts.append(f"Images: {len(image_ids)}")
+                                    if image_captions:
+                                        preview = ", ".join(image_captions[:3])
+                                        more = "…" if len(image_captions) > 3 else ""
+                                        meta_parts.append(f"Image captions: {preview}{more}")
+
+                                if has_tables or table_count:
+                                    meta_parts.append(f"Tables: {int(table_count)}")
+
+                                content = (doc.get("content") or "")[:500]
+                                result += (
+                                    f"[{i}] {source} (score: {score:.2%})\n"
+                                    f"  {' | '.join(meta_parts)}\n"
+                                    f"{content}\n\n"
+                                )
+
+                            if attached_count:
+                                result += (
+                                    f"(Attached {attached_count} image(s) from matching chunks for multimodal analysis.)\n"
+                                )
+                        else:
+                            result = "No search results found"
+                    else:
+                        result = "Error: query required for SEARCH_CHUNKS"
+
+                elif action == DocumentAction.GREP_DOCUMENT.value:
+                    document_id = tool_args.get("document_id")
+                    pattern = tool_args.get("pattern")
+                    if document_id and pattern:
+                        result = await self.rag_agent.grep_document(document_id, pattern)
+                    else:
+                        result = "Error: document_id and pattern required for GREP_DOCUMENT"
+
+                elif action == DocumentAction.LIST_DOCUMENTS.value:
+                    if conversation_id:
+                        documents = await self.rag_agent.list_conversation_documents(
+                            conversation_id
+                        )
+                        if documents:
+                            result = "AVAILABLE DOCUMENTS:\n\n"
+                            for i, doc in enumerate(documents, 1):
+                                result += (
+                                    f"{i}. {doc['filename']} "
+                                    f"(ID: {doc['document_id']}, "
+                                    f"Chunks: {doc['chunk_count']})\n"
+                                )
+                        else:
+                            result = "No documents found in this conversation"
+                    else:
+                        result = "Error: No conversation_id available"
+
+                elif action == DocumentAction.VIEW_IMAGES.value:
+                    document_id = tool_args.get("document_id")
+                    if document_id:
+                        images = await self.rag_agent.get_document_images(document_id)
+                        if images:
+                            attached_count = _merge_agentic_images(images)
+                            result = (
+                                f"IMAGES ({len(images)} found, {attached_count} added to context):\n\n"
+                            )
+                            for i, img in enumerate(images, 1):
+                                page = img.get("page_number", "?")
+                                caption = img.get("caption") or "No caption"
+                                result += f"[{i}] Page {page}: {caption}\n"
+                        else:
+                            result = f"No images found for document {document_id}"
+                    else:
+                        result = "Error: document_id required for VIEW_IMAGES"
+
+                else:
+                    result = f"Unknown action: {action}"
+
+            except Exception as e:
+                result = f"Error executing {action}: {str(e)}"
+
+            # Log the action for user visibility
+            reason = tool_args.get("reason", "")
+            if reason:
+                logger.debug(f"RAG Agentic: {action} - {reason}")
+
+            tool_outputs.append({
+                "tool_call_id": tool_id,
+                "name": tool_name,
+                "content": result,
+            })
+
+        # Add tool messages to state
+        for output in tool_outputs:
+            state.setdefault("messages", []).append(
+                ToolMessage(
+                    content=output["content"],
+                    tool_call_id=output["tool_call_id"],
+                    name=output["name"],
+                )
+            )
+
+        state["context"] = context
+
+        # Increment iteration count
+        current_iteration = state.get("iteration_count") or 0
+        state["iteration_count"] = current_iteration + 1
+
+        if tool_artifacts:
+            existing_artifacts = context.get("tool_artifacts", [])
+            existing_artifacts.extend(tool_artifacts)
+            context["tool_artifacts"] = existing_artifacts
+        if all_images:
+            existing_images = context.get("tool_images", [])
+            existing_images.extend(all_images)
+            context["tool_images"] = existing_images
+
+        return state
+
+    def _should_call_rag_tools(self, state: GraphState) -> str:
+        if not settings.agentic_rag_enabled:
+            return "end"
+
+        messages = state.get("messages", [])
+        if not messages:
+            return "end"
+
+        last_message = messages[-1]
+        if isinstance(last_message, AIMessage) and last_message.tool_calls:
+            return "rag_tools"
+
+        return "end"
+
+    def _should_continue_rag(self, state: GraphState) -> str:
+        """
+        Determine if RAG agentic loop should continue or end.
+        """
+        context = state.get("context", {})
+        agentic_iteration = context.get("agentic_rag_iteration", 0)
+
+        # Check iteration limit
+        max_iterations = settings.agentic_max_iterations
+        if agentic_iteration >= max_iterations:
+            logger.warning(
+                f"RAG agentic loop reached max iterations ({max_iterations}), forcing end"
+            )
+            return "end"
+
+        # Continue to RAG agent for more processing
+        return "rag_agent"
 
     async def _search_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
@@ -1222,7 +1660,7 @@ class MultiAgentWorkflow:
                 # Execution actions - switch to executing phase
                 if action in execution_actions:
                     state["planning_phase"] = "executing"
-                    logger.info(f"Switched to executing phase due to {action} action")
+                    logger.debug(f"Switched to executing phase due to {action} action")
 
         # Add tool artifacts to response for UI visibility
         response = state.get("response")
@@ -1572,10 +2010,6 @@ class MultiAgentWorkflow:
         config = self._build_graph_config(thread_id)
 
         try:
-            # Run summarization ONCE at the start (same as graph-level behavior)
-            # This ensures streaming path matches regular execute() path
-            initial_state = await self._summarization_node(initial_state)
-
             routed_state = await self._route_node(initial_state)
             selected_agent = routed_state.get("selected_agent")
             initial_state["selected_agent"] = selected_agent
@@ -1585,7 +2019,9 @@ class MultiAgentWorkflow:
 
         yield {"type": "agent_selected", "agent": selected_agent}
 
-        if selected_agent == "rag_agent":
+        # For traditional RAG we use the agent's custom streaming implementation.
+        # For agentic RAG we must stream the LangGraph execution so tool calls can run.
+        if selected_agent == "rag_agent" and not settings.agentic_rag_enabled:
             conversation_history = []
             if conversation_id and user_id:
                 try:
@@ -1664,6 +2100,40 @@ class MultiAgentWorkflow:
             set()
         )  # Track which tool calls have had tool_start emitted
 
+        def _consume_text_chunk(text_chunk: str) -> Optional[str]:
+            """Return the incremental delta to emit, updating accumulated_content in-place.
+
+            Some backends emit cumulative text (full content-so-far) or repeat the final
+            content as a last chunk. This helper deduplicates those cases so we don't
+            end up with duplicated responses.
+            """
+            nonlocal accumulated_content
+
+            if not text_chunk:
+                return None
+
+            chunk_text = coerce_response_text(text_chunk)
+            if not chunk_text:
+                return None
+
+            if accumulated_content:
+                # Exact repeat of what we've already accumulated.
+                if chunk_text == accumulated_content:
+                    return None
+
+                # Cumulative chunk: new chunk starts with what we already have.
+                if chunk_text.startswith(accumulated_content):
+                    delta = chunk_text[len(accumulated_content) :]
+                    accumulated_content = chunk_text
+                    return delta or None
+
+                # Duplicate tail chunk.
+                if accumulated_content.endswith(chunk_text):
+                    return None
+
+            accumulated_content += chunk_text
+            return chunk_text
+
         try:
             # Use recommended LangGraph streaming approach with multiple modes
             # - "messages": Stream LLM tokens with metadata (includes tool_call_chunks)
@@ -1693,16 +2163,9 @@ class MultiAgentWorkflow:
 
                                 if block_type == "text":
                                     text_content = block.get("text", "")
-                                    # Skip if this content was already accumulated (duplicate final chunk)
-                                    if (
-                                        text_content
-                                        and text_content not in accumulated_content
-                                    ):
-                                        accumulated_content += text_content
-                                        yield {
-                                            "type": "token",
-                                            "content": text_content,
-                                        }
+                                    delta = _consume_text_chunk(text_content)
+                                    if delta:
+                                        yield {"type": "token", "content": delta}
 
                                 # Handle thinking block type
                                 elif block_type == "thinking":
@@ -1794,21 +2257,13 @@ class MultiAgentWorkflow:
                                             }
                                     elif part_type == "text":
                                         text_content = part.get("text", "")
-                                        # Skip if this content was already accumulated (duplicate final chunk)
-                                        if (
-                                            text_content
-                                            and text_content not in accumulated_content
-                                        ):
-                                            accumulated_content += text_content
-                                            yield {
-                                                "type": "token",
-                                                "content": text_content,
-                                            }
+                                        delta = _consume_text_chunk(text_content)
+                                        if delta:
+                                            yield {"type": "token", "content": delta}
                                 elif isinstance(part, str) and part:
-                                    # Skip if this content was already accumulated
-                                    if part not in accumulated_content:
-                                        accumulated_content += part
-                                        yield {"type": "token", "content": part}
+                                    delta = _consume_text_chunk(part)
+                                    if delta:
+                                        yield {"type": "token", "content": delta}
 
                         # Fallback: Handle legacy string content attribute
                         elif (
@@ -1817,10 +2272,9 @@ class MultiAgentWorkflow:
                             and isinstance(message_chunk.content, str)
                         ):
                             content = coerce_response_text(message_chunk.content)
-                            # Skip if this content was already accumulated (duplicate final chunk)
-                            if content and content not in accumulated_content:
-                                accumulated_content += content
-                                yield {"type": "token", "content": content}
+                            delta = _consume_text_chunk(content)
+                            if delta:
+                                yield {"type": "token", "content": delta}
 
                         # Check for chunk completion and emit complete tool calls
                         if (
@@ -1842,8 +2296,6 @@ class MultiAgentWorkflow:
 
                                     try:
                                         # Parse args if it's a JSON string
-                                        import json
-
                                         args = (
                                             json.loads(tool_call["args"])
                                             if tool_call["args"]
@@ -2005,7 +2457,7 @@ class MultiAgentWorkflow:
                     ):
                         response.metadata["thinking_summary"] = accumulated_thinking
 
-                    if accumulated_content:
+                    if accumulated_content and not (response.message.content or "").strip():
                         response.message.content = accumulated_content
 
                     # For planning agent, include todos in metadata
