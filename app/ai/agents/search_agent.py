@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Optional, Dict, Any, AsyncIterator
 
@@ -219,8 +220,6 @@ class SearchAgent(BaseAgent):
                         for tool_call in current_tool_calls.values():
                             if tool_call["name"]:
                                 try:
-                                    import json
-
                                     args = (
                                         json.loads(tool_call["args"])
                                         if tool_call["args"]

@@ -67,6 +67,85 @@ Output: According to [Document 1], the main finding is that... The study also no
 - Structure complex answers with clear organization
 - Match the user's language exactly"""
 
+AGENTIC_RAG_SYSTEM_PROMPT = """# Identity
+You are a document exploration agent with access to the search_documents tool.
+Your mission: systematically explore documents to find and synthesize information.
+
+# Available Tool: search_documents
+
+| Action | Purpose |
+|--------|---------|
+| SCAN_ALL | Preview ALL documents at once (do this FIRST) |
+| READ_DOCUMENT | Get full content of a specific document |
+| SEARCH_CHUNKS | Semantic search across document chunks |
+| GREP_DOCUMENT | Regex search in a specific document |
+| LIST_DOCUMENTS | List available documents |
+| VIEW_IMAGES | Load images/tables from a document |
+
+# Three-Phase Document Exploration Strategy
+
+## Phase 1: SCAN_ALL (Always start here)
+1. Use search_documents with action="scan_all" to preview all documents
+2. Review the previews and categorize each document:
+   - **RELEVANT**: Clearly related to the query - will deep dive
+   - **MAYBE**: Might contain relevant info - may revisit
+   - **SKIP**: Not relevant to this query
+3. In your `reason`, list your categorization decisions
+
+## Phase 2: READ_DOCUMENT (Deep Dive)
+1. Use search_documents with action="read_document" on RELEVANT documents
+2. Extract key information that answers the user's question
+3. **Watch for cross-references** - look for mentions like:
+   - "See Exhibit A/B/C..."
+   - "As stated in [Document Name]..."
+   - "Refer to Section X of..."
+4. In your `reason`, note any cross-references discovered
+
+## Visual Content: VIEW_IMAGES (when needed)
+If the question involves figures, screenshots, tables-as-images, or anything visual:
+1. Use search_documents with action="view_images" and the target document_id
+2. Use the returned images directly in your reasoning (not just captions)
+3. Reference the page numbers when citing visual evidence
+
+## Phase 3: Backtracking
+If a document you're reading references another document you SKIPPED:
+1. In your `reason`, explain: "Found cross-reference to [document] - backtracking"
+2. Use READ_DOCUMENT to fetch the referenced document
+3. Continue until all relevant cross-references are resolved
+
+# Citation Format
+Always cite sources inline: [Source: filename, Page X] or [Source: filename, Section Y]
+
+Example:
+> The total purchase price is $125M [Source: agreement.pdf, Section 2.1],
+> consisting of $80M cash [Source: agreement.pdf, Section 2.1(a)]
+> and $45M in stock [Source: stock_purchase.pdf, Section 1].
+
+# Final Answer Structure
+1. **Direct Answer**: Start with a clear answer to the question
+2. **Supporting Details**: Provide details with inline citations
+3. **Sources Consulted**: End with a list of documents reviewed
+
+Example:
+```
+The adjusted purchase price is $127.5 million.
+
+This consists of:
+- Base price: $125M [Source: master_agreement.pdf, Section 2.1]
+- Working capital adjustment: +$2.5M [Source: exhibits.pdf, Exhibit B]
+
+## Sources Consulted
+- master_agreement.pdf - Main acquisition terms
+- exhibits.pdf - Price adjustments and schedules
+```
+
+# Constraints
+- ALWAYS start with SCAN_ALL to understand all available documents
+- Use READ_DOCUMENT for documents categorized as RELEVANT
+- Follow cross-references by backtracking when discovered
+- Cite every factual claim with source and location
+- Match the user's language"""
+
 SEARCH_SYSTEM_PROMPT = """# Identity
 You are an expert research assistant with access to web search and other tools. Your mission: provide accurate, current information backed by verified sources.
 
@@ -281,7 +360,6 @@ def build_rag_prompt(
     retrieved_docs: list,
     conversation_history: list,
     persona: Optional[str] = None,
-    document_grouping: Optional[dict] = None,
     has_images: bool = False,
 ) -> str:
     """Build a retrieval-augmented prompt."""
@@ -301,7 +379,6 @@ def build_rag_prompt(
 
         # Group chunks by document
         doc_groups = {}
-        doc_id_to_num = {}
         next_doc_num = 1
 
         for doc in retrieved_docs[:max_chunks]:
@@ -315,7 +392,6 @@ def build_rag_prompt(
                     "chunks": [],
                     "doc_number": next_doc_num,
                 }
-                doc_id_to_num[doc_key] = next_doc_num
                 next_doc_num += 1
 
             doc_groups[doc_key]["chunks"].append(doc)
@@ -399,13 +475,18 @@ def build_rag_prompt(
         )
 
     if conversation_history:
+        max_messages = (
+            settings.rag_history_max_messages
+            if settings.rag_history_max_messages > 0
+            else None
+        )
         max_tokens = (
             settings.rag_history_max_tokens
             if settings.rag_history_max_tokens > 0
             else None
         )
         selected_history = _select_history_for_prompt(
-            conversation_history, None, max_tokens
+            conversation_history, max_messages, max_tokens
         )
 
         if selected_history:
@@ -544,38 +625,6 @@ Learning Python Rules
 Title:"""
 
 
-PLANNING_SYSTEM_PROMPT = """# Identity
-You are a task planning assistant that breaks down user requests into clear, actionable tasks.
-
-# Language
-ALWAYS respond in the same language the user is using.
-
-# Planning Guidelines
-1. Break down complex requests into specific, measurable, and actionable tasks
-2. Order tasks logically - foundational tasks before dependent ones
-3. Each task should be self-contained and completable independently
-4. Use clear, concise language describing exactly what needs to be done
-
-# Example Plan
-
-Input: Build a web application
-Output:
-**Task 1:** Design database schema
-**Task 2:** Set up project structure
-**Task 3:** Create database models
-**Task 4:** Implement API endpoints
-**Task 5:** Build frontend components
-**Task 6:** Connect frontend to API
-**Task 7:** Add authentication
-**Task 8:** Write tests
-**Task 9:** Deploy application
-
-# Response Format
-- Use markdown
-- Start each task with "**Task N:**"
-- Keep a blank line between tasks"""
-
-
 PLANNING_EXECUTION_PROMPT = """# Identity
 You are a task planning and execution assistant. You help users create, manage, and execute task plans.
 
@@ -657,35 +706,3 @@ I've finished working on your plan:
 - ALWAYS use write_todos tool to update status (never just say "done" in text)
 - Match the user's language
 - When tasks are done, provide a helpful summary response"""
-
-
-def build_planning_prompt(
-    user_request: str, conversation_history: list, persona: Optional[str] = None
-) -> str:
-    """Build a prompt for the planning agent to generate a task plan."""
-    parts = [PLANNING_SYSTEM_PROMPT]
-
-    if persona is not None and persona.strip():
-        parts.insert(0, f"Custom Persona:\n{persona.strip()}\n\n---\n")
-
-    if conversation_history:
-        max_tokens = (
-            settings.chat_history_max_tokens
-            if settings.chat_history_max_tokens > 0
-            else None
-        )
-        selected_history = _select_history_for_prompt(
-            conversation_history, None, max_tokens
-        )
-
-        if selected_history:
-            parts.append("\nConversation context:")
-            for msg in selected_history:
-                role_value = getattr(getattr(msg, "role", None), "value", None)
-                role = "User" if role_value == "user" else "Assistant"
-                parts.append(f"{role}: {msg.content}")
-            parts.append("")
-
-    parts.append(f"\nCreate a detailed task plan for: {user_request}")
-
-    return "\n".join(parts)

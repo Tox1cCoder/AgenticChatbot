@@ -22,7 +22,7 @@ class CheckpointManager:
         if "postgresql+psycopg2://" in self.db_url:
             self.db_url = self.db_url.replace("postgresql+psycopg2://", "postgresql://")
 
-        logger.info(
+        logger.debug(
             f"CheckpointManager initialized with schema: {settings.checkpoint_schema}"
         )
 
@@ -59,7 +59,7 @@ class CheckpointManager:
                 await temp_saver.setup()
 
             self._initialized = True
-            logger.info(
+            logger.debug(
                 f"Successfully created checkpoint tables in schema '{self.settings.checkpoint_schema}' "
                 f"with pool size {min_size}-{max_size}"
             )
@@ -99,7 +99,7 @@ class CheckpointManager:
 
         for attempt, delay in enumerate(delays, 1):
             try:
-                logger.info(f"Attempting checkpoint reconnection (attempt {attempt}/3)")
+                logger.debug(f"Attempting checkpoint reconnection (attempt {attempt}/3)")
 
                 # Close existing pool if present
                 if self._pool:
@@ -116,7 +116,7 @@ class CheckpointManager:
                 # Attempt setup
                 await self.setup()
 
-                logger.info("Checkpoint reconnection successful")
+                logger.debug("Checkpoint reconnection successful")
                 return True
 
             except Exception as e:
@@ -146,7 +146,7 @@ class CheckpointManager:
 
             self._initialized = False
             self.checkpointer = None
-            logger.info("Checkpoint manager cleaned up")
+            logger.debug("Checkpoint manager cleaned up")
         except Exception as e:
             logger.error(f"Error during checkpoint manager cleanup: {e}", exc_info=True)
 

@@ -218,43 +218,36 @@ async def health_check_redis():
 
 @app.get("/health/qdrant")
 async def health_check_qdrant():
-    """Check Qdrant connection health"""
-    rag_agent = None
     try:
-        container = get_container()
-        app_settings = container.config()
+        from qdrant_client import QdrantClient
 
-        rag_agent = RAGAgent(
-            settings=app_settings,
-            collection_name=app_settings.qdrant_collection_name,
+        client = QdrantClient(url=settings.qdrant_url)
+        collections = client.get_collections()
+
+        collection_exists = any(
+            c.name == settings.qdrant_collection_name
+            for c in collections.collections
         )
 
-        await rag_agent.initialize()
-
-        status_info = await rag_agent.get_status()
-
-        return {
-            "status": status_info.get("status", "unknown"),
-            "collection": status_info.get("collection"),
-            "vectors_count": status_info.get("vectors_count", 0),
-            "message": (
-                "Qdrant connection successful"
-                if status_info.get("status") == "healthy"
-                else "Qdrant connection issues"
-            ),
-        }
+        if collection_exists:
+            info = client.get_collection(settings.qdrant_collection_name)
+            return {
+                "status": "healthy",
+                "collection": settings.qdrant_collection_name,
+                "vectors_count": info.vectors_count,
+                "message": "Qdrant connection successful"
+            }
+        else:
+            return {
+                "status": "unhealthy",
+                "message": f"Collection '{settings.qdrant_collection_name}' not found"
+            }
     except Exception as e:
         return {
             "status": "unhealthy",
             "error": str(e),
-            "message": "Failed to connect to Qdrant",
+            "message": "Failed to connect to Qdrant"
         }
-    finally:
-        if rag_agent:
-            try:
-                await rag_agent.cleanup()
-            except:
-                pass
 
 
 @app.get("/health/all")

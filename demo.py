@@ -3591,10 +3591,8 @@ def render_chat_view():
             if status:
                 progress_pct = status.get("progressPercentage", 0)
                 next_task = status.get("nextTask")
-                pending = status.get("pendingTasks", 0)
                 completed = status.get("completedTasks", 0)
                 total = status.get("totalTasks", 0)
-                in_progress = status.get("inProgressTasks", 0)
 
                 with st.container():
                     # Progress bar and summary

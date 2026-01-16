@@ -210,7 +210,7 @@ class MCPManager:
             }
             self._index_server_tools(server_name, cleaned_tools)
 
-            logger.info(
+            logger.debug(
                 "Loaded %d tools from server '%s' (session active)",
                 len(cleaned_tools),
                 server_name,
@@ -415,7 +415,7 @@ class MCPManager:
 
         if self.client:
             self.client = None
-            logger.info("MCP client cleaned up")
+            logger.debug("MCP client cleaned up")
 
     def add_server(self, server_name: str, server_config: Dict[str, Any]) -> None:
         self._ensure_config_loaded()
@@ -765,4 +765,4 @@ async def reset_global_mcp_manager() -> None:
         
         _global_mcp_manager = None
         _mcp_initialized = False
-        logger.info("Global MCP manager reset")
+        logger.debug("Global MCP manager reset")

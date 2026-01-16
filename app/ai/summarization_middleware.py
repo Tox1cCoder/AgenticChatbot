@@ -28,7 +28,7 @@ class SummarizationConfig:
 
     # Summarization model (use cheaper/faster model)
     model: str = "gemini-3-flash-preview"
-    temperature: float = 0.7
+    temperature: float = 1.0
 
 
 # Default summarization prompt
@@ -52,7 +52,7 @@ def _get_config() -> SummarizationConfig:
         keep_messages=getattr(settings, "summarization_keep_messages", 20),
         model_context_size=getattr(settings, "summarization_model_context_size", 1000000),
         model=getattr(settings, "summarization_model", "gemini-3-flash-preview"),
-        temperature=0.7,
+        temperature=1.0,
     )
 
 
@@ -101,14 +101,14 @@ def should_summarize(
     # Check token threshold
     estimated_tokens = _estimate_tokens(non_system_messages)
     if estimated_tokens >= config.trigger_tokens:
-        logger.info(
+        logger.debug(
             f"Summarization triggered: {estimated_tokens} tokens >= {config.trigger_tokens}"
         )
         return True
 
     # Check message count threshold
     if len(non_system_messages) >= config.trigger_messages:
-        logger.info(
+        logger.debug(
             f"Summarization triggered: {len(non_system_messages)} messages >= {config.trigger_messages}"
         )
         return True
@@ -116,7 +116,7 @@ def should_summarize(
     # Check fraction threshold
     fraction_threshold = int(config.model_context_size * config.trigger_fraction)
     if estimated_tokens >= fraction_threshold:
-        logger.info(
+        logger.debug(
             f"Summarization triggered: {estimated_tokens} tokens >= {config.trigger_fraction * 100}% of context"
         )
         return True
@@ -179,7 +179,7 @@ async def generate_summary(
             else str(response.content)
         )
 
-        logger.info(
+        logger.debug(
             f"Generated summary for {len(messages_to_summarize)} messages "
             f"({len(summary)} chars)"
         )
@@ -225,7 +225,7 @@ def apply_summarization_to_state(
     return state
 
 
-async def summarize_if_needed_for_state(
+async def summarize_for_state(
     state: Dict[str, Any],
     config: Optional[SummarizationConfig] = None,
 ) -> Dict[str, Any]:

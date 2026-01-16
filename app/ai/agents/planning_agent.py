@@ -1,108 +1,66 @@
+from __future__ import annotations
+
+import json
 import uuid
-from typing import Optional, List, Dict, Any
+from textwrap import dedent
+from typing import Any, Dict, Iterable, List, Optional
 
-from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
 
-from .base_agent import BaseAgent
-
+from ...core.config import settings
+from ..prompts import PLANNING_EXECUTION_PROMPT
 from ..schemas import (
     AgentMessage,
     AgentResponse,
     AgentType,
     MessageRole,
-    Task,
     Plan,
+    Task,
     TodoAction,
     TodoStatus,
+    TodoItem,
     WriteTodosInput,
 )
-
-from ..prompts import build_planning_prompt, PLANNING_EXECUTION_PROMPT
-from ..utils import coerce_response_text
-
-
-PLAN_MODIFICATION_PROMPT = """You are a planning assistant. The user wants to modify an existing task plan.
-
-CURRENT PLAN:
-{current_plan}
-
-USER REQUEST:
-{user_request}
-
-INSTRUCTIONS:
-1. Analyze the user's request to understand what changes they want
-2. Apply the requested modifications to the plan
-3. Supported operations:
-   - Add new tasks
-   - Remove tasks
-   - Modify task descriptions
-   - Reorder tasks
-4. Ensure the modified plan is valid
-5. Return the complete modified plan
-
-Return the updated plan with all tasks."""
+from ..utils import coerce_response_text, normalize_tool_call
+from .base_agent import BaseAgent
 
 
 def create_write_todos_tool():
-    """Create the write_todos tool for task management."""
+    """Expose the write_todos schema to the LLM.
+
+    In the LangGraph workflow, write_todos is executed by `app/ai/graph.py` in the
+    planning tools node. This implementation mainly exists to provide a validated
+    schema (WriteTodosInput) to the model.
+    """
 
     @tool(args_schema=WriteTodosInput)
     def write_todos(
         action: TodoAction,
-        todos: Optional[List[dict]] = None,
-        todo: Optional[dict] = None,
+        todos: Optional[List[TodoItem]] = None,
+        todo: Optional[TodoItem] = None,
         todo_id: Optional[str] = None,
         reason: Optional[str] = None,
     ) -> str:
-        """
-        Manage the todo list for task planning. Use this tool to:
-        - SET_TODOS: Replace all todos with a new list (when creating a plan)
-        - ADD_TODO: Add a single new todo to the list
-        - UPDATE_TODO: Update an existing todo's description or other properties
-        - COMPLETE_TODO: Mark a todo as completed when done working on it
-        - START_TODO: Mark a todo as in progress when starting work on it
-        - REMOVE_TODO: Remove a todo from the list
-
-        The tool returns a confirmation message. The actual state update
-        is handled by the graph's tool execution node.
-        """
-        # This is a placeholder - actual execution happens in the graph's _planning_tools_node
-        # The tool just validates and returns a confirmation
+        action_value = action.value if hasattr(action, "value") else str(action)
         if action == TodoAction.SET_TODOS:
-            if not todos:
-                return "Error: todos list is required for SET_TODOS action"
-            return f"Setting {len(todos)} todos in the plan."
-
-        elif action == TodoAction.ADD_TODO:
-            if not todo:
-                return "Error: todo is required for ADD_TODO action"
-            return f"Adding todo: {todo.get('description', 'unknown')}"
-
-        elif action == TodoAction.COMPLETE_TODO:
-            if not todo_id:
-                return "Error: todo_id is required for COMPLETE_TODO action"
-            msg = f"Marking todo {todo_id} as completed."
+            return f"Set {len(todos or [])} todos."
+        if action == TodoAction.ADD_TODO:
+            desc = getattr(todo, "description", None) if todo else None
+            return f"Added todo: {desc or 'unknown'}"
+        if action == TodoAction.UPDATE_TODO:
+            ref = getattr(todo, "id", None) if todo else None
+            return f"Updated todo: {ref or 'unknown'}"
+        if action == TodoAction.REMOVE_TODO:
+            return f"Removed todo: {todo_id or 'unknown'}"
+        if action == TodoAction.START_TODO:
+            return f"Started todo: {todo_id or 'unknown'}"
+        if action == TodoAction.COMPLETE_TODO:
+            msg = f"Completed todo: {todo_id or 'unknown'}"
             if reason:
-                msg += f" Reason: {reason}"
+                msg += f" ({reason})"
             return msg
-
-        elif action == TodoAction.START_TODO:
-            if not todo_id:
-                return "Error: todo_id is required for START_TODO action"
-            return f"Starting work on todo {todo_id}."
-
-        elif action == TodoAction.UPDATE_TODO:
-            if not todo:
-                return "Error: todo is required for UPDATE_TODO action"
-            return f"Updating todo: {todo.get('id', 'unknown')}"
-
-        elif action == TodoAction.REMOVE_TODO:
-            if not todo_id:
-                return "Error: todo_id is required for REMOVE_TODO action"
-            return f"Removing todo {todo_id}."
-
-        return f"Unknown action: {action}"
+        return f"Unsupported action: {action_value}"
 
     return write_todos
 
@@ -122,13 +80,11 @@ class PlanningAgent(BaseAgent):
         return PLANNING_EXECUTION_PROMPT
 
     async def _init_tools(self):
-        # First call parent to initialize MCP tools
+        # Initialize MCP tools from parent.
         await super()._init_tools()
 
-        # Add write_todos tool to the beginning of the tools list
+        # Ensure write_todos is available (and first).
         write_todos_tool = create_write_todos_tool()
-
-        # Deduplicate by checking if write_todos already exists
         tool_names = {tool.name for tool in self.tools}
         if write_todos_tool.name not in tool_names:
             self.tools.insert(0, write_todos_tool)
@@ -142,218 +98,105 @@ class PlanningAgent(BaseAgent):
         planning_phase: Optional[str] = None,
         should_describe_plan: bool = False,
     ) -> str:
-        # Call parent to get base prompt with persona and tool context
         base_prompt = super()._build_system_prompt(persona, has_tool_context)
 
-        # Add phase-specific instructions
         phase = planning_phase or "planning"
-        
         if phase == "planning":
-            phase_prompt = """
-# CURRENT PHASE: PLANNING
-You are in the PLANNING phase. Your role is to:
-- Create or modify the task plan using SET_TODOS, ADD_TODO, UPDATE_TODO, or REMOVE_TODO
-- DO NOT start executing tasks (no START_TODO or COMPLETE_TODO)
-- Wait for the user to explicitly ask to implement/execute/start before working on tasks
+            phase_prompt = dedent(
+                """
+                # CURRENT PHASE: PLANNING
+                - Create or modify the task plan using: set_todos, add_todo, update_todo, remove_todo
+                - Do NOT execute tasks: no start_todo or complete_todo
+                - Ask for confirmation before starting execution
 
-When the user asks to "implement", "execute", "start working", "work on this", or similar:
-- You should switch to EXECUTION phase and begin working through tasks
-- Set planning_phase: "executing" in your response metadata"""
-        else:  # executing
-            phase_prompt = """
-# CURRENT PHASE: EXECUTING
-You are in the EXECUTION phase. Work through tasks autonomously:
-1. Find the next pending task
-2. Use START_TODO to mark it in progress
-3. Complete the task work
-4. Use COMPLETE_TODO to mark it done
-5. Continue to the next task
+                When the user explicitly asks to start/execute/implement:
+                - Begin execution by calling start_todo for the next task
+                """
+            ).strip()
+        else:
+            phase_prompt = dedent(
+                """
+                # CURRENT PHASE: EXECUTING
+                Work through tasks autonomously:
+                1) Find the next pending task
+                2) Call start_todo
+                3) Do the work
+                4) Call complete_todo
+                5) Continue to the next task
 
-Continue until all tasks are complete or you need user clarification."""
+                Stop only when all tasks are completed (then summarize), you need user clarification,
+                or an unresolvable error occurs.
+                """
+            ).strip()
 
-        base_prompt = f"{base_prompt}\n{phase_prompt}"
+        prompt = f"{base_prompt}\n\n{phase_prompt}"
 
-        # Add instruction to describe the plan after creation/modification
         if should_describe_plan:
-            base_prompt += """
+            prompt += "\n\n" + dedent(
+                """
+                # IMPORTANT: You just created or modified the plan.
+                Now respond with text only:
+                - Summarize the tasks you created/modified
+                - Ask if the user wants changes before starting execution
+                - Do NOT make any tool calls in this response
+                """
+            ).strip()
 
-# IMPORTANT: You just created or modified the plan.
-Now provide a clear, helpful response that:
-1. Describes the tasks you created/modified
-2. Lists the key tasks in the plan
-3. Asks if the user wants to make any changes before starting execution
-DO NOT make any tool calls - just respond with text describing the plan."""
-
-        # Append todo context if provided
         if todos:
-            task_context = self._format_todos_context(todos, current_task_index)
-            return f"{base_prompt}\n\n{task_context}"
+            prompt += "\n\n" + self._format_todos_context(todos, current_task_index)
 
-        return base_prompt
+        return prompt
 
     def _format_todos_context(
-        self,
-        todos: List[Dict[str, Any]],
-        current_task_index: Optional[int] = None,
+        self, todos: List[Dict[str, Any]], current_task_index: Optional[int] = None
     ) -> str:
         if not todos:
             return ""
 
         lines = ["CURRENT TASK PLAN:"]
-        lines.append(
-            "(Use the ID shown in brackets when calling COMPLETE_TODO or START_TODO)"
-        )
+        lines.append("(Use the ID shown in brackets when calling start_todo/complete_todo)")
         lines.append("")
 
         for i, todo in enumerate(todos):
-            status = todo.get("status", "pending")
+            raw_status = todo.get("status", TodoStatus.PENDING.value)
+            status = raw_status.value if hasattr(raw_status, "value") else raw_status
+
             desc = todo.get("description", "No description")
             todo_id = todo.get("id", str(i + 1))
 
-            # Status indicator
-            if status == "completed":
-                indicator = "✅"
-            elif status == "in_progress":
-                indicator = "🔄"
-            elif status == "skipped":
-                indicator = "⏭️"
+            if status == TodoStatus.COMPLETED.value:
+                indicator = "[x]"
+            elif status == TodoStatus.IN_PROGRESS.value:
+                indicator = "[~]"
+            elif status == TodoStatus.SKIPPED.value:
+                indicator = "[-]"
             else:
-                indicator = "⬜"
+                indicator = "[ ]"
 
-            # Highlight current task
             current_marker = " ← CURRENT TASK" if i == current_task_index else ""
             lines.append(
                 f"{indicator} Task {i + 1} [ID: {todo_id}]: {desc} ({status}){current_marker}"
             )
 
-        # Add summary
-        completed = sum(1 for t in todos if t.get("status") == "completed")
-        total = len(todos)
-        lines.append(f"\nProgress: {completed}/{total} tasks completed")
+        completed = sum(
+            1
+            for t in todos
+            if (getattr(t.get("status"), "value", t.get("status")) == TodoStatus.COMPLETED.value)
+        )
+        lines.append(f"\nProgress: {completed}/{len(todos)} tasks completed")
 
         return "\n".join(lines)
 
-    async def invoke_model(
-        self,
-        message: AgentMessage,
-        conversation_id: Optional[str] = None,
-        todos: Optional[List[Dict[str, Any]]] = None,
-        current_task_index: Optional[int] = None,
-    ) -> AgentResponse:
-        if not self.langchain_model:
-            return self._build_error_response(
-                "Planning service is not properly configured.",
-                conversation_id,
-            )
-
-        # Initialize MCP tools if not done yet
-        if self.mcp_manager is None:
-            await self._init_tools()
-
-        llm_with_tools = self._get_llm_with_tools()
-        system_prompt = self._build_system_prompt(
-            None, False, todos, current_task_index
-        )
-
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=message.content),
-        ]
-
-        response = await llm_with_tools.ainvoke(messages)
-
-        tool_calls = []
-        if hasattr(response, "tool_calls") and response.tool_calls:
-            tool_calls = response.tool_calls
-            return AgentResponse(
-                agent_type=AgentType.PLANNING,
-                agent_id="planning_agent",
-                message=AgentMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=coerce_response_text(response.content or ""),
-                    tool_calls=tool_calls,
-                ),
-                metadata={
-                    "model": self.model_name,
-                    "conversation_id": conversation_id,
-                    "has_tool_calls": True,
-                },
-            )
-
-        # No tool calls - just a regular response
-        return AgentResponse(
-            agent_type=AgentType.PLANNING,
-            agent_id="planning_agent",
-            message=AgentMessage(
-                role=MessageRole.ASSISTANT,
-                content=coerce_response_text(response.content or ""),
-            ),
-            metadata={
-                "model": self.model_name,
-                "conversation_id": conversation_id,
-            },
-        )
-
-    # === Legacy methods for backward compatibility ===
-
     async def generate_plan(
-        self,
-        message: AgentMessage,
-        conversation_id: Optional[str] = None,
+        self, message: AgentMessage, conversation_id: Optional[str] = None
     ) -> AgentResponse:
-        """Legacy method: Generate plan using structured output."""
-        if not self.langchain_model:
-            return self._build_error_response(
-                "Planning service is not properly configured.",
-                conversation_id,
-            )
-
-        conversation_history = message.metadata.get("history", [])
-        persona = message.metadata.get("persona")
-
-        prompt = build_planning_prompt(
-            message.content, conversation_history, persona=persona
+        """Generate a plan payload for persistence (used by TaskPlanService)."""
+        return await self._generate_or_modify_plan(
+            message=message,
+            existing_tasks=None,
+            conversation_id=conversation_id,
+            plan_modified=False,
         )
-
-        try:
-            structured_llm = self.langchain_model.with_structured_output(Plan)
-            plan: Plan = await structured_llm.ainvoke(prompt)
-
-            validated_tasks = self._validate_and_order_tasks(plan.tasks)
-            plan.tasks = validated_tasks
-
-            formatted_response = self._format_plan_response(plan)
-
-            # Also generate todos for the new format
-            todos = self._plan_to_todos(plan)
-
-            return AgentResponse(
-                agent_type=AgentType.PLANNING,
-                agent_id="planning_agent",
-                message=AgentMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=coerce_response_text(formatted_response),
-                ),
-                metadata={
-                    "model": self.model_name,
-                    "conversation_id": conversation_id,
-                    "plan": plan.model_dump(),
-                    "task_count": len(plan.tasks),
-                    "todos": todos,  # Include for state sync
-                },
-            )
-
-        except Exception as e:
-            error_msg = (
-                f"Issue while creating the plan: {str(e)}. Please try rephrasing your request."
-                if isinstance(e, ValueError)
-                else f"Error while generating the plan: {str(e)}"
-            )
-            return self._build_error_response(
-                error_msg,
-                conversation_id,
-                error=str(e),
-            )
 
     async def modify_plan(
         self,
@@ -361,240 +204,241 @@ DO NOT make any tool calls - just respond with text describing the plan."""
         existing_tasks: List[Dict[str, Any]],
         conversation_id: Optional[str] = None,
     ) -> AgentResponse:
-        """Legacy method: Modify plan using structured output."""
+        """Modify an existing plan payload for persistence (used by TaskPlanService)."""
+        return await self._generate_or_modify_plan(
+            message=message,
+            existing_tasks=existing_tasks,
+            conversation_id=conversation_id,
+            plan_modified=True,
+        )
+
+    async def _generate_or_modify_plan(
+        self,
+        *,
+        message: AgentMessage,
+        existing_tasks: Optional[List[Dict[str, Any]]],
+        conversation_id: Optional[str],
+        plan_modified: bool,
+    ) -> AgentResponse:
         if not self.langchain_model:
             return self._build_error_response(
                 "Planning service is not properly configured.",
                 conversation_id,
             )
 
-        current_plan_str = self._format_existing_tasks(existing_tasks)
+        persona = message.metadata.get("persona")
+        conversation_history = message.metadata.get("history", [])
 
-        prompt = PLAN_MODIFICATION_PROMPT.format(
-            current_plan=current_plan_str,
-            user_request=message.content,
+        # Convert existing tasks into todo-like dicts for prompt context.
+        todos: List[Dict[str, Any]] = []
+        current_task_index: Optional[int] = None
+        if existing_tasks:
+            for i, task in enumerate(existing_tasks):
+                todos.append(
+                    {
+                        "id": task.get("id", str(i)),
+                        "description": task.get("description", ""),
+                        "status": task.get("status", TodoStatus.PENDING.value),
+                        "order": task.get("order", task.get("task_order", i)),
+                    }
+                )
+            current_task_index = next(
+                (
+                    i
+                    for i, todo in enumerate(todos)
+                    if todo.get("status") in (TodoStatus.PENDING.value, TodoStatus.IN_PROGRESS.value)
+                ),
+                None,
+            )
+
+        system_prompt = self._build_system_prompt(
+            persona=persona,
+            has_tool_context=False,
+            todos=todos or None,
+            current_task_index=current_task_index,
+            planning_phase="planning",
         )
 
-        try:
-            structured_llm = self.langchain_model.with_structured_output(Plan)
-            modified_plan: Plan = await structured_llm.ainvoke(prompt)
+        # Force a tool call so we can reliably extract a machine-readable plan.
+        write_todos_tool = create_write_todos_tool()
+        llm = self.langchain_model.bind_tools(
+            [write_todos_tool],
+            tool_config={"function_calling_config": {"mode": "ANY"}},
+        )
 
-            validated_tasks = self._validate_and_order_tasks(modified_plan.tasks)
-            modified_plan.tasks = validated_tasks
-
-            formatted_response = self._format_modification_response(
-                existing_tasks, modified_plan
+        langchain_messages = [SystemMessage(content=system_prompt)]
+        if conversation_history:
+            langchain_messages.extend(
+                self._convert_history_to_langchain_messages(conversation_history)
             )
+        langchain_messages.append(HumanMessage(content=message.content))
 
-            # Generate todos for state sync
-            todos = self._plan_to_todos(modified_plan)
+        raw_response = await llm.ainvoke(langchain_messages)
 
-            return AgentResponse(
-                agent_type=AgentType.PLANNING,
-                agent_id="planning_agent",
-                message=AgentMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=coerce_response_text(formatted_response),
-                ),
-                metadata={
-                    "model": self.model_name,
-                    "conversation_id": conversation_id,
-                    "plan": modified_plan.model_dump(),
-                    "task_count": len(modified_plan.tasks),
-                    "plan_modified": True,
-                    "todos": todos,
-                },
-            )
+        tool_calls = getattr(raw_response, "tool_calls", None) or []
+        updated_todos = self._apply_write_todos_calls(base_todos=todos, tool_calls=tool_calls)
 
-        except ValueError as e:
-            error_msg = (
-                f"Issue while modifying the plan: {str(e)}. Please try rephrasing your request."
-                if isinstance(e, ValueError)
-                else f"Error while modifying the plan: {str(e)}"
-            )
-            return self._build_error_response(
-                error_msg,
-                conversation_id,
-                error=str(e),
-            )
-
-    def _plan_to_todos(self, plan: Plan) -> List[Dict[str, Any]]:
-        todos = []
-        for i, task in enumerate(plan.tasks):
-            todos.append(
+        if not updated_todos:
+            fallback_text = coerce_response_text(getattr(raw_response, "content", ""))
+            fallback_text = fallback_text.strip() if fallback_text else ""
+            if not fallback_text:
+                return self._build_error_response(
+                    "I couldn't generate a valid plan from your request.",
+                    conversation_id,
+                )
+            updated_todos = [
                 {
                     "id": str(uuid.uuid4()),
-                    "description": task.description,
+                    "description": fallback_text,
                     "status": TodoStatus.PENDING.value,
-                    "order": i,
+                    "order": 0,
                 }
-            )
-        return todos
-
-    def _format_existing_tasks(self, existing_tasks: List[Dict[str, Any]]) -> str:
-        if not existing_tasks:
-            return "No existing tasks."
-
-        lines = []
-        for i, task in enumerate(existing_tasks):
-            desc = task.get("description", "No description")
-            status = task.get("status", "pending")
-            lines.append(f"Task {i + 1}: {desc} [{status}]")
-
-        return "\n".join(lines)
-
-    def _format_modification_response(
-        self, original_tasks: List[Dict[str, Any]], modified_plan: Plan
-    ) -> str:
-        parts = []
-
-        original_count = len(original_tasks)
-        new_count = len(modified_plan.tasks)
-
-        if new_count > original_count:
-            parts.append(
-                f"I've updated the plan (added {new_count - original_count} task(s)):"
-            )
-        elif new_count < original_count:
-            parts.append(
-                f"I've updated the plan (removed {original_count - new_count} task(s)):"
-            )
-        else:
-            parts.append("I've updated the plan:")
-
-        parts.append("")
-
-        if modified_plan.overall_goal:
-            parts.append(f"**Goal:** {modified_plan.overall_goal}")
-            parts.append("")
-
-        for i, task in enumerate(modified_plan.tasks):
-            task_line = f"**Task {i + 1}:** {task.description}"
-            parts.append(task_line)
-            parts.append("")
-
-        return "\n".join(parts)
-
-
-
-    def _format_plan_response(self, plan: Plan) -> str:
-        parts = []
-
-        if plan.overall_goal:
-            parts.append(f"**Goal:** {plan.overall_goal}")
-            parts.append("")
-
-        parts.append(f"I've created a plan with {len(plan.tasks)} tasks:")
-        parts.append("")
-
-        for i, task in enumerate(plan.tasks):
-            task_line = f"**Task {i + 1}:** {task.description}"
-            parts.append(task_line)
-            parts.append("")
-
-        return "\n".join(parts)
-
-    async def stream_message(
-        self,
-        message: AgentMessage,
-        conversation_id: Optional[str] = None,
-        todos: Optional[List[Dict[str, Any]]] = None,
-        current_task_index: Optional[int] = None,
-    ):
-        """Stream planning agent responses with proper token streaming."""
-        if not self.langchain_model:
-            yield {
-                "type": "error",
-                "error": "Planning service is not properly configured.",
-            }
-            return
-
-        try:
-            # Initialize MCP tools if not done yet
-            if self.mcp_manager is None:
-                await self._init_tools()
-
-            llm_with_tools = self._get_llm_with_tools()
-            system_prompt = self._build_system_prompt(
-                None, False, todos, current_task_index
-            )
-
-            messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=message.content),
             ]
 
-            accumulated_content = ""
-            accumulated_thinking = ""
-            tool_calls = []
+        plan = self._todos_to_plan(
+            todos=updated_todos,
+            overall_goal=(message.content.strip() or None) if not plan_modified else None,
+        )
 
-            # Stream using astream_events
-            async for event in llm_with_tools.astream_events(messages, version="v2"):
-                event_type = event.get("event")
+        response_text = self._format_plan_summary(plan, plan_modified=plan_modified)
 
-                if event_type == "on_chat_model_stream":
-                    chunk = event.get("data", {}).get("chunk")
-                    if not chunk:
-                        continue
+        metadata: Dict[str, Any] = {
+            "model": self.model_name,
+            "conversation_id": conversation_id,
+            "plan": plan.model_dump(),
+            "task_count": len(plan.tasks),
+            "todos": updated_todos,
+        }
+        if plan_modified:
+            metadata["plan_modified"] = True
 
-                    # Handle content blocks
-                    if hasattr(chunk, "content_blocks") and chunk.content_blocks:
-                        for block in chunk.content_blocks:
-                            block_type = block.get("type")
+        return AgentResponse(
+            agent_type=self.agent_type,
+            agent_id=self.agent_id,
+            message=AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content=response_text,
+            ),
+            metadata=metadata,
+        )
 
-                            if block_type == "text":
-                                token = block.get("text", "")
-                                if token:
-                                    accumulated_content += token
-                                    yield {"type": "token", "content": token}
+    def _apply_write_todos_calls(
+        self, *, base_todos: List[Dict[str, Any]], tool_calls: Iterable[Any]
+    ) -> List[Dict[str, Any]]:
+        max_todos = getattr(settings, "max_todos_per_plan", 50)
+        todos = list(base_todos)
 
-                            elif block_type in ("thinking", "reasoning"):
-                                thinking_token = block.get(block_type, "") or block.get(
-                                    "text", ""
-                                )
-                                if thinking_token:
-                                    accumulated_thinking += thinking_token
-                                    yield {
-                                        "type": "thinking",
-                                        "content": thinking_token,
-                                    }
+        for raw_tool_call in tool_calls:
+            tool_call = normalize_tool_call(raw_tool_call)
+            if tool_call.get("name") != "write_todos":
+                continue
 
-                    # Handle string content
-                    elif hasattr(chunk, "content") and isinstance(chunk.content, str):
-                        token = coerce_response_text(chunk.content)
-                        if token:
-                            accumulated_content += token
-                            yield {"type": "token", "content": token}
+            args = tool_call.get("args") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    continue
+            if not isinstance(args, dict):
+                continue
 
-                    # Handle tool calls
-                    if hasattr(chunk, "tool_call_chunks") and chunk.tool_call_chunks:
-                        for tc_chunk in chunk.tool_call_chunks:
-                            if tc_chunk:
-                                tool_calls.append(tc_chunk)
+            action_raw = args.get("action")
+            action = action_raw.value if hasattr(action_raw, "value") else str(action_raw or "")
 
-            # Build final response
-            response = AgentResponse(
-                agent_type=AgentType.PLANNING,
-                agent_id="planning_agent",
-                message=AgentMessage(
-                    role=MessageRole.ASSISTANT,
-                    content=accumulated_content,
-                    tool_calls=tool_calls if tool_calls else None,
-                ),
-                metadata={
-                    "model": self.model_name,
-                    "conversation_id": conversation_id,
-                    "has_tool_calls": bool(tool_calls),
-                },
-            )
+            if action == TodoAction.SET_TODOS.value:
+                new_todos = args.get("todos") or []
+                if not isinstance(new_todos, list):
+                    continue
+                if len(new_todos) > max_todos:
+                    continue
+                todos = [self._coerce_todo_item(t, i) for i, t in enumerate(new_todos)]
 
-            if accumulated_thinking:
-                response.metadata["thinking"] = accumulated_thinking
+            elif action == TodoAction.ADD_TODO.value:
+                new_todo = args.get("todo")
+                if not new_todo:
+                    continue
+                todos.append(self._coerce_todo_item(new_todo, len(todos)))
 
-            yield {"type": "complete", "response": response}
+            elif action == TodoAction.UPDATE_TODO.value:
+                updated_todo = args.get("todo")
+                if not updated_todo:
+                    continue
+                updated = self._coerce_todo_item(updated_todo, 0)
+                todo_id = updated.get("id")
+                if not todo_id:
+                    continue
+                for i, todo in enumerate(todos):
+                    if str(todo.get("id")) == str(todo_id):
+                        todos[i] = {**todo, **updated}
+                        break
 
-        except Exception as e:
-            yield {"type": "error", "error": str(e)}
+            elif action == TodoAction.REMOVE_TODO.value:
+                todo_id = args.get("todo_id")
+                if not todo_id:
+                    continue
+                todos = [t for t in todos if str(t.get("id")) != str(todo_id)]
 
-    async def cleanup(self):
-        await super().cleanup()
+            elif action == TodoAction.START_TODO.value:
+                todo_id = args.get("todo_id")
+                for todo in todos:
+                    if str(todo.get("id")) == str(todo_id):
+                        todo["status"] = TodoStatus.IN_PROGRESS.value
+                        break
+
+            elif action == TodoAction.COMPLETE_TODO.value:
+                todo_id = args.get("todo_id")
+                for todo in todos:
+                    if str(todo.get("id")) == str(todo_id):
+                        todo["status"] = TodoStatus.COMPLETED.value
+                        break
+
+        if len(todos) > max_todos:
+            todos = todos[:max_todos]
+
+        return todos
+
+    def _coerce_todo_item(self, raw_todo: Any, fallback_order: int) -> Dict[str, Any]:
+        if hasattr(raw_todo, "model_dump"):
+            todo = raw_todo.model_dump()
+        elif isinstance(raw_todo, dict):
+            todo = dict(raw_todo)
+        else:
+            todo = {"description": str(raw_todo)}
+
+        todo.setdefault("id", str(uuid.uuid4()))
+        todo.setdefault("status", TodoStatus.PENDING.value)
+        todo.setdefault("order", fallback_order)
+        return todo
+
+    def _todos_to_plan(self, *, todos: List[Dict[str, Any]], overall_goal: Optional[str]) -> Plan:
+        def sort_key(item: Dict[str, Any]) -> int:
+            order = item.get("order")
+            try:
+                return int(order)
+            except (TypeError, ValueError):
+                return 0
+
+        ordered = sorted(todos, key=sort_key) if todos else []
+
+        seen: set[str] = set()
+        tasks: List[Task] = []
+        for item in ordered:
+            desc = str(item.get("description", "")).strip()
+            if not desc or desc in seen:
+                continue
+            seen.add(desc)
+            tasks.append(Task(description=desc))
+
+        return Plan(tasks=tasks, overall_goal=overall_goal)
+
+    def _format_plan_summary(self, plan: Plan, *, plan_modified: bool) -> str:
+        if not plan.tasks:
+            return "I couldn't generate any actionable tasks."
+
+        parts = ["I've updated the plan:" if plan_modified else "I've created a plan:", ""]
+        if plan.overall_goal:
+            parts.append(f"Goal: {plan.overall_goal}")
+            parts.append("")
+        for i, task in enumerate(plan.tasks, start=1):
+            parts.append(f"{i}. {task.description}")
+        return "\n".join(parts)

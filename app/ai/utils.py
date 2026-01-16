@@ -333,3 +333,47 @@ def get_error_recovery_hint(
 
     # Generic fallback
     return f"Unexpected {error_type}: review the error message and adjust arguments or try a different approach"
+
+
+def extract_content_from_result(result: Any) -> Any:
+    """
+    Extract actual content from LangChain Content objects.
+
+    MCP tools often return results wrapped in Content format:
+    [{'type': 'text', 'text': '...', 'id': '...'}]
+
+    This function unwraps such content to extract the actual text values.
+
+    Args:
+        result: The tool result which may be wrapped in Content format
+
+    Returns:
+        Unwrapped content - either pure text or cleaned structure
+    """
+    if isinstance(result, list):
+        cleaned = []
+        for item in result:
+            if isinstance(item, dict):
+                if (
+                    "type" in item
+                    and item.get("type") == "text"
+                    and "text" in item
+                ):
+                    cleaned.append(item["text"])
+                else:
+                    cleaned.append(item)
+            else:
+                cleaned.append(item)
+        if len(cleaned) == 1:
+            return cleaned[0]
+        return cleaned
+
+    if isinstance(result, dict):
+        if (
+            "type" in result
+            and result.get("type") == "text"
+            and "text" in result
+        ):
+            return result["text"]
+
+    return result
