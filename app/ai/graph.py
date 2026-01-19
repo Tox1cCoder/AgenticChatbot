@@ -31,6 +31,7 @@ from .memory import get_memory_manager
 from ..core.config import settings
 from .hitl_config import build_interrupt_response, requires_human_approval
 from .rag_tool_actions import execute_search_documents_action
+from .tool_execution import ensure_agent_tool_map, execute_tool_calls, invoke_tool
 from .todo_actions import apply_write_todos_action
 from .utils import normalize_tool_call, coerce_response_text, make_json_safe, extract_content_from_result
 from ..core.response_constants import NO_RESPONSE_GENERATED
@@ -102,6 +103,36 @@ class MultiAgentWorkflow:
 
         # Return only messages from the current turn
         return messages[last_human_idx:]
+
+    @staticmethod
+    def _consume_stream_text_chunk(
+        accumulated_content: str, text_chunk: Any
+    ) -> Tuple[str, Optional[str]]:
+        """
+        Return (new_accumulated_content, delta_to_emit) for a streaming text chunk.
+        """
+        if not text_chunk:
+            return accumulated_content, None
+
+        chunk_text = coerce_response_text(text_chunk)
+        if not chunk_text:
+            return accumulated_content, None
+
+        if accumulated_content:
+            # Exact repeat of what we've already accumulated.
+            if chunk_text == accumulated_content:
+                return accumulated_content, None
+
+            # Cumulative chunk: new chunk starts with what we already have.
+            if chunk_text.startswith(accumulated_content):
+                delta = chunk_text[len(accumulated_content) :]
+                return chunk_text, delta or None
+
+            # Duplicate tail chunk.
+            if accumulated_content.endswith(chunk_text):
+                return accumulated_content, None
+
+        return accumulated_content + chunk_text, chunk_text
 
     # ============================================================
     # Shared Helper Methods 
@@ -239,10 +270,20 @@ class MultiAgentWorkflow:
         initial_state["context"]["has_existing_plan"] = has_existing_plan
         if existing_tasks:
             initial_state["context"]["existing_tasks"] = existing_tasks
-            initial_state["todos"] = existing_tasks
-            initial_state["current_task_index"] = self._find_first_pending_task(
-                existing_tasks
-            )
+            todos: List[Dict[str, Any]] = []
+            for i, task in enumerate(existing_tasks):
+                if not isinstance(task, dict):
+                    continue
+                todos.append(
+                    {
+                        "id": task.get("id", str(i)),
+                        "description": task.get("description", ""),
+                        "status": task.get("status", TodoStatus.PENDING.value),
+                        "order": task.get("order", task.get("task_order", i)),
+                    }
+                )
+            initial_state["todos"] = todos
+            initial_state["current_task_index"] = self._find_first_pending_task(todos)
 
         # Initialize planning call count for budget tracking
         initial_state["planning_call_count"] = 0
@@ -395,129 +436,24 @@ class MultiAgentWorkflow:
         if not agent:
             return state
 
-        if not hasattr(agent, "tools") or not agent.tools:
-            if hasattr(agent, "_init_mcp"):
-                await agent._init_mcp()
-            elif hasattr(agent, "_init_tools"):
-                await agent._init_tools()
-
-        if not hasattr(agent, "tools") or not agent.tools:
+        tool_map = await ensure_agent_tool_map(agent)
+        if not tool_map:
             return state
 
-        tool_map = {t.name: t for t in agent.tools}
-        tool_outputs = []
-        tool_artifacts = []
-        all_images = []
+        tool_outputs, tool_artifacts, all_images = await execute_tool_calls(
+            tool_calls=last_message.tool_calls,
+            tool_map=tool_map,
+            capture_images=True,
+        )
 
-        for tool_call in last_message.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
-            tool_id = tool_call["id"]
-
-            tool = tool_map.get(tool_name)
-            if tool:
-                try:
-                    result = (
-                        await tool.ainvoke(tool_args)
-                        if tool.coroutine
-                        else tool.invoke(tool_args)
-                    )
-                    # Extract actual content from Content objects
-                    result = extract_content_from_result(result)
-                    result_str = str(result)
-                    tool_outputs.append(
-                        {
-                            "tool_call_id": tool_id,
-                            "role": "tool",
-                            "name": tool_name,
-                            "content": result_str,
-                        }
-                    )
-
-                    # Track tool artifact
-                    tool_artifacts.append(
-                        {
-                            "tool_call_id": tool_id,
-                            "tool": tool_name,
-                            "args": tool_args,
-                            "output": (
-                                result_str[:1000]
-                                if len(result_str) > 1000
-                                else result_str
-                            ),
-                            "error": None,
-                        }
-                    )
-
-                    try:
-                        parsed_result = json.loads(result_str)
-                        if (
-                            isinstance(parsed_result, dict)
-                            and "images" in parsed_result
-                        ):
-                            for img in parsed_result["images"]:
-                                if isinstance(img, dict):
-                                    img_url = img.get("url")
-                                    img_desc = img.get("description", "")
-                                    if img_url:
-                                        all_images.append(
-                                            {
-                                                "url": img_url,
-                                                "description": img_desc,
-                                            }
-                                        )
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
-                except Exception as e:
-                    error_msg = f"Error: {e}"
-                    tool_outputs.append(
-                        {
-                            "tool_call_id": tool_id,
-                            "role": "tool",
-                            "name": tool_name,
-                            "content": error_msg,
-                        }
-                    )
-                    tool_artifacts.append(
-                        {
-                            "tool": tool_name,
-                            "args": tool_args,
-                            "output": None,
-                            "error": str(e),
-                        }
-                    )
-            else:
-                error_msg = f"Error: Tool {tool_name} not found"
-                tool_outputs.append(
-                    {
-                        "tool_call_id": tool_id,
-                        "role": "tool",
-                        "name": tool_name,
-                        "content": error_msg,
-                    }
-                )
-                tool_artifacts.append(
-                    {
-                        "tool_call_id": tool_id,
-                        "tool": tool_name,
-                        "args": tool_args,
-                        "output": None,
-                        "error": f"Tool {tool_name} not found",
-                    }
-                )
-
-        new_messages = []
         for output in tool_outputs:
-            new_messages.append(
+            state.setdefault("messages", []).append(
                 ToolMessage(
                     content=output["content"],
                     tool_call_id=output["tool_call_id"],
                     name=output["name"],
                 )
             )
-
-        state.setdefault("messages", []).extend(new_messages)
 
         current_iteration = state.get("iteration_count") or 0
         state["iteration_count"] = current_iteration + 1
@@ -921,7 +857,6 @@ class MultiAgentWorkflow:
         ]
         non_search_outputs_by_id: Dict[str, str] = {}
 
-        tool_map: Dict[str, Any] = {}
         if non_search_tool_calls:
             tool_calls_to_execute = list(non_search_tool_calls)
 
@@ -978,87 +913,19 @@ class MultiAgentWorkflow:
                 agent = (
                     self.agents.get(selected_agent_name) if selected_agent_name else None
                 )
-                if agent:
-                    if not hasattr(agent, "tools") or not agent.tools:
-                        if hasattr(agent, "_init_mcp"):
-                            await agent._init_mcp()
-                        elif hasattr(agent, "_init_tools"):
-                            await agent._init_tools()
-                    if hasattr(agent, "tools") and agent.tools:
-                        tool_map = {t.name: t for t in agent.tools}
-
-                for tc in tool_calls_to_execute:
-                    tool_name = tc.get("name")
-                    tool_id = tc.get("id")
-                    tool_args = tc.get("args", {})
-
-                    tool = tool_map.get(tool_name) if tool_map else None
-                    if tool:
-                        try:
-                            result = (
-                                await tool.ainvoke(tool_args)
-                                if tool.coroutine
-                                else tool.invoke(tool_args)
-                            )
-                            result = extract_content_from_result(result)
-                            result_str = str(result)
-                            non_search_outputs_by_id[tool_id] = result_str
-                            tool_artifacts.append(
-                                {
-                                    "tool_call_id": tool_id,
-                                    "tool": tool_name,
-                                    "args": tool_args,
-                                    "output": (
-                                        result_str[:1000]
-                                        if len(result_str) > 1000
-                                        else result_str
-                                    ),
-                                    "error": None,
-                                }
-                            )
-                            try:
-                                parsed_result = json.loads(result_str)
-                                if (
-                                    isinstance(parsed_result, dict)
-                                    and "images" in parsed_result
-                                ):
-                                    for img in parsed_result["images"]:
-                                        if isinstance(img, dict):
-                                            img_url = img.get("url")
-                                            img_desc = img.get("description", "")
-                                            if img_url:
-                                                all_images.append(
-                                                    {
-                                                        "url": img_url,
-                                                        "description": img_desc,
-                                                    }
-                                                )
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-                        except Exception as e:
-                            error_msg = f"Error: {e}"
-                            non_search_outputs_by_id[tool_id] = error_msg
-                            tool_artifacts.append(
-                                {
-                                    "tool_call_id": tool_id,
-                                    "tool": tool_name,
-                                    "args": tool_args,
-                                    "output": None,
-                                    "error": str(e),
-                                }
-                            )
-                    else:
-                        error_msg = f"Error: Tool {tool_name} not found"
-                        non_search_outputs_by_id[tool_id] = error_msg
-                        tool_artifacts.append(
-                            {
-                                "tool_call_id": tool_id,
-                                "tool": tool_name,
-                                "args": tool_args,
-                                "output": None,
-                                "error": f"Tool {tool_name} not found",
-                            }
-                        )
+                tool_map = await ensure_agent_tool_map(agent) if agent else {}
+                outputs, artifacts, images = await execute_tool_calls(
+                    tool_calls=tool_calls_to_execute,
+                    tool_map=tool_map,
+                    capture_images=True,
+                )
+                for output in outputs:
+                    if output.get("tool_call_id"):
+                        non_search_outputs_by_id[output["tool_call_id"]] = output[
+                            "content"
+                        ]
+                tool_artifacts.extend(artifacts)
+                all_images.extend(images)
 
         for tool_call_data in normalized_tool_calls:
             tool_name = tool_call_data.get("name")
@@ -1208,22 +1075,13 @@ class MultiAgentWorkflow:
         if not messages:
             return state
 
-        # Get conversation context
-        conversation_history = []
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
-
-        if conversation_id and user_id:
-            memory_manager = get_memory_manager()
-            conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=True
-            )
-            conversation_history = conv_memory.get_recent_messages(
-                limit=None, exclude_last=1
-            )
+        conversation_history = await self._get_conversation_history(
+            conversation_id, user_id
+        )
 
         context = state.get("context", {})
-        existing_tasks = context.get("existing_tasks", [])
 
         # Get planning phase and check if we need to generate plan response
         planning_phase = state.get("planning_phase", "planning")
@@ -1299,6 +1157,7 @@ class MultiAgentWorkflow:
         context = state.get("context", {})
         had_error = False
         max_todos = getattr(settings, "max_todos_per_plan", 50)
+        tool_map = await ensure_agent_tool_map(self.planning_agent)
 
         for tool_call in last_message.tool_calls:
             tool_call_data = normalize_tool_call(tool_call)
@@ -1308,15 +1167,10 @@ class MultiAgentWorkflow:
 
             if tool_name != "write_todos":
                 try:
-                    tool = None
-                    if self.planning_agent and hasattr(self.planning_agent, "tools"):
-                        for t in self.planning_agent.tools:
-                            if t.name == tool_name:
-                                tool = t
-                                break
-
-                    if tool:
-                        result = await tool.ainvoke(tool_args)
+                    tool = tool_map.get(tool_name) if tool_name else None
+                    if tool is not None:
+                        result = await invoke_tool(tool, tool_args)
+                        result = extract_content_from_result(result)
                         tool_outputs.append(
                             {
                                 "tool_call_id": tool_id,
@@ -1756,19 +1610,9 @@ class MultiAgentWorkflow:
         # For traditional RAG we use the agent's custom streaming implementation.
         # For agentic RAG we must stream the LangGraph execution so tool calls can run.
         if selected_agent == "rag_agent" and not settings.agentic_rag_enabled:
-            conversation_history = []
-            if conversation_id and user_id:
-                try:
-                    memory_manager = get_memory_manager()
-                    conv_memory = await memory_manager.get_memory(
-                        UUID(conversation_id), UUID(user_id), force_refresh=True
-                    )
-                    # Get all messages from history without limit
-                    conversation_history = conv_memory.get_recent_messages(
-                        limit=None, exclude_last=1
-                    )
-                except Exception:
-                    pass
+            conversation_history = await self._get_conversation_history(
+                conversation_id, user_id
+            )
 
             agent_msg = AgentMessage(
                 role=MessageRole.USER,
@@ -1799,71 +1643,12 @@ class MultiAgentWorkflow:
                 yield {"type": "error", "error": str(e)}
             return
 
-        # Handle planning agent - now with streaming support
-        if selected_agent == "planning_agent":
-            # Convert existing_tasks to todos format for state
-            todos = []
-            if existing_tasks:
-                for i, task in enumerate(existing_tasks):
-                    todos.append(
-                        {
-                            "id": task.get("id", str(i)),
-                            "description": task.get("description", ""),
-                            "status": task.get("status", "pending"),
-                            "order": task.get("task_order", i),
-                        }
-                    )
-
-            # Set up initial state for graph execution
-            initial_state["todos"] = todos
-            # Find the first pending or in-progress task as current
-            current_task_index = None
-            for i, todo in enumerate(todos):
-                status = todo.get("status", "pending")
-                if status in ("pending", "in_progress"):
-                    current_task_index = i
-                    break
-            initial_state["current_task_index"] = current_task_index
-            initial_state["planning_call_count"] = 0
-            # Don't return early - fall through to the common streaming logic below
-
         accumulated_content = ""
         accumulated_thinking = ""  # Track thinking content for non-RAG agents
         current_tool_calls = {}  # Track tool call chunks by index
         emitted_tool_call_ids = (
             set()
         )  # Track which tool calls have had tool_start emitted
-
-        def _consume_text_chunk(text_chunk: str) -> Optional[str]:
-            """
-            Return the incremental delta to emit, updating accumulated_content in-place.
-            """
-            nonlocal accumulated_content
-
-            if not text_chunk:
-                return None
-
-            chunk_text = coerce_response_text(text_chunk)
-            if not chunk_text:
-                return None
-
-            if accumulated_content:
-                # Exact repeat of what we've already accumulated.
-                if chunk_text == accumulated_content:
-                    return None
-
-                # Cumulative chunk: new chunk starts with what we already have.
-                if chunk_text.startswith(accumulated_content):
-                    delta = chunk_text[len(accumulated_content) :]
-                    accumulated_content = chunk_text
-                    return delta or None
-
-                # Duplicate tail chunk.
-                if accumulated_content.endswith(chunk_text):
-                    return None
-
-            accumulated_content += chunk_text
-            return chunk_text
 
         try:
             # - "messages": Stream LLM tokens with metadata (includes tool_call_chunks)
@@ -1893,7 +1678,11 @@ class MultiAgentWorkflow:
 
                                 if block_type == "text":
                                     text_content = block.get("text", "")
-                                    delta = _consume_text_chunk(text_content)
+                                    accumulated_content, delta = (
+                                        self._consume_stream_text_chunk(
+                                            accumulated_content, text_content
+                                        )
+                                    )
                                     if delta:
                                         yield {"type": "token", "content": delta}
 
@@ -1987,11 +1776,19 @@ class MultiAgentWorkflow:
                                             }
                                     elif part_type == "text":
                                         text_content = part.get("text", "")
-                                        delta = _consume_text_chunk(text_content)
+                                        accumulated_content, delta = (
+                                            self._consume_stream_text_chunk(
+                                                accumulated_content, text_content
+                                            )
+                                        )
                                         if delta:
                                             yield {"type": "token", "content": delta}
                                 elif isinstance(part, str) and part:
-                                    delta = _consume_text_chunk(part)
+                                    accumulated_content, delta = (
+                                        self._consume_stream_text_chunk(
+                                            accumulated_content, part
+                                        )
+                                    )
                                     if delta:
                                         yield {"type": "token", "content": delta}
 
@@ -2002,7 +1799,9 @@ class MultiAgentWorkflow:
                             and isinstance(message_chunk.content, str)
                         ):
                             content = coerce_response_text(message_chunk.content)
-                            delta = _consume_text_chunk(content)
+                            accumulated_content, delta = self._consume_stream_text_chunk(
+                                accumulated_content, content
+                            )
                             if delta:
                                 yield {"type": "token", "content": delta}
 
