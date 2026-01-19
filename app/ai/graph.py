@@ -1669,7 +1669,6 @@ class MultiAgentWorkflow:
         self,
         thread_id: str,
         decisions: List[InterruptDecision],
-        interrupt_id: Optional[str] = None,
     ) -> Optional[AgentResponse]:
         if not self.checkpointer:
             raise ValueError("Checkpointing is not enabled, cannot resume.")
@@ -1836,11 +1835,8 @@ class MultiAgentWorkflow:
         )  # Track which tool calls have had tool_start emitted
 
         def _consume_text_chunk(text_chunk: str) -> Optional[str]:
-            """Return the incremental delta to emit, updating accumulated_content in-place.
-
-            Some backends emit cumulative text (full content-so-far) or repeat the final
-            content as a last chunk. This helper deduplicates those cases so we don't
-            end up with duplicated responses.
+            """
+            Return the incremental delta to emit, updating accumulated_content in-place.
             """
             nonlocal accumulated_content
 
@@ -1870,7 +1866,6 @@ class MultiAgentWorkflow:
             return chunk_text
 
         try:
-            # Use recommended LangGraph streaming approach with multiple modes
             # - "messages": Stream LLM tokens with metadata (includes tool_call_chunks)
             # - "updates": Stream state updates after each node (includes completed messages)
             async for chunk in self.graph.astream(

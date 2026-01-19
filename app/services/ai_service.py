@@ -177,7 +177,6 @@ class AIService:
         self,
         thread_id: str,
         decisions: List[InterruptDecision],
-        interrupt_id: Optional[str] = None,
     ) -> AgentResponse:
         if not self.checkpointer:
             return self._build_error_response(
@@ -187,7 +186,6 @@ class AIService:
         response = await self.workflow.resume_with_decisions(
             thread_id=thread_id,
             decisions=decisions,
-            interrupt_id=interrupt_id,
         )
 
         if response:

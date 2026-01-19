@@ -715,7 +715,6 @@ class MessageService(IMessageService):
         bot_response = await self.ai_service.resume_interrupted_execution(
             thread_id=thread_id,
             decisions=decisions,
-            interrupt_id=interrupt_id,
         )
 
         self._clear_redis_interrupt(conversation_id, interrupt_id)

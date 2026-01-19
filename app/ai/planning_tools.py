@@ -1,10 +1,3 @@
-"""
-Planning tool schemas.
-
-These tools are primarily used to expose validated schemas to the LLM.
-The actual execution for stateful tools is handled by the LangGraph workflow.
-"""
-
 from __future__ import annotations
 
 from typing import List, Optional
@@ -15,11 +8,8 @@ from .schemas import TodoAction, TodoItem, WriteTodosInput
 
 
 def create_write_todos_tool():
-    """Expose the write_todos schema to the LLM.
-
-    In the LangGraph workflow, write_todos is executed by `app/ai/graph.py` in the
-    planning tools node. This implementation mainly exists to provide a validated
-    schema (WriteTodosInput) to the model.
+    """
+    Expose the write_todos schema to the LLM.
     """
 
     @tool(args_schema=WriteTodosInput)

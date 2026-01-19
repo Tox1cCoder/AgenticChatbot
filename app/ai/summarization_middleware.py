@@ -207,7 +207,7 @@ def apply_summarization_to_state(
 
     # Create summary message as SystemMessage
     summary_message = SystemMessage(
-        content=f"[Summary of previous conversation]\n{summary}\n[End of summary]"
+        content=f"[Summary of previous conversation]\n{summary}\n[End of summary]\n"
     )
 
     state["messages"] = system_messages + [summary_message] + messages_to_keep
