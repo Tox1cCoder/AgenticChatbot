@@ -63,3 +63,4 @@ mcp_config.json
 output/
 boring_servers/
 scripts/
+.agent

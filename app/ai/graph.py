@@ -2105,8 +2105,6 @@ class MultiAgentWorkflow:
                                     )
 
                                     # Handle AIMessage - extract tool_calls only
-                                    # Note: Text/thinking/reasoning content is already streamed via
-                                    # messages mode, so we skip content parsing here to avoid duplicates
                                     if isinstance(last_msg, AIMessage):
                                         # Handle tool calls
                                         if (

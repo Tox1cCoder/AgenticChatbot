@@ -200,9 +200,6 @@ def extract_agent_execution_info(agent_response: Dict[str, Any]) -> Dict[str, An
     - List of tools used
     - Tool artifacts (calls with arguments and outputs)
 
-    Note: For Gemini's "thinking" feature (extended reasoning), use the 'thinking_summary'
-    field in response metadata instead. This function only extracts tool execution info.
-
     Args:
         agent_response: The response dictionary from agent.invoke()
 

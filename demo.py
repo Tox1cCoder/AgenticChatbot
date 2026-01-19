@@ -3993,8 +3993,6 @@ def render_chat_view():
                             st.rerun()
                         elif event_type != "error" and not interrupt_data:
                             st.toast("Failed to send message", icon="❌")
-    # Note: Legacy tool approval UI removed. Now using modern interrupt-based approval in render_interrupt_approval_ui()
-
 
 def render_manage_modal():
     """Conversation management modal dialog"""

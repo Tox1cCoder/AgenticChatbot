@@ -7,6 +7,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 from ..core.config import settings
 from .agent_config import get_api_key
+from .utils import coerce_response_text
 
 logger = logging.getLogger(__name__)
 
@@ -173,11 +174,7 @@ async def generate_summary(
 
         response = await model.ainvoke([HumanMessage(content=prompt)])
 
-        summary = (
-            response.content
-            if isinstance(response.content, str)
-            else str(response.content)
-        )
+        summary = coerce_response_text(response.content)
 
         logger.debug(
             f"Generated summary for {len(messages_to_summarize)} messages "
