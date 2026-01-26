@@ -33,7 +33,12 @@ from .hitl_config import build_interrupt_response, requires_human_approval
 from .rag_tool_actions import execute_search_documents_action
 from .tool_execution import ensure_agent_tool_map, execute_tool_calls, invoke_tool
 from .todo_actions import apply_write_todos_action
-from .utils import normalize_tool_call, coerce_response_text, make_json_safe, extract_content_from_result
+from .utils import (
+    normalize_tool_call,
+    coerce_response_text,
+    make_json_safe,
+    extract_content_from_result,
+)
 from ..core.response_constants import NO_RESPONSE_GENERATED
 
 logger = logging.getLogger(__name__)
@@ -110,6 +115,10 @@ class MultiAgentWorkflow:
     ) -> Tuple[str, Optional[str]]:
         """
         Return (new_accumulated_content, delta_to_emit) for a streaming text chunk.
+
+        Handles both:
+        - Cumulative chunks (Gemini): Each chunk contains all text accumulated so far
+        - Incremental chunks (OpenAI): Each chunk contains only new text
         """
         if not text_chunk:
             return accumulated_content, None
@@ -119,23 +128,24 @@ class MultiAgentWorkflow:
             return accumulated_content, None
 
         if accumulated_content:
-            # Exact repeat of what we've already accumulated.
+            # Exact repeat of what we've already accumulated - skip it
             if chunk_text == accumulated_content:
                 return accumulated_content, None
 
-            # Cumulative chunk: new chunk starts with what we already have.
+            # Cumulative chunk: new chunk starts with what we already have (Gemini)
             if chunk_text.startswith(accumulated_content):
                 delta = chunk_text[len(accumulated_content) :]
                 return chunk_text, delta or None
 
-            # Duplicate tail chunk.
+            # Duplicate tail chunk - skip it
             if accumulated_content.endswith(chunk_text):
                 return accumulated_content, None
 
+        # Incremental chunk (OpenAI) or first chunk - append and emit
         return accumulated_content + chunk_text, chunk_text
 
     # ============================================================
-    # Shared Helper Methods 
+    # Shared Helper Methods
     # ============================================================
 
     async def _get_conversation_history(
@@ -237,6 +247,7 @@ class MultiAgentWorkflow:
         user_id: Optional[str] = None,
         persona: Optional[str] = None,
         attachments: Optional[list] = None,
+        model_request: Optional[Dict[str, Any]] = None,
         current_task: Optional[Dict[str, Any]] = None,
         all_tasks: Optional[List[Dict[str, Any]]] = None,
         planning_mode_enabled: bool = False,
@@ -252,6 +263,8 @@ class MultiAgentWorkflow:
             initial_state["conversation_id"] = conversation_id
         if user_id is not None:
             initial_state["user_id"] = user_id
+        if model_request is not None:
+            initial_state["model_request"] = model_request
         initial_state["selected_agent"] = None
         initial_state["response"] = None
         initial_state["persona"] = persona
@@ -756,6 +769,8 @@ class MultiAgentWorkflow:
             conversation_history,
             state.get("persona"),
             conversation_id,
+            user_id=user_id,
+            model_request=state.get("model_request"),
         )
 
         self._merge_tool_artifacts(state, response)
@@ -783,9 +798,7 @@ class MultiAgentWorkflow:
 
         last_human_idx = self._find_last_human_message_index(messages)
         original_query = (
-            messages[last_human_idx].content
-            if last_human_idx is not None
-            else content
+            messages[last_human_idx].content if last_human_idx is not None else content
         )
 
         tool_context = []
@@ -799,7 +812,11 @@ class MultiAgentWorkflow:
             "history": conversation_history,
             "original_query": original_query,
             "tool_context": tool_context,
-            "agentic_images": context.get("agentic_images", []),  # Pass images for multimodal LLM
+            "agentic_images": context.get(
+                "agentic_images", []
+            ),  # Pass images for multimodal LLM
+            "model_request": state.get("model_request"),
+            "user_id": user_id,
         }
 
         agent_msg = AgentMessage(
@@ -900,7 +917,11 @@ class MultiAgentWorkflow:
                         elif decision_type == "edit":
                             modified_args = decision.get("args", tc.get("args", {}))
                             tool_calls_to_execute.append(
-                                {"name": tool_name, "args": modified_args, "id": tool_call_id}
+                                {
+                                    "name": tool_name,
+                                    "args": modified_args,
+                                    "id": tool_call_id,
+                                }
                             )
                         else:
                             feedback = decision.get("args", {}).get(
@@ -911,7 +932,9 @@ class MultiAgentWorkflow:
             if tool_calls_to_execute:
                 selected_agent_name = state.get("selected_agent")
                 agent = (
-                    self.agents.get(selected_agent_name) if selected_agent_name else None
+                    self.agents.get(selected_agent_name)
+                    if selected_agent_name
+                    else None
                 )
                 tool_map = await ensure_agent_tool_map(agent) if agent else {}
                 outputs, artifacts, images = await execute_tool_calls(
@@ -952,11 +975,13 @@ class MultiAgentWorkflow:
                 max_agentic_images=max_agentic_images,
             )
 
-            tool_outputs.append({
-                "tool_call_id": tool_id,
-                "name": tool_name,
-                "content": result,
-            })
+            tool_outputs.append(
+                {
+                    "tool_call_id": tool_id,
+                    "name": tool_name,
+                    "content": result,
+                }
+            )
 
         # Add tool messages to state
         for output in tool_outputs:
@@ -1035,6 +1060,8 @@ class MultiAgentWorkflow:
             conversation_history,
             state.get("persona"),
             conversation_id,
+            user_id=user_id,
+            model_request=state.get("model_request"),
         )
 
         self._merge_tool_artifacts(state, response)
@@ -1058,6 +1085,8 @@ class MultiAgentWorkflow:
             conversation_history,
             state.get("persona"),
             conversation_id,
+            user_id=user_id,
+            model_request=state.get("model_request"),
         )
 
         self._merge_tool_artifacts(state, response, append_images=True)
@@ -1111,6 +1140,8 @@ class MultiAgentWorkflow:
             conversation_history=conversation_history,
             persona=persona,
             conversation_id=conversation_id,
+            user_id=user_id,
+            model_request=state.get("model_request"),
             todos=todos,
             current_task_index=current_task_index,
             planning_phase=planning_phase,
@@ -1221,7 +1252,9 @@ class MultiAgentWorkflow:
 
             except Exception as e:
                 raw_action = tool_args.get("action")
-                action = raw_action.value if hasattr(raw_action, "value") else raw_action
+                action = (
+                    raw_action.value if hasattr(raw_action, "value") else raw_action
+                )
                 result = f"Error executing {action}: {str(e)}"
                 had_error = True  # Mark error for circuit breaker
 
@@ -1404,6 +1437,7 @@ class MultiAgentWorkflow:
         thread_id: Optional[str] = None,
         persona: Optional[str] = None,
         attachments: Optional[list] = None,
+        model_request: Optional[Dict[str, Any]] = None,
         current_task: Optional[Dict[str, Any]] = None,
         all_tasks: Optional[List[Dict[str, Any]]] = None,
         planning_mode_enabled: bool = False,
@@ -1417,6 +1451,7 @@ class MultiAgentWorkflow:
             user_id=user_id,
             persona=persona,
             attachments=attachments,
+            model_request=model_request,
             current_task=current_task,
             all_tasks=all_tasks,
             planning_mode_enabled=planning_mode_enabled,
@@ -1576,6 +1611,7 @@ class MultiAgentWorkflow:
         thread_id: Optional[str] = None,
         persona: Optional[str] = None,
         attachments: Optional[list] = None,
+        model_request: Optional[Dict[str, Any]] = None,
         current_task: Optional[Dict[str, Any]] = None,
         all_tasks: Optional[List[Dict[str, Any]]] = None,
         planning_mode_enabled: bool = False,
@@ -1588,6 +1624,7 @@ class MultiAgentWorkflow:
             user_id=user_id,
             persona=persona,
             attachments=attachments,
+            model_request=model_request,
             current_task=current_task,
             all_tasks=all_tasks,
             planning_mode_enabled=planning_mode_enabled,
@@ -1609,7 +1646,22 @@ class MultiAgentWorkflow:
 
         # For traditional RAG we use the agent's custom streaming implementation.
         # For agentic RAG we must stream the LangGraph execution so tool calls can run.
-        if selected_agent == "rag_agent" and not settings.agentic_rag_enabled:
+        rag_provider = None
+        model_request = initial_state.get("model_request")
+        if isinstance(model_request, dict):
+            rag_cfg = model_request.get("rag")
+            if not isinstance(rag_cfg, dict):
+                rag_cfg = model_request.get("all")
+            if isinstance(rag_cfg, dict):
+                rag_provider = (
+                    str(rag_cfg.get("provider") or "").strip().lower() or None
+                )
+
+        if (
+            selected_agent == "rag_agent"
+            and not settings.agentic_rag_enabled
+            and rag_provider != "openai"
+        ):
             conversation_history = await self._get_conversation_history(
                 conversation_id, user_id
             )
@@ -1617,7 +1669,12 @@ class MultiAgentWorkflow:
             agent_msg = AgentMessage(
                 role=MessageRole.USER,
                 content=message,
-                metadata={"history": conversation_history, "persona": persona},
+                metadata={
+                    "history": conversation_history,
+                    "persona": persona,
+                    "model_request": initial_state.get("model_request"),
+                    "user_id": user_id,
+                },
                 attachments=attachments,
             )
 
@@ -1744,6 +1801,8 @@ class MultiAgentWorkflow:
                                         and not current_tool_calls[tool_index]["id"]
                                     ):
                                         current_tool_calls[tool_index]["id"] = tool_id
+                            
+                            pass  # Content blocks handled
 
                         # Handle content as list (when include_thoughts=True)
                         # LangChain returns content as list with thinking/reasoning and text parts
@@ -1799,8 +1858,10 @@ class MultiAgentWorkflow:
                             and isinstance(message_chunk.content, str)
                         ):
                             content = coerce_response_text(message_chunk.content)
-                            accumulated_content, delta = self._consume_stream_text_chunk(
-                                accumulated_content, content
+                            accumulated_content, delta = (
+                                self._consume_stream_text_chunk(
+                                    accumulated_content, content
+                                )
                             )
                             if delta:
                                 yield {"type": "token", "content": delta}
@@ -1984,7 +2045,10 @@ class MultiAgentWorkflow:
                     ):
                         response.metadata["thinking_summary"] = accumulated_thinking
 
-                    if accumulated_content and not (response.message.content or "").strip():
+                    if (
+                        accumulated_content
+                        and not (response.message.content or "").strip()
+                    ):
                         response.message.content = accumulated_content
 
                     # For planning agent, include todos in metadata

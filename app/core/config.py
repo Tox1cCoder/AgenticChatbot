@@ -91,6 +91,24 @@ class Settings(BaseSettings):
         description="Smithery API Key for MCP server access",
     )
 
+    # Multi-Provider Configuration
+    model_encryption_key: str = Field(
+        default="",
+        description="Fernet encryption key for storing provider API keys (32 url-safe base64-encoded bytes)",
+    )
+    openai_request_timeout_seconds: int = Field(
+        default=60,
+        description="Timeout for OpenAI API requests in seconds",
+    )
+    provider_retry_attempts: int = Field(
+        default=3,
+        description="Number of retry attempts for provider API calls before fallback",
+    )
+    provider_retry_delay_seconds: float = Field(
+        default=1.0,
+        description="Base delay in seconds between retry attempts (uses exponential backoff)",
+    )
+
     # LangSmith Configuration
     langsmith_api_key: str = Field(
         default="",

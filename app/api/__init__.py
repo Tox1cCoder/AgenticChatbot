@@ -1,3 +1,9 @@
+from app.core.container import setup_auto_injection, Container
+
+# Ensure AppAutoInjector wiring_map is configured even when importing `app.api.*`
+# modules directly (e.g. verification scripts that don't import `app.main`).
+setup_auto_injection(Container)
+
 from app.api.users import router as users_router
 from app.api.conversations import router as conversations_router
 from app.api.messages import router as messages_router

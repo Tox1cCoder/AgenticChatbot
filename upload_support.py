@@ -1,4 +1,4 @@
-import streamlit as st # type: ignore
+import streamlit as st  # type: ignore
 import requests
 import time
 from typing import Dict, Any, Optional
@@ -13,7 +13,7 @@ def render_upload_section():
         st.session_state.get("current_conversation_id")
         and st.session_state.current_conversation_id != "pending_new"
     ):
-        st.markdown("### 📁 Upload Documents")
+        st.markdown("### :material/upload_file: Upload Documents")
         st.caption(f"Upload to current conversation")
 
         uploaded_file = st.file_uploader(
@@ -25,21 +25,27 @@ def render_upload_section():
 
         if uploaded_file is not None:
             # Display file info
-            st.info(f"📄 {uploaded_file.name} ({uploaded_file.size} bytes)")
+            st.info(
+                f"{uploaded_file.name} ({uploaded_file.size} bytes)",
+                icon=":material/description:",
+            )
 
             if st.button(
                 "Upload File",
-                use_container_width=True,
+                icon=":material/upload:",
+                width="stretch",
                 key=f"upload_btn_{st.session_state.current_conversation_id}",
             ):
                 upload_result = upload_document(uploaded_file)
                 if upload_result:
-                    st.success("✅ File uploaded successfully!")
+                    st.success(
+                        "File uploaded successfully!", icon=":material/check_circle:"
+                    )
                     # Clear cache to refresh data
                     st.cache_data.clear()
                     st.rerun()
                 else:
-                    st.error("❌ Upload failed")
+                    st.error("Upload failed", icon=":material/cancel:")
 
 
 def upload_document(uploaded_file) -> Optional[Dict[str, Any]]:
@@ -127,23 +133,31 @@ def poll_document_status(document_id: str):
                 # Status: 1=Processing, 2=Ready, 3=Failed
                 if status_code == 1:
                     status_placeholder.info(
-                        f"⏳ Processing '{filename}'... ({int(elapsed_time)}s elapsed)"
+                        f"Processing '{filename}'... ({int(elapsed_time)}s elapsed)",
+                        icon=":material/schedule:",
                     )
                 elif status_code == 2:
                     status_placeholder.success(
-                        f"✅ '{filename}' is ready! Processing completed in {int(elapsed_time)}s"
+                        f"'{filename}' is ready! Processing completed in {int(elapsed_time)}s",
+                        icon=":material/check_circle:",
                     )
                     time.sleep(2)  # Show success message briefly
                     status_placeholder.empty()
                     break
                 elif status_code == 3:
-                    status_placeholder.error(f"❌ '{filename}' processing failed")
+                    status_placeholder.error(
+                        f"'{filename}' processing failed", icon=":material/cancel:"
+                    )
                     break
                 else:
-                    status_placeholder.warning(f"❓ Unknown status for '{filename}'")
+                    status_placeholder.warning(
+                        f"Unknown status for '{filename}'", icon=":material/help:"
+                    )
                     break
             else:
-                status_placeholder.warning("⚠️ Unable to fetch document status")
+                status_placeholder.warning(
+                    "Unable to fetch document status", icon=":material/warning:"
+                )
                 break
 
             # Wait before next poll
@@ -218,9 +232,11 @@ def render_document_list():
         st.session_state.get("current_conversation_id")
         and st.session_state.current_conversation_id != "pending_new"
     ):
-        with st.expander("📚 Conversation Documents", expanded=False):
+        with st.expander(":material/menu_book: Conversation Documents", expanded=False):
             # Add refresh button
-            if st.button("🔄 Refresh Status", key="refresh_docs"):
+            if st.button(
+                "Refresh Status", icon=":material/refresh:", key="refresh_docs"
+            ):
                 st.cache_data.clear()
                 st.rerun()
 
@@ -236,19 +252,35 @@ def render_document_list():
                     for doc in documents:
                         # Status mapping
                         status_map = {
-                            1: {"icon": "⏳", "text": "Processing", "color": "orange"},
-                            2: {"icon": "✅", "text": "Ready", "color": "green"},
-                            3: {"icon": "❌", "text": "Failed", "color": "red"},
+                            1: {
+                                "icon": ":material/schedule:",
+                                "text": "Processing",
+                                "color": "orange",
+                            },
+                            2: {
+                                "icon": ":material/check_circle:",
+                                "text": "Ready",
+                                "color": "green",
+                            },
+                            3: {
+                                "icon": ":material/cancel:",
+                                "text": "Failed",
+                                "color": "red",
+                            },
                         }
 
                         status_info = status_map.get(
                             doc.get("status"),
-                            {"icon": "❓", "text": "Unknown", "color": "gray"},
+                            {
+                                "icon": ":material/help:",
+                                "text": "Unknown",
+                                "color": "gray",
+                            },
                         )
 
                         col1, col2, col3 = st.columns([3, 1, 1])
                         with col1:
-                            st.text(
+                            st.markdown(
                                 f"{status_info['icon']} {doc.get('filename', 'Unknown')}"
                             )
                             st.caption(
@@ -260,7 +292,8 @@ def render_document_list():
                             )
                         with col3:
                             if st.button(
-                                "🗑️",
+                                "Delete",
+                                icon=":material/delete:",
                                 key=f"del_{doc.get('id')}",
                                 help="Delete document",
                             ):

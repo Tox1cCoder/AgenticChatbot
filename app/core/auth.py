@@ -12,6 +12,7 @@ from app.core.exceptions import (
     AuthorizationException,
 )
 from app.services.jwt_service import JwtService
+from app.models.user import User
 
 security = HTTPBearer()
 
@@ -21,6 +22,13 @@ def get_jwt_service() -> JwtService:
     from app.core.container import container
 
     return container.jwt_service()
+
+
+def get_user_service():
+    """Dependency to get UserService from container"""
+    from app.core.container import container
+
+    return container.user_service()
 
 
 async def get_current_user_id(
@@ -80,4 +88,53 @@ def require_user_ownership(resource_user_id: UUID, authenticated_user_id: UUID) 
         raise AuthorizationException(
             detail="Access denied: insufficient permissions",
             error_code="INSUFFICIENT_PERMISSIONS",
+        )
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    jwt_service: JwtService = Depends(get_jwt_service),
+) -> User:
+    """
+    Dependency to get current authenticated User object from JWT token.
+
+    Returns:
+        User: The authenticated user object
+
+    Raises:
+        TokenExpiredException: If the token has expired
+        AuthenticationException: If the token is invalid or user not found
+    """
+    from app.interfaces.user_service_interface import IUserService
+    from app.core.container import container
+
+    token = credentials.credentials
+    try:
+        user_id_str = get_user_id_from_token(token, jwt_service)
+        user_id = UUID(user_id_str)
+
+        # Get user from service
+        user_service: IUserService = container.user_service()
+        user_read = user_service.get_by_id(user_id)
+
+        # Convert UserRead schema to User model
+        # Note: We return a minimal User object for auth purposes
+        user = User(
+            id=user_read.id,
+            username=user_read.username,
+            email=user_read.email,
+            created_at=user_read.created_at,
+            updated_at=user_read.updated_at,
+            deleted_at=user_read.deleted_at,
+            avatar_url=user_read.avatar_url,
+            password_hash="",  # Don't include password hash in auth response
+        )
+        return user
+
+    except jwt.ExpiredSignatureError:
+        raise TokenExpiredException()
+    except ValueError:
+        raise AuthenticationException(
+            detail="Invalid user ID format in token",
+            error_code="INVALID_USER_ID_FORMAT",
         )

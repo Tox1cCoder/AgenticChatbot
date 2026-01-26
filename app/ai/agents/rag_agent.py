@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import base64
+import asyncio
 from typing import Optional, List, Dict, Any, AsyncIterator
 from uuid import UUID
 from pathlib import Path
@@ -89,6 +90,77 @@ class RAGAgent:
         self.reranker = CrossEncoder(self.settings.reranker_model)
         logger.info(f"Re-ranker initialized: {self.settings.reranker_model}")
 
+    def _resolve_model_request(self, model_request: Any) -> Optional[Dict[str, Any]]:
+        if not model_request or not isinstance(model_request, dict):
+            return None
+
+        override = model_request.get("rag")
+        if isinstance(override, dict):
+            return override
+
+        shared = model_request.get("all")
+        return shared if isinstance(shared, dict) else None
+
+    def _get_openai_api_key(self, user_id: Any) -> Optional[str]:
+        if not user_id:
+            return None
+
+        try:
+            user_uuid = UUID(str(user_id))
+        except Exception:
+            return None
+
+        try:
+            from app.core.container import container
+
+            provider_service = container.provider_service()
+            return provider_service.get_decrypted_api_key(user_uuid, "openai")
+        except Exception:
+            return None
+
+    def _coerce_temperature(self, value: Any, default: float) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        return float(default)
+
+    async def _ainvoke_with_retries(self, runnable: Any, payload: Any) -> Any:
+        attempts = getattr(settings, "provider_retry_attempts", 3) or 3
+        delay = getattr(settings, "provider_retry_delay_seconds", 1.0) or 1.0
+
+        try:
+            attempts = int(attempts)
+        except Exception:
+            attempts = 3
+        try:
+            delay = float(delay)
+        except Exception:
+            delay = 1.0
+
+        if attempts < 1:
+            attempts = 1
+        if delay < 0:
+            delay = 0.0
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return await runnable.ainvoke(payload)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= attempts:
+                    break
+                sleep_for = delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "rag_agent: provider call failed (attempt %s/%s): %s",
+                    attempt,
+                    attempts,
+                    exc,
+                )
+                if sleep_for:
+                    await asyncio.sleep(sleep_for)
+
+        raise last_exc or RuntimeError("Provider call failed")
+
     async def _init_tools(self):
         if self.mcp_manager is not None:
             return
@@ -127,7 +199,9 @@ class RAGAgent:
                     len(active_servers),
                 )
             else:
-                logger.warning("No MCP tools available for RAGAgent; running without tools")
+                logger.warning(
+                    "No MCP tools available for RAGAgent; running without tools"
+                )
         else:
             # MCP failed but we should still have search_documents for agentic mode
             if self.tools:
@@ -179,6 +253,8 @@ class RAGAgent:
         query = message.content
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
+        model_request = message.metadata.get("model_request")
+        request_user_id = message.metadata.get("user_id")
 
         # Initialize tools if not done yet
         if self.mcp_manager is None:
@@ -239,30 +315,96 @@ class RAGAgent:
         tool_artifacts: List[Dict[str, Any]] = []
         error_message: Optional[str] = None
 
-        try:
-            if images and self.tools and self.langchain_model:
-                (
-                    tool_response_text,
-                    tools_used,
-                    tool_artifacts,
-                ) = await self._generate_with_tools(prompt)
+        resolved_request = self._resolve_model_request(model_request)
+        provider = "gemini"
+        effective_model_name = self.model_name
+        effective_temperature = self._coerce_temperature(
+            (resolved_request or {}).get("temperature"),
+            AGENT_CONFIG.get("rag", {}).get("temperature", 1.0),
+        )
+        used_fallback = False
+        fallback_reason: Optional[str] = None
 
-                multimodal_prompt = self._augment_prompt_with_tool_context(
-                    prompt, tool_response_text, tool_artifacts
-                )
-                response_text = await self._generate_with_vision(
-                    multimodal_prompt, images
-                )
-            elif images:
-                response_text = await self._generate_with_vision(prompt, images)
-            elif self.tools and self.langchain_model:
-                # Use tools without images
-                response_text, tools_used, tool_artifacts = (
-                    await self._generate_with_tools(prompt)
-                )
-            else:
-                # Regular text-only generation
-                response_text = await self._generate(prompt)
+        if resolved_request and isinstance(resolved_request, dict):
+            requested_provider = (
+                str(resolved_request.get("provider") or "").strip().lower()
+            )
+            requested_model = resolved_request.get("model")
+            if requested_provider in {"openai", "gemini"}:
+                provider = requested_provider
+            if (
+                provider == "openai"
+                and isinstance(requested_model, str)
+                and requested_model.strip()
+            ):
+                effective_model_name = requested_model.strip()
+
+        try:
+            if provider == "openai":
+                api_key = self._get_openai_api_key(request_user_id)
+                if not api_key:
+                    used_fallback = True
+                    fallback_reason = "OpenAI provider selected but no API key is configured for this user"
+                    provider = "gemini"
+                    effective_model_name = self.model_name
+
+                if provider == "openai" and images:
+                    used_fallback = True
+                    fallback_reason = "OpenAI provider selected but multimodal document images are currently handled by Gemini"
+                    provider = "gemini"
+                    effective_model_name = self.model_name
+
+                if provider == "openai":
+                    from ..model_factory import ModelFactory
+
+                    llm = ModelFactory.create_model(
+                        provider="openai",
+                        model=effective_model_name,
+                        api_key=api_key,
+                        temperature=effective_temperature,
+                        timeout=settings.openai_request_timeout_seconds,
+                        streaming=True,
+                    )
+                    try:
+                        response = await self._ainvoke_with_retries(llm, prompt)
+                        response_text = coerce_response_text(
+                            getattr(response, "content", "")
+                        )
+                    except Exception as exc:
+                        used_fallback = True
+                        fallback_reason = f"{type(exc).__name__}"
+                        provider = "gemini"
+                        effective_model_name = self.model_name
+                        response_text = await self._generate(prompt)
+                else:
+                    # Fall back to Gemini path below
+                    response_text = await self._generate(prompt)
+
+            # Only process with images/tools if OpenAI wasn't used (to prevent overwriting OpenAI response)
+            if provider != "openai":
+                if images and self.tools and self.langchain_model:
+                    (
+                        tool_response_text,
+                        tools_used,
+                        tool_artifacts,
+                    ) = await self._generate_with_tools(prompt)
+
+                    multimodal_prompt = self._augment_prompt_with_tool_context(
+                        prompt, tool_response_text, tool_artifacts
+                    )
+                    response_text = await self._generate_with_vision(
+                        multimodal_prompt, images
+                    )
+                elif images:
+                    response_text = await self._generate_with_vision(prompt, images)
+                elif self.tools and self.langchain_model:
+                    # Use tools without images
+                    response_text, tools_used, tool_artifacts = (
+                        await self._generate_with_tools(prompt)
+                    )
+                else:
+                    # Regular text-only generation
+                    response_text = await self._generate(prompt)
         except Exception as exc:
             logger.error("Error generating RAG response: %s", exc, exc_info=True)
             error_message = f"{type(exc).__name__}: {exc}"
@@ -345,7 +487,8 @@ class RAGAgent:
 
         # Build metadata
         metadata = {
-            "model": self.model_name,
+            "model": effective_model_name,
+            "provider": provider,
             "conversation_id": conversation_id,
             "documents_found": len(doc_grouping),  # Number of unique documents
             "chunks_retrieved": len(retrieved_docs),  # Total number of chunks
@@ -363,6 +506,13 @@ class RAGAgent:
             "has_images": bool(images),
             "images_count": len(images) if images else 0,
         }
+
+        if used_fallback:
+            metadata["provider_fallback"] = {
+                "from": "openai",
+                "to": "gemini",
+                "reason": fallback_reason or "fallback",
+            }
 
         # Add image data to metadata for frontend display
         if images:
@@ -1010,7 +1160,6 @@ class RAGAgent:
             query_filter=search_filter,
         ).points
 
-
         results = []
         for result in search_results:
             results.append(
@@ -1124,7 +1273,9 @@ class RAGAgent:
             "high": types.MediaResolution.MEDIA_RESOLUTION_HIGH,
         }
         config_value = self.settings.media_resolution
-        return resolution_map.get(config_value, types.MediaResolution.MEDIA_RESOLUTION_HIGH)
+        return resolution_map.get(
+            config_value, types.MediaResolution.MEDIA_RESOLUTION_HIGH
+        )
 
     async def _generate_with_vision(
         self, prompt: str, images: List[Dict[str, Any]]
@@ -1132,7 +1283,7 @@ class RAGAgent:
         try:
             parts = []
             media_resolution = self._get_media_resolution()
-            
+
             for index, image in enumerate(images, start=1):
                 image_data = base64.b64decode(image["data"])
 
@@ -1143,7 +1294,7 @@ class RAGAgent:
                     types.Part.from_bytes(
                         data=image_data,
                         mime_type=mime_type,
-                        media_resolution=media_resolution
+                        media_resolution=media_resolution,
                     )
                 )
 
@@ -1346,9 +1497,7 @@ class RAGAgent:
                 all_results, key=lambda r: r.payload.get("chunk_index", 0)
             )
 
-            content = "\n\n".join(
-                r.payload.get("content", "") for r in sorted_results
-            )
+            content = "\n\n".join(r.payload.get("content", "") for r in sorted_results)
 
             return content
 
@@ -1393,7 +1542,8 @@ class RAGAgent:
                     scroll_filter=Filter(
                         must=[
                             FieldCondition(
-                                key="conversation_id", match=MatchValue(value=conversation_id)
+                                key="conversation_id",
+                                match=MatchValue(value=conversation_id),
                             )
                         ]
                     ),
@@ -1429,9 +1579,7 @@ class RAGAgent:
             )
             return []
 
-    async def grep_document(
-        self, document_id: str, pattern: str
-    ) -> Optional[str]:
+    async def grep_document(self, document_id: str, pattern: str) -> Optional[str]:
         """
         Search for regex pattern in a document's content.
         Used for agentic GREP_DOCUMENT action.
@@ -1457,9 +1605,7 @@ class RAGAgent:
         except re.error as e:
             return f"Error: Invalid regex pattern - {e}"
 
-    async def scan_all_documents(
-        self, conversation_id: str
-    ) -> str:
+    async def scan_all_documents(self, conversation_id: str) -> str:
         """
         Scan all documents in a conversation and return previews.
         Used for agentic SCAN_ALL action.
@@ -1470,21 +1616,16 @@ class RAGAgent:
             return f"No documents found in conversation {conversation_id}"
 
         output = []
-        output.append("═" * 60)
-        output.append(f"  DOCUMENT SCAN: {len(documents)} documents found")
-        output.append("═" * 60)
-        output.append("")
+        output.append(f"DOCUMENT SCAN: {len(documents)} documents found")
 
         for i, doc in enumerate(documents, 1):
             doc_id = doc["document_id"]
             filename = doc["filename"]
             chunk_count = doc["chunk_count"]
 
-            output.append("┌" + "─" * 58)
-            output.append(f"│ [{i}/{len(documents)}] {filename}")
-            output.append(f"│ Document ID: {doc_id}")
-            output.append(f"│ Chunks: {chunk_count}")
-            output.append("├" + "─" * 58)
+            output.append(f"[{i}/{len(documents)}] {filename}")
+            output.append(f"Document ID: {doc_id}")
+            output.append(f"Chunks: {chunk_count}")
 
             # Get preview
             preview = await self.get_document_preview(doc_id)
@@ -1492,21 +1633,18 @@ class RAGAgent:
                 # Indent preview lines
                 preview_lines = preview.split("\n")
                 for line in preview_lines[:30]:  # Limit preview lines
-                    output.append(f"│ {line}")
+                    output.append(f"{line}")
                 if len(preview_lines) > 30:
-                    output.append("│ ... (preview truncated)")
+                    output.append("... (preview truncated)")
             else:
-                output.append("│ [Preview unavailable]")
+                output.append("[Preview unavailable]")
 
-            output.append("└" + "─" * 58)
             output.append("")
 
-        output.append("═" * 60)
         output.append("  NEXT STEPS:")
         output.append("  1. Categorize documents as RELEVANT / MAYBE / SKIP")
         output.append("  2. Use READ_DOCUMENT for deep dive into RELEVANT docs")
         output.append("  3. Watch for cross-references to other documents")
-        output.append("═" * 60)
 
         return "\n".join(output)
 
@@ -1526,13 +1664,15 @@ class RAGAgent:
             with open(image_path, "rb") as f:
                 base64_data = base64.b64encode(f.read()).decode("utf-8")
 
-            images.append({
-                "id": str(image.id),
-                "data": base64_data,
-                "mime_type": image.mime_type,
-                "caption": image.image_caption,
-                "page_number": image.page_number,
-            })
+            images.append(
+                {
+                    "id": str(image.id),
+                    "data": base64_data,
+                    "mime_type": image.mime_type,
+                    "caption": image.image_caption,
+                    "page_number": image.page_number,
+                }
+            )
 
         return images
 
@@ -1554,6 +1694,8 @@ class RAGAgent:
         tool_context = message.metadata.get("tool_context", [])
         conversation_history = message.metadata.get("history", [])
         agentic_images = message.metadata.get("agentic_images", [])
+        model_request = message.metadata.get("model_request")
+        request_user_id = message.metadata.get("user_id")
 
         system_prompt = AGENTIC_RAG_SYSTEM_PROMPT
         if persona:
@@ -1563,7 +1705,65 @@ class RAGAgent:
         if not self.tools:
             await self._init_tools()
 
-        llm_with_tools = self.langchain_model.bind_tools(self.tools)
+        resolved_request = self._resolve_model_request(model_request)
+        provider = "gemini"
+        effective_model_name = self.model_name
+        effective_temperature = self._coerce_temperature(
+            (resolved_request or {}).get("temperature"),
+            AGENT_CONFIG.get("rag", {}).get("temperature", 1.0),
+        )
+        used_fallback = False
+        fallback_reason: Optional[str] = None
+
+        llm = self.langchain_model
+        if resolved_request and isinstance(resolved_request, dict):
+            requested_provider = (
+                str(resolved_request.get("provider") or "").strip().lower()
+            )
+            requested_model = resolved_request.get("model")
+            if requested_provider in {"openai", "gemini"}:
+                provider = requested_provider
+            if (
+                provider == "openai"
+                and isinstance(requested_model, str)
+                and requested_model.strip()
+            ):
+                effective_model_name = requested_model.strip()
+
+        if provider == "openai":
+            api_key = self._get_openai_api_key(request_user_id)
+            if api_key:
+                from ..model_factory import ModelFactory
+
+                llm = ModelFactory.create_model(
+                    provider="openai",
+                    model=effective_model_name,
+                    api_key=api_key,
+                    temperature=effective_temperature,
+                    timeout=settings.openai_request_timeout_seconds,
+                    streaming=True,
+                )
+            else:
+                used_fallback = True
+                fallback_reason = "OpenAI provider selected but no API key is configured for this user"
+                provider = "gemini"
+                effective_model_name = self.model_name
+                llm = create_langchain_model(agent_type="rag")
+
+        if provider == "gemini" and effective_model_name != self.model_name:
+            llm = create_langchain_model(
+                agent_type="rag",
+                model_override=effective_model_name,
+                temperature_override=effective_temperature,
+            )
+
+        from ..model_factory import ModelFactory
+
+        llm_with_tools = ModelFactory.bind_tools_to_model(
+            llm,
+            self.tools,
+            tool_choice=getattr(settings, "tool_choice_mode", "auto"),
+        )
 
         # Build messages list with conversation history
         messages = [SystemMessage(content=system_prompt)]
@@ -1571,7 +1771,11 @@ class RAGAgent:
         # Add conversation history (convert AgentMessage to LangChain format)
         for hist_msg in conversation_history:
             if hasattr(hist_msg, "role") and hasattr(hist_msg, "content"):
-                role_value = hist_msg.role.value if hasattr(hist_msg.role, "value") else hist_msg.role
+                role_value = (
+                    hist_msg.role.value
+                    if hasattr(hist_msg.role, "value")
+                    else hist_msg.role
+                )
                 if role_value == "user":
                     messages.append(HumanMessage(content=hist_msg.content))
                 elif role_value == "assistant":
@@ -1584,40 +1788,61 @@ class RAGAgent:
             for i, result in enumerate(tool_context, 1):
                 context_parts.append(f"\nTool Call {i} Output:\n{result}")
         context_parts.append(f"\n\nConversation ID: {conversation_id}")
-        context_parts.append("\nUse the search_documents tool to explore documents and find information to answer the question.")
+        context_parts.append(
+            "\nUse the search_documents tool to explore documents and find information to answer the question."
+        )
 
         # Build multimodal content if images are available
         if agentic_images:
             # Build content list with text and images
             human_content = [{"type": "text", "text": "\n".join(context_parts)}]
-            
+
             for img in agentic_images:
                 img_data = img.get("data")
                 mime_type = img.get("mime_type", "image/jpeg")
                 caption = img.get("caption", "")
                 page = img.get("page_number", "?")
-                
+
                 if img_data:
-                    human_content.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{mime_type};base64,{img_data}"
+                    human_content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{img_data}"},
                         }
-                    })
+                    )
                     # Add caption as context
                     if caption:
-                        human_content.append({
-                            "type": "text", 
-                            "text": f"[Image from page {page}: {caption}]"
-                        })
-            
+                        human_content.append(
+                            {
+                                "type": "text",
+                                "text": f"[Image from page {page}: {caption}]",
+                            }
+                        )
+
             messages.append(HumanMessage(content=human_content))
         else:
             messages.append(HumanMessage(content="\n".join(context_parts)))
 
-
         try:
-            response = await llm_with_tools.ainvoke(messages)
+            if provider == "openai" and not used_fallback:
+                try:
+                    response = await self._ainvoke_with_retries(
+                        llm_with_tools, messages
+                    )
+                except Exception as exc:
+                    used_fallback = True
+                    fallback_reason = f"{type(exc).__name__}: {exc}"
+                    provider = "gemini"
+                    effective_model_name = self.model_name
+                    llm = create_langchain_model(agent_type="rag")
+                    llm_with_tools = ModelFactory.bind_tools_to_model(
+                        llm,
+                        self.tools,
+                        tool_choice=getattr(settings, "tool_choice_mode", "auto"),
+                    )
+                    response = await llm_with_tools.ainvoke(messages)
+            else:
+                response = await llm_with_tools.ainvoke(messages)
 
             # Extract content and tool calls
             response_text = coerce_response_text(response.content or "")
@@ -1641,10 +1866,22 @@ class RAGAgent:
                 agent_id="rag_agent",
                 message=response_message,
                 metadata={
-                    "model": self.model_name,
+                    "model": effective_model_name,
+                    "provider": provider,
                     "conversation_id": conversation_id,
                     "agentic_mode": True,
                     "has_tool_calls": bool(tool_calls),
+                    **(
+                        {
+                            "provider_fallback": {
+                                "from": "openai",
+                                "to": "gemini",
+                                "reason": fallback_reason or "fallback",
+                            }
+                        }
+                        if used_fallback
+                        else {}
+                    ),
                 },
             )
 

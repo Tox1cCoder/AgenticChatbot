@@ -195,12 +195,12 @@ class MCPManager:
             session = await session_context.__aenter__()
 
             tools = list(await load_mcp_tools(session))
-            
+
             for tool in tools:
                 if hasattr(tool, "name") and ":" in tool.name:
                     # Remove the prefix before the colon
                     tool.name = tool.name.split(":", 1)[-1]
-            
+
             cleaned_tools = self._clean_tool_schemas(tools)
 
             # Store context and session for proper cleanup
@@ -247,7 +247,7 @@ class MCPManager:
             for key, value in schema.items():
                 if key in unsupported_keys:
                     continue
-                
+
                 # Skip None values - Gemini can't handle them in schemas
                 if value is None:
                     continue
@@ -271,17 +271,21 @@ class MCPManager:
                         filtered[key] = filtered_value
                 elif isinstance(value, list):
                     filtered[key] = [
-                        self._filter_schema_recursively(item) for item in value
+                        self._filter_schema_recursively(item)
+                        for item in value
                         if item is not None
                     ]
                 else:
                     filtered[key] = value
             return filtered
         elif isinstance(schema, list):
-            return [self._filter_schema_recursively(item) for item in schema if item is not None]
+            return [
+                self._filter_schema_recursively(item)
+                for item in schema
+                if item is not None
+            ]
         else:
             return schema
-
 
     def _remove_non_string_enums(self, schema: Any) -> Any:
         if isinstance(schema, dict):
@@ -301,7 +305,14 @@ class MCPManager:
         cleaned_tools = []
         for tool in tools:
             # Check if tool has an args_schema
-            if not hasattr(tool, "args_schema") or tool.args_schema is None:
+            tool_had_no_schema = (
+                not hasattr(tool, "args_schema") or tool.args_schema is None
+            )
+            if tool_had_no_schema:
+                # Add empty properties schema for tools without args_schema
+                # to satisfy OpenAI's requirement
+                # Note: Only set to dict for tools that originally had None
+                tool.args_schema = {"type": "object", "properties": {}}
                 cleaned_tools.append(tool)
                 continue
 
@@ -312,6 +323,13 @@ class MCPManager:
             if isinstance(args_schema, dict):
                 filtered = self._filter_schema_recursively(args_schema)
                 tool.args_schema = self._remove_non_string_enums(filtered)
+
+                # Ensure OpenAI-compatible schema: must have type and properties
+                if not tool.args_schema.get("properties"):
+                    tool.args_schema["properties"] = {}
+                if not tool.args_schema.get("type"):
+                    tool.args_schema["type"] = "object"
+
                 cleaned_tools.append(tool)
                 continue
 
@@ -331,6 +349,11 @@ class MCPManager:
                     if isinstance(schema, dict):
                         schema = self._filter_schema_recursively(schema)
                         schema = self._remove_non_string_enums(schema)
+                        # Ensure OpenAI-compatible schema
+                        if not schema.get("properties"):
+                            schema["properties"] = {}
+                        if not schema.get("type"):
+                            schema["type"] = "object"
                     return schema
 
                 args_schema.model_json_schema = staticmethod(filtered_schema_method)
@@ -721,6 +744,7 @@ class MCPManager:
             "description": server_config.get("description", ""),
         }
 
+
 _global_mcp_manager: Optional["MCPManager"] = None
 _mcp_init_lock: asyncio.Lock = asyncio.Lock()
 _mcp_initialized: bool = False
@@ -729,27 +753,27 @@ _mcp_initialized: bool = False
 async def get_global_mcp_manager() -> MCPManager:
     """
     Get or create a singleton MCPManager instance.
-    
+
     Returns:
         MCPManager: The global MCP manager instance with tools pre-loaded.
     """
     global _global_mcp_manager, _mcp_initialized
-    
+
     if _global_mcp_manager is not None and _mcp_initialized:
         return _global_mcp_manager
-    
+
     async with _mcp_init_lock:
         # Double-check after acquiring lock
         if _global_mcp_manager is not None and _mcp_initialized:
             return _global_mcp_manager
-        
+
         _global_mcp_manager = MCPManager()
         await _global_mcp_manager.initialize()
-        
+
         # Pre-load all tools to avoid lazy loading overhead
         tools = await _global_mcp_manager.get_tools()
         _mcp_initialized = True
-        
+
     return _global_mcp_manager
 
 
@@ -758,11 +782,11 @@ async def reset_global_mcp_manager() -> None:
     Reset the global MCP manager.
     """
     global _global_mcp_manager, _mcp_initialized
-    
+
     async with _mcp_init_lock:
         if _global_mcp_manager is not None:
             await _global_mcp_manager.cleanup()
-        
+
         _global_mcp_manager = None
         _mcp_initialized = False
         logger.debug("Global MCP manager reset")

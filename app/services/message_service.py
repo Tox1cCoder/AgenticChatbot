@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Tuple, Any, Dict, TYPE_CHECKING
 from uuid import UUID
@@ -18,6 +19,7 @@ from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.pagination_validation import validate_pagination_params
 from app.interfaces.message_service_interface import IMessageService
 from app.services.ai_service import AIService
+from app.services.model_config_service import ModelConfigService
 from app.schemas.task_plan import TaskPlanCreate, TaskPlanUpdate
 from app.ai.schemas import (
     AgentResponse,
@@ -50,6 +52,7 @@ class MessageService(IMessageService):
         conversation_validation_utils: ConversationValidationUtils,
         message_validation_utils: MessageValidationUtils,
         ai_service: AIService,
+        model_config_service: Optional[ModelConfigService] = None,
         tool_approval_repository: Optional[ToolApprovalRepository] = None,
         task_plan_service: Optional["ITaskPlanService"] = None,
     ):
@@ -57,9 +60,31 @@ class MessageService(IMessageService):
         self.conversation_validation_utils = conversation_validation_utils
         self.message_validation_utils = message_validation_utils
         self.ai_service = ai_service
+        self.model_config_service = model_config_service
         self.tool_approval_repository = tool_approval_repository
         self.task_plan_service = task_plan_service
         self.redis_client = self._init_redis_client()
+
+    def _resolve_persistent_model_request(
+        self, user_id: Optional[UUID]
+    ) -> Optional[Dict[str, Any]]:
+        if not self.model_config_service or not user_id:
+            return None
+
+        try:
+            model_request = self.model_config_service.get_effective_model_request(
+                user_id
+            )
+        except Exception as exc:
+            logging.warning(
+                "Failed to load persistent model config for user %s: %s",
+                user_id,
+                type(exc).__name__,
+                exc_info=True,
+            )
+            return None
+
+        return model_request if isinstance(model_request, dict) else None
 
     def _init_redis_client(self):
         redis_url = getattr(settings, "redis_url", "") or ""
@@ -313,6 +338,16 @@ class MessageService(IMessageService):
                 else None
             )
 
+            model_request = (
+                message_create_data.model_config_field
+                if (
+                    hasattr(message_create_data, "model_config_field")
+                    and isinstance(message_create_data.model_config_field, dict)
+                    and message_create_data.model_config_field
+                )
+                else self._resolve_persistent_model_request(user_id)
+            )
+
             auto_execute_plan = (
                 planning_mode_enabled
                 and has_existing_plan
@@ -337,6 +372,7 @@ class MessageService(IMessageService):
                 existing_tasks_dict=existing_tasks_dict,
                 attachments=attachments,
                 auto_execute_plan=auto_execute_plan,
+                model_request=model_request,
             )
 
             if interrupt_payload:
@@ -459,6 +495,16 @@ class MessageService(IMessageService):
                 else None
             )
 
+            model_request = (
+                message_create_data.model_config_field
+                if (
+                    hasattr(message_create_data, "model_config_field")
+                    and isinstance(message_create_data.model_config_field, dict)
+                    and message_create_data.model_config_field
+                )
+                else self._resolve_persistent_model_request(user_id)
+            )
+
             # Stream bot response generation
             bot_response_content = ERROR_NO_RESPONSE
             bot_response = None
@@ -473,6 +519,7 @@ class MessageService(IMessageService):
                     planning_mode_enabled=planning_mode_enabled,
                     has_existing_plan=has_existing_plan,
                     existing_tasks=existing_tasks_dict,
+                    model_request=model_request,
                 ):
                     event_type = event.get("type")
 
@@ -1028,6 +1075,7 @@ class MessageService(IMessageService):
         existing_tasks_dict: Optional[List[Dict[str, Any]]],
         attachments: Optional[list],
         auto_execute_plan: bool,
+        model_request: Optional[Dict[str, Any]] = None,
     ) -> Tuple[
         Optional[str],
         Dict[str, Any],
@@ -1056,6 +1104,7 @@ class MessageService(IMessageService):
             planning_mode_enabled=planning_mode_enabled,
             has_existing_plan=has_plan,
             existing_tasks=existing_tasks_dict,
+            model_request=model_request,
         )
 
         # Handle interrupts (HITL)

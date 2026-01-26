@@ -12,6 +12,8 @@ from app.repositories.message import MessageRepository
 from app.repositories.feedback import FeedbackRepository
 from app.repositories.document import DocumentRepository
 from app.repositories.task_plan import TaskPlanRepository
+from app.repositories.model_provider import ModelProviderRepository
+from app.repositories.agent_model_config import AgentModelConfigRepository
 
 from app.services.auth_service import AuthService
 from app.services.user_service import UserService
@@ -24,6 +26,8 @@ from app.services.document_processing_service import DocumentProcessingService
 from app.services.mcp_service import MCPService
 from app.services.jwt_service import JwtService
 from app.services.task_plan_service import TaskPlanService
+from app.services.provider_service import ProviderService
+from app.services.model_config_service import ModelConfigService
 
 from app.ai.checkpoint import CheckpointManager
 from app.ai.mcp_integration import MCPManager
@@ -69,6 +73,8 @@ class Container(containers.DeclarativeContainer):
             "app.api.mcp",
             "app.api.task_plans",
             "app.api.ai_sdk",
+            "app.api.providers",
+            "app.api.model_config",
         ]
     )
 
@@ -144,6 +150,16 @@ class Container(containers.DeclarativeContainer):
 
     task_plan_repository = providers.Factory(
         TaskPlanRepository,
+        session_factory=db.provided.session,
+    )
+
+    model_provider_repository = providers.Factory(
+        ModelProviderRepository,
+        session_factory=db.provided.session,
+    )
+
+    agent_model_config_repository = providers.Factory(
+        AgentModelConfigRepository,
         session_factory=db.provided.session,
     )
 
@@ -224,12 +240,18 @@ class Container(containers.DeclarativeContainer):
         conversation_repository=conversation_repository,
     )
 
+    model_config_service = providers.Factory(
+        ModelConfigService,
+        repository=agent_model_config_repository,
+    )
+
     message_service: providers.Provider[IMessageService] = providers.Factory(
         MessageService,
         message_repository=message_repository,
         conversation_validation_utils=conversation_validation_utils,
         message_validation_utils=message_validation_utils,
         ai_service=ai_service,
+        model_config_service=model_config_service,
         task_plan_service=task_plan_service,
     )
 
@@ -270,6 +292,11 @@ class Container(containers.DeclarativeContainer):
     mcp_service = providers.Factory(
         MCPService,
         mcp_manager=mcp_manager,
+    )
+
+    provider_service = providers.Factory(
+        ProviderService,
+        provider_repository=model_provider_repository,
     )
 
 

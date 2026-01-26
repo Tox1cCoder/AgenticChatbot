@@ -13,6 +13,7 @@ from app.utils.case_conversion import (
 from app.schemas.feedback import FeedbackRead
 from app.ai.schemas import InterruptResponse, InterruptDecision
 
+
 class MessageCreate(BaseModel):
     conversation_id: UUID = Field(
         ..., description="Conversation ID this message belongs to"
@@ -25,8 +26,28 @@ class MessageCreate(BaseModel):
         default=None,
         description="Optional image attachments with structure {name: str, mime: str, data: str (base64)}",
     )
+    model_config_field: Optional[Dict[str, Any]] = Field(
+        default=None,
+        alias="modelConfig",
+        description="""Optional per-message model configuration for provider/model selection.
+        
+        Structure:
+        {
+          "all": {"provider": "openai", "model": "gpt-4o-mini", "temperature": 0.7},
+          "chat": null,      # Optional per-agent override
+          "rag": null,       # Optional per-agent override
+          "search": null,    # Optional per-agent override
+          "planning": null   # Optional per-agent override
+        }
+        
+        If 'all' is set, applies to all agents unless per-agent override is present.
+        If omitted, uses system defaults (Gemini).
+        """,
+    )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
 class MessageUpdate(BaseModel):
     content: Optional[str] = Field(None, min_length=1, description="Message content")
 
@@ -103,7 +124,7 @@ class MessageRead(BaseModel):
         # Populate fields from message_metadata for persisted messages
         if not isinstance(self.message_metadata, dict):
             return self
-            
+
         # Populate interrupt from metadata
         if self.interrupt is None:
             payload = self.message_metadata.get("interrupt")
@@ -116,7 +137,7 @@ class MessageRead(BaseModel):
                     )
                 except Exception:
                     pass
-        
+
         # Populate suggested_questions from metadata
         if self.suggested_questions is None:
             suggestions = self.message_metadata.get("suggested_questions")
@@ -124,7 +145,7 @@ class MessageRead(BaseModel):
                 self.suggested_questions = [
                     s for s in suggestions if isinstance(s, str)
                 ]
-        
+
         return self
 
 

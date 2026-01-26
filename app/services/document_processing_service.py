@@ -73,16 +73,23 @@ class DocumentProcessingService:
     def _ensure_collection_exists(self):
         from qdrant_client.models import Distance, VectorParams
 
-        collections = self.qdrant_client.get_collections()
-        exists = any(c.name == self.collection_name for c in collections.collections)
+        try:
+            collections = self.qdrant_client.get_collections()
+            exists = any(
+                c.name == self.collection_name for c in collections.collections
+            )
+        except Exception as e:
+            logger.warning(
+                f"Could not connect to Qdrant: {e}. Collection check skipped."
+            )
+            return
 
         if not exists:
             self.qdrant_client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(
-                    size=self.embedding_dimension,
-                    distance=Distance.COSINE
-                )
+                    size=self.embedding_dimension, distance=Distance.COSINE
+                ),
             )
         else:
             info = self.qdrant_client.get_collection(self.collection_name)
@@ -266,7 +273,7 @@ class DocumentProcessingService:
                     "-t",
                     "false",
                     "-b",
-                    "pipeline"
+                    "pipeline",
                 ],
                 timeout=self.settings.mineru_timeout,
                 check=True,
@@ -298,9 +305,11 @@ class DocumentProcessingService:
             images_dir = markdown_file.parent / "images"
 
             # Try to find content_list.json for structured metadata
-            content_list_path = markdown_file.parent / f"{markdown_file.stem}_content_list.json"
+            content_list_path = (
+                markdown_file.parent / f"{markdown_file.stem}_content_list.json"
+            )
             content_blocks = None
-            
+
             if content_list_path.exists():
                 try:
                     content_blocks = self._parse_content_list_json(content_list_path)
@@ -385,12 +394,16 @@ class DocumentProcessingService:
 
                 documents = [
                     type(
-                        "Document", (), {"page_content": markdown_content, "metadata": {}}
+                        "Document",
+                        (),
+                        {"page_content": markdown_content, "metadata": {}},
                     )()
                 ]
                 chunks = self._create_chunks(documents)
 
-                unpaged_images = [img for img in images_data if img["page_number"] is None]
+                unpaged_images = [
+                    img for img in images_data if img["page_number"] is None
+                ]
 
                 chunks_with_metadata = []
                 for chunk in chunks:
@@ -456,7 +469,7 @@ class DocumentProcessingService:
     def _parse_content_list_json(self, content_list_path: Path) -> List[Dict[str, Any]]:
         """
         Parse MinerU's content_list.json to extract structured content with metadata.
-        
+
         Returns list of content blocks with:
         - text/content: The actual content
         - page_idx: Page number (0-indexed)
@@ -466,7 +479,7 @@ class DocumentProcessingService:
         """
         with open(content_list_path, "r", encoding="utf-8") as f:
             content_list = json.load(f)
-        
+
         return content_list
 
     def _create_chunks_with_page_metadata(
@@ -477,7 +490,7 @@ class DocumentProcessingService:
     ) -> List[Dict[str, Any]]:
         """
         Create chunks from content_list.json blocks while preserving page metadata.
-        
+
         Strategy:
         - Accumulate text from consecutive blocks
         - Split when chunk exceeds max_chunk_size
@@ -499,10 +512,10 @@ class DocumentProcessingService:
             """Save current accumulated chunk if it has content."""
             nonlocal current_chunk_text, current_page_start, current_page_end
             nonlocal current_images, current_tables, pages_in_current_chunk
-            
+
             if not current_chunk_text.strip():
                 return
-            
+
             # Gather images for pages in this chunk
             chunk_images = current_images.copy()
             for page in pages_in_current_chunk:
@@ -510,19 +523,21 @@ class DocumentProcessingService:
                     for img in page_to_images[page]:
                         if img not in chunk_images:
                             chunk_images.append(img)
-            
-            chunks_with_metadata.append({
-                "text": current_chunk_text.strip(),
-                "page_start": current_page_start,
-                "page_end": current_page_end,
-                "has_images": bool(chunk_images),
-                "image_count": len(chunk_images),
-                "images": chunk_images,
-                "has_tables": bool(current_tables),
-                "table_count": len(current_tables),
-                "tables": current_tables,
-            })
-            
+
+            chunks_with_metadata.append(
+                {
+                    "text": current_chunk_text.strip(),
+                    "page_start": current_page_start,
+                    "page_end": current_page_end,
+                    "has_images": bool(chunk_images),
+                    "image_count": len(chunk_images),
+                    "images": chunk_images,
+                    "has_tables": bool(current_tables),
+                    "table_count": len(current_tables),
+                    "tables": current_tables,
+                }
+            )
+
             # Reset for next chunk
             current_chunk_text = ""
             current_page_start = None
@@ -536,7 +551,7 @@ class DocumentProcessingService:
             block_type = block.get("type", "text")
             bbox = block.get("bbox")
             text_level = block.get("text_level", 0)
-            
+
             # Extract text content based on block type
             text = ""
             if block_type == "text":
@@ -561,7 +576,9 @@ class DocumentProcessingService:
                 if captions:
                     text = "[Table: " + " ".join(captions) + "]"
                 elif footnotes:
-                    text = "[Table] " + " ".join(str(note) for note in footnotes if note)
+                    text = "[Table] " + " ".join(
+                        str(note) for note in footnotes if note
+                    )
                 else:
                     text = "[Table]"
             elif block_type == "image":
@@ -580,7 +597,9 @@ class DocumentProcessingService:
                 if captions:
                     text = "[Image: " + " ".join(captions) + "]"
                 elif footnotes:
-                    text = "[Image] " + " ".join(str(note) for note in footnotes if note)
+                    text = "[Image] " + " ".join(
+                        str(note) for note in footnotes if note
+                    )
                 else:
                     text = "[Image]"
             elif block_type == "equation":
@@ -591,33 +610,32 @@ class DocumentProcessingService:
             else:
                 # Fallback for any other block type
                 text = block.get("text", "")
-            
+
             # Check if adding this block would exceed chunk size
             proposed_length = len(current_chunk_text) + len(text) + 1  # +1 for newline
             if current_chunk_text and proposed_length > max_chunk_size:
                 _finalize_chunk()
-            
+
             # Update page tracking
             if current_page_start is None:
                 current_page_start = page_idx
             current_page_end = page_idx
             pages_in_current_chunk.add(page_idx)
-            
+
             # Append text
             if text:
                 current_chunk_text += text + "\n"
 
         # Finalize the last chunk
         _finalize_chunk()
-        
+
         logger.info(
             "Created %d page-aware chunks from %d content blocks",
             len(chunks_with_metadata),
             len(content_blocks),
         )
-        
-        return chunks_with_metadata
 
+        return chunks_with_metadata
 
     @staticmethod
     def _normalize_filename_token(value: str) -> str:
@@ -1023,7 +1041,11 @@ class DocumentProcessingService:
                 chunk_id = None
                 page_number = img_data.get("page_number")
 
-                if page_number is not None and chunk_id_mapping and chunks_with_metadata:
+                if (
+                    page_number is not None
+                    and chunk_id_mapping
+                    and chunks_with_metadata
+                ):
                     for chunk_idx, chunk_data in enumerate(chunks_with_metadata):
                         page_start = chunk_data.get("page_start")
                         page_end = chunk_data.get("page_end")
@@ -1206,9 +1228,7 @@ class DocumentProcessingService:
             types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
         ]
 
-        model_name = getattr(
-            self.settings, "image_caption_model"
-        )
+        model_name = getattr(self.settings, "image_caption_model")
         response = self.gemini_client.models.generate_content(
             model=model_name,
             contents=prompt_parts,

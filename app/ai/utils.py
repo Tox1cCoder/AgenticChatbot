@@ -2,7 +2,7 @@
 Shared utility functions for AI agents.
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Sequence
 import json
 
 
@@ -64,6 +64,97 @@ def coerce_response_text(content: Any) -> str:
         return str(content)
     else:
         return str(content) if content is not None else ""
+
+
+def extract_openai_reasoning_summary(content: Any) -> Optional[str]:
+    """
+    Extract OpenAI reasoning *summary* text from LangChain content blocks.
+
+    When `reasoning={"summary": ...}` is set, ChatOpenAI may return content like:
+      [
+        {"type": "reasoning", "summary": [{"type": "text", "text": "..."}]},
+        {"type": "text", "text": "final answer"}
+      ]
+    """
+    if not content:
+        return None
+
+    blocks: List[Any]
+    if isinstance(content, list):
+        blocks = content
+    elif isinstance(content, dict):
+        blocks = [content]
+    else:
+        return None
+
+    parts: List[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if str(block.get("type") or "").strip().lower() != "reasoning":
+            continue
+
+        summary = block.get("summary")
+        if isinstance(summary, str):
+            parts.append(summary)
+            continue
+
+        if isinstance(summary, dict):
+            text = summary.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text)
+            continue
+
+        if isinstance(summary, list):
+            for item in summary:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text)
+                elif isinstance(item, str) and item.strip():
+                    parts.append(item)
+            continue
+
+    cleaned = "\n".join(p.strip() for p in parts if isinstance(p, str) and p.strip())
+    return cleaned or None
+
+
+def _get_nested(data: Any, path: Sequence[str]) -> Any:
+    current: Any = data
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def extract_openai_reasoning_tokens(message: Any) -> Optional[int]:
+    """
+    Best-effort extraction of OpenAI reasoning token count from LangChain metadata.
+    """
+    candidates: List[Dict[str, Any]] = []
+    for attr in ("usage_metadata", "response_metadata", "additional_kwargs"):
+        meta = getattr(message, attr, None)
+        if isinstance(meta, dict):
+            candidates.append(meta)
+
+    paths: List[Sequence[str]] = [
+        ("usage", "output_tokens_details", "reasoning_tokens"),
+        ("usage", "completion_tokens_details", "reasoning_tokens"),
+        ("token_usage", "completion_tokens_details", "reasoning_tokens"),
+        ("output_tokens_details", "reasoning_tokens"),
+        ("completion_tokens_details", "reasoning_tokens"),
+    ]
+
+    for meta in candidates:
+        for path in paths:
+            value = _get_nested(meta, path)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return int(value)
+
+    return None
 
 
 def format_tool_result(value: Any) -> str:
@@ -351,11 +442,7 @@ def extract_content_from_result(result: Any) -> Any:
         cleaned = []
         for item in result:
             if isinstance(item, dict):
-                if (
-                    "type" in item
-                    and item.get("type") == "text"
-                    and "text" in item
-                ):
+                if "type" in item and item.get("type") == "text" and "text" in item:
                     cleaned.append(item["text"])
                 else:
                     cleaned.append(item)
@@ -366,11 +453,7 @@ def extract_content_from_result(result: Any) -> Any:
         return cleaned
 
     if isinstance(result, dict):
-        if (
-            "type" in result
-            and result.get("type") == "text"
-            and "text" in result
-        ):
+        if "type" in result and result.get("type") == "text" and "text" in result:
             return result["text"]
 
     return result

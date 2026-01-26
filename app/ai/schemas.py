@@ -126,6 +126,8 @@ class GraphState(TypedDict):
     persona: NotRequired[Optional[str]]
     iteration_count: NotRequired[Optional[int]]
     pending_tool_calls: NotRequired[Optional[List[Any]]]
+    # Multi-provider model configuration
+    model_request: NotRequired[Optional[Dict[str, Any]]]
     # Task planning context fields
     task_plan_id: NotRequired[Optional[str]]
     current_task: NotRequired[Optional[Dict[str, Any]]]
@@ -140,12 +142,10 @@ class GraphState(TypedDict):
     planning_phase: NotRequired[Optional[str]]
 
 
-
 class Task(BaseModel):
     """Represents a single task in a plan."""
 
     description: str = Field(..., description="Clear, actionable task description")
-
 
 
 class Plan(BaseModel):
@@ -191,7 +191,6 @@ class TodoItem(BaseModel):
     order: int = Field(..., description="Order/position in the todo list (0-indexed)")
 
 
-
 class WriteTodosInput(BaseModel):
     """Input schema for the write_todos tool."""
 
@@ -207,7 +206,8 @@ class WriteTodosInput(BaseModel):
         description="For COMPLETE_TODO, REMOVE_TODO, START_TODO: the ID of the todo to modify",
     )
     reason: Optional[str] = Field(
-        None, description="Optional reason for the action (e.g., why skipping/completing)"
+        None,
+        description="Optional reason for the action (e.g., why skipping/completing)",
     )
 
 
@@ -241,4 +241,3 @@ class SearchDocumentsInput(BaseModel):
     reason: Optional[str] = Field(
         None, description="Reasoning for the action (displayed to user)"
     )
-

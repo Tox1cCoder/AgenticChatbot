@@ -9,6 +9,7 @@ from app.models.conversation import Conversation
 from app.models.message import Message
 from app.models.feedback import Feedback
 from app.models.document import Document
+from app.models.model_provider import ModelProvider
 
 __all__ = [
     "MessageRole",
@@ -20,4 +21,5 @@ __all__ = [
     "Message",
     "Feedback",
     "Document",
+    "ModelProvider",
 ]

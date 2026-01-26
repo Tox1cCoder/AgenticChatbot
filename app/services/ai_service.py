@@ -76,6 +76,7 @@ class AIService:
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
+        model_request: Optional[Dict[str, Any]] = None,
     ) -> AgentResponse:
 
         thread_id = (
@@ -97,6 +98,7 @@ class AIService:
             planning_mode_enabled=planning_mode_enabled,
             has_existing_plan=has_existing_plan,
             existing_tasks=existing_tasks,
+            model_request=model_request,
         )
 
         if response:
@@ -117,6 +119,7 @@ class AIService:
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
+        model_request: Optional[Dict[str, Any]] = None,
     ) -> AgentResponse:
 
         if conversation_id is None or user_id is None:
@@ -131,6 +134,7 @@ class AIService:
                 planning_mode_enabled=planning_mode_enabled,
                 has_existing_plan=has_existing_plan,
                 existing_tasks=existing_tasks,
+                model_request=model_request,
             )
             if response:
                 return response
@@ -146,6 +150,7 @@ class AIService:
             planning_mode_enabled=planning_mode_enabled,
             has_existing_plan=has_existing_plan,
             existing_tasks=existing_tasks,
+            model_request=model_request,
         )
 
     async def resume_workflow(
@@ -204,6 +209,7 @@ class AIService:
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
+        model_request: Optional[Dict[str, Any]] = None,
     ):
         thread_id = (
             str(conversation_id) if conversation_id and self.checkpointer else None
@@ -228,6 +234,7 @@ class AIService:
             planning_mode_enabled=planning_mode_enabled,
             has_existing_plan=has_existing_plan,
             existing_tasks=existing_tasks,
+            model_request=model_request,
         ):
             event_type = event.get("type")
 

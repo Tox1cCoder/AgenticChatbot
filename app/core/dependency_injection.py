@@ -28,6 +28,8 @@ from app.services.document_processing_service import DocumentProcessingService
 from app.services.mcp_service import MCPService
 from app.services.jwt_service import JwtService
 from app.services.ai_service import AIService
+from app.services.provider_service import ProviderService
+from app.services.model_config_service import ModelConfigService
 from app.utils.validation.user_validation import UserValidationUtils
 from app.utils.validation.conversation_validation import (
     ConversationValidationUtils,
@@ -129,6 +131,8 @@ class AppAutoInjector(AutoInjector):
             MCPService: getattr(container_ref, "mcp_service"),
             JwtService: getattr(container_ref, "jwt_service"),
             AIService: getattr(container_ref, "ai_service"),
+            ProviderService: getattr(container_ref, "provider_service"),
+            ModelConfigService: getattr(container_ref, "model_config_service"),
         }
 
     @classmethod

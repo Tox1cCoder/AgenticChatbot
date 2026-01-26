@@ -10,7 +10,7 @@ import re
 from html.parser import HTMLParser
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from upload_support import delete_document, get_uploaded_documents, upload_document
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dateutil import parser
 import markdown as _markdown  # type: ignore
 
@@ -79,9 +79,21 @@ _ALLOWED_TAGS = {
 APP_STYLE = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,200..700,0..1,-50..200');
     
     html, body, [class*="css"] {
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    .material-symbols-outlined {
+        font-variation-settings:
+            'FILL' 0,
+            'wght' 500,
+            'GRAD' 0,
+            'opsz' 20;
+        font-size: 1em;
+        line-height: 1;
+        vertical-align: middle;
     }
     
     /* Hide Streamlit branding */
@@ -458,7 +470,9 @@ APP_STYLE = """
     
     /* Status indicators */
     .status-badge {
-        display: inline-block;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
         padding: 4px 12px;
         border-radius: 12px;
         font-size: 0.8rem;
@@ -553,15 +567,16 @@ APP_STYLE = """
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     }
     
-    /* Thinking/Reasoning UI Styles - Gemini/ChatGPT inspired */
+    /* Thinking/Reasoning UI Styles - Modern blue design */
     .thinking-container {
-        border-left: 3px solid #8b5cf6;
-        padding: 12px 16px;
+        border-left: 3px solid #3b82f6;
+        padding: 14px 18px;
         margin: 8px 0 16px 0;
-        background: linear-gradient(135deg, rgba(139, 92, 246, 0.08) 0%, rgba(139, 92, 246, 0.04) 100%);
-        border-radius: 0 8px 8px 0;
+        background: linear-gradient(135deg, rgba(59, 130, 246, 0.06) 0%, rgba(59, 130, 246, 0.02) 100%);
+        border-radius: 0 10px 10px 0;
         font-size: 0.9em;
-        color: #6b7280;
+        color: #4b5563;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
     }
     
     .thinking-header {
@@ -569,7 +584,7 @@ APP_STYLE = """
         align-items: center;
         gap: 8px;
         font-weight: 600;
-        color: #8b5cf6;
+        color: #3b82f6;
         margin-bottom: 8px;
     }
     
@@ -588,7 +603,7 @@ APP_STYLE = """
         width: 6px;
         height: 6px;
         border-radius: 50%;
-        background-color: #8b5cf6;
+        background-color: #3b82f6;
         animation: thinking-pulse 1.4s infinite ease-in-out;
     }
     
@@ -608,9 +623,15 @@ APP_STYLE = """
     }
     
     .thinking-content {
-        line-height: 1.6;
+        line-height: 1.65;
         white-space: pre-wrap;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        color: #374151;
+    }
+    
+    .thinking-content strong {
+        font-weight: 600;
+        color: #1f2937;
     }
     
     /* Collapsed thinking expander styles */
@@ -618,13 +639,14 @@ APP_STYLE = """
         display: flex;
         align-items: center;
         gap: 8px;
-        color: #8b5cf6;
+        color: #3b82f6;
         font-weight: 500;
         cursor: pointer;
+        transition: color 0.2s ease;
     }
     
     .thinking-expander-header:hover {
-        color: #7c3aed;
+        color: #1d4ed8;
     }
     
     /* Image Lightbox Modal */
@@ -804,13 +826,13 @@ def safe_api_call(
         response_data = make_api_request(method, endpoint, data)
         if response_data and response_data.get("success"):
             if success_message:
-                st.toast(success_message, icon="✅")
+                st.toast(success_message, icon=":material/check_circle:")
             return response_data
         else:
-            st.toast(error_message, icon="❌")
+            st.toast(error_message, icon=":material/cancel:")
             return None
     except Exception as e:
-        st.toast(f"{error_message}: {str(e)}", icon="❌")
+        st.toast(f"{error_message}: {str(e)}", icon=":material/cancel:")
         return None
 
 
@@ -846,18 +868,23 @@ def render_status_badge(status: str) -> str:
     badge_class = f"status-{status_lower}"
 
     status_icons = {
-        "processing": "⏳",
-        "ready": "✅",
-        "failed": "❌",
-        "pending": "⏸️",
-        "active": "🟢",
-        "inactive": "⚪",
+        "processing": "schedule",
+        "ready": "check_circle",
+        "failed": "cancel",
+        "pending": "pause_circle",
+        "active": "radio_button_checked",
+        "inactive": "radio_button_unchecked",
     }
 
-    icon = status_icons.get(status_lower, "")
+    icon_name = status_icons.get(status_lower)
+    icon_html = (
+        f'<span class="material-symbols-outlined" aria-hidden="true">{html.escape(icon_name)}</span>'
+        if icon_name
+        else ""
+    )
     display_text = status.replace("_", " ").title()
 
-    return f'<span class="status-badge {badge_class}">{icon} {display_text}</span>'
+    return f'<span class="status-badge {badge_class}">{icon_html}{display_text}</span>'
 
 
 def format_timestamp(timestamp: str) -> str:
@@ -931,7 +958,7 @@ def render_conversation_button(
     if st.button(
         title,
         key=f"conv_{conversation['id']}",
-        use_container_width=True,
+        width='stretch',
         type=button_type,
     ):
         if conversation["id"] != st.session_state.current_conversation_id:
@@ -1027,6 +1054,15 @@ SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
     "tool_execution_result": lambda: None,
     "selected_chunk_info": lambda: None,
     "chunk_preview_dialog_key": lambda: False,
+    # Provider/model UI state
+    "openai_models": list,
+    "openai_models_last_fetch": lambda: None,
+    "openai_models_fetch_attempted": lambda: False,
+    "openai_models_fetch_error": lambda: None,
+    # Persistent per-agent model config UI state
+    "agent_model_config_cache": dict,
+    "agent_model_config_last_fetch": lambda: None,
+    "agent_model_config_fetch_error": lambda: None,
     # Planning mode state
     "planning_status": lambda: None,
     "task_plans_list": list,
@@ -1372,16 +1408,18 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
         response.raise_for_status()
         response_data = response.json()
     except requests.exceptions.HTTPError as http_error:
-        st.toast(f"HTTP error {http_error.response.status_code}", icon="❌")
+        st.toast(
+            f"HTTP error {http_error.response.status_code}", icon=":material/cancel:"
+        )
         return {}
     except requests.exceptions.ConnectionError:
-        st.toast("Cannot connect to API", icon="❌")
+        st.toast("Cannot connect to API", icon=":material/cancel:")
         return {}
     except ValueError:
-        st.toast("Unexpected response from API", icon="❌")
+        st.toast("Unexpected response from API", icon=":material/cancel:")
         return {}
     except Exception as exc:
-        st.toast(f"Error: {exc}", icon="❌")
+        st.toast(f"Error: {exc}", icon=":material/cancel:")
         return {}
 
     if not response_data.get("success"):
@@ -1392,9 +1430,9 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
             st.session_state.auth_token = None
             st.session_state.current_user_id = None
             st.session_state.show_login = True
-            st.toast("Please log in", icon="🔒")
+            st.toast("Please log in", icon=":material/lock:")
         else:
-            st.toast(f"{error_message}", icon="❌")
+            st.toast(f"{error_message}", icon=":material/cancel:")
         return {}
 
     return response_data
@@ -1438,17 +1476,19 @@ def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
                         continue
 
     except requests.exceptions.HTTPError as http_error:
-        st.toast(f"HTTP error {http_error.response.status_code}", icon="❌")
+        st.toast(
+            f"HTTP error {http_error.response.status_code}", icon=":material/cancel:"
+        )
         yield {"type": "error", "error": f"HTTP {http_error.response.status_code}"}
     except requests.exceptions.ConnectionError as conn_error:
         if not stream_completed:
-            st.toast("Cannot connect to API", icon="❌")
+            st.toast("Cannot connect to API", icon=":material/cancel:")
             yield {"type": "error", "error": "Connection error"}
     except requests.exceptions.Timeout:
-        st.toast("Request timed out", icon="⏱️")
+        st.toast("Request timed out", icon=":material/schedule:")
         yield {"type": "error", "error": "Timeout"}
     except Exception as exc:
-        st.toast(f"Error: {exc}", icon="❌")
+        st.toast(f"Error: {exc}", icon=":material/cancel:")
         yield {"type": "error", "error": str(exc)}
 
 
@@ -1495,6 +1535,10 @@ def get_conversations(
         last_response = response
 
         if not fetch_all_pages:
+            break
+
+        # If we received fewer items than the limit, this is the last page
+        if len(items) < limit:
             break
 
         current = meta.get("currentPage", current_page)
@@ -1558,6 +1602,62 @@ def get_messages(
     )
     response = make_api_request("GET", endpoint)
     return response
+
+
+def get_providers() -> List[Dict[str, Any]]:
+    """List configured providers for the current user (API key never returned)."""
+    response = make_api_request("GET", "/providers")
+    data = response.get("data", []) if response else []
+    return data if isinstance(data, list) else []
+
+
+def upsert_provider(
+    provider_type: str,
+    api_key: str,
+    *,
+    is_default: bool = False,
+    provider_metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    payload: Dict[str, Any] = {
+        "provider_type": provider_type,
+        "api_key": api_key,
+        "is_default": is_default,
+        "provider_metadata": provider_metadata or {},
+    }
+    response = make_api_request("POST", "/providers", payload)
+    return response.get("data") if response else None
+
+
+def delete_provider(provider_type: str) -> bool:
+    response = make_api_request("DELETE", f"/providers/{provider_type}")
+    return bool(response)
+
+
+def fetch_provider_models(provider_type: str) -> List[Dict[str, Any]]:
+    response = make_api_request("GET", f"/providers/{provider_type}/models")
+    data = response.get("data", []) if response else []
+    return data if isinstance(data, list) else []
+
+
+def get_model_config() -> Dict[str, Any]:
+    """Get persisted per-agent model config (defaults + overrides)."""
+    response = make_api_request("GET", "/model-config")
+    data = response.get("data", {}) if response else {}
+    return data if isinstance(data, dict) else {}
+
+
+def patch_model_config(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Upsert one or more agent configs."""
+    response = make_api_request("PATCH", "/model-config", payload)
+    data = response.get("data", {}) if response else {}
+    return data if isinstance(data, dict) else {}
+
+
+def reset_model_config() -> Dict[str, Any]:
+    """Reset all persisted agent configs back to defaults."""
+    response = make_api_request("POST", "/model-config/reset", {})
+    data = response.get("data", {}) if response else {}
+    return data if isinstance(data, dict) else {}
 
 
 def normalize_persona_input(raw: str) -> str:
@@ -1637,11 +1737,11 @@ def _handle_new_image_attachments(uploaded_files: List) -> None:
 
     remaining = _MAX_IMAGE_ATTACHMENTS - len(pending)
     if remaining <= 0:
-        st.toast(f"{_MAX_IMAGE_ATTACHMENTS} images", icon="⚠️")
+        st.toast(f"{_MAX_IMAGE_ATTACHMENTS} images", icon=":material/warning:")
         return
 
     if len(new_items) > remaining:
-        st.toast("Some images ignored", icon="⚠️")
+        st.toast("Some images ignored", icon=":material/warning:")
 
     pending.extend(new_items[:remaining])
     st.session_state.pending_image_attachments = pending
@@ -1820,13 +1920,17 @@ def render_login_page():
 
         with tab1:
             with st.form("login_form", clear_on_submit=False):
-                email = st.text_input("📧 Email", placeholder="your@email.com")
+                email = st.text_input(
+                    ":material/mail: Email", placeholder="your@email.com"
+                )
                 password = st.text_input(
-                    "🔒 Password", type="password", placeholder="Enter password"
+                    ":material/lock: Password",
+                    type="password",
+                    placeholder="Enter password",
                 )
 
                 if st.form_submit_button(
-                    "Sign In", use_container_width=True, type="primary"
+                    "Sign In", width='stretch', type="primary"
                 ):
                     with st.spinner("Signing in..."):
                         auth_response = make_api_request(
@@ -1842,24 +1946,32 @@ def render_login_page():
                                 "userId"
                             ]
                             st.session_state.show_login = False
-                            st.toast("Welcome back!", icon="✅")
+                            st.toast("Welcome back!", icon=":material/check_circle:")
                             st.rerun()
                         else:
                             st.error("Invalid credentials")
 
         with tab2:
             with st.form("signup_form", clear_on_submit=False):
-                username = st.text_input("👤 Username", placeholder="Choose a username")
-                email = st.text_input("📧 Email", placeholder="your@email.com")
+                username = st.text_input(
+                    ":material/person: Username", placeholder="Choose a username"
+                )
+                email = st.text_input(
+                    ":material/mail: Email", placeholder="your@email.com"
+                )
                 password = st.text_input(
-                    "🔒 Password", type="password", placeholder="Create password"
+                    ":material/lock: Password",
+                    type="password",
+                    placeholder="Create password",
                 )
                 confirm_password = st.text_input(
-                    "🔒 Confirm", type="password", placeholder="Confirm password"
+                    ":material/lock: Confirm",
+                    type="password",
+                    placeholder="Confirm password",
                 )
 
                 if st.form_submit_button(
-                    "Create Account", use_container_width=True, type="primary"
+                    "Create Account", width='stretch', type="primary"
                 ):
                     if not username or not email or not password:
                         st.error("Please fill all fields")
@@ -1887,7 +1999,10 @@ def render_login_page():
                                         "data"
                                     ]["userId"]
                                     st.session_state.show_login = False
-                                    st.toast("✅ Account created!", icon="✅")
+                                    st.toast(
+                                        "Account created!",
+                                        icon=":material/check_circle:",
+                                    )
                                     st.rerun()
 
 
@@ -1896,7 +2011,7 @@ def render_sidebar():
         st.markdown("# Multi-agent ChatBot")
 
         # New chat button
-        if st.button("New Chat", use_container_width=True, type="primary"):
+        if st.button("New Chat", width='stretch', type="primary"):
             st.session_state.current_conversation_id = "pending_new"
             st.session_state.active_view = "chat"
             close_conversation_manager()
@@ -1904,7 +2019,7 @@ def render_sidebar():
             st.rerun()
 
         # Manage conversations button
-        if st.button("Manage Conversations", use_container_width=True):
+        if st.button("Manage Conversations", width='stretch'):
             if st.session_state.get("conversation_manager_visible"):
                 close_conversation_manager()
             else:
@@ -1934,7 +2049,7 @@ def render_sidebar():
 
         # Grouped conversations
         if st.session_state.conversations_list:
-            st.markdown("### 💬 Conversations")
+            st.markdown("### :material/chat: Conversations")
 
             sorted_conversations = sorted(
                 st.session_state.conversations_list,
@@ -1946,7 +2061,8 @@ def render_sidebar():
 
             for group_name, convs in grouped.items():
                 with st.expander(
-                    f"📅 {group_name} ({len(convs)})", expanded=(group_name == "Today")
+                    f":material/calendar_today: {group_name} ({len(convs)})",
+                    expanded=(group_name == "Today"),
                 ):
                     for conv in convs:
                         is_active = (
@@ -1961,7 +2077,7 @@ def render_sidebar():
             user = get_user(st.session_state.current_user_id)
             if user:
                 st.markdown(f"**{user['username']}**")
-                if st.button("Sign Out", use_container_width=True):
+                if st.button("Sign Out", width='stretch'):
                     st.session_state.current_user_id = None
                     st.session_state.current_conversation_id = None
                     close_conversation_manager()
@@ -1973,7 +2089,7 @@ def render_sidebar():
                     st.session_state.show_login = True
                     st.session_state.pending_image_attachments = []
                     st.session_state.message_image_thumbnails = {}
-                    st.toast("👋 Goodbye!", icon="👋")
+                    st.toast("Goodbye!", icon=":material/waving_hand:")
                     st.rerun()
 
 
@@ -2135,7 +2251,7 @@ def render_tool_artifacts(tool_artifacts: List[Dict[str, Any]]):
     if not tool_artifacts:
         return
 
-    st.markdown("#### 🔧 Tool Executions", unsafe_allow_html=True)
+    st.markdown("#### Tool Executions", unsafe_allow_html=True)
 
     for idx, artifact in enumerate(tool_artifacts, start=1):
         tool_name = artifact.get("tool", "unknown_tool")
@@ -2143,18 +2259,29 @@ def render_tool_artifacts(tool_artifacts: List[Dict[str, Any]]):
 
         # Status badge styling
         if has_error:
-            status_badge = "🔴 Error"
+            status_badge_md = ":material/error: Error"
+            status_badge_label = "Error"
+            status_icon_name = "error"
             badge_color = COLORS["error"]
         else:
-            status_badge = "🟢 Success"
+            status_badge_md = ":material/check_circle: Success"
+            status_badge_label = "Success"
+            status_icon_name = "check_circle"
             badge_color = COLORS["success"]
 
+        status_badge_html = (
+            f'<span class="material-symbols-outlined" aria-hidden="true">{status_icon_name}</span>'
+            f" {html.escape(status_badge_label)}"
+        )
+
         # Create expander for each tool
-        with st.expander(f"**[{idx}] {tool_name}** - {status_badge}", expanded=False):
+        with st.expander(
+            f"**[{idx}] {tool_name}** - {status_badge_md}", expanded=False
+        ):
             # Show execution status
             st.markdown(
                 f'<div style="background-color: {badge_color}15; padding: 8px; border-radius: 4px; margin-bottom: 8px;">'
-                f'<strong style="color: {badge_color};">Status:</strong> {status_badge}'
+                f'<strong style="color: {badge_color};">Status:</strong> {status_badge_html}'
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -2193,7 +2320,7 @@ def render_tool_artifacts(tool_artifacts: List[Dict[str, Any]]):
             # Show execution time if available
             execution_time = artifact.get("execution_time")
             if execution_time:
-                st.caption(f"⏱️ Execution time: {execution_time:.2f}s")
+                st.caption(f":material/timer: Execution time: {execution_time:.2f}s")
 
 
 def render_citations(message_metadata: Dict[str, Any], msg_id: Optional[str] = None):
@@ -2277,7 +2404,7 @@ def render_citations(message_metadata: Dict[str, Any], msg_id: Optional[str] = N
                         "View",
                         key=f"cite_doc_{msg_id}_{doc_num}",
                         help="View chunk content",
-                        use_container_width=True,
+                        width='stretch',
                     ):
                         st.session_state["selected_chunk_info"] = {
                             "source": source,
@@ -2332,7 +2459,7 @@ def render_citations(message_metadata: Dict[str, Any], msg_id: Optional[str] = N
                                 "Details",
                                 key=f"cite_chunk_{msg_id}_{doc_num}_{chunk_idx}",
                                 help="View chunk content",
-                                use_container_width=True,
+                                width='stretch',
                             ):
                                 st.session_state["selected_chunk_info"] = {
                                     "source": source,
@@ -2420,13 +2547,53 @@ def render_thinking_summary(message_metadata: Dict[str, Any]):
     thinking_summary = message_metadata.get("thinking_summary")
     if thinking_summary:
         with st.expander("Thought Process", expanded=False):
+            # Convert markdown to HTML for proper formatting
+            import re
+
+            # Simple markdown conversion for bold text
+            formatted_text = html.escape(thinking_summary)
+            # Convert **text** to <strong>text</strong>
+            formatted_text = re.sub(
+                r"\*\*(.*?)\*\*", r"<strong>\1</strong>", formatted_text
+            )
+
             # Use custom styled container for thinking content
             st.markdown(
                 f"""<div class="thinking-container">
-                    <div class="thinking-content">{html.escape(thinking_summary)}</div>
+                    <div class="thinking-content">{formatted_text}</div>
                 </div>""",
                 unsafe_allow_html=True,
             )
+
+
+def render_reasoning_summary(message_metadata: Dict[str, Any]):
+    """Render OpenAI reasoning summary (not chain-of-thought) when available."""
+    reasoning_summary = message_metadata.get("reasoning_summary")
+    if not reasoning_summary:
+        return
+
+    title = "Reasoning (summary)"
+    tokens = message_metadata.get("reasoning_tokens")
+    if isinstance(tokens, int) and tokens >= 0:
+        title = f"{title} - {tokens} tokens"
+
+    with st.expander(title, expanded=False):
+        # Convert markdown to HTML for proper formatting
+        import re
+
+        # Simple markdown conversion for bold text
+        formatted_text = html.escape(str(reasoning_summary))
+        # Convert **text** to <strong>text</strong>
+        formatted_text = re.sub(
+            r"\*\*(.*?)\*\*", r"<strong>\1</strong>", formatted_text
+        )
+
+        st.markdown(
+            f"""<div class="thinking-container">
+                <div class="thinking-content">{formatted_text}</div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
 
 
 def render_suggestion_buttons(suggestions: List[str], msg_id: str):
@@ -2436,10 +2603,10 @@ def render_suggestion_buttons(suggestions: List[str], msg_id: str):
     """
     if not suggestions:
         return
-    
+
     # Create columns for horizontal layout
     cols = st.columns(min(len(suggestions), 3))
-    
+
     for idx, suggestion in enumerate(suggestions[:3]):
         with cols[idx]:
             # Use a unique key based on message ID and suggestion index
@@ -2447,7 +2614,7 @@ def render_suggestion_buttons(suggestions: List[str], msg_id: str):
             if st.button(
                 f"{suggestion}",
                 key=button_key,
-                use_container_width=True,
+                width='stretch',
                 help="Click to use this question",
             ):
                 # Store in session state so the chat input can pick it up
@@ -2463,11 +2630,38 @@ def render_message_bubble(msg: Dict[str, Any], is_user: bool):
     avatar = "user" if is_user else "assistant"
 
     with st.chat_message(avatar):
+        message_metadata = msg.get("messageMetadata", {}) or {}
+
         # Show thinking summary first for assistant messages
         if not is_user:
-            render_thinking_summary(msg.get("messageMetadata", {}))
+            render_reasoning_summary(message_metadata)
+            render_thinking_summary(message_metadata)
+
+            provider = message_metadata.get("provider")
+            model = message_metadata.get("model")
+            if provider or model:
+                if provider and model:
+                    st.caption(f"{provider}:{model}")
+                else:
+                    st.caption(str(model or provider))
 
         st.markdown(content_text)  # Native markdown with LaTeX support
+
+        if not is_user:
+            fallback = message_metadata.get("provider_fallback")
+            if isinstance(fallback, dict):
+                from_provider = fallback.get("from")
+                to_provider = fallback.get("to")
+                reason = fallback.get("reason")
+                label = (
+                    f"Fallback: {from_provider} -> {to_provider}"
+                    if from_provider and to_provider
+                    else "Fallback to default provider"
+                )
+                if isinstance(reason, str) and reason.strip():
+                    label = f"{label} ({reason.strip()[:140]})"
+                st.caption(label)
+
         st.caption(timestamp)
 
     # Show attachments if user message
@@ -2507,13 +2701,13 @@ def render_message_feedback_inline(msg: Dict[str, Any]):
         col1, col2 = st.columns([4, 1])
         with col1:
             rating = feedback.get("rating", 0)
-            stars = "⭐" * rating
-            st.caption(f"{stars} {rating}/5")
+            stars = " ".join([":material/star:"] * int(rating)) if rating else ""
+            st.caption(f"{stars} {rating}/5".strip())
             comment = feedback.get("comment")
             if comment:
-                st.caption(f"💬 {comment[:60]}...")
+                st.caption(f":material/comment: {comment[:60]}...")
         with col2:
-            with st.popover("✏️", help="Edit feedback"):
+            with st.popover(":material/edit:", help="Edit feedback"):
                 st.markdown("**Edit Feedback**")
                 with st.form(f"edit_feedback_{msg['id']}", clear_on_submit=True):
                     rating = st.select_slider(
@@ -2528,7 +2722,7 @@ def render_message_feedback_inline(msg: Dict[str, Any]):
                     )
 
                     if st.form_submit_button(
-                        "Update", use_container_width=True, type="primary"
+                        "Update", width='stretch', type="primary"
                     ):
                         feedback_data = {
                             "messageId": msg["id"],
@@ -2540,18 +2734,20 @@ def render_message_feedback_inline(msg: Dict[str, Any]):
                         )
                         if response:
                             st.session_state.conversation_messages_page = 0
-                            st.toast("Feedback updated!", icon="✅")
+                            st.toast(
+                                "Feedback updated!", icon=":material/check_circle:"
+                            )
                             st.rerun()
     else:
         # Show add feedback popover
-        with st.popover("💬 Feedback", help="Give feedback"):
+        with st.popover(":material/comment: Feedback", help="Give feedback"):
             st.markdown("**Provide Feedback**")
             with st.form(f"add_feedback_{msg['id']}", clear_on_submit=True):
                 rating = st.select_slider("Rating", options=[1, 2, 3, 4, 5], value=5)
                 comment = st.text_area("Comment (optional)", height=68)
 
                 if st.form_submit_button(
-                    "Submit", use_container_width=True, type="primary"
+                    "Submit", width='stretch', type="primary"
                 ):
                     feedback_data = {
                         "messageId": msg["id"],
@@ -2563,7 +2759,7 @@ def render_message_feedback_inline(msg: Dict[str, Any]):
                     )
                     if response:
                         st.session_state.conversation_messages_page = 0
-                        st.toast("Feedback submitted!", icon="✅")
+                        st.toast("Feedback submitted!", icon=":material/check_circle:")
                         st.rerun()
 
 
@@ -2702,12 +2898,12 @@ def render_tool_parameter_form(
 
 def render_tools_tab():
     """Render the MCP Tools management and testing interface"""
-    st.markdown("# 🔧 MCP Tools Management")
+    st.markdown("# :material/extension: MCP Tools Management")
     st.markdown(
         "Discover and test Model Context Protocol (MCP) tools available to the chatbot."
     )
 
-    if st.button("🔄 Refresh", use_container_width=True):
+    if st.button("Refresh", icon=":material/refresh:", width='stretch'):
         st.rerun()
 
     st.markdown("---")
@@ -2746,7 +2942,7 @@ def render_tools_tab():
                 label_visibility="collapsed",
             )
 
-            if st.button("Add Server from JSON", use_container_width=True):
+            if st.button("Add Server from JSON", width='stretch'):
                 if json_config.strip():
                     try:
                         config = json.loads(json_config)
@@ -2776,7 +2972,8 @@ def render_tools_tab():
                         # Invalid format
                         else:
                             st.error(
-                                "❌ Invalid format. Please use one of these formats:"
+                                "Invalid format. Please use one of these formats:",
+                                icon=":material/error:",
                             )
                             servers_to_add = []
 
@@ -2797,7 +2994,8 @@ def render_tools_tab():
                                     if response and response.get("success"):
                                         success_count += 1
                                         st.success(
-                                            f"✅ Server '{server_name}' added successfully!"
+                                            f"Server '{server_name}' added successfully!",
+                                            icon=":material/check_circle:",
                                         )
                                     else:
                                         error_msg = (
@@ -2809,13 +3007,15 @@ def render_tools_tab():
                                             f"{server_name}: {error_msg}"
                                         )
                                         st.error(
-                                            f"❌ Failed to add '{server_name}': {error_msg}"
+                                            f"Failed to add '{server_name}': {error_msg}",
+                                            icon=":material/cancel:",
                                         )
 
                             # Show summary
                             if success_count > 0:
                                 st.info(
-                                    f"✅ Successfully added {success_count} server(s). Refreshing..."
+                                    f"Successfully added {success_count} server(s). Refreshing...",
+                                    icon=":material/refresh:",
                                 )
                                 # Small delay to ensure file is written
                                 import time
@@ -2828,7 +3028,7 @@ def render_tools_tab():
                                     f"Failed to add {len(failed_servers)} server(s)"
                                 )
                                 for failure in failed_servers:
-                                    st.text(f"  • {failure}")
+                                    st.text(f"  - {failure}")
                     except json.JSONDecodeError as e:
                         st.error(f"Invalid JSON: {e}")
                     except Exception as e:
@@ -2878,7 +3078,7 @@ def render_tools_tab():
                 )
                 enabled_input = st.checkbox("Enable server", value=True)
 
-                if st.form_submit_button("Add Server", use_container_width=True):
+                if st.form_submit_button("Add Server", width='stretch'):
                     if not server_name_input:
                         st.error("Server name is required")
                     else:
@@ -2911,15 +3111,16 @@ def render_tools_tab():
                                                 "Invalid JSON in environment variables"
                                             )
 
-                                    with st.spinner("Adding server..."):
-                                        result = add_mcp_server(config)
-                                        if result:
-                                            st.success(
-                                                f"✅ Server '{server_name_input}' added!"
-                                            )
-                                            st.rerun()
-                                        else:
-                                            st.error("Failed to add server")
+                                            with st.spinner("Adding server..."):
+                                                result = add_mcp_server(config)
+                                                if result:
+                                                    st.success(
+                                                        f"Server '{server_name_input}' added!",
+                                                        icon=":material/check_circle:",
+                                                    )
+                                                    st.rerun()
+                                                else:
+                                                    st.error("Failed to add server")
                             else:
                                 if not url_input:
                                     st.error("URL is required for HTTP transport")
@@ -2934,15 +3135,16 @@ def render_tools_tab():
                                         except json.JSONDecodeError:
                                             st.error("Invalid JSON in headers")
 
-                                    with st.spinner("Adding server..."):
-                                        result = add_mcp_server(config)
-                                        if result:
-                                            st.success(
-                                                f"✅ Server '{server_name_input}' added!"
-                                            )
-                                            st.rerun()
-                                        else:
-                                            st.error("Failed to add server")
+                                            with st.spinner("Adding server..."):
+                                                result = add_mcp_server(config)
+                                                if result:
+                                                    st.success(
+                                                        f"Server '{server_name_input}' added!",
+                                                        icon=":material/check_circle:",
+                                                    )
+                                                    st.rerun()
+                                                else:
+                                                    st.error("Failed to add server")
                         except Exception as e:
                             st.error(f"Error: {e}")
 
@@ -2966,7 +3168,7 @@ def render_tools_tab():
 
             enabled_url = st.checkbox("Enable server", value=True, key="url_enabled")
 
-            if st.button("Add Server from URL", use_container_width=True):
+            if st.button("Add Server from URL", width='stretch'):
                 if not url_input.strip():
                     st.error("URL is required")
                 else:
@@ -2985,7 +3187,10 @@ def render_tools_tab():
                         with st.spinner("Adding server from URL..."):
                             result = add_mcp_server_from_url(url_config)
                             if result:
-                                st.success("✅ Server added successfully from URL!")
+                                st.success(
+                                    "Server added successfully from URL!",
+                                    icon=":material/check_circle:",
+                                )
                                 # Small delay to ensure file is written
                                 import time
 
@@ -3009,7 +3214,9 @@ def render_tools_tab():
                 transport = server.get("transport", "unknown")
                 description = server.get("description", "No description")
 
-                status_color = "🟢" if enabled else "🔴"
+                status_icon = (
+                    ":material/check_circle:" if enabled else ":material/cancel:"
+                )
                 status_text = "Enabled" if enabled else "Disabled"
 
                 col1, col2, col3 = st.columns([3, 1, 1])
@@ -3017,7 +3224,7 @@ def render_tools_tab():
                 with col1:
                     st.markdown(
                         f"""
-                    **{status_color} {server_name}** - {status_text}
+                    **{status_icon} {server_name}** - {status_text}
                     - Transport: `{transport}`
                     - Tools: {tool_count}
                     - {description if description else "No description available"}
@@ -3123,9 +3330,7 @@ def render_tools_tab():
         )
 
         # Submit button
-        execute_button = st.form_submit_button(
-            "▶Execute Tool", use_container_width=True
-        )
+        execute_button = st.form_submit_button("Execute Tool", width='stretch')
 
         if execute_button:
             if parameter_errors:
@@ -3155,7 +3360,11 @@ def render_tools_tab():
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            status_label = "✅ Success" if success else "❌ Failed"
+            status_label = (
+                ":material/check_circle: Success"
+                if success
+                else ":material/cancel: Failed"
+            )
             st.markdown(f"**Status:** {status_label}")
         with col2:
             st.markdown(f"**Time:** {execution_time:.3f}s")
@@ -3197,7 +3406,7 @@ def render_interrupt_approval_ui():
             st.rerun()
         return
 
-    st.warning("**Tool Execution Requires Approval**", icon="⏸️")
+    st.warning("**Tool Execution Requires Approval**", icon=":material/pause_circle:")
     st.markdown(
         "The AI assistant wants to execute the following tool(s). Please review and approve:"
     )
@@ -3234,11 +3443,11 @@ def render_interrupt_approval_ui():
         if current_decision:
             decision_type = current_decision.get("type", "")
             if decision_type in ("accept", "approve"):
-                st.success(f"Approved", icon="✅")
+                st.success(f"Approved", icon=":material/check_circle:")
             elif decision_type == "edit":
-                st.info(f"Edited and approved", icon="✏️")
+                st.info(f"Edited and approved", icon=":material/edit:")
             elif decision_type in ("reject", "respond"):
-                st.error(f"Rejected", icon="❌")
+                st.error(f"Rejected", icon=":material/cancel:")
 
             # Option to change decision
             if st.button(f"Change decision", key=f"change_{idx}"):
@@ -3257,7 +3466,7 @@ def render_interrupt_approval_ui():
                 if st.button(
                     f"Accept",
                     key=f"accept_{idx}",
-                    use_container_width=True,
+                    width='stretch',
                     type="primary",
                 ):
                     st.session_state.pending_decisions[task_id] = {
@@ -3269,12 +3478,12 @@ def render_interrupt_approval_ui():
                     st.rerun()
 
             with col2:
-                if st.button(f"Edit Args", key=f"edit_{idx}", use_container_width=True):
+                if st.button(f"Edit Args", key=f"edit_{idx}", width='stretch'):
                     st.session_state[f"editing_tool_{idx}"] = True
                     st.rerun()
 
             with col3:
-                if st.button(f"Reject", key=f"reject_{idx}", use_container_width=True):
+                if st.button(f"Reject", key=f"reject_{idx}", width='stretch'):
                     st.session_state.pending_decisions[task_id] = {
                         "type": "respond",
                         "task_id": task_id,
@@ -3296,7 +3505,7 @@ def render_interrupt_approval_ui():
                     col_save, col_cancel = st.columns(2)
                     with col_save:
                         if st.form_submit_button(
-                            "Save & Accept", use_container_width=True, type="primary"
+                            "Save & Accept", width='stretch', type="primary"
                         ):
                             try:
                                 edited_args = json.loads(edited_args_text)
@@ -3312,7 +3521,7 @@ def render_interrupt_approval_ui():
                                 st.error("Invalid JSON format")
 
                     with col_cancel:
-                        if st.form_submit_button("Cancel", use_container_width=True):
+                        if st.form_submit_button("Cancel", width='stretch'):
                             st.session_state.pop(f"editing_tool_{idx}", None)
                             st.rerun()
 
@@ -3347,13 +3556,13 @@ def render_interrupt_approval_ui():
     with col_submit:
         if st.button(
             "Submit Decisions",
-            use_container_width=True,
+            width='stretch',
             type="primary",
         ):
             _submit_interrupt_decisions(thread_id, interrupt_id, action_requests)
 
     with col_approve_all:
-        if st.button("Accept All", use_container_width=True):
+        if st.button("Accept All", width='stretch'):
             # Auto-approve all remaining tools
             for req in action_requests:
                 task_id = (
@@ -3374,7 +3583,7 @@ def render_interrupt_approval_ui():
             _submit_interrupt_decisions(thread_id, interrupt_id, action_requests)
 
     with col_cancel:
-        if st.button("Cancel All", use_container_width=True):
+        if st.button("Cancel All", width='stretch'):
             # Reject all tools
             for req in action_requests:
                 task_id = (
@@ -3428,7 +3637,9 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests):
             if next_interrupt:
                 st.session_state.pending_interrupt = next_interrupt
                 st.session_state.interrupt_conversation_id = conversation_id
-                st.toast("Additional tool approval required.", icon="⚠️")
+                st.toast(
+                    "Additional tool approval required.", icon=":material/warning:"
+                )
                 st.rerun()
             else:
                 # Clear interrupt state
@@ -3436,7 +3647,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests):
                 st.session_state.pop("interrupt_conversation_id", None)
 
                 # Refresh messages
-                st.toast("Tool execution completed!", icon="✅")
+                st.toast("Tool execution completed!", icon=":material/check_circle:")
                 st.session_state.conversation_messages_page = 0
                 st.rerun()
         else:
@@ -3601,17 +3812,19 @@ def render_chat_view():
                         st.progress(progress_pct / 100.0)
                         if next_task:
                             st.success(
-                                f"📋 **{completed}/{total}** tasks complete | "
+                                f":material/checklist: **{completed}/{total}** tasks complete | "
                                 f"**Current:** {next_task.get('description', 'N/A')[:50]}..."
                                 if len(next_task.get("description", "")) > 50
-                                else f"📋 **{completed}/{total}** tasks complete | "
+                                else f":material/checklist: **{completed}/{total}** tasks complete | "
                                 f"**Current:** {next_task.get('description', 'N/A')}"
                             )
                         else:
-                            st.success(f"✅ **All {total} tasks completed!**")
+                            st.success(
+                                f":material/check_circle: **All {total} tasks completed!**"
+                            )
                     with col2:
                         if st.button(
-                            "📋 View All",
+                            ":material/checklist: View All",
                             key="goto_planning_from_chat",
                             help="View Full Task List",
                         ):
@@ -3625,7 +3838,9 @@ def render_chat_view():
                             tasks.get("data", []) if isinstance(tasks, dict) else tasks
                         )
                         if task_list:
-                            with st.expander("📝 Task Progress", expanded=False):
+                            with st.expander(
+                                ":material/list_alt: Task Progress", expanded=False
+                            ):
                                 for task in task_list:
                                     task_status = task.get("status", "pending")
                                     task_desc = task.get(
@@ -3633,13 +3848,19 @@ def render_chat_view():
                                     )
 
                                     if task_status == "completed":
-                                        st.markdown(f"✅ ~~{task_desc}~~")
+                                        st.markdown(
+                                            f":material/check_circle: ~~{task_desc}~~"
+                                        )
                                     elif task_status == "in_progress":
-                                        st.markdown(f"🔄 **{task_desc}** ← Current")
+                                        st.markdown(
+                                            f":material/refresh: **{task_desc}** (current)"
+                                        )
                                     elif task_status == "skipped":
-                                        st.markdown(f"⏭️ ~~{task_desc}~~ (skipped)")
+                                        st.markdown(
+                                            f":material/skip_next: ~~{task_desc}~~ (skipped)"
+                                        )
                                     else:
-                                        st.markdown(f"⬜ {task_desc}")
+                                        st.markdown(f":material/pending: {task_desc}")
 
     elif conversation_id == "pending_new":
         st.markdown("# New Chat")
@@ -3656,7 +3877,7 @@ def render_chat_view():
     # Load more button
     if conversation_id and conversation_id != "pending_new":
         if st.session_state.has_more_messages:
-            if st.button("Load older messages", use_container_width=True):
+            if st.button("Load older messages", width='stretch'):
                 next_page = st.session_state.conversation_messages_page + 1
                 load_messages_page(next_page, show_spinner=True)
 
@@ -3670,7 +3891,7 @@ def render_chat_view():
     )
 
     if not messages_to_display and conversation_id not in (None, "pending_new"):
-        st.info("💬 No messages yet. Start the conversation!")
+        st.info("No messages yet. Start the conversation!", icon=":material/chat:")
 
     # Find the last assistant message for showing suggestions
     last_assistant_msg_id = None
@@ -3684,11 +3905,13 @@ def render_chat_view():
         sender_value = msg.get("sender")
         is_user_message = sender_value in (1, "user", "USER", "User")
         render_message_bubble(msg, is_user_message)
-        
+
         # Show suggestion buttons for the last assistant message only
         if not is_user_message and msg.get("id") == last_assistant_msg_id:
             metadata = msg.get("messageMetadata", {})
-            suggestions = msg.get("suggestedQuestions") or metadata.get("suggested_questions")
+            suggestions = msg.get("suggestedQuestions") or metadata.get(
+                "suggested_questions"
+            )
             if suggestions:
                 render_suggestion_buttons(suggestions, str(msg.get("id", "")))
 
@@ -3711,7 +3934,12 @@ def render_chat_view():
                 with cols[idx % len(cols)]:
                     image_bytes = base64.b64decode(att["data"])
                     st.image(image_bytes, caption=att["name"], width=80)
-                    if st.button("❌", key=f"remove_{att['token']}"):
+                    if st.button(
+                        "Remove",
+                        icon=":material/close:",
+                        key=f"remove_{att['token']}",
+                        help="Remove attachment",
+                    ):
                         st.session_state.pending_image_attachments = [
                             item
                             for item in st.session_state.pending_image_attachments
@@ -3738,7 +3966,7 @@ def render_chat_view():
         # Message form
         # Check for pending suggestion from suggestion buttons
         pending_suggestion = st.session_state.pop("pending_suggestion", "")
-        
+
         with st.form("message_form", clear_on_submit=True):
             col1, col2, col3 = st.columns([6, 1, 1])
 
@@ -3775,7 +4003,7 @@ def render_chat_view():
                 stripped_message = message_content.strip()
 
                 if not stripped_message and not pending_attachments:
-                    st.toast("Please enter a message", icon="⚠️")
+                    st.toast("Please enter a message", icon=":material/warning:")
                 else:
                     message_to_send = stripped_message or _format_image_only_message(
                         pending_attachments
@@ -3822,7 +4050,10 @@ def render_chat_view():
                                     label="Conversation created!", state="complete"
                                 )
                             else:
-                                st.toast("Failed to create conversation", icon="❌")
+                                st.toast(
+                                    "Failed to create conversation",
+                                    icon=":material/cancel:",
+                                )
                                 return
 
                     message_data = {
@@ -3895,18 +4126,19 @@ def render_chat_view():
                                 accumulated_content += (
                                     content  # Append each token chunk
                                 )
-                                # Collapse thinking to expander when answer starts
+                                # Collapse thinking when answer starts - just show summary
                                 if accumulated_thinking and accumulated_content:
-                                    with thinking_placeholder.container():
-                                        with st.expander(
-                                            "Thought Process", expanded=False
-                                        ):
-                                            st.markdown(
-                                                f"""<div class="thinking-container">
-                                                    <div class="thinking-content">{html.escape(accumulated_thinking)}</div>
-                                                </div>""",
-                                                unsafe_allow_html=True,
-                                            )
+                                    thinking_placeholder.markdown(
+                                        f"""<details>
+                                            <summary style="cursor: pointer; font-weight: bold; padding: 8px; background: #f0f2f6; border-radius: 4px; margin-bottom: 8px;">
+                                                <span class="material-symbols-outlined" aria-hidden="true" style="margin-right: 6px;">psychology</span> Thought Process
+                                            </summary>
+                                            <div class="thinking-container" style="padding: 8px;">
+                                                <div class="thinking-content">{html.escape(accumulated_thinking)}</div>
+                                            </div>
+                                        </details>""",
+                                        unsafe_allow_html=True,
+                                    )
                                 # Display with native markdown for LaTeX support
                                 response_placeholder.markdown(accumulated_content)
 
@@ -3914,9 +4146,8 @@ def render_chat_view():
                                 # Show tool execution
                                 tool_name = event.get("name", "unknown")
                                 tool_status = event.get("status", "running")
-                                status_icon = "✓" if tool_status == "success" else "⚠"
                                 status.update(
-                                    label=f"Tool: {tool_name} {status_icon}",
+                                    label=f"Tool: {tool_name} ({tool_status})",
                                     state="running",
                                 )
 
@@ -3930,7 +4161,7 @@ def render_chat_view():
                                 interrupt_data = event.get("interrupt")
 
                                 status.update(
-                                    label="⏸ Workflow paused - Tool approval required",
+                                    label="Workflow paused - Tool approval required",
                                     state="running",
                                 )
 
@@ -3942,12 +4173,14 @@ def render_chat_view():
                                     )
                                 else:
                                     st.error(
-                                        "❌ Interrupt detected but no interrupt data provided. Check HITL configuration."
+                                        "Interrupt detected but no interrupt data provided. Check HITL configuration.",
+                                        icon=":material/error:",
                                     )
 
                                 # Display info message
                                 st.info(
-                                    "🔧 The assistant wants to use tools. Please review and approve below."
+                                    "The assistant wants to use tools. Please review and approve below.",
+                                    icon=":material/handyman:",
                                 )
 
                                 # Stop processing further events and rerun to show approval UI
@@ -3964,7 +4197,9 @@ def render_chat_view():
                                 status.update(
                                     label=f"Error: {error_msg}", state="error"
                                 )
-                                st.toast(f"Error: {error_msg}", icon="❌")
+                                st.toast(
+                                    f"Error: {error_msg}", icon=":material/cancel:"
+                                )
                                 break
 
                             elif event_type == "title_updated":
@@ -3989,10 +4224,11 @@ def render_chat_view():
                             reset_conversation_state()
                             st.session_state.show_attachment_uploader = False
                             load_messages_page(1)
-                            st.toast("Message sent!", icon="✅")
+                            st.toast("Message sent!", icon=":material/check_circle:")
                             st.rerun()
                         elif event_type != "error" and not interrupt_data:
-                            st.toast("Failed to send message", icon="❌")
+                            st.toast("Failed to send message", icon=":material/cancel:")
+
 
 def render_manage_modal():
     """Conversation management modal dialog"""
@@ -4121,7 +4357,7 @@ def render_manage_modal():
                             if st.button(
                                 "Open",
                                 key=open_button_key,
-                                use_container_width=True,
+                                width='stretch',
                                 type="primary",
                             ):
                                 if conv_id is not None:
@@ -4130,7 +4366,10 @@ def render_manage_modal():
                                     reset_conversation_state()
                                     st.rerun()
                                 else:
-                                    st.toast("Conversation is missing an ID", icon="⚠️")
+                                    st.toast(
+                                        "Conversation is missing an ID",
+                                        icon=":material/warning:",
+                                    )
                         with col2:
                             delete_button_key = (
                                 f"conversation_manager_delete_{conv_id_str}_{idx}"
@@ -4140,10 +4379,13 @@ def render_manage_modal():
                             if st.button(
                                 "Delete",
                                 key=delete_button_key,
-                                use_container_width=True,
+                                width='stretch',
                             ):
                                 if conv_id is None:
-                                    st.toast("Conversation is missing an ID", icon="⚠️")
+                                    st.toast(
+                                        "Conversation is missing an ID",
+                                        icon=":material/warning:",
+                                    )
                                 else:
                                     result = make_api_request(
                                         "DELETE", f"/conversations/{conv_id}"
@@ -4161,14 +4403,14 @@ def render_manage_modal():
                                         refresh_conversations_list()
                                         st.toast(
                                             f"Deleted '{conv.get('title', 'Conversation')}'",
-                                            icon="✅",
+                                            icon=":material/check_circle:",
                                         )
                                         st.rerun()
             else:
                 st.info("No conversations found matching your search.")
         else:
             st.info("No conversations available.")
-        if st.button("Close", use_container_width=True):
+        if st.button("Close", width='stretch'):
             close_conversation_manager()
             st.rerun()
 
@@ -4189,7 +4431,7 @@ def render_chunk_preview_modal():
 
         if not selected_info:
             st.warning("No chunk information available.")
-            if st.button("Close", use_container_width=True):
+            if st.button("Close", width='stretch'):
                 st.session_state["chunk_preview_dialog_key"] = False
                 st.rerun()
             return
@@ -4247,14 +4489,14 @@ def render_chunk_preview_modal():
                 disabled=True,
                 label_visibility="collapsed",
             )
-            st.caption(f"📊 Character count: {char_count}")
+            st.caption(f":material/bar_chart: Character count: {char_count}")
         else:
             st.info("Chunk content is not available.")
 
         st.divider()
 
         # Close button
-        if st.button("Close", use_container_width=True):
+        if st.button("Close", width='stretch'):
             st.session_state["chunk_preview_dialog_key"] = False
             st.session_state["selected_chunk_info"] = None
             st.rerun()
@@ -4265,7 +4507,7 @@ def render_chunk_preview_modal():
 
 def render_documents_tab():
     """Documents management workspace (moved from the sidebar)."""
-    st.markdown("# 📄 Documents")
+    st.markdown("# :material/description: Documents")
 
     conversation_id = st.session_state.get("current_conversation_id")
     if conversation_id in (None, "pending_new"):
@@ -4315,7 +4557,7 @@ def render_documents_tab():
             if st.button(
                 "Upload & Process",
                 key=f"upload_doc_{conversation_id}",
-                use_container_width=True,
+                width='stretch',
                 type="primary",
             ):
                 with st.spinner("Uploading document..."):
@@ -4338,7 +4580,7 @@ def render_documents_tab():
         if st.button(
             "Refresh document list",
             key="documents_refresh",
-            use_container_width=True,
+            width='stretch',
         ):
             st.cache_data.clear()
             st.rerun()
@@ -4375,15 +4617,31 @@ def render_documents_tab():
         return
 
     status_map = {
-        1: {"label": "Processing", "icon": "⏳", "help": "Indexing in progress"},
-        2: {"label": "Ready", "icon": "✅", "help": "Available for retrieval"},
-        3: {"label": "Failed", "icon": "⚠️", "help": "Processing failed"},
+        1: {
+            "label": "Processing",
+            "icon": ":material/schedule:",
+            "help": "Indexing in progress",
+        },
+        2: {
+            "label": "Ready",
+            "icon": ":material/check_circle:",
+            "help": "Available for retrieval",
+        },
+        3: {
+            "label": "Failed",
+            "icon": ":material/warning:",
+            "help": "Processing failed",
+        },
     }
 
     for doc in documents:
         status = status_map.get(
             doc.get("status"),
-            {"label": "Unknown", "icon": "❔", "help": "Status unavailable"},
+            {
+                "label": "Unknown",
+                "icon": ":material/help:",
+                "help": "Status unavailable",
+            },
         )
 
         with st.container():
@@ -4401,12 +4659,12 @@ def render_documents_tab():
                 if st.button(
                     "Delete",
                     key=f"delete_doc_{doc.get('id')}",
-                    use_container_width=True,
+                    width='stretch',
                 ):
                     with st.spinner("Removing document..."):
                         if delete_document(doc.get("id")):
                             st.cache_data.clear()
-                            st.toast("Document deleted.", icon="🗑️")
+                            st.toast("Document deleted.", icon=":material/delete:")
                             st.rerun()
                         else:
                             st.error("Delete failed. Please try again.")
@@ -4417,10 +4675,26 @@ def render_documents_tab():
 # ==================== PLANNING TAB ====================
 
 TASK_STATUS_MAP = {
-    "pending": {"label": "Pending", "icon": "⏳", "color": "#f59e0b"},
-    "in_progress": {"label": "In Progress", "icon": "🔄", "color": "#3b82f6"},
-    "completed": {"label": "Completed", "icon": "✅", "color": "#10b981"},
-    "skipped": {"label": "Skipped", "icon": "⏭️", "color": "#64748b"},
+    "pending": {
+        "label": "Pending",
+        "icon": '<span class="material-symbols-outlined" aria-hidden="true">schedule</span>',
+        "color": "#f59e0b",
+    },
+    "in_progress": {
+        "label": "In Progress",
+        "icon": '<span class="material-symbols-outlined" aria-hidden="true">autorenew</span>',
+        "color": "#3b82f6",
+    },
+    "completed": {
+        "label": "Completed",
+        "icon": '<span class="material-symbols-outlined" aria-hidden="true">check_circle</span>',
+        "color": "#10b981",
+    },
+    "skipped": {
+        "label": "Skipped",
+        "icon": '<span class="material-symbols-outlined" aria-hidden="true">skip_next</span>',
+        "color": "#64748b",
+    },
 }
 
 
@@ -4495,7 +4769,7 @@ def delete_task_plan(task_id: str) -> bool:
 
 def render_planning_tab():
     """Render the Planning tab for managing task plans."""
-    st.markdown("# 📋 Planning")
+    st.markdown("# :material/checklist: Planning")
 
     conversation_id = st.session_state.get("current_conversation_id")
     is_new_conversation = conversation_id == "pending_new"
@@ -4545,13 +4819,13 @@ def render_planning_tab():
         # Metrics row
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("⏳ Pending", pending)
+            st.metric("Pending", pending)
         with col2:
-            st.metric("🔄 In Progress", in_progress)
+            st.metric("In Progress", in_progress)
         with col3:
-            st.metric("✅ Completed", completed)
+            st.metric("Completed", completed)
         with col4:
-            st.metric("⏭️ Skipped", skipped)
+            st.metric("Skipped", skipped)
 
         # Next task info
         next_task = status.get("nextTask")
@@ -4597,11 +4871,15 @@ def render_planning_tab():
             with st.spinner("Generating task plan..."):
                 tasks = create_task_plan_ai(conversation_id, ai_input.strip())
                 if tasks:
-                    st.toast(f"Created {len(tasks)} tasks!", icon="✅")
+                    st.toast(
+                        f"Created {len(tasks)} tasks!", icon=":material/check_circle:"
+                    )
                     st.session_state.clear_planning_generate_input = True
                     st.rerun()
                 else:
-                    st.toast("Failed to generate plan. Try again.", icon="❌")
+                    st.toast(
+                        "Failed to generate plan. Try again.", icon=":material/cancel:"
+                    )
 
     with tab_manual:
         st.markdown("Enter tasks manually, one per line.")
@@ -4628,11 +4906,17 @@ def render_planning_tab():
                 with st.spinner("Creating tasks..."):
                     tasks = create_task_plan_manual(conversation_id, descriptions)
                     if tasks:
-                        st.toast(f"Created {len(tasks)} tasks!", icon="✅")
+                        st.toast(
+                            f"Created {len(tasks)} tasks!",
+                            icon=":material/check_circle:",
+                        )
                         st.session_state.clear_planning_manual_input = True
                         st.rerun()
                     else:
-                        st.toast("Failed to create tasks. Try again.", icon="❌")
+                        st.toast(
+                            "Failed to create tasks. Try again.",
+                            icon=":material/cancel:",
+                        )
             else:
                 st.warning("Please enter at least one task description.")
 
@@ -4647,7 +4931,7 @@ def render_planning_tab():
             "Show completed tasks", value=True, key="show_completed_tasks"
         )
     with col2:
-        if st.button("Refresh", key="refresh_tasks_btn", use_container_width=True):
+        if st.button("Refresh", key="refresh_tasks_btn", width='stretch'):
             st.rerun()
 
     tasks = get_task_plans(conversation_id, include_completed=show_completed)
@@ -4699,13 +4983,16 @@ def render_planning_tab():
                 with col1:
                     if task_status == "pending":  # Pending
                         if st.button(
-                            "▶Start", key=f"start_{task_id}", use_container_width=True
+                            "Start",
+                            icon=":material/play_arrow:",
+                            key=f"start_{task_id}",
+                            width='stretch',
                         ):
                             result = update_task_plan(
                                 task_id, {"status": "in_progress"}
                             )
                             if result:
-                                st.toast("Task started!", icon="🔄")
+                                st.toast("Task started!", icon=":material/refresh:")
                                 st.rerun()
 
                 with col2:
@@ -4716,11 +5003,13 @@ def render_planning_tab():
                         if st.button(
                             "Complete",
                             key=f"complete_{task_id}",
-                            use_container_width=True,
+                            width='stretch',
                         ):
                             result = complete_task_plan(task_id)
                             if result:
-                                st.toast("Task completed!", icon="✅")
+                                st.toast(
+                                    "Task completed!", icon=":material/check_circle:"
+                                )
                                 st.rerun()
 
                 with col3:
@@ -4729,29 +5018,32 @@ def render_planning_tab():
                         "in_progress",
                     ):  # Pending or In Progress
                         if st.button(
-                            "⏭Skip", key=f"skip_{task_id}", use_container_width=True
+                            "Skip",
+                            icon=":material/skip_next:",
+                            key=f"skip_{task_id}",
+                            width='stretch',
                         ):
                             result = update_task_plan(task_id, {"status": "skipped"})
                             if result:
-                                st.toast("Task skipped!", icon="⏭️")
+                                st.toast("Task skipped!", icon=":material/skip_next:")
                                 st.rerun()
 
                 with col4:
                     if st.button(
-                        "Delete", key=f"delete_{task_id}", use_container_width=True
+                        "Delete", key=f"delete_{task_id}", width='stretch'
                     ):
                         if delete_task_plan(task_id):
-                            st.toast("Task deleted!", icon="🗑️")
+                            st.toast("Task deleted!", icon=":material/delete:")
                             st.rerun()
                         else:
-                            st.toast("Failed to delete task.", icon="❌")
+                            st.toast("Failed to delete task.", icon=":material/cancel:")
 
                 st.markdown("---")
 
 
 def render_settings_view():
     """Settings and instructions view"""
-    st.markdown("# ⚙️ Instructions")
+    st.markdown("# :material/settings: Instructions")
 
     conversation_id = st.session_state.get("current_conversation_id")
     is_new_conversation = conversation_id == "pending_new"
@@ -4794,7 +5086,7 @@ def render_settings_view():
         cols = st.columns(len(PERSONA_TEMPLATES))
         for idx, (label, template) in enumerate(PERSONA_TEMPLATES.items()):
             with cols[idx]:
-                if st.button(label, key=f"template_{idx}", use_container_width=True):
+                if st.button(label, key=f"template_{idx}", width='stretch'):
                     st.session_state.persona_editor_value = template[
                         :_MAX_PERSONA_LENGTH
                     ]
@@ -4820,7 +5112,10 @@ def render_settings_view():
         st.caption(f"{char_count}/{_MAX_PERSONA_LENGTH}")
 
     if exceeds_limit:
-        st.error("⚠️ Character limit exceeded. Please shorten your instructions.")
+        st.error(
+            "Character limit exceeded. Please shorten your instructions.",
+            icon=":material/warning:",
+        )
 
     # Actions
     col1, col2 = st.columns(2)
@@ -4829,7 +5124,7 @@ def render_settings_view():
         if is_new_conversation:
             if st.button(
                 "Apply to New Chat",
-                use_container_width=True,
+                width='stretch',
                 disabled=exceeds_limit,
                 type="primary",
             ):
@@ -4837,13 +5132,13 @@ def render_settings_view():
                 st.session_state.pending_persona_prompt = sanitized
                 st.session_state.persona_editor_pending_value = sanitized
                 st.session_state.persona_editor_pending = True
-                st.toast("Persona saved for new chat!", icon="✅")
+                st.toast("Persona saved for new chat!", icon=":material/check_circle:")
                 st.session_state.active_view = "chat"
                 st.rerun()
         else:
             if st.button(
                 "Save Persona",
-                use_container_width=True,
+                width='stretch',
                 disabled=exceeds_limit,
                 type="primary",
             ):
@@ -4854,21 +5149,21 @@ def render_settings_view():
                 )
                 if response and response.get("data"):
                     refresh_conversations_list()
-                    st.toast("Persona updated!", icon="✅")
+                    st.toast("Persona updated!", icon=":material/check_circle:")
                     st.session_state.active_view = "chat"
                     st.rerun()
                 else:
-                    st.toast("Failed to update persona", icon="❌")
+                    st.toast("Failed to update persona", icon=":material/cancel:")
 
     with col2:
         if is_new_conversation:
-            if st.button("Clear", use_container_width=True):
+            if st.button("Clear", width='stretch'):
                 st.session_state.persona_editor_pending_value = ""
                 st.session_state.persona_editor_pending = True
                 st.session_state.pending_persona_prompt = ""
                 st.rerun()
         else:
-            if st.button("Clear Persona", use_container_width=True):
+            if st.button("Clear Persona", width='stretch'):
                 response = make_api_request(
                     "PATCH",
                     f"/conversations/{conversation_id}",
@@ -4876,8 +5171,339 @@ def render_settings_view():
                 )
                 if response and response.get("data"):
                     refresh_conversations_list()
-                    st.toast("Persona removed!", icon="✅")
+                    st.toast("Persona removed!", icon=":material/check_circle:")
                     st.rerun()
+
+
+def render_models_view() -> None:
+    """Model/provider settings (keys + persistent per-agent model selection)."""
+    st.markdown("# Models")
+
+    providers = get_providers()
+    openai_provider = next(
+        (
+            p
+            for p in providers
+            if str(p.get("provider_type", "")).strip().lower() == "openai"
+        ),
+        None,
+    )
+
+    st.subheader("OpenAI API Key (stored in DB)")
+    if openai_provider:
+        created_at = openai_provider.get("created_at") or openai_provider.get(
+            "createdAt"
+        )
+        key_preview = openai_provider.get("key_preview") or openai_provider.get(
+            "keyPreview"
+        )
+        st.success(f"Configured ({key_preview or '***'})")
+        if created_at:
+            st.caption(f"Added: {created_at}")
+    else:
+        st.info("No OpenAI key saved for this user yet.")
+
+    with st.form("openai_provider_form", clear_on_submit=True):
+        api_key = st.text_input("OpenAI API key", type="password", placeholder="sk-...")
+        submitted = st.form_submit_button(
+            "Save / Update OpenAI Key",
+            width='stretch',
+            type="primary",
+        )
+        if submitted:
+            api_key = api_key.strip()
+            if not api_key:
+                st.toast("Please enter an API key", icon=":material/warning:")
+            else:
+                result = upsert_provider("openai", api_key, is_default=False)
+                if result:
+                    st.session_state.openai_models = []
+                    st.session_state.openai_models_last_fetch = None
+                    st.session_state.openai_models_fetch_attempted = False
+                    st.session_state.openai_models_fetch_error = None
+                    st.toast("OpenAI key saved", icon=":material/check_circle:")
+                    st.rerun()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button(
+            "Refresh OpenAI model list",
+            width='stretch',
+        ):
+            with st.spinner("Fetching models from OpenAI..."):
+                models = fetch_provider_models("openai")
+
+            st.session_state.openai_models_fetch_attempted = True
+            if models:
+                st.session_state.openai_models = models
+                st.session_state.openai_models_last_fetch = datetime.now(
+                    timezone.utc
+                ).isoformat()
+                st.session_state.openai_models_fetch_error = None
+                st.toast(f"Loaded {len(models)} models", icon=":material/check_circle:")
+            else:
+                st.session_state.openai_models_fetch_error = (
+                    "No models returned. Check your OpenAI key."
+                )
+            st.rerun()
+
+    with col2:
+        if st.button(
+            "Delete OpenAI key",
+            width='stretch',
+            disabled=openai_provider is None,
+        ):
+            if delete_provider("openai"):
+                st.session_state.openai_models = []
+                st.session_state.openai_models_last_fetch = None
+                st.session_state.openai_models_fetch_attempted = False
+                st.session_state.openai_models_fetch_error = None
+                st.toast("OpenAI key deleted", icon=":material/delete:")
+                st.rerun()
+
+    st.subheader("Available OpenAI models")
+
+    last_fetch = st.session_state.get("openai_models_last_fetch")
+    if last_fetch:
+        st.caption(f"Last fetched: {last_fetch}")
+
+    models = st.session_state.get("openai_models") or []
+    if models:
+        st.dataframe(models, width='stretch', hide_index=True)
+    else:
+        st.info("Click “Refresh OpenAI model list” to load available models.")
+
+    st.divider()
+
+    st.subheader("Agent model configuration (persistent)")
+
+    if not st.session_state.get("agent_model_config_cache"):
+        with st.spinner("Loading model configuration..."):
+            st.session_state.agent_model_config_cache = get_model_config()
+            st.session_state.agent_model_config_last_fetch = datetime.now(
+                timezone.utc
+            ).isoformat()
+            st.session_state.agent_model_config_fetch_error = None
+
+    config = st.session_state.get("agent_model_config_cache") or {}
+
+    controls_col1, controls_col2, controls_col3 = st.columns([1.2, 1.2, 3])
+    with controls_col1:
+        if st.button("Reload from server", width='stretch'):
+            with st.spinner("Loading model configuration..."):
+                st.session_state.agent_model_config_cache = get_model_config()
+                st.session_state.agent_model_config_last_fetch = datetime.now(
+                    timezone.utc
+                ).isoformat()
+                st.session_state.agent_model_config_fetch_error = None
+            st.toast("Model config reloaded", icon=":material/refresh:")
+            st.rerun()
+
+    with controls_col2:
+        if st.button("Reset to defaults", width='stretch'):
+            with st.spinner("Resetting..."):
+                st.session_state.agent_model_config_cache = reset_model_config()
+                st.session_state.agent_model_config_last_fetch = datetime.now(
+                    timezone.utc
+                ).isoformat()
+                st.session_state.agent_model_config_fetch_error = None
+            st.toast("Model config reset", icon=":material/cleaning_services:")
+            st.rerun()
+
+    with controls_col3:
+        fetched_at = st.session_state.get("agent_model_config_last_fetch")
+        if fetched_at:
+            st.caption(f"Last loaded: {fetched_at}")
+        st.caption("These settings apply automatically to new messages.")
+
+    gemini_model_options = [
+        "gemini-3-flash-preview",
+        "gemini-3-pro-preview",
+        "gemini-2.5-flash-latest",
+        "gemini-2.5-pro",
+    ]
+
+    openai_model_ids = [
+        str(m.get("id") or m.get("name") or "").strip()
+        for m in (st.session_state.get("openai_models") or [])
+        if isinstance(m, dict) and str(m.get("id") or m.get("name") or "").strip()
+    ]
+
+    agents: List[Tuple[str, str]] = [
+        ("chat", "Chat"),
+        ("rag", "RAG"),
+        ("search", "Search"),
+        ("planning", "Planning"),
+    ]
+
+    # Initialize provider selections in session state if not present
+    for agent_key, _ in agents:
+        cfg = config.get(agent_key, {}) if isinstance(config, dict) else {}
+        current_provider = str(cfg.get("provider") or "gemini").strip().lower()
+        if current_provider not in ("gemini", "openai"):
+            current_provider = "gemini"
+
+        if f"temp_provider_{agent_key}" not in st.session_state:
+            st.session_state[f"temp_provider_{agent_key}"] = current_provider
+
+    def _build_model_options(
+        current: str, candidates: List[str], placeholder: str
+    ) -> List[str]:
+        options: List[str] = []
+        if current and current not in options:
+            options.append(current)
+        for item in candidates:
+            if item and item not in options:
+                options.append(item)
+        return options or [placeholder]
+
+    # Provider selection outside form for reactivity
+    st.subheader("Select providers for each agent")
+    provider_cols = st.columns(len(agents))
+    for idx, (agent_key, label) in enumerate(agents):
+        with provider_cols[idx]:
+            cfg = config.get(agent_key, {}) if isinstance(config, dict) else {}
+            current_provider = str(cfg.get("provider") or "gemini").strip().lower()
+            if current_provider not in ("gemini", "openai"):
+                current_provider = "gemini"
+
+            selected_provider = st.selectbox(
+                label,
+                options=["gemini", "openai"],
+                index=(
+                    0
+                    if st.session_state.get(
+                        f"temp_provider_{agent_key}", current_provider
+                    )
+                    == "gemini"
+                    else 1
+                ),
+                key=f"provider_selector_{agent_key}",
+                format_func=lambda value: "Gemini" if value == "gemini" else "OpenAI",
+            )
+            st.session_state[f"temp_provider_{agent_key}"] = selected_provider
+
+    st.divider()
+    st.subheader("Configure models and parameters")
+
+    with st.form("agent_model_config_form"):
+        for agent_key, label in agents:
+            cfg = config.get(agent_key, {}) if isinstance(config, dict) else {}
+            current_provider = str(cfg.get("provider") or "gemini").strip().lower()
+            if current_provider not in ("gemini", "openai"):
+                current_provider = "gemini"
+
+            current_model = str(cfg.get("model") or "").strip()
+            current_temp = cfg.get("temperature", 1.0)
+            if not isinstance(current_temp, (int, float)):
+                current_temp = 1.0
+
+            st.markdown(f"**{label}**")
+            col_model, col_temp = st.columns([3, 1.2])
+
+            # Get the provider from the selector outside the form
+            selected_provider = st.session_state.get(
+                f"temp_provider_{agent_key}", current_provider
+            )
+
+            with col_model:
+                if selected_provider == "openai":
+                    model_options = _build_model_options(
+                        current=current_model if current_provider == "openai" else "",
+                        candidates=openai_model_ids,
+                        placeholder="(load OpenAI models above)",
+                    )
+                    st.selectbox(
+                        "Model",
+                        options=model_options,
+                        index=0,
+                        key=f"agent_cfg_model_select_{agent_key}",
+                    )
+                    st.text_input(
+                        "Custom model (optional)",
+                        placeholder="gpt-4o-mini",
+                        key=f"agent_cfg_model_custom_{agent_key}",
+                        value="",
+                        help="If set, overrides the dropdown selection.",
+                    )
+                else:
+                    model_options = _build_model_options(
+                        current=current_model if current_provider == "gemini" else "",
+                        candidates=gemini_model_options,
+                        placeholder="gemini-3-flash-preview",
+                    )
+                    st.selectbox(
+                        "Model",
+                        options=model_options,
+                        index=0,
+                        key=f"agent_cfg_model_select_{agent_key}",
+                    )
+                    st.text_input(
+                        "Custom model (optional)",
+                        placeholder="gemini-3-flash-preview",
+                        key=f"agent_cfg_model_custom_{agent_key}",
+                        value="",
+                        help="If set, overrides the dropdown selection.",
+                    )
+
+            with col_temp:
+                st.slider(
+                    "Temperature",
+                    min_value=0.0,
+                    max_value=2.0,
+                    value=float(current_temp),
+                    step=0.05,
+                    key=f"agent_cfg_temperature_{agent_key}",
+                )
+
+        submitted = st.form_submit_button(
+            "Save agent model settings",
+            type="primary",
+            width='stretch',
+        )
+
+        if submitted:
+            payload: Dict[str, Any] = {}
+            for agent_key, _ in agents:
+                # Use the provider from the selector outside the form
+                provider = (
+                    str(st.session_state.get(f"temp_provider_{agent_key}") or "gemini")
+                    .strip()
+                    .lower()
+                )
+                selected = str(
+                    st.session_state.get(f"agent_cfg_model_select_{agent_key}") or ""
+                ).strip()
+                custom = str(
+                    st.session_state.get(f"agent_cfg_model_custom_{agent_key}") or ""
+                ).strip()
+                model = custom or selected
+                temperature = st.session_state.get(
+                    f"agent_cfg_temperature_{agent_key}", 1.0
+                )
+                if not isinstance(temperature, (int, float)):
+                    temperature = 1.0
+
+                if model and not model.startswith("("):
+                    payload[agent_key] = {
+                        "provider": provider,
+                        "model": model,
+                        "temperature": float(temperature),
+                    }
+
+            with st.spinner("Saving model settings..."):
+                updated = patch_model_config(payload)
+
+            if updated:
+                st.session_state.agent_model_config_cache = updated
+                st.session_state.agent_model_config_last_fetch = datetime.now(
+                    timezone.utc
+                ).isoformat()
+                st.toast("Saved model settings", icon=":material/check_circle:")
+                st.rerun()
+            else:
+                st.toast("Failed to save model settings", icon=":material/cancel:")
 
 
 def main():
@@ -4899,8 +5525,15 @@ def main():
     render_chunk_preview_modal()
 
     # Tab-based navigation across primary workspaces
-    tab_chat, tab_planning, tab_docs, tab_instructions, tab_mcp = st.tabs(
-        ["💬 Chat", "📋 Planning", "📄 Documents", "⚙️ Instructions", "🔧 MCP Config"]
+    tab_chat, tab_planning, tab_docs, tab_instructions, tab_models, tab_mcp = st.tabs(
+        [
+            ":material/chat: Chat",
+            ":material/checklist: Planning",
+            ":material/description: Documents",
+            ":material/settings: Instructions",
+            ":material/smart_toy: Models",
+            ":material/extension: MCP Config",
+        ]
     )
 
     with tab_chat:
@@ -4914,6 +5547,9 @@ def main():
 
     with tab_instructions:
         render_settings_view()
+
+    with tab_models:
+        render_models_view()
 
     with tab_mcp:
         render_tools_tab()
