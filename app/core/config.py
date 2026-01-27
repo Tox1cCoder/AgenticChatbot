@@ -390,6 +390,35 @@ class Settings(BaseSettings):
         description="Enable/disable Pydantic validation for tool arguments and results",
     )
 
+    # Tool Result Token Management
+    tool_result_max_chars: int = Field(
+        default=8000,
+        description="Maximum characters to include in ToolMessage content sent to model (0 = no limit). Full output is preserved in artifacts for UI.",
+    )
+    tool_result_truncation_suffix: str = Field(
+        default="\n\n[Output truncated - full result available in tool artifacts]",
+        description="Suffix to append when tool result is truncated",
+    )
+
+    # Per-Agent Tool Allowlists
+    # Empty list means bind all available tools; non-empty list restricts to specified tools/servers
+    chat_agent_allowed_tools: List[str] = Field(
+        default=[],
+        description="Tool names or server names that chat agent can use. Empty = all tools.",
+    )
+    search_agent_allowed_tools: List[str] = Field(
+        default=["tavily", "time"],
+        description="Tool names or server names that search agent can use. Empty = all tools.",
+    )
+    rag_agent_allowed_tools: List[str] = Field(
+        default=[],
+        description="Tool names or server names that RAG agent can use. Empty = all tools.",
+    )
+    planning_agent_allowed_tools: List[str] = Field(
+        default=[],
+        description="Tool names or server names that planning agent can use. Empty = all tools.",
+    )
+
     # Hallucination Prevention Configuration
     confidence_threshold_abstain: float = Field(
         default=0.3,

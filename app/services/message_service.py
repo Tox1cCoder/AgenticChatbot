@@ -603,7 +603,6 @@ class MessageService(IMessageService):
                 if not bot_response_content or not bot_response_content.strip():
                     bot_response_content = NO_RESPONSE_GENERATED
 
-                # Fix markdown code blocks that may be missing newlines
                 bot_response_content = fix_markdown_code_blocks(bot_response_content)
 
                 # Create metadata for bot response
@@ -1167,7 +1166,6 @@ class MessageService(IMessageService):
             except Exception:
                 pass
 
-        # Fix markdown code blocks
         bot_response_content = fix_markdown_code_blocks(bot_response_content)
 
         return bot_response_content, bot_metadata, bot_response, 1, None

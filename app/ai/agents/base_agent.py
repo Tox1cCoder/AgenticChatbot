@@ -22,6 +22,13 @@ from ..utils import (
 from ..agent_config import create_langchain_model, create_gemini_client, AGENT_CONFIG
 from ...core.config import settings
 from ..mcp_integration import get_global_mcp_manager
+from ..mcp_registry import get_mcp_tools_generation
+from ..token_instrumentation import (
+    compute_token_breakdown,
+    extract_actual_usage,
+    log_token_breakdown,
+    TokenBudgetExceededWarning,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +49,9 @@ class BaseAgent(ABC):
         self.mcp_manager = None
         self.tools: List[BaseTool] = []
 
+        # Track tools generation to detect when refresh is needed
+        self._tools_generation_seen: int = 0
+
         self._init_gemini()
 
     def _init_gemini(self) -> None:
@@ -59,7 +69,24 @@ class BaseAgent(ABC):
             raise
 
     async def _init_tools(self) -> None:
-        if self.mcp_manager is not None:
+        """
+        Initialize or refresh tools from MCP manager.
+
+        This method now checks the tools_generation version from the registry
+        to detect when tools need to be refreshed (e.g., after a server is
+        disabled). This ensures disabled server tools are never bound to the model.
+
+        Tools are also filtered based on per-agent allowlists configured in settings.
+        """
+        current_generation = get_mcp_tools_generation()
+
+        # Check if we need to refresh tools
+        needs_refresh = (
+            self.mcp_manager is None
+            or self._tools_generation_seen != current_generation
+        )
+
+        if not needs_refresh:
             return
 
         try:
@@ -67,16 +94,32 @@ class BaseAgent(ABC):
 
             all_tools = await self.mcp_manager.get_tools()
 
-            self.tools = self._deduplicate_tools(all_tools)
+            # Deduplicate first
+            unique_tools = self._deduplicate_tools(all_tools)
+
+            # Apply per-agent tool allowlist filtering
+            self.tools = self._filter_tools_by_allowlist(unique_tools)
+
+            # Update our tracked generation
+            self._tools_generation_seen = current_generation
 
             server_status = self.mcp_manager.get_servers_status()
             active_servers = [
                 name for name, status in server_status.items() if status.get("enabled")
             ]
-            logger.info(
-                f"Initialized {len(self.tools)} unique tools from "
-                f"{len(active_servers)} active MCP servers: {active_servers}"
-            )
+
+            # Log tool refresh with generation info
+            if self._tools_generation_seen > 0:
+                logger.info(
+                    f"Refreshed tools for {self.agent_id} (generation={current_generation}): "
+                    f"{len(self.tools)} tools (from {len(unique_tools)} available) "
+                    f"from {len(active_servers)} active servers"
+                )
+            else:
+                logger.info(
+                    f"Initialized {len(self.tools)} tools (from {len(unique_tools)} available) "
+                    f"for {self.agent_id} from {len(active_servers)} MCP servers"
+                )
 
         except Exception as e:
             logger.error(f"Error initializing MCP tools: {e}")
@@ -87,6 +130,54 @@ class BaseAgent(ABC):
         for tool in tools:
             unique_tools.setdefault(tool.name, tool)
         return list(unique_tools.values())
+
+    def _filter_tools_by_allowlist(self, tools: List[BaseTool]) -> List[BaseTool]:
+        """
+        Filter tools based on per-agent allowlist configuration.
+
+        Allowlist can contain:
+        - Tool names (e.g., "tavily_search")
+        - Server names (e.g., "tavily") - matches all tools from that server
+
+        If allowlist is empty, all tools are allowed.
+        """
+        # Get agent-specific allowlist from settings
+        allowlist_key = f"{self.agent_config_key}_agent_allowed_tools"
+        allowlist = getattr(settings, allowlist_key, []) or []
+
+        # Empty allowlist means all tools allowed
+        if not allowlist:
+            return tools
+
+        # Build set of allowed names for fast lookup
+        allowed_set = set(allowlist)
+
+        filtered_tools = []
+        for tool in tools:
+            tool_name = getattr(tool, "name", "")
+
+            # Check if tool name is directly in allowlist
+            if tool_name in allowed_set:
+                filtered_tools.append(tool)
+                continue
+
+            # Check if tool's server is in allowlist
+            if self.mcp_manager:
+                server_name = self.mcp_manager.get_server_for_tool(tool)
+                if server_name and server_name in allowed_set:
+                    filtered_tools.append(tool)
+                    continue
+
+        if len(filtered_tools) < len(tools):
+            logger.debug(
+                "%s: Filtered tools from %d to %d based on allowlist %s",
+                self.agent_id,
+                len(tools),
+                len(filtered_tools),
+                allowlist,
+            )
+
+        return filtered_tools
 
     def _resolve_model_request(
         self, model_request: Optional[Dict[str, Any]]
@@ -238,8 +329,9 @@ class BaseAgent(ABC):
         **system_prompt_kwargs: Any,
     ) -> AgentResponse:
         try:
-            if self.mcp_manager is None:
-                await self._init_tools()
+            # Always check for tool refresh (handles disabled servers, etc.)
+            # _init_tools now checks generation version and only refreshes if needed
+            await self._init_tools()
 
             resolved_request = self._resolve_model_request(model_request)
 
@@ -346,14 +438,35 @@ class BaseAgent(ABC):
             langchain_messages = [SystemMessage(content=system_prompt)]
 
             # Convert and prepend conversation history (from database)
+            history_messages_lc = []
             if conversation_history:
-                history_messages = self._convert_history_to_langchain_messages(
+                history_messages_lc = self._convert_history_to_langchain_messages(
                     conversation_history
                 )
-                langchain_messages.extend(history_messages)
+                langchain_messages.extend(history_messages_lc)
 
             # Add current turn messages
             langchain_messages.extend(messages)
+
+            # === Token Instrumentation ===
+            # Compute and log token breakdown for observability
+            token_breakdown = compute_token_breakdown(
+                system_prompt=system_prompt,
+                history_messages=history_messages_lc,
+                current_turn_messages=messages,
+                tools=self.tools if self.tools else None,
+            )
+            log_token_breakdown(
+                breakdown=token_breakdown,
+                agent_id=self.agent_id,
+                conversation_id=conversation_id,
+                level=logging.DEBUG,
+            )
+            # Check for budget warnings
+            TokenBudgetExceededWarning.check_and_warn(
+                breakdown=token_breakdown,
+                agent_id=self.agent_id,
+            )
 
             # This ensures it runs ONCE per request, not on every agent iteration
             # (prevents context bloat during ReAct loops)
@@ -429,6 +542,19 @@ class BaseAgent(ABC):
             else:
                 response = await llm_with_tools.ainvoke(langchain_messages)
 
+            # === Extract and log actual token usage ===
+            actual_usage = extract_actual_usage(response)
+            if actual_usage.get("input_tokens") is not None:
+                token_breakdown.actual_input_tokens = actual_usage["input_tokens"]
+                token_breakdown.actual_output_tokens = actual_usage.get("output_tokens")
+                logger.debug(
+                    "%s: Actual token usage - input=%s, output=%s (estimated=%d)",
+                    self.agent_id,
+                    actual_usage["input_tokens"],
+                    actual_usage.get("output_tokens"),
+                    token_breakdown.total_tokens,
+                )
+
             tool_calls = None
             if hasattr(response, "tool_calls") and response.tool_calls:
                 tool_calls = response.tool_calls
@@ -451,6 +577,7 @@ class BaseAgent(ABC):
                 "conversation_id": conversation_id,
                 "has_tool_calls": tool_calls is not None,
                 "tool_count": len(self.tools),
+                "token_breakdown": token_breakdown.to_dict(),
             }
 
             if used_fallback:

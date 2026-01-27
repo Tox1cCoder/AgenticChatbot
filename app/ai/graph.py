@@ -39,6 +39,11 @@ from .utils import (
     make_json_safe,
     extract_content_from_result,
 )
+from .token_instrumentation import (
+    trim_history_to_budget,
+    HistoryBudgetConfig,
+    truncate_tool_result,
+)
 from ..core.response_constants import NO_RESPONSE_GENERATED
 
 logger = logging.getLogger(__name__)
@@ -149,13 +154,25 @@ class MultiAgentWorkflow:
     # ============================================================
 
     async def _get_conversation_history(
-        self, conversation_id: Optional[str], user_id: Optional[str]
+        self,
+        conversation_id: Optional[str],
+        user_id: Optional[str],
+        agent_key: Optional[str] = None,
     ) -> List:
         """
-        Get conversation history with caching.
+        Get conversation history with caching and budget trimming.
 
         Caches history per conversation_id with TTL to avoid
         redundant database queries within a single graph execution.
+
+        History is trimmed according to agent-specific settings:
+        - {agent_key}_history_max_messages
+        - {agent_key}_history_max_tokens
+
+        Args:
+            conversation_id: The conversation UUID
+            user_id: The user UUID
+            agent_key: Agent type key (chat, rag, search, planning) for budget lookup
         """
         if not conversation_id or not user_id:
             return []
@@ -169,6 +186,14 @@ class MultiAgentWorkflow:
             age_seconds = (now - cached_time).total_seconds()
 
             if age_seconds < self._history_cache_ttl_seconds:
+                # Apply history budget trimming based on agent type
+                if agent_key:
+                    budget_config = HistoryBudgetConfig.for_agent(agent_key, settings)
+                    return trim_history_to_budget(
+                        cached_history,
+                        max_messages=budget_config.max_messages,
+                        max_tokens=budget_config.max_tokens,
+                    )
                 return cached_history
 
         try:
@@ -178,9 +203,17 @@ class MultiAgentWorkflow:
             )
             history = conv_memory.get_recent_messages(limit=None, exclude_last=1)
 
-            # Cache the result
+            # Cache the full (untrimmed) result
             self._history_cache[cache_key] = (history, now)
 
+            # Apply history budget trimming based on agent type before returning
+            if agent_key:
+                budget_config = HistoryBudgetConfig.for_agent(agent_key, settings)
+                return trim_history_to_budget(
+                    history,
+                    max_messages=budget_config.max_messages,
+                    max_tokens=budget_config.max_tokens,
+                )
             return history
         except Exception:
             return []
@@ -459,10 +492,36 @@ class MultiAgentWorkflow:
             capture_images=True,
         )
 
+        # Get tool result truncation settings
+        max_chars = getattr(settings, "tool_result_max_chars", 0) or 0
+        truncation_suffix = getattr(
+            settings,
+            "tool_result_truncation_suffix",
+            "\n\n[Output truncated - full result available in tool artifacts]",
+        )
+
         for output in tool_outputs:
+            content = output["content"]
+
+            # Truncate tool result content if configured
+            # Full output is preserved in tool_artifacts for UI display
+            if max_chars > 0:
+                content, was_truncated = truncate_tool_result(
+                    content,
+                    max_chars=max_chars,
+                    truncation_suffix=truncation_suffix,
+                )
+                if was_truncated:
+                    logger.debug(
+                        "Truncated tool output for %s from %d to %d chars",
+                        output["name"],
+                        len(output["content"]),
+                        len(content),
+                    )
+
             state.setdefault("messages", []).append(
                 ToolMessage(
-                    content=output["content"],
+                    content=content,
                     tool_call_id=output["tool_call_id"],
                     name=output["name"],
                 )
@@ -759,7 +818,7 @@ class MultiAgentWorkflow:
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         conversation_history = await self._get_conversation_history(
-            conversation_id, user_id
+            conversation_id, user_id, agent_key="chat"
         )
 
         current_turn_messages = self._get_current_turn_messages(messages)
@@ -791,7 +850,7 @@ class MultiAgentWorkflow:
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         conversation_history = await self._get_conversation_history(
-            conversation_id, user_id
+            conversation_id, user_id, agent_key="rag"
         )
 
         context = state.get("context", {})
@@ -1050,7 +1109,7 @@ class MultiAgentWorkflow:
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         conversation_history = await self._get_conversation_history(
-            conversation_id, user_id
+            conversation_id, user_id, agent_key="search"
         )
 
         current_turn_messages = self._get_current_turn_messages(messages)
@@ -1075,7 +1134,7 @@ class MultiAgentWorkflow:
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         conversation_history = await self._get_conversation_history(
-            conversation_id, user_id
+            conversation_id, user_id, agent_key="chat"
         )
 
         current_turn_messages = self._get_current_turn_messages(messages)
@@ -1107,7 +1166,7 @@ class MultiAgentWorkflow:
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         conversation_history = await self._get_conversation_history(
-            conversation_id, user_id
+            conversation_id, user_id, agent_key="planning"
         )
 
         context = state.get("context", {})
@@ -1663,7 +1722,7 @@ class MultiAgentWorkflow:
             and rag_provider != "openai"
         ):
             conversation_history = await self._get_conversation_history(
-                conversation_id, user_id
+                conversation_id, user_id, agent_key="rag"
             )
 
             agent_msg = AgentMessage(
@@ -1801,7 +1860,7 @@ class MultiAgentWorkflow:
                                         and not current_tool_calls[tool_index]["id"]
                                     ):
                                         current_tool_calls[tool_index]["id"] = tool_id
-                            
+
                             pass  # Content blocks handled
 
                         # Handle content as list (when include_thoughts=True)

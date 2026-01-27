@@ -4,7 +4,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Iterable
+from typing import Dict, List, Optional, Any, Iterable, TYPE_CHECKING
 
 from app.core.config import settings
 from app.core.exceptions.mcp import (
@@ -19,6 +19,8 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel as PydanticBaseModel
 
+if TYPE_CHECKING:
+    from .mcp_registry import MCPRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -457,6 +459,9 @@ class MCPManager:
         self.config["mcp_servers"][server_name] = server_config
         self.save_config()
 
+        # Notify registry of configuration change
+        self._notify_registry_change()
+
     async def remove_server(self, server_name: str) -> None:
         self._ensure_config_loaded()
         if server_name not in self.config.get("mcp_servers", {}):
@@ -491,6 +496,9 @@ class MCPManager:
         del self.config["mcp_servers"][server_name]
         self.save_config()
 
+        # Notify registry of configuration change
+        self._notify_registry_change()
+
     async def enable_server(self, server_name: str) -> None:
         self._ensure_config_loaded()
         if server_name not in self.config.get("mcp_servers", {}):
@@ -498,6 +506,9 @@ class MCPManager:
 
         self.config["mcp_servers"][server_name]["enabled"] = True
         self.save_config()
+
+        # Notify registry of configuration change
+        self._notify_registry_change()
 
     async def disable_server(self, server_name: str) -> None:
         self._ensure_config_loaded()
@@ -538,6 +549,9 @@ class MCPManager:
         self.config["mcp_servers"][server_name]["enabled"] = False
         self.save_config()
 
+        # Notify registry of configuration change
+        self._notify_registry_change()
+
     def save_config(self) -> None:
         try:
             with open(self.config_path, "w") as f:
@@ -554,6 +568,9 @@ class MCPManager:
         await self.cleanup()
         await self.initialize()
         await self.get_tools()
+
+        # Notify registry of configuration change
+        self._notify_registry_change()
 
     async def get_all_tools_info(self) -> List[Dict[str, Any]]:
         """
@@ -744,49 +761,49 @@ class MCPManager:
             "description": server_config.get("description", ""),
         }
 
+    def _notify_registry_change(self) -> None:
+        """
+        Notify the MCP Registry that configuration has changed.
 
-_global_mcp_manager: Optional["MCPManager"] = None
-_mcp_init_lock: asyncio.Lock = asyncio.Lock()
-_mcp_initialized: bool = False
+        This increments the tools generation version so that agents
+        know to refresh their tool caches.
+        """
+        try:
+            from .mcp_registry import MCPRegistry
+
+            MCPRegistry.notify_server_change()
+        except ImportError:
+            # Registry not available, ignore
+            pass
+
+
+# =============================================================================
+# Module-level functions - delegate to MCPRegistry for unified instance management
+# =============================================================================
 
 
 async def get_global_mcp_manager() -> MCPManager:
     """
     Get or create a singleton MCPManager instance.
 
+    This function delegates to MCPRegistry to ensure a single shared instance
+    is used by both agents and the DI container.
+
     Returns:
         MCPManager: The global MCP manager instance with tools pre-loaded.
     """
-    global _global_mcp_manager, _mcp_initialized
+    from .mcp_registry import MCPRegistry
 
-    if _global_mcp_manager is not None and _mcp_initialized:
-        return _global_mcp_manager
-
-    async with _mcp_init_lock:
-        # Double-check after acquiring lock
-        if _global_mcp_manager is not None and _mcp_initialized:
-            return _global_mcp_manager
-
-        _global_mcp_manager = MCPManager()
-        await _global_mcp_manager.initialize()
-
-        # Pre-load all tools to avoid lazy loading overhead
-        tools = await _global_mcp_manager.get_tools()
-        _mcp_initialized = True
-
-    return _global_mcp_manager
+    return await MCPRegistry.get_manager_async()
 
 
 async def reset_global_mcp_manager() -> None:
     """
     Reset the global MCP manager.
+
+    Delegates to MCPRegistry for unified cleanup.
     """
-    global _global_mcp_manager, _mcp_initialized
+    from .mcp_registry import MCPRegistry
 
-    async with _mcp_init_lock:
-        if _global_mcp_manager is not None:
-            await _global_mcp_manager.cleanup()
-
-        _global_mcp_manager = None
-        _mcp_initialized = False
-        logger.debug("Global MCP manager reset")
+    await MCPRegistry.reset()
+    logger.debug("Global MCP manager reset via registry")

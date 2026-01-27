@@ -16,18 +16,16 @@ logger = logging.getLogger(__name__)
 class SummarizationConfig:
     """Configuration for summarization behavior."""
 
-    # Trigger thresholds (ANY condition triggers summarization)
-    trigger_tokens: int = 20000  # Trigger when estimated tokens exceed this
-    trigger_messages: int = 50  # OR when message count exceeds this
-    trigger_fraction: float = 0.8  # OR when context usage exceeds this fraction
+    trigger_tokens: int = 20000
+    trigger_messages: int = 50
+    trigger_fraction: float = 0.8
 
-    # What to keep after summarization
     keep_messages: int = 20  # Keep the last N messages (most recent context)
 
     # Model context window size (for fraction calculation)
-    model_context_size: int = 1000000  # Gemini 3 has 1M context
+    model_context_size: int = 1000000
 
-    # Summarization model (use cheaper/faster model)
+    # Summarization model
     model: str = "gemini-3-flash-preview"
     temperature: float = 1.0
 
@@ -102,24 +100,15 @@ def should_summarize(
     # Check token threshold
     estimated_tokens = _estimate_tokens(non_system_messages)
     if estimated_tokens >= config.trigger_tokens:
-        logger.debug(
-            f"Summarization triggered: {estimated_tokens} tokens >= {config.trigger_tokens}"
-        )
         return True
 
     # Check message count threshold
     if len(non_system_messages) >= config.trigger_messages:
-        logger.debug(
-            f"Summarization triggered: {len(non_system_messages)} messages >= {config.trigger_messages}"
-        )
         return True
 
     # Check fraction threshold
     fraction_threshold = int(config.model_context_size * config.trigger_fraction)
     if estimated_tokens >= fraction_threshold:
-        logger.debug(
-            f"Summarization triggered: {estimated_tokens} tokens >= {config.trigger_fraction * 100}% of context"
-        )
         return True
 
     return False

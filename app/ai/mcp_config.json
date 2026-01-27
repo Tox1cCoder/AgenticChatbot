@@ -28,7 +28,7 @@
       "description": "Current time lookup utility with timezone support"
     },
     "form_filler": {
-      "enabled": true,
+      "enabled": false,
       "transport": "stdio",
       "command": "python",
       "args": [
@@ -73,7 +73,7 @@
       "env": {
         "NODE_OPTIONS": "--no-warnings"
       },
-      "enabled": true
+      "enabled": false
     },
     "postgres": {
       "transport": "stdio",

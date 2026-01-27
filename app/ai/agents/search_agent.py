@@ -130,7 +130,6 @@ class SearchAgent(BaseAgent):
                     if not chunk:
                         continue
 
-                    # Use content_blocks for better content handling
                     if hasattr(chunk, "content_blocks") and chunk.content_blocks:
                         for block in chunk.content_blocks:
                             block_type = block.get("type")

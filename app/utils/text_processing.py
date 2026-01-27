@@ -170,13 +170,10 @@ def fix_markdown_code_blocks(text: str) -> str:
     """
     Fix markdown code blocks that are missing newlines before opening fences.
 
-    Ensures proper rendering by adding newline before ``` if preceded by non-whitespace.
     """
     if not text:
         return text
 
-    # Pattern: non-whitespace character followed by ``` (code fence)
-    # Replace with: the character, newline, then the code fence
     fixed = re.sub(r"([^\n\s])(```)", r"\1\n\2", text)
 
     return fixed

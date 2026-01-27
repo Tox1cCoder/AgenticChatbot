@@ -31,6 +31,7 @@ from app.services.model_config_service import ModelConfigService
 
 from app.ai.checkpoint import CheckpointManager
 from app.ai.mcp_integration import MCPManager
+from app.ai.mcp_registry import MCPRegistry
 from app.ai.agents.planning_agent import PlanningAgent
 from app.repositories.document_image import DocumentImageRepository
 
@@ -112,9 +113,10 @@ class Container(containers.DeclarativeContainer):
         settings=providers.Object(settings),
     )
 
-    # MCP Manager
+    # MCP Manager - uses MCPRegistry to share instance with agents
+    # This returns the sync accessor; async initialization happens via get_manager_async()
     mcp_manager = providers.Singleton(
-        MCPManager,
+        lambda: MCPRegistry.get_manager_sync() or MCPManager(),
     )
 
     # Repositories - use session factory from database
