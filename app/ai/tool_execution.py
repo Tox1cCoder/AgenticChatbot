@@ -65,7 +65,25 @@ def build_tool_artifact(
     return artifact
 
 
-async def ensure_agent_tool_map(agent: Any) -> Dict[str, Any]:
+async def ensure_agent_tool_map(
+    agent: Any,
+    conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build a tool map for executing tool calls.
+
+    When deferred tool loading is enabled, this includes:
+    - All tools from agent.tools (MCP tools)
+    - The tool_search tool
+    - Any deferred tools loaded for the conversation
+
+    Args:
+        agent: The agent instance
+        conversation_id: Optional conversation ID for deferred tool lookup
+
+    Returns:
+        Dict mapping tool names to tool objects
+    """
     if not agent:
         return {}
 
@@ -77,7 +95,54 @@ async def ensure_agent_tool_map(agent: Any) -> Dict[str, Any]:
             await agent._init_tools()
         tools = getattr(agent, "tools", None) or []
 
-    return {t.name: t for t in tools if getattr(t, "name", None)}
+    tool_map = {t.name: t for t in tools if getattr(t, "name", None)}
+
+    # If deferred loading is enabled, add tool_search to the map
+    # This ensures tool_search can execute even though it's not in agent.tools
+    from ..core.config import settings
+
+    if settings.mcp_tool_search_enabled:
+        from .tool_search_tool import create_tool_search_tool
+
+        # Get agent's allowlist if available
+        agent_key = getattr(agent, "agent_config_key", None)
+        allowlist = None
+        if agent_key:
+            allowlist_key = f"{agent_key}_agent_allowed_tools"
+            allowlist = getattr(settings, allowlist_key, None) or []
+
+        # Create tool_search with the agent's allowlist
+        tool_search = create_tool_search_tool(allowlist=allowlist)
+        if tool_search.name not in tool_map:
+            tool_map[tool_search.name] = tool_search
+
+    return tool_map
+
+
+def _mark_tool_used_if_deferred(tool_name: str) -> None:
+    """
+    Mark a tool as used in the deferred tool state if applicable.
+
+    This updates the LRU timestamp so frequently-used tools are less
+    likely to be evicted.
+
+    Args:
+        tool_name: The name of the tool that was executed
+    """
+    from ..core.config import settings
+
+    if not settings.mcp_tool_search_enabled:
+        return
+
+    from .tool_context import get_tool_context
+    from .deferred_tool_state import get_deferred_tool_state
+
+    ctx = get_tool_context()
+    if not ctx.conversation_id:
+        return
+
+    state = get_deferred_tool_state()
+    state.mark_tool_used(ctx.conversation_id, ctx.agent_key, tool_name)
 
 
 async def invoke_tool(tool: Any, tool_args: Any) -> Any:
@@ -174,6 +239,9 @@ async def execute_tool_calls(
             )
             if capture_images:
                 images.extend(extract_images_from_tool_result(result_text))
+
+            # Update LRU timestamp for deferred tools on successful execution
+            _mark_tool_used_if_deferred(tool_name)
         except Exception as exc:
             error_msg = f"Error: {exc}"
             outputs.append(
@@ -191,4 +259,3 @@ async def execute_tool_calls(
             )
 
     return outputs, artifacts, images
-

@@ -4,36 +4,28 @@
       "enabled": true,
       "transport": "stdio",
       "command": "python",
-      "args": [
-        "app/ai/mcp_servers/calculator_server.py"
-      ],
+      "args": ["app/ai/mcp_servers/calculator_server.py"],
       "description": "Basic calculator operations (add, subtract, multiply, divide, power)"
     },
     "tavily": {
       "enabled": true,
       "transport": "stdio",
       "command": "python",
-      "args": [
-        "app/ai/mcp_servers/tavily_server.py"
-      ],
+      "args": ["app/ai/mcp_servers/tavily_server.py"],
       "description": "Web search using Tavily API for real-time information retrieval"
     },
     "time": {
       "enabled": true,
       "transport": "stdio",
       "command": "python",
-      "args": [
-        "app/ai/mcp_servers/time_server.py"
-      ],
+      "args": ["app/ai/mcp_servers/time_server.py"],
       "description": "Current time lookup utility with timezone support"
     },
     "form_filler": {
       "enabled": false,
       "transport": "stdio",
       "command": "python",
-      "args": [
-        "app/ai/mcp_servers/form_filler_server.py"
-      ],
+      "args": ["app/ai/mcp_servers/form_filler_server.py"],
       "description": "Natural language incident report form filler - extracts structured data from Vietnamese/English descriptions"
     },
     "boring": {
@@ -55,12 +47,9 @@
     "weather": {
       "transport": "stdio",
       "command": "npx",
-      "args": [
-        "-y",
-        "@timlukahorstmann/mcp-weather"
-      ],
+      "args": ["-y", "@timlukahorstmann/mcp-weather"],
       "env": {
-        "ACCUWEATHER_API_KEY": "zpka_b368669f60f74d56a0b9c9b3ef5941b7_3e4cf19e"
+        "ACCUWEATHER_API_KEY": "${ACCUWEATHER_API_KEY}"
       },
       "enabled": true
     },
@@ -81,7 +70,7 @@
       "args": [
         "-y",
         "@modelcontextprotocol/server-postgres",
-        "postgresql://postgres:123123123@localhost:5432/chatbot"
+        "${DATABASE_URL}"
       ],
       "enabled": true
     }

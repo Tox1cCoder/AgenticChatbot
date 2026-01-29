@@ -216,6 +216,69 @@ class RAGAgent:
             unique_tools.setdefault(tool.name, tool)
         return list(unique_tools.values())
 
+    @property
+    def agent_config_key(self) -> str:
+        """Return the agent config key for consistency with BaseAgent."""
+        return "rag"
+
+    def _get_allowlist(self) -> Optional[List[str]]:
+        """Get the per-agent tool allowlist from settings."""
+        allowlist_key = f"{self.agent_config_key}_agent_allowed_tools"
+        return getattr(settings, allowlist_key, []) or []
+
+    def _get_tools_for_binding(
+        self,
+        conversation_id: Optional[str] = None,
+        internal_tools: Optional[List[BaseTool]] = None,
+    ) -> List[BaseTool]:
+        """
+        Get the tools to bind to the model for this invocation.
+
+        When mcp_tool_search_enabled is True, returns a reduced set:
+        - Internal tools (if provided)
+        - tool_search tool
+        - Pinned MCP tools
+        - Loaded deferred tools for this conversation
+
+        When mcp_tool_search_enabled is False, returns all tools (current behavior).
+
+        Args:
+            conversation_id: Current conversation ID for deferred tool lookup
+            internal_tools: Non-MCP internal tools to always include
+
+        Returns:
+            List of tools to bind to the model
+        """
+        from ..deferred_tool_binding import (
+            should_use_deferred_loading,
+            build_deferred_tool_list,
+        )
+
+        use_deferred = should_use_deferred_loading(self.agent_config_key)
+
+        if use_deferred:
+            # Build deferred tool list
+            return build_deferred_tool_list(
+                conversation_id=conversation_id,
+                agent_key=self.agent_config_key,
+                mcp_manager=self.mcp_manager,
+                all_mcp_tools=self.tools,
+                internal_tools=internal_tools,
+                allowlist=self._get_allowlist(),
+            )
+        else:
+            # Traditional mode: return all tools (with internal tools prepended)
+            if internal_tools:
+                # Combine internal tools with MCP tools, avoiding duplicates
+                seen = {t.name for t in internal_tools}
+                combined = list(internal_tools)
+                for tool in self.tools:
+                    if tool.name not in seen:
+                        combined.append(tool)
+                        seen.add(tool.name)
+                return combined
+            return self.tools
+
     def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
 
         tool_choice = (
@@ -1758,10 +1821,17 @@ class RAGAgent:
             )
 
         from ..model_factory import ModelFactory
+        from ..deferred_tool_binding import should_use_deferred_loading
+
+        # Get tools for binding - supports deferred loading when enabled
+        tools_to_bind = self._get_tools_for_binding(
+            conversation_id=conversation_id,
+            internal_tools=[create_search_documents_tool()],
+        )
 
         llm_with_tools = ModelFactory.bind_tools_to_model(
             llm,
-            self.tools,
+            tools_to_bind,
             tool_choice=getattr(settings, "tool_choice_mode", "auto"),
         )
 
@@ -1835,9 +1905,14 @@ class RAGAgent:
                     provider = "gemini"
                     effective_model_name = self.model_name
                     llm = create_langchain_model(agent_type="rag")
+                    # Use deferred tool binding on fallback too
+                    tools_to_bind = self._get_tools_for_binding(
+                        conversation_id=conversation_id,
+                        internal_tools=[create_search_documents_tool()],
+                    )
                     llm_with_tools = ModelFactory.bind_tools_to_model(
                         llm,
-                        self.tools,
+                        tools_to_bind,
                         tool_choice=getattr(settings, "tool_choice_mode", "auto"),
                     )
                     response = await llm_with_tools.ainvoke(messages)

@@ -527,6 +527,44 @@ class Settings(BaseSettings):
         description="Characters to include in document preview during scan phase (~1 page)",
     )
 
+    # MCP Tool Search Configuration (Deferred Loading)
+    mcp_tool_search_enabled: bool = Field(
+        default=False,
+        description="Enable deferred MCP tool loading via tool_search. When enabled, only tool_search + pinned tools are bound by default.",
+    )
+    mcp_tool_search_default_top_k: int = Field(
+        default=5,
+        description="Default number of tools to return from tool_search queries.",
+    )
+    mcp_tool_search_max_top_k: int = Field(
+        default=100,
+        description="Maximum allowed top_k value for tool_search (clamped to this).",
+    )
+    mcp_tool_search_autoload_top_k: int = Field(
+        default=5,
+        description="Number of top-ranked tools to automatically load/bind after tool_search (hard cap per Anthropic guidance).",
+    )
+    mcp_tool_search_pinned_tools: List[str] = Field(
+        default=[],
+        description="Tool names (or server::tool_name) that are always bound, not deferred. Recommended 3-5 high-frequency tools.",
+    )
+    mcp_tool_search_max_pinned_tools: int = Field(
+        default=5,
+        description="Safety cap on pinned tools to prevent schema bloat.",
+    )
+    mcp_tool_search_max_loaded_tools_per_conversation: int = Field(
+        default=8,
+        description="Maximum deferred tools that can be loaded per conversation.",
+    )
+    mcp_tool_search_loaded_tools_ttl_minutes: int = Field(
+        default=30,
+        description="TTL in minutes for loaded deferred tools (evicted after expiry).",
+    )
+    mcp_tool_search_log_queries: bool = Field(
+        default=False,
+        description="Log tool_search queries (disable in production to avoid logging sensitive queries).",
+    )
+
 
 @lru_cache()
 def get_settings() -> Settings:

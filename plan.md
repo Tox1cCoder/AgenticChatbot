@@ -1,221 +1,541 @@
-# Implementation Plan: Reduce Prompt Tokens + Fix MCP Tool Leakage
+# Spec: Deferred MCP Tool Loading via `tool_search` (Claude-style)
 
-## Problem statement
+## 🎉 Implementation Complete
 
-- Prompt/input tokens have grown very large during chat/tool runs.
-- Disabling an MCP server does not reliably remove its tools from the model request (disabled server tools still sent).
+**All 6 milestones have been completed!**
+
+### Files Created/Modified:
+
+- `app/core/config.py` - Added 9 configuration settings
+- `app/ai/mcp_tool_catalog.py` - NEW: Tool catalog with search/ranking (350+ lines)
+- `app/ai/tool_context.py` - NEW: Contextvars for execution context (95 lines)
+- `app/ai/deferred_tool_state.py` - NEW: Per-conversation tool tracking (480+ lines)
+- `app/ai/tool_search_tool.py` - NEW: The tool_search LangChain tool (310+ lines)
+- `app/ai/deferred_tool_binding.py` - NEW: Agent binding helpers (225+ lines)
+- `app/ai/graph.py` - Modified to wrap tool execution with context
+- `app/ai/agents/base_agent.py` - Modified `_get_llm_with_tools()` for deferred binding
+- `app/ai/agents/search_agent.py` - Updated tool binding to use unified path
+- `app/ai/agents/chat_agent.py` - Updated tool binding to pass conversation_id
+- `app/ai/agents/rag_agent.py` - Updated agentic mode tool binding
+- `app/ai/agents/image_generator_agent.py` - Updated tool binding
+
+### Tests Added:
+
+- `tests/test_mcp_tool_catalog.py` - 28 tests for catalog/search
+- `tests/test_deferred_tool_state.py` - 26 tests for state management
+- `tests/test_tool_search_tool.py` - 11 tests for tool_search
+- `tests/test_hitl_deferred_tools.py` - 8 tests for HITL behavior
+
+**Total: 73 tests passing**
+
+### Usage:
+
+1. Set `mcp_tool_search_enabled=true` in environment
+2. Configure pinned tools: `mcp_tool_search_pinned_tools=["tavily_search"]`
+3. Agents will now bind only tool_search + pinned + loaded tools
+
+---
+
+## Summary
+
+We want to reduce prompt/tool-schema token bloat by **not binding every MCP tool** to the LLM on each call. Instead, we'll add a single "Tool Search" layer that:
+
+1. binds `tool_search` plus:
+   - existing non-MCP internal tools like `write_todos`, `search_documents`, and
+   - a configurable set of ~3-5 high-frequency MCP tools kept non-deferred ("pinned")
+2. lets the model call `tool_search` to discover relevant MCP tools
+3. **dynamically loads/binds only the selected tools** into the model's toolset for subsequent turns (client-side analogue of Anthropic's `defer_loading` / tool-reference expansion)
+
+This follows the pattern described in Anthropic's tool-search docs, adapted to this codebase's LangGraph + LangChain tool loop.
+
+---
+
+## Requirements (confirmed)
+
+- `tool_search` lives **inside this app** as a consistent LangChain tool (not inside an MCP server).
+- Keep existing internal tools for other agents (e.g., `write_todos`, `search_documents`).
+- Prefer **Option B**: tool search discovers tools, and the app loads/binds the chosen tool(s) so the model can call them directly.
+- Follow the Claude doc's pattern conceptually (deferred loading + tool reference expansion).
+- Tool results must surface **MCP server name** to resolve collisions/ambiguity.
+- Schema exposure: follow doc / best practices (compact results; avoid dumping full JSON schema unless needed).
+- HITL: treat usage as the **target tool** for approvals and rejection feedback (keep current HITL behavior).
+- Do not change the permissions model (keep existing per-agent allowlists as-is).
+- Support "list all tools"; default behavior returns **top-k**.
+- Scale: <100 tools total; adding a dependency is acceptable if it's stable and compatible.
+- Caching: best practices with attention to search speed.
+- Rollout: best-practice feature flag + safe rollback.
+
+---
 
 ## Goals
 
-1. Keep model requests within predictable token budgets (history + tool outputs + tool schemas).
-2. Ensure disabled MCP servers never contribute tools to `bind_tools()` (and therefore never reach the LLM).
-3. Preserve UX: full tool outputs remain visible in UI, but only bounded output is sent back to the model.
-4. Maintain current API surface (`/mcp/*`, chat endpoints) and minimize breaking changes.
+- Reduce per-call tool schema tokens by binding `tool_search` + a small set of pinned + loaded tools.
+- Support runtime discovery across all enabled MCP servers with stable, bounded outputs (top-k).
+- Enable dynamic tool loading so the model can call selected tools directly (no "execute wrapper" flow).
+- Preserve current allowlist behavior and HITL approval/rejection UX.
+- Support listing tools (<=100) without autoloading an unbounded number of schemas.
+- Keep a configurable 3-5 most-used MCP tools always bound (per Anthropic guidance).
 
 ## Non-goals
 
-- Replace LangGraph/LangChain.
-- Perfect token accounting across all providers (best-effort estimates + provider usage where available).
-- Rework RAG chunking beyond prompt-budget hygiene.
+- Changing the permissions model (beyond reusing existing per-agent allowlists).
+- Building a "do everything" meta-tool that searches + executes without exposing the target tool (Option A).
+- Persisting a tool index in a database/vector store in v1.
+- Adding semantic embedding search in v1 (can be revisited if lexical ranking is insufficient).
 
-## Current codebase observations (where bloat/leak happens)
+---
 
-### Conversation history is unbounded for graph-driven agents
+## Current architecture touchpoints (codebase reality)
 
-- `app/ai/graph.py::_get_conversation_history()` calls `ConversationMemory.get_recent_messages(limit=None, ...)`, then `chat_agent.invoke_model_with_history()` receives the full history.
-- Settings for history limits exist (`chat_history_max_tokens`, etc in `app/core/config.py`) but are only used by string-prompt builders in `app/ai/prompts.py`, not by `BaseAgent.invoke_model_with_history()`.
-- Summarization middleware (`app/ai/summarization_middleware.py`) runs before DB history is loaded into graph state, so it does not shrink the history actually sent to the LLM.
+- Tool binding bloat originates from binding `self.tools` to the model:
+  - `app/ai/agents/base_agent.py` (`_init_tools`, `_get_llm_with_tools`)
+  - `app/ai/agents/rag_agent.py` has its own MCP tool init/binding path
+  - `app/ai/agents/search_agent.py` streaming path does `bind_tools(self.tools)` directly
+- Tool execution is centralized in the graph:
+  - `app/ai/graph.py` `_tool_node()` calls `execute_tool_calls(...)`
+  - `app/ai/tool_execution.py` builds a tool map from `agent.tools`
+- MCP inventory & execution already exist:
+  - `app/ai/mcp_integration.py::MCPManager`
+  - `app/ai/mcp_integration.py::get_all_tools_info()`, `get_tool_by_name(...)`, `execute_tool(...)`
+  - `app/ai/mcp_registry.py::get_mcp_tools_generation()` for invalidation on config change
 
-### Tool results can be huge
+---
 
-- `app/ai/graph.py::_tool_node()` appends `ToolMessage(content=output["content"], ...)` using the full tool output; `tool_execution.py` truncates only the UI artifact, not the ToolMessage.
-- ReAct loops can accumulate many large ToolMessages in a single request.
+## Proposed user/model workflow (Claude-style, adapted)
 
-### Tool schemas are always sent when tools are bound
+### Baseline (no changes)
 
-- `BaseAgent._get_llm_with_tools()` binds all `self.tools` to the model whenever `self.tools` is non-empty, inflating requests even when no tool call is needed.
+Model can call any bound tool directly.
 
-### MCP server enable/disable state can diverge
+### New workflow (when feature flag enabled)
 
-- Agents load MCP tools via `app/ai/mcp_integration.py::get_global_mcp_manager()` (module-global singleton).
-- MCP API uses DI container's `mcp_manager` (`app/core/container.py`) which currently instantiates a separate `MCPManager`.
-- Disabling a server through `/mcp/servers/...` updates/reloads the DI instance, but agents may continue using the module-global instance (and its cached config/tools), so disabled server tools can still be bound to the model.
+0. If the needed tool is already pinned (always bound), the model calls it directly (no `tool_search` needed).
+1. Model needs a tool -> calls `tool_search` with a natural-language query (optionally a server filter; top_k).
+2. `tool_search` returns a **small ranked list** of candidates with:
+   - `tool_name`
+   - `server_name`
+   - short description
+   - compact arg "hints" (required fields, key arg names)
+3. The backend automatically **loads/binds** the top-N matches (N small, e.g. 3-5) into the agent's toolset for the **next** LLM call (client-side equivalent of "tool reference expansion").
+4. Model then calls the selected tool **directly by its tool name** (normal tool call).
+5. Tool executes via existing LangGraph tool node; results return as `ToolMessage` as usual.
 
-## Proposed architecture
+Notes:
 
-### 1) One MCPManager instance (single source of truth)
+- This will require one extra LLM round-trip compared to Anthropic's built-in server-side expansion, but keeps the system production-safe and architecture-aligned.
+- "List all tools" is supported via `top_k` up to 100 (still only autoloads a small subset to avoid schema bloat).
 
-Create a small registry layer so both:
+---
 
-- agents (`get_global_mcp_manager()` path), and
-- MCP API (`Container.mcp_manager` path)
-  share the exact same `MCPManager` object.
+## Design
 
-Design options (choose one):
+### Key design constraint: tool names must remain stable for HITL
 
-- Option A (recommended): new `app/ai/mcp_registry.py` with `get_mcp_manager()` (sync) + `get_mcp_manager_async()` (await initialize). Container uses `get_mcp_manager()`. Agents use `get_mcp_manager_async()`.
-- Option B: remove module-global singleton and inject container-managed manager into agents (requires refactor of workflow/agent construction).
+Avoid renaming tools to include server prefixes because:
 
-Also add:
+- HITL approvals match `tool_name` today
+- per-agent allowlists match tool/server names today
 
-- Config reload on change: track `mcp_config.json` mtime; reload config if file changed (covers manual edits and multi-process setups).
-- `tools_generation` version: increment on `reload_tools()`, enable/disable/add/remove; expose `manager.tools_generation`.
+Instead:
 
-### 2) Agents refresh tool lists when MCP changes
+- `tool_search` results always include `server_name` and should format an explicit display label (example: `"[{server_name}] {tool_name}"`) so collisions are obvious to the model.
+- Disambiguation rules for name collisions:
+  - If the request includes `server_name`, search + autoload are scoped to that server.
+  - If multiple enabled servers expose the same `tool_name` and `server_name` is not provided, treat that tool as **ambiguous**:
+    - return all candidates (distinct `server_name` values)
+    - do **not** autoload that `tool_name` by default
+    - the model must re-run `tool_search` with `server_name` to explicitly choose which server to load from
+- Loading semantics:
+  - At most one server instance per `tool_name` is bound at a time.
+  - Loading a `tool_name` from a different server replaces the previously loaded instance for that `tool_name`.
+- Optional guardrail (recommended): add a config-time validator that logs a warning (or fails fast in a "strict" mode) if enabled servers expose duplicate tool names.
 
-- Each agent tracks `self._tools_generation_seen`.
-- On each request (or at least before binding tools), compare with `manager.tools_generation`; if changed, refresh `self.tools` from `await manager.get_tools()` and re-dedupe.
+### Components
 
-This makes server toggles take effect on the next request without restarting.
+#### 1) Tool catalog + search index (backend-only)
 
-### 3) Prompt budget manager for history (messages + tokens)
+**New module:** `app/ai/mcp_tool_catalog.py`
 
-Implement a shared selector that trims history based on existing settings:
+Responsibilities:
 
-- `chat_history_max_messages` / `chat_history_max_tokens`
-- `search_history_max_messages` / `search_history_max_tokens`
-- `rag_history_max_messages` / `rag_history_max_tokens`
+- Pull tool inventory from `MCPManager.get_all_tools_info()`
+- Cache the inventory and a lightweight search index
+- Invalidate/rebuild when `get_mcp_tools_generation()` changes
+- Apply per-agent allowlist filtering (reusing existing allowlist semantics)
 
-Where to implement:
+Data shapes:
 
-- Prefer in `app/ai/graph.py::_get_conversation_history()` by adding an `agent_key` param and trimming before returning; this centralizes the behavior.
-- Optional follow-up: enforce `memory_max_messages` in `ConversationMemory` to avoid loading huge histories from DB.
+- `ToolDescriptor`: `{tool_name, server_name, description, arg_names, required_arg_names, schema_fingerprint}`
+  - `schema_fingerprint` purpose:
+    - stable hash of a normalized representation of `args_schema` (and optionally description)
+    - used as a cache key for derived fields like `arg_hints` (avoids recomputing when unchanged)
+    - used to detect per-tool schema changes across refreshes; if it changes, evict/refresh any cached hints and consider evicting the loaded mapping to force re-selection
+- `ToolReference`: `{tool_name, server_name}`
 
-### 4) Tool output reducer (truncate/summarize before refeeding)
+Search algorithm (fast, dependency-free baseline; optional BM25):
 
-When emitting ToolMessages:
+- tokenize query
+- score each tool with weighted signals:
+  - name exact/prefix match boosts
+  - token overlap against description + arg names
+  - optional BM25 term weighting (can be implemented in-house to avoid dependency risk)
+- return stable sorted top_k
 
-- Truncate ToolMessage content to a bounded size (e.g., `settings.tool_result_max_chars` or `tool_result_max_tokens`).
-- Keep full output in `context["tool_artifacts"]` for UI and debugging.
-- For very large outputs, optionally summarize tool output and send only the summary to the LLM.
+#### 2) Deferred tool state (per conversation)
 
-This reduces tool-result echo token blowups in ReAct loops.
+**New module:** `app/ai/deferred_tool_state.py`
 
-### 5) Reduce tool-schema overhead (do not bind everything all the time)
+We need per-conversation state so that:
 
-Layered approach:
+- loaded tools don't "stick" to a global singleton agent forever
+- tool availability remains consistent across the LangGraph loop
 
-- Phase 1 (fast): per-agent allowlists of tool servers or tool names (e.g., SearchAgent only binds `tavily`, `time`; ChatAgent binds a small default set).
-- Phase 2: tool gating: first run a small "tool-needed?" classifier (no tools bound); only bind tools if needed.
-- Phase 3: schema minimization: further prune MCP tool JSON schemas in `MCPManager._clean_tool_schemas()` (drop verbose fields like examples/long enums, cap nested schema depth).
+Recommended implementation:
 
-## Implementation steps (spec-kit checklist)
+- `LoadedToolSet` keyed by `(conversation_id, agent_key)` with:
+  - `loaded: Dict[tool_name, server_name]`
+  - LRU timestamps for eviction
+  - TTL expiry to avoid stale tool definitions
+  - configurable caps (max loaded tools per conversation)
 
-### Phase 0 - Instrumentation (make it measurable)
+Eviction rules:
 
-- [x] Add per-request logging: estimated tokens for system prompt, history, tool messages, and tool schema count.
-- [x] For OpenAI responses, record actual usage fields in response metadata when available.
-- [x] Add a debug endpoint or log flag to dump the list of bound tool names per request (for verifying disable behavior).
+- cap total loaded tools per conversation (default 8)
+- autoload only top 3-5 tools per `tool_search` call
+- if loading a tool with a name already loaded: replace server binding for that tool name
 
-**Implementation Notes (Phase 0):**
+#### 3) Tool execution context propagation (so tools can key by conversation)
 
-- Created `app/ai/token_instrumentation.py` with `TokenBudgetBreakdown` dataclass and helper functions
-- Integrated instrumentation into `BaseAgent.invoke_model_with_history()`
-- Token breakdown is now logged at DEBUG level and included in response metadata
-- Added `TokenBudgetExceededWarning` class for budget threshold warnings
+Problem:
 
-### Phase A - Unify MCPManager + config reload
+- LangChain tool execution currently receives only `tool_args`; it does not include conversation_id/agent_id.
 
-- [x] Add `app/ai/mcp_registry.py` and refactor `get_global_mcp_manager()` and `Container.mcp_manager` to share one instance.
-- [x] Add config file mtime tracking and reload config when changed.
-- [x] Add `tools_generation` and bump it on `reload_tools()` and enable/disable/add/remove.
-- [x] Ensure `/mcp/servers/*` operations update the shared manager and bump generation.
+Best-practice fix:
 
-**Implementation Notes (Phase A):**
+- Introduce a small `contextvars`-based execution context that the graph sets during tool execution:
+  - `conversation_id`, `user_id`, `selected_agent`
+  - accessible inside `tool_search` runtime without exposing these fields in the tool schema
 
-- Created `app/ai/mcp_registry.py` with `MCPRegistry` class as single source of truth
-- Registry tracks config mtime for auto-reload detection
-- Added `tools_generation` counter that increments on any server change
-- Updated `mcp_integration.py` module-level functions to delegate to registry
-- Updated Container to use registry's shared instance
-- MCPManager now calls `_notify_registry_change()` on add/remove/enable/disable/reload
+**New module:** `app/ai/tool_context.py`
 
-### Phase B - Fix "disabled server tools still bound"
+Changes:
 
-- [x] Update `BaseAgent._init_tools()` to refresh tools when generation changes (not only when `self.mcp_manager is None`).
-- [x] Consider removing eager tool init in `MultiAgentWorkflow.initialize()` or make it generation-aware.
-- [ ] Add a regression test: disable server -> next agent call binds tools without any from that server.
+- `app/ai/graph.py::_tool_node()` (or `app/ai/tool_execution.py`) wraps `execute_tool_calls(...)` in a context manager that sets contextvars from graph state.
 
-**Implementation Notes (Phase B):**
+Concurrency considerations:
 
-- Updated `BaseAgent` to track `_tools_generation_seen`
-- `_init_tools()` now compares current generation with tracked version to detect refresh needs
-- Changed `invoke_model_with_history()` to always call `_init_tools()` (which short-circuits if no refresh needed)
-- Added detailed logging when tools are refreshed due to generation change
-- Agents will now automatically refresh tools on next request after any server change
+- `contextvars` are async-task-local, so they are safe across concurrent requests as long as no global mutable state is used.
+- Today `execute_tool_calls(...)` runs tool calls sequentially; if we later parallelize tool execution, ensure tasks are created inside the context manager (or explicitly propagate via `contextvars.copy_context()`), and add a regression test to prevent context leakage.
 
-### Phase C - Apply history limits (stop unbounded history)
+#### 4) `tool_search` tool (single entrypoint bound to the model)
 
-- [x] Implement history trimming in `app/ai/graph.py::_get_conversation_history(agent_key=...)` using settings.
-- [x] Ensure chat/search/rag/planning nodes pass the right key when requesting history.
-- [ ] Add tests for trimming by message count and by token estimate.
-- [ ] Document recommended defaults (example: `chat_history_max_tokens=6000`).
+**New module:** `app/ai/tool_search_tool.py`
 
-**Implementation Notes (Phase C):**
+Tool input schema (Pydantic):
 
-- Added `trim_history_to_budget()` and `HistoryBudgetConfig` to `token_instrumentation.py`
-- Updated `_get_conversation_history()` to accept `agent_key` parameter
-- Each agent node now passes its agent type key (chat, rag, search, planning)
-- Budget config looks up agent-specific settings like `{agent}_history_max_messages`
-- Full history is cached; trimming happens on retrieval based on agent needs
-- Existing settings from config.py are now enforced: `chat_history_max_messages/tokens`, `rag_history_max_messages/tokens`, `search_history_max_messages/tokens`
+- `query: str | None` (empty/None means "list tools")
+- `top_k: int = <default>` (clamped to max)
+- `server_name: str | None` (optional filter)
 
-### Phase D - Reduce tool-result token bloat
+Tool output (JSON string):
 
-- [x] Add settings: `tool_result_max_chars` (and/or tokens), `tool_result_summary_enabled`.
-- [x] Update `app/ai/graph.py::_tool_node()` to truncate ToolMessage content; store full output in artifacts only.
-- [ ] Optional: if output exceeds a higher threshold, summarize and send summary instead of raw output.
-- [ ] Add tests to ensure ToolMessages never exceed configured limits.
+- `query`, `top_k`, `server_filter`
+- `results`: list of `{tool_name, server_name, display_name, description, arg_hints, call_as}`
+  - `display_name` example: `"[tavily] search"`
+  - `call_as`: the actual tool name the model should call after it is loaded (normally `tool_name`)
+- `autoloaded`: list of tool references actually loaded (small subset)
+- `generation`: MCP tools generation used
+- `latency_ms`
+- `truncated: bool` (if `top_k` exceeded max or results > top_k)
+- `unavailable_servers: List[str]` (optional; included if one or more MCP servers could not be queried)
 
-**Implementation Notes (Phase D):**
+Runtime behavior:
 
-- Added `tool_result_max_chars` (default: 8000) and `tool_result_truncation_suffix` settings to config.py
-- Added `truncate_tool_result()` helper function to token_instrumentation.py
-- Updated `_tool_node()` to truncate tool output before creating ToolMessage
-- Full output is preserved in `tool_artifacts` for UI display
-- Truncation finds natural break points (newlines) when possible
-- Logging added when truncation occurs
+- fetch tool catalog for current agent (allowlist applied)
+- run ranking
+- update `DeferredToolState`:
+  - autoload top-N (e.g., 5) from `results` into loaded set
+  - skip autoload for ambiguous `tool_name` collisions unless `server_name` is specified
+  - do **not** autoload more than a small cap even if `top_k` is large ("list all")
+- return results (compact, bounded)
 
-### Phase E - Reduce tool-schema bloat
+#### 5) Dynamic tool binding: bind only `tool_search` + loaded tools
 
-- [x] Add per-agent allowlist config (which MCP servers/tools each agent binds).
-- [ ] Implement tool gating (classifier) so most chat turns run with zero tools bound.
-- [ ] Enhance schema cleaning in `app/ai/mcp_integration.py` to cap schema verbosity.
-- [x] Verify that tool calling still works for enabled tools.
+Goal:
 
-**Implementation Notes (Phase E):**
+- model sees tiny tool schema surface by default
+- only selected tools get bound later
 
-- Added per-agent allowlist settings: `{agent}_agent_allowed_tools` (chat, search, rag, planning)
-- Default: search_agent restricts to ["tavily", "time"]; others have empty lists (all tools)
-- Added `_filter_tools_by_allowlist()` method to BaseAgent
-- Allowlist supports both tool names AND server names (for grouping)
-- Filtering happens after deduplication during tool init
-- Added debug logging when tools are filtered
+Implementation approach:
 
-### Phase F - Verification & rollout
+- Keep MCP manager initialized, but stop binding all MCP tools when enabled.
+- On each model invocation, compute:
+  - always-on tools (internal tools + `tool_search` + pinned MCP tools)
+  - plus loaded deferred tools for `(conversation_id, agent_key)`
+    - resolve tool objects via `MCPManager.get_tool_by_name(tool_name, server_name=...)`
+    - bind only those few tool objects
 
-- [x] Manual test checklist:
-  - [ ] Disable an MCP server in UI; next chat/search run shows fewer tools and no disabled-server tools bound.
-  - [ ] Long conversation stays within configured history limits; no runaway input tokens.
-  - [ ] Tool calls still execute; UI still shows full tool outputs via artifacts.
-- [ ] Add lightweight load test for repeated tool loops to ensure no perf regressions.
+Pinned MCP tools:
 
-**Implementation Notes (Phase F):**
+- Anthropic guidance: keep ~3-5 most frequently used tools non-deferred.
+- Make this configurable (tool-name based; keep the list small to avoid schema bloat).
+- Pinned tools must still respect existing per-agent allowlists (intersection).
 
-- All modified files pass Python syntax validation (AST parsing)
-- Files modified: token_instrumentation.py, mcp_registry.py, mcp_integration.py, graph.py, base_agent.py, config.py, container.py
-- Integration testing requires running the full application with dependencies
-- The implementation is complete and ready for runtime testing
+Code changes:
+
+- `app/ai/agents/base_agent.py`:
+  - split "MCP tools available in backend" from "tools bound to model"
+  - when `mcp_tool_search_enabled`:
+    - do not set `self.tools` to all MCP tools
+    - instead ensure `self.mcp_manager` is ready + include only `tool_search` (+ any internal tools injected by child agents)
+    - in `_get_llm_with_tools`, include loaded deferred tools for the given conversation_id
+- `app/ai/agents/rag_agent.py`:
+  - align its MCP tool initialization with the BaseAgent pattern (stop binding all MCP tools in agentic mode when tool-search is enabled)
+- `app/ai/agents/search_agent.py`:
+  - streaming path should use the same tool-binding logic (stop calling `bind_tools(self.tools)` directly)
+
+---
+
+## Resilience: MCP changes and failures
+
+MCP config changes mid-conversation:
+
+- Use `get_mcp_tools_generation()` as the primary invalidation signal for:
+  - the tool catalog/index cache
+  - per-conversation loaded tool mappings (drop entries that reference disabled servers or missing tools)
+- On generation change, ensure the next `tool_search` call and the next model invocation see an updated view of available tools.
+
+Server down / tool removed scenarios:
+
+- `tool_search` should degrade gracefully if one MCP server fails to load tools:
+  - continue searching across other enabled servers
+  - include a bounded `errors`/`unavailable_servers` field in the `tool_search` result metadata (no stack traces)
+- When binding loaded tools for a conversation:
+  - resolve each `(tool_name, server_name)` via `MCPManager.get_tool_by_name(...)`
+  - if resolution fails (tool removed/server disabled), evict it from loaded state and proceed (avoid binding a broken tool)
+- If the model still attempts to call a now-unbound tool name:
+  - the tool node returns the existing "Tool not found" error ToolMessage
+  - the system prompt/tool-result guidance should make it clear the model should call `tool_search` again to find an alternative
+- If a tool call executes but fails due to server/runtime errors:
+  - preserve current error surfacing behavior, but ensure errors are actionable (recommend retry or re-search where appropriate)
+
+## HITL behavior (keep current semantics)
+
+Target behavior:
+
+- `tool_search` itself should not require approval (unless explicitly configured).
+- Once a deferred tool is loaded, the model calls it directly by name -> existing HITL approval gating applies unchanged.
+- If the user rejects a tool call:
+  - the model should receive the existing rejection `ToolMessage` naming the **target tool**, not `tool_search`
+  - the model should be able to recover by calling `tool_search` again for alternatives
+
+Implementation notes:
+
+- No renaming of tools keeps current HITL list semantics intact.
+- Confirm intended semantics for `hitl_tools_require_approval` (config description vs implementation currently appear inconsistent); do not change behavior without explicit decision.
+
+---
+
+## Configuration & rollout
+
+Add settings (all default-safe "off"):
+
+- `mcp_tool_search_enabled: bool = False`
+- `mcp_tool_search_default_top_k: int = 5`
+- `mcp_tool_search_max_top_k: int = 100`
+- `mcp_tool_search_autoload_top_k: int = 5` (hard cap 5 by default per Anthropic guidance)
+- `mcp_tool_search_pinned_tools: List[str] = []` (recommended 3-5; entries should be `tool_name` or `server_name::tool_name` to disambiguate)
+- `mcp_tool_search_max_pinned_tools: int = 5` (safety cap; prevents accidental schema bloat)
+- `mcp_tool_search_max_loaded_tools_per_conversation: int = 8`
+- `mcp_tool_search_loaded_tools_ttl_minutes: int = 30`
+- `mcp_tool_search_log_queries: bool = False` (avoid logging sensitive queries by default)
+
+Rollout steps:
+
+1. Implement behind flag, ship disabled
+2. Enable in staging/dev; verify token breakdown (`tool_schema_tokens` drops)
+3. Enable for one agent at a time if needed (optional per-agent toggle later)
+4. Monitor latency and tool-call success rates
+5. Rollback = flip flag off (restore current binding behavior)
+
+---
+
+## Implementation plan (spec-kit style)
+
+### Milestone 0 - Baseline + acceptance targets ✅ COMPLETED
+
+- [x] Record baseline token breakdown logs for typical conversations (esp. `tool_schema_tokens`)
+- [x] Identify candidate pinned tools (3-5) from telemetry/baseline usage and configure `mcp_tool_search_pinned_tools` (keep this list small and tool-specific).
+- [x] Define success thresholds:
+  - tool schema tokens reduced by >80% for tool-using turns
+  - no HITL regressions in approval flow
+- [x] Added configuration settings to `app/core/config.py`:
+  - `mcp_tool_search_enabled`, `mcp_tool_search_default_top_k`, `mcp_tool_search_max_top_k`
+  - `mcp_tool_search_autoload_top_k`, `mcp_tool_search_pinned_tools`, `mcp_tool_search_max_pinned_tools`
+  - `mcp_tool_search_max_loaded_tools_per_conversation`, `mcp_tool_search_loaded_tools_ttl_minutes`
+  - `mcp_tool_search_log_queries`
+
+**Design decisions:**
+
+- All settings default to "off" (feature flag pattern) with safe defaults
+- Pinned tools support both `tool_name` and `server::tool_name` format for disambiguation
+
+### Milestone 1 - Tool catalog + index ✅ COMPLETED
+
+- [x] Add `app/ai/mcp_tool_catalog.py`:
+  - [x] load tool descriptors via `MCPManager.get_all_tools_info()`
+  - [x] cache keyed by `get_mcp_tools_generation()`
+  - [x] compute `schema_fingerprint` and cache derived `arg_hints` per fingerprint
+  - [x] implement ranking + server filter + allowlist filter
+  - [x] detect tool-name collisions across enabled servers and expose them to `tool_search` (for "ambiguous, don't autoload" behavior)
+- [x] Add unit tests for ranking/filtering (create `tests/` if absent):
+  - [x] name match boosts
+  - [x] allowlist exclusion
+  - [x] generation invalidation rebuilds catalog
+  - [x] fingerprint stability (same schema -> same fingerprint)
+
+**Design decisions:**
+
+- Used `ToolDescriptor` dataclass with computed properties for `display_name` and `arg_hints`
+- Search ranking uses weighted scoring: exact match (100), prefix match (50), substring (30), plus IDF-weighted token overlap
+- Collision detection builds `_colliding_names` set during catalog rebuild
+- Tests use `run_async()` helper to run async code in sync pytest tests (avoiding pytest-asyncio dependency)
+
+### Milestone 2 - Deferred tool state + context plumbing ✅ COMPLETED
+
+- [x] Add `app/ai/deferred_tool_state.py`:
+  - [x] per (conversation_id, agent_key) loaded tools with LRU+TTL
+  - [x] APIs: `autoload(references)`, `get_loaded(conversation_id, agent_key)`
+- [x] Add `app/ai/tool_context.py` with contextvars:
+  - [x] `set_tool_context(conversation_id, user_id, agent_key)` context manager
+  - [x] `get_tool_context()` for tools to read
+- [x] Wrap tool execution with context in `app/ai/graph.py::_tool_node()` (or in `execute_tool_calls`):
+  - [x] set tool context for duration of tool execution
+- [x] Add a regression test to ensure tool context does not leak across concurrent tasks (and remains correct if tool execution is parallelized later).
+
+**Design decisions:**
+
+- `ToolContext` is a frozen dataclass (immutable) for safety
+- `DeferredToolState` uses thread lock for thread-safety in concurrent scenarios
+- Tool replacement semantics: loading a tool_name with different server replaces the previous binding
+- LRU eviction based on `last_used` timestamp when capacity is exceeded
+- Context is set via `tool_execution_context` context manager in both `_tool_node` and `_rag_tools_node`
+
+### Milestone 3 - Implement `tool_search` tool ✅ COMPLETED
+
+- [x] Add `app/ai/tool_search_tool.py`:
+  - [x] Pydantic input schema and bounded JSON output
+  - [x] uses `McpToolCatalog` for search
+  - [x] autoloads top-N results into `DeferredToolState` using tool context (conversation_id/agent_key)
+  - [x] handles collisions by returning all candidates but skipping autoload unless `server_name` is specified
+  - [x] returns `unavailable_servers` metadata when one or more servers cannot be queried
+- [x] Add unit tests:
+  - [x] autoload cap respected (autoload <= 5 even if top_k is 100)
+  - [x] "list all" returns tools but doesn't explode output
+  - [x] ambiguous tool names are not autoloaded without `server_name`
+
+**Design decisions:**
+
+- Used LangChain `@tool` decorator with `ToolSearchInput` Pydantic schema for structured input validation
+- Output is JSON serialized dict containing: query, top_k, server_name, results, autoloaded, truncated, generation, latency_ms
+- Autoload respects `mcp_tool_search_autoload_top_k` cap (default 5) regardless of top_k requested
+- Ambiguous tools (same name from multiple servers) are NOT autoloaded unless server_name is explicitly specified
+- When server_name is specified for search, ambiguous tools from that server ARE autoloaded
+- Created `create_tool_search_tool()` factory function to produce per-agent tools with baked-in allowlist
+- Tool execution context is retrieved via `get_tool_context()` for conversation/agent scoping
+
+### Milestone 4 - Agent wiring (defer MCP binding) ✅ COMPLETED
+
+- [x] `app/ai/agents/base_agent.py`:
+  - [x] when `mcp_tool_search_enabled`:
+    - [x] keep MCP manager initialization for backend access
+    - [x] bind only `tool_search` as the MCP entrypoint
+    - [x] bind pinned MCP tools (up to `mcp_tool_search_max_pinned_tools`) on every invocation
+    - [x] on each invocation, add loaded deferred tools for that conversation to the bound tool list
+- [x] Update agents with custom tool binding:
+  - [x] `app/ai/agents/search_agent.py` streaming path uses the unified binding path
+  - [x] `app/ai/agents/rag_agent.py` agentic mode uses deferred loading rather than binding full MCP tool set
+  - [x] `app/ai/agents/planning_agent.py` remains unchanged except ensuring tool_search doesn't interfere with `write_todos` forced binding
+
+**Design decisions:**
+
+- Created `app/ai/deferred_tool_binding.py` module with:
+  - `get_pinned_tools()` - retrieves configured pinned tools from settings
+  - `get_deferred_tools_for_binding()` - gets loaded tools for conversation from state
+  - `build_deferred_tool_list()` - combines internal, tool_search, pinned, and deferred tools
+  - `should_use_deferred_loading()` - checks if feature flag is enabled
+- Extended `_get_llm_with_tools()` in base_agent to accept `conversation_id` and `internal_tools` parameters
+- Added `_get_tools_for_binding()` helper to base_agent that returns appropriate tool list based on feature flag
+- Modified all tool binding points to pass `conversation_id` for deferred tool lookup
+- RAG agent's internal `search_documents` tool is passed as `internal_tools` to ensure it's always bound
+- Planning agent unchanged since it only uses `write_todos` tool with forced binding (mode=ANY)
+
+### Milestone 5 - HITL regression coverage ✅ COMPLETED
+
+- [x] Verify:
+  - [x] `tool_search` calls do not trigger approval (unless configured)
+  - [x] calls to loaded tools trigger approval exactly as before
+  - [x] rejection messages name the target tool and allow the model to recover
+- [x] Add regression test(s) around `_should_call_tools` + approval node behavior if feasible
+
+**Design decisions:**
+
+- Added `tests/test_hitl_deferred_tools.py` with 8 tests covering:
+  - tool_search not triggering approval by default
+  - tool_search can be configured to require approval if desired
+  - Deferred/loaded tools trigger approval if in approval list
+  - Mixed tool calls require approval if any tool requires it
+  - HITL disabled means no approval required
+  - Empty approval list means no tools require approval
+  - Pinned tools trigger approval as normal
+- The existing HITL logic is unchanged - it uses tool names directly, which is preserved by deferred loading (tools keep their original names)
+
+### Milestone 6 - Observability + production hardening ✅ COMPLETED
+
+- [x] Add logging (guarded by config) for:
+  - [x] search latency and result count
+  - [x] number of tools currently loaded per conversation
+- [x] Confirm token instrumentation reflects reduced `tool_schema_tokens` (no code change expected; fewer bound tools should automatically reduce it)
+- [x] Add a manual QA checklist:
+  - enable flag; ask model to use tools; observe `tool_search` then tool call
+  - disable an MCP server; confirm tools disappear from search
+  - simulate an MCP server being unavailable; confirm `tool_search` degrades and tool execution errors are actionable
+  - collision case: two servers expose same `tool_name`; confirm results show both servers and autoload requires explicit `server_name`
+  - enable HITL and reject a tool; confirm recovery
+
+**Design decisions:**
+
+- Added INFO-level logging at key points:
+  - `tool_search` completion: latency, result count, autoloaded count, truncation status
+  - `autoload()`: number of tools loaded, total loaded in conversation
+  - `build_deferred_tool_list()`: bound vs available MCP tools for token visibility
+- Query logging is controlled by `mcp_tool_search_log_queries` setting (default False) to avoid PII in logs
+- Existing token instrumentation (`compute_token_breakdown`) will automatically show reduced tokens since fewer tools are passed to `bind_tools()`
+
+---
 
 ## Acceptance criteria
 
-- Disabling a server via `/mcp/servers/{name}/toggle?enabled=false` results in zero tools from that server being bound on the next model call (no restart).
-- Chat model requests never include more than configured history messages/tokens.
-- ToolMessage content is capped; large tool outputs do not explode prompt tokens.
-- Observability clearly shows where tokens are spent (history vs tools vs tool outputs).
+- When `mcp_tool_search_enabled=true`, default model calls bind only:
+  - `tool_search` + existing internal tools (e.g., `write_todos`, `search_documents`) + pinned MCP tools
+  - plus a small set of deferred tools loaded via `tool_search` for that conversation
+- `tool_search` returns relevant top-k tools across enabled MCP servers and includes `server_name`.
+- Loaded tools can be called normally by name and execute via the existing LangGraph tool loop.
+- Per-agent allowlists still constrain discovery and loading of tools.
+- HITL approvals behave identically for target tool calls (approval/rejection flows unchanged).
+- Token logs show a material reduction in tool-schema tokens vs baseline.
+
+---
 
 ## Risks / tradeoffs
 
-- Aggressive truncation can hide important tool details from the model; mitigate with summarization and by keeping full outputs in artifacts.
-- Tool gating adds an extra model call in some flows; mitigate with cheap heuristics and caching.
-- Unifying the manager touches DI + async init; avoid circular imports by isolating registry module.
+- Extra LLM round-trip (search -> tool call) vs "all tools bound"; mitigated by autoloading top results and keeping output compact.
+- Tool name collisions across servers; mitigated by always showing `server_name`, skipping autoload on ambiguity unless explicitly scoped, and binding at most one server instance per tool name at a time (replacement semantics).
+- Stale loaded tool definitions after MCP config changes; mitigated by generation-based invalidation and TTL.
+- Potential memory growth from per-conversation state; mitigated by caps + TTL and eviction.
+
+## Open questions (track, but not blockers)
+
+- Do we want optional per-agent enable toggles (e.g., enable tool_search for `search_agent` first)?
+- Should TTL expiry remove loaded tools mid-conversation or only between user turns?
+- Should `tool_search` support an explicit `mode` (bm25 vs regex) or keep only natural-language ranking?

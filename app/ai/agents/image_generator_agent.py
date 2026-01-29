@@ -24,10 +24,10 @@ class ImageGeneratorAgent(BaseAgent):
     def _init_gemini(self) -> None:
         if not self.enabled:
             return
-        
+
         # Use image generator model for gemini_client (for actual image generation)
         self.gemini_client = create_gemini_client()
-        
+
         # Override LangChain model to use flash for tool calling (not image generation)
         self.langchain_model = create_langchain_model(
             agent_type="image_generator",
@@ -88,7 +88,7 @@ class ImageGeneratorAgent(BaseAgent):
             )
 
         # Configure tool calling (only if no tool results yet)
-        llm_with_tools = self._get_llm_with_tools()
+        llm_with_tools = self._get_llm_with_tools(conversation_id=conversation_id)
 
         messages = [
             {"role": "system", "content": self._get_system_prompt()},

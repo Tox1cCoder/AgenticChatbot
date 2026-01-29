@@ -2,9 +2,7 @@ import json
 import logging
 from typing import Optional, Dict, Any, AsyncIterator
 
-from langchain_core.messages import (
-    HumanMessage
-)
+from langchain_core.messages import HumanMessage
 
 from .base_agent import BaseAgent
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
@@ -56,7 +54,7 @@ class SearchAgent(BaseAgent):
         )
 
         # Configure tool calling; allow follow-up tool planning when needed
-        llm_with_tools = self._get_llm_with_tools()
+        llm_with_tools = self._get_llm_with_tools(conversation_id=conversation_id)
 
         # Invoke model
         response = await llm_with_tools.ainvoke([HumanMessage(content=prompt)])
@@ -111,7 +109,8 @@ class SearchAgent(BaseAgent):
             message.content, conversation_history, persona=persona
         )
 
-        llm_with_tools = self.langchain_model.bind_tools(self.tools)
+        # Use unified tool binding with deferred loading support
+        llm_with_tools = self._get_llm_with_tools(conversation_id=conversation_id)
         accumulated_content = ""
         accumulated_thinking = ""
         current_tool_calls = {}  # Track tool call chunks

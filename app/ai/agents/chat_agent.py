@@ -3,9 +3,7 @@ import base64
 from typing import Optional, List
 
 from google.genai import types
-from langchain_core.messages import (
-    HumanMessage
-)
+from langchain_core.messages import HumanMessage
 
 from .base_agent import BaseAgent
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
@@ -131,7 +129,7 @@ class ChatAgent(BaseAgent):
         )
 
         # Configure tool calling based on global setting; allow the model to decide
-        llm_with_tools = self._get_llm_with_tools()
+        llm_with_tools = self._get_llm_with_tools(conversation_id=conversation_id)
 
         # Invoke model
         response = await llm_with_tools.ainvoke([HumanMessage(content=prompt)])

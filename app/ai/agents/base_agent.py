@@ -29,6 +29,11 @@ from ..token_instrumentation import (
     log_token_breakdown,
     TokenBudgetExceededWarning,
 )
+from ..deferred_tool_binding import (
+    should_use_deferred_loading,
+    build_deferred_tool_list,
+    log_tool_binding_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +184,63 @@ class BaseAgent(ABC):
 
         return filtered_tools
 
+    def _get_allowlist(self) -> Optional[List[str]]:
+        """Get the per-agent tool allowlist from settings."""
+        allowlist_key = f"{self.agent_config_key}_agent_allowed_tools"
+        return getattr(settings, allowlist_key, []) or []
+
+    def _get_tools_for_binding(
+        self,
+        conversation_id: Optional[str] = None,
+        internal_tools: Optional[List[BaseTool]] = None,
+    ) -> List[BaseTool]:
+        """
+        Get the tools to bind to the model for this invocation.
+
+        When mcp_tool_search_enabled is True, returns a reduced set:
+        - Internal tools (if provided)
+        - tool_search tool
+        - Pinned MCP tools
+        - Loaded deferred tools for this conversation
+
+        When mcp_tool_search_enabled is False, returns all tools (current behavior).
+
+        Args:
+            conversation_id: Current conversation ID for deferred tool lookup
+            internal_tools: Non-MCP internal tools to always include
+
+        Returns:
+            List of tools to bind to the model
+        """
+        use_deferred = should_use_deferred_loading(self.agent_config_key)
+
+        if use_deferred:
+            # Build deferred tool list
+            tools = build_deferred_tool_list(
+                conversation_id=conversation_id,
+                agent_key=self.agent_config_key,
+                mcp_manager=self.mcp_manager,
+                all_mcp_tools=self.tools,  # self.tools contains filtered MCP tools
+                internal_tools=internal_tools,
+                allowlist=self._get_allowlist(),
+            )
+            log_tool_binding_summary(
+                self.agent_config_key, conversation_id, tools, deferred_enabled=True
+            )
+            return tools
+        else:
+            # Traditional mode: return all tools (with internal tools prepended)
+            if internal_tools:
+                # Combine internal tools with MCP tools, avoiding duplicates
+                seen = {t.name for t in internal_tools}
+                combined = list(internal_tools)
+                for tool in self.tools:
+                    if tool.name not in seen:
+                        combined.append(tool)
+                        seen.add(tool.name)
+                return combined
+            return self.tools
+
     def _resolve_model_request(
         self, model_request: Optional[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
@@ -195,9 +257,32 @@ class BaseAgent(ABC):
         shared = model_request.get("all")
         return shared if isinstance(shared, dict) else None
 
-    def _get_llm_with_tools(self, model: Any = None) -> Any:
+    def _get_llm_with_tools(
+        self,
+        model: Any = None,
+        conversation_id: Optional[str] = None,
+        internal_tools: Optional[List[BaseTool]] = None,
+    ) -> Any:
+        """
+        Bind tools to the model for invocation.
+
+        Args:
+            model: Optional model override
+            conversation_id: Conversation ID for deferred tool lookup
+            internal_tools: Non-MCP internal tools to include
+
+        Returns:
+            Model with tools bound
+        """
         llm = model or self.langchain_model
-        if not self.tools or llm is None:
+
+        # Get tools for binding (respects deferred loading setting)
+        tools = self._get_tools_for_binding(
+            conversation_id=conversation_id,
+            internal_tools=internal_tools,
+        )
+
+        if not tools or llm is None:
             return llm
 
         tool_choice = getattr(settings, "tool_choice_mode", "auto")
@@ -206,7 +291,7 @@ class BaseAgent(ABC):
 
         return ModelFactory.bind_tools_to_model(
             llm,
-            self.tools,
+            tools,
             tool_choice=tool_choice,
         )
 
@@ -418,7 +503,12 @@ class BaseAgent(ABC):
                         temperature_override=effective_temperature,
                     )
 
-            llm_with_tools = self._get_llm_with_tools(llm)
+            llm_with_tools = self._get_llm_with_tools(
+                llm, conversation_id=conversation_id
+            )
+
+            # Get the tools that are actually bound (for accurate token counting)
+            bound_tools = self._get_tools_for_binding(conversation_id=conversation_id)
 
             has_tool_context = any(
                 isinstance(msg, ToolMessage)
@@ -450,11 +540,12 @@ class BaseAgent(ABC):
 
             # === Token Instrumentation ===
             # Compute and log token breakdown for observability
+            # Use bound_tools (not self.tools) to reflect actual schema tokens sent
             token_breakdown = compute_token_breakdown(
                 system_prompt=system_prompt,
                 history_messages=history_messages_lc,
                 current_turn_messages=messages,
-                tools=self.tools if self.tools else None,
+                tools=bound_tools if bound_tools else None,
             )
             log_token_breakdown(
                 breakdown=token_breakdown,
@@ -502,7 +593,9 @@ class BaseAgent(ABC):
                                 timeout=settings.openai_request_timeout_seconds,
                                 streaming=True,
                             )
-                            llm_with_tools = self._get_llm_with_tools(llm)
+                            llm_with_tools = self._get_llm_with_tools(
+                                llm, conversation_id=conversation_id
+                            )
                             openai_reasoning_summary_requested = False
                             response = await self._ainvoke_with_retries(
                                 llm_with_tools, langchain_messages
@@ -521,7 +614,9 @@ class BaseAgent(ABC):
                                 model_override=effective_model_name,
                                 temperature_override=effective_temperature,
                             )
-                            llm_with_tools = self._get_llm_with_tools(llm)
+                            llm_with_tools = self._get_llm_with_tools(
+                                llm, conversation_id=conversation_id
+                            )
                             response = await llm_with_tools.ainvoke(langchain_messages)
                     else:
                         # Retry exhausted or provider error: fall back to Gemini defaults.
@@ -537,7 +632,9 @@ class BaseAgent(ABC):
                             model_override=effective_model_name,
                             temperature_override=effective_temperature,
                         )
-                        llm_with_tools = self._get_llm_with_tools(llm)
+                        llm_with_tools = self._get_llm_with_tools(
+                            llm, conversation_id=conversation_id
+                        )
                         response = await llm_with_tools.ainvoke(langchain_messages)
             else:
                 response = await llm_with_tools.ainvoke(langchain_messages)

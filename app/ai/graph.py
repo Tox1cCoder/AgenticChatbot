@@ -44,6 +44,7 @@ from .token_instrumentation import (
     HistoryBudgetConfig,
     truncate_tool_result,
 )
+from .tool_context import tool_execution_context
 from ..core.response_constants import NO_RESPONSE_GENERATED
 
 logger = logging.getLogger(__name__)
@@ -482,15 +483,24 @@ class MultiAgentWorkflow:
         if not agent:
             return state
 
-        tool_map = await ensure_agent_tool_map(agent)
+        tool_map = await ensure_agent_tool_map(
+            agent, conversation_id=state.get("conversation_id")
+        )
         if not tool_map:
             return state
 
-        tool_outputs, tool_artifacts, all_images = await execute_tool_calls(
-            tool_calls=last_message.tool_calls,
-            tool_map=tool_map,
-            capture_images=True,
-        )
+        # Extract context for tool execution
+        conversation_id = state.get("conversation_id")
+        user_id = state.get("user_id")
+        agent_key = getattr(agent, "agent_config_key", None) or selected_agent_name
+
+        # Execute tools with context set for deferred tool loading support
+        with tool_execution_context(conversation_id, user_id, agent_key):
+            tool_outputs, tool_artifacts, all_images = await execute_tool_calls(
+                tool_calls=last_message.tool_calls,
+                tool_map=tool_map,
+                capture_images=True,
+            )
 
         # Get tool result truncation settings
         max_chars = getattr(settings, "tool_result_max_chars", 0) or 0
@@ -995,12 +1005,23 @@ class MultiAgentWorkflow:
                     if selected_agent_name
                     else None
                 )
-                tool_map = await ensure_agent_tool_map(agent) if agent else {}
-                outputs, artifacts, images = await execute_tool_calls(
-                    tool_calls=tool_calls_to_execute,
-                    tool_map=tool_map,
-                    capture_images=True,
+                tool_map = (
+                    await ensure_agent_tool_map(agent, conversation_id=conversation_id)
+                    if agent
+                    else {}
                 )
+
+                # Extract context for tool execution
+                user_id = state.get("user_id")
+                agent_key = getattr(agent, "agent_config_key", None) if agent else "rag"
+
+                # Execute tools with context set for deferred tool loading support
+                with tool_execution_context(conversation_id, user_id, agent_key):
+                    outputs, artifacts, images = await execute_tool_calls(
+                        tool_calls=tool_calls_to_execute,
+                        tool_map=tool_map,
+                        capture_images=True,
+                    )
                 for output in outputs:
                     if output.get("tool_call_id"):
                         non_search_outputs_by_id[output["tool_call_id"]] = output[
@@ -1247,7 +1268,10 @@ class MultiAgentWorkflow:
         context = state.get("context", {})
         had_error = False
         max_todos = getattr(settings, "max_todos_per_plan", 50)
-        tool_map = await ensure_agent_tool_map(self.planning_agent)
+        conversation_id = state.get("conversation_id")
+        tool_map = await ensure_agent_tool_map(
+            self.planning_agent, conversation_id=conversation_id
+        )
 
         for tool_call in last_message.tool_calls:
             tool_call_data = normalize_tool_call(tool_call)
