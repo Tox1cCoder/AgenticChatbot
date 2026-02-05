@@ -3,6 +3,8 @@ import logging
 import re
 import base64
 import asyncio
+import queue
+import threading
 from typing import Optional, List, Dict, Any, AsyncIterator
 from uuid import UUID
 from pathlib import Path
@@ -25,11 +27,17 @@ from ..prompts import build_rag_prompt, AGENTIC_RAG_SYSTEM_PROMPT
 from ..agent_config import create_langchain_model, create_gemini_client, AGENT_CONFIG
 from ..rag_tools import create_search_documents_tool
 from ..mcp_integration import get_global_mcp_manager
+from ..model_factory import ModelFactory
 from ...core.config import settings, Settings
+
 from ..utils import (
     coerce_response_text,
     extract_agent_execution_info,
     get_error_recovery_hint,
+)
+from ..deferred_tool_binding import (
+    should_use_deferred_loading,
+    build_deferred_tool_list,
 )
 from ...repositories.document_image import DocumentImageRepository
 from ...database.session import SessionLocal
@@ -249,10 +257,6 @@ class RAGAgent:
         Returns:
             List of tools to bind to the model
         """
-        from ..deferred_tool_binding import (
-            should_use_deferred_loading,
-            build_deferred_tool_list,
-        )
 
         use_deferred = should_use_deferred_loading(self.agent_config_key)
 
@@ -418,8 +422,6 @@ class RAGAgent:
                     effective_model_name = self.model_name
 
                 if provider == "openai":
-                    from ..model_factory import ModelFactory
-
                     llm = ModelFactory.create_model(
                         provider="openai",
                         model=effective_model_name,
@@ -1043,10 +1045,6 @@ class RAGAgent:
             return all_citations
 
     async def _generate_stream(self, prompt: str):
-        import asyncio
-        import queue
-        import threading
-
         try:
             config_kwargs = {}
             if settings.enable_thinking:
@@ -1118,8 +1116,6 @@ class RAGAgent:
                                 has_thought = hasattr(part, "thought") and part.thought
                                 has_text = hasattr(part, "text") and part.text
 
-                                # Per Gemini docs: thought signatures may be in empty text parts
-                                # Only skip if there's no text AND no thought marker
                                 if not has_text and not has_thought:
                                     continue
 

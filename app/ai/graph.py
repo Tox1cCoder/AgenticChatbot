@@ -1209,6 +1209,13 @@ class MultiAgentWorkflow:
         planning_call_count = (state.get("planning_call_count") or 0) + 1
         state["planning_call_count"] = planning_call_count
 
+        # Debug logging for observability
+        logger.info(
+            f"[Planning Node] phase={planning_phase}, call_count={planning_call_count}, "
+            f"generate_plan_response={should_generate_plan_response}, "
+            f"todos_count={len(todos)}, current_task_index={current_task_index}"
+        )
+
         persona = state.get("persona")
 
         # Get only current turn messages for the model
@@ -1269,85 +1276,100 @@ class MultiAgentWorkflow:
         had_error = False
         max_todos = getattr(settings, "max_todos_per_plan", 50)
         conversation_id = state.get("conversation_id")
+        user_id = state.get("user_id")
+        agent_key = getattr(self.planning_agent, "agent_config_key", "planning")
+
         tool_map = await ensure_agent_tool_map(
             self.planning_agent, conversation_id=conversation_id
         )
 
-        for tool_call in last_message.tool_calls:
-            tool_call_data = normalize_tool_call(tool_call)
-            tool_name = tool_call_data.get("name")
-            tool_id = tool_call_data.get("id")
-            tool_args = tool_call_data.get("args", {})
+        # Debug logging for observability
+        tool_names = [
+            normalize_tool_call(tc).get("name") for tc in last_message.tool_calls
+        ]
+        logger.info(f"[Planning Tools Node] Executing tools: {tool_names}")
 
-            if tool_name != "write_todos":
+        # Wrap tool execution with context for deferred tool loading support
+        with tool_execution_context(conversation_id, user_id, agent_key):
+            for tool_call in last_message.tool_calls:
+                tool_call_data = normalize_tool_call(tool_call)
+                tool_name = tool_call_data.get("name")
+                tool_id = tool_call_data.get("id")
+                tool_args = tool_call_data.get("args", {})
+
+                if tool_name != "write_todos":
+                    try:
+                        tool = tool_map.get(tool_name) if tool_name else None
+                        if tool is not None:
+                            result = await invoke_tool(tool, tool_args)
+                            result = extract_content_from_result(result)
+                            tool_outputs.append(
+                                {
+                                    "tool_call_id": tool_id,
+                                    "name": tool_name,
+                                    "content": (
+                                        str(result)
+                                        if result
+                                        else "Tool executed successfully"
+                                    ),
+                                }
+                            )
+                        else:
+                            tool_outputs.append(
+                                {
+                                    "tool_call_id": tool_id,
+                                    "name": tool_name,
+                                    "content": f"Tool not found: {tool_name}",
+                                }
+                            )
+                    except Exception as e:
+                        logger.error(f"Error executing MCP tool {tool_name}: {e}")
+                        tool_outputs.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "content": f"Error executing tool: {str(e)}",
+                            }
+                        )
+                        had_error = True  # Mark error for circuit breaker
+                    continue
+
                 try:
-                    tool = tool_map.get(tool_name) if tool_name else None
-                    if tool is not None:
-                        result = await invoke_tool(tool, tool_args)
-                        result = extract_content_from_result(result)
-                        tool_outputs.append(
-                            {
-                                "tool_call_id": tool_id,
-                                "name": tool_name,
-                                "content": (
-                                    str(result)
-                                    if result
-                                    else "Tool executed successfully"
-                                ),
-                            }
+                    todos, current_task_index, result, action = (
+                        apply_write_todos_action(
+                            todos=todos,
+                            current_task_index=current_task_index,
+                            tool_args=tool_args,
+                            max_todos=max_todos,
                         )
-                    else:
-                        tool_outputs.append(
-                            {
-                                "tool_call_id": tool_id,
-                                "name": tool_name,
-                                "content": f"Tool not found: {tool_name}",
-                            }
+                    )
+                    write_todos_actions.append(action)
+
+                    if action == "set_todos" and result.startswith(
+                        "Error: Plan exceeds maximum"
+                    ):
+                        requested = len(tool_args.get("todos", []) or [])
+                        logger.warning(
+                            "Rejected plan with %d todos (max: %d)",
+                            requested,
+                            max_todos,
                         )
+
                 except Exception as e:
-                    logger.error(f"Error executing MCP tool {tool_name}: {e}")
-                    tool_outputs.append(
-                        {
-                            "tool_call_id": tool_id,
-                            "name": tool_name,
-                            "content": f"Error executing tool: {str(e)}",
-                        }
+                    raw_action = tool_args.get("action")
+                    action = (
+                        raw_action.value if hasattr(raw_action, "value") else raw_action
                     )
+                    result = f"Error executing {action}: {str(e)}"
                     had_error = True  # Mark error for circuit breaker
-                continue
 
-            try:
-                todos, current_task_index, result, action = apply_write_todos_action(
-                    todos=todos,
-                    current_task_index=current_task_index,
-                    tool_args=tool_args,
-                    max_todos=max_todos,
+                tool_outputs.append(
+                    {
+                        "tool_call_id": tool_id,
+                        "name": tool_name,
+                        "content": result,
+                    }
                 )
-                write_todos_actions.append(action)
-
-                if action == "set_todos" and result.startswith(
-                    "Error: Plan exceeds maximum"
-                ):
-                    requested = len(tool_args.get("todos", []) or [])
-                    logger.warning(
-                        "Rejected plan with %d todos (max: %d)", requested, max_todos
-                    )
-
-            except Exception as e:
-                raw_action = tool_args.get("action")
-                action = (
-                    raw_action.value if hasattr(raw_action, "value") else raw_action
-                )
-                result = f"Error executing {action}: {str(e)}"
-                had_error = True  # Mark error for circuit breaker
-
-            tool_outputs.append(
-                {
-                    "tool_call_id": tool_id,
-                    "name": tool_name,
-                    "content": result,
-                }
-            )
 
         # Add tool messages to state
         for output in tool_outputs:
@@ -1461,10 +1483,29 @@ class MultiAgentWorkflow:
             context["plan_just_modified"] = False
             context["generate_plan_response"] = True
             state["context"] = context
+            logger.info(
+                "[Should Continue Planning] Decision: planning_agent (plan_just_modified=True)"
+            )
             return "planning_agent"
 
-        # In planning phase, don't auto-execute - just end after plan response
+        # In planning phase, always give the agent a chance to respond after tools
         if planning_phase == "planning":
+            messages = state.get("messages", [])
+            last_msg_type = type(messages[-1]).__name__ if messages else "None"
+
+            # If last message is a ToolMessage, give agent a chance to process results
+            if messages and isinstance(messages[-1], ToolMessage):
+                logger.info(
+                    "[Should Continue Planning] Decision: planning_agent "
+                    "(last_message=ToolMessage, agent needs to respond)"
+                )
+                return "planning_agent"
+
+            # Agent already responded with text - end planning loop
+            logger.info(
+                f"[Should Continue Planning] Decision: end (planning_phase=planning, "
+                f"last_message_type={last_msg_type})"
+            )
             return "end"
 
         # === EXECUTING PHASE LOGIC ===

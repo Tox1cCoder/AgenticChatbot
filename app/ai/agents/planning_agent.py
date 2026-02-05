@@ -5,6 +5,7 @@ from textwrap import dedent
 from typing import Any, Dict, Iterable, List, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import BaseTool
 
 from ...core.config import settings
 from ..planning_tools import create_write_todos_tool
@@ -26,6 +27,10 @@ from .base_agent import BaseAgent
 class PlanningAgent(BaseAgent):
     """Planning agent that manages task plans using ReAct-style tool-calling."""
 
+    def __init__(self, model_name: Optional[str] = None):
+        """Initialize Planning Agent with 'planning' config key."""
+        super().__init__(model_name=model_name, agent_config_key="planning")
+
     @property
     def agent_type(self) -> AgentType:
         return AgentType.PLANNING
@@ -36,6 +41,33 @@ class PlanningAgent(BaseAgent):
 
     def _get_base_system_prompt(self) -> str:
         return PLANNING_EXECUTION_PROMPT
+
+    def _get_llm_with_tools(
+        self,
+        model: Any = None,
+        conversation_id: Optional[str] = None,
+        internal_tools: Optional[List[BaseTool]] = None,
+    ) -> Any:
+        """
+        Override to ensure write_todos is always included as an internal tool.
+
+        This guarantees write_todos is available even in deferred tool loading mode,
+        where only tool_search + pinned tools + loaded tools would normally be bound.
+        """
+        write_todos_tool = create_write_todos_tool()
+        combined_internal = [write_todos_tool]
+
+        if internal_tools:
+            # Add any additional internal tools, avoiding duplicates
+            for tool in internal_tools:
+                if tool.name != write_todos_tool.name:
+                    combined_internal.append(tool)
+
+        return super()._get_llm_with_tools(
+            model=model,
+            conversation_id=conversation_id,
+            internal_tools=combined_internal,
+        )
 
     async def _init_tools(self):
         # Initialize MCP tools from parent.
@@ -90,15 +122,18 @@ class PlanningAgent(BaseAgent):
         prompt = f"{base_prompt}\n\n{phase_prompt}"
 
         if should_describe_plan:
-            prompt += "\n\n" + dedent(
-                """
+            prompt += (
+                "\n\n"
+                + dedent(
+                    """
                 # IMPORTANT: You just created or modified the plan.
                 Now respond with text only:
                 - Summarize the tasks you created/modified
                 - Ask if the user wants changes before starting execution
                 - Do NOT make any tool calls in this response
                 """
-            ).strip()
+                ).strip()
+            )
 
         if todos:
             prompt += "\n\n" + self._format_todos_context(todos, current_task_index)
@@ -112,7 +147,9 @@ class PlanningAgent(BaseAgent):
             return ""
 
         lines = ["CURRENT TASK PLAN:"]
-        lines.append("(Use the ID shown in brackets when calling start_todo/complete_todo)")
+        lines.append(
+            "(Use the ID shown in brackets when calling start_todo/complete_todo)"
+        )
         lines.append("")
 
         for i, todo in enumerate(todos):
@@ -139,7 +176,10 @@ class PlanningAgent(BaseAgent):
         completed = sum(
             1
             for t in todos
-            if (getattr(t.get("status"), "value", t.get("status")) == TodoStatus.COMPLETED.value)
+            if (
+                getattr(t.get("status"), "value", t.get("status"))
+                == TodoStatus.COMPLETED.value
+            )
         )
         lines.append(f"\nProgress: {completed}/{len(todos)} tasks completed")
 
@@ -204,7 +244,8 @@ class PlanningAgent(BaseAgent):
                 (
                     i
                     for i, todo in enumerate(todos)
-                    if todo.get("status") in (TodoStatus.PENDING.value, TodoStatus.IN_PROGRESS.value)
+                    if todo.get("status")
+                    in (TodoStatus.PENDING.value, TodoStatus.IN_PROGRESS.value)
                 ),
                 None,
             )
@@ -234,7 +275,9 @@ class PlanningAgent(BaseAgent):
         raw_response = await llm.ainvoke(langchain_messages)
 
         tool_calls = getattr(raw_response, "tool_calls", None) or []
-        updated_todos = self._apply_write_todos_calls(base_todos=todos, tool_calls=tool_calls)
+        updated_todos = self._apply_write_todos_calls(
+            base_todos=todos, tool_calls=tool_calls
+        )
 
         if not updated_todos:
             fallback_text = coerce_response_text(getattr(raw_response, "content", ""))
@@ -255,7 +298,9 @@ class PlanningAgent(BaseAgent):
 
         plan = self._todos_to_plan(
             todos=updated_todos,
-            overall_goal=(message.content.strip() or None) if not plan_modified else None,
+            overall_goal=(
+                (message.content.strip() or None) if not plan_modified else None
+            ),
         )
 
         response_text = self._format_plan_summary(plan, plan_modified=plan_modified)
@@ -306,7 +351,9 @@ class PlanningAgent(BaseAgent):
 
         return todos
 
-    def _todos_to_plan(self, *, todos: List[Dict[str, Any]], overall_goal: Optional[str]) -> Plan:
+    def _todos_to_plan(
+        self, *, todos: List[Dict[str, Any]], overall_goal: Optional[str]
+    ) -> Plan:
         def sort_key(item: Dict[str, Any]) -> int:
             order = item.get("order")
             try:
@@ -331,7 +378,10 @@ class PlanningAgent(BaseAgent):
         if not plan.tasks:
             return "I couldn't generate any actionable tasks."
 
-        parts = ["I've updated the plan:" if plan_modified else "I've created a plan:", ""]
+        parts = [
+            "I've updated the plan:" if plan_modified else "I've created a plan:",
+            "",
+        ]
         if plan.overall_goal:
             parts.append(f"Goal: {plan.overall_goal}")
             parts.append("")

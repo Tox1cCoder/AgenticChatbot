@@ -31,8 +31,7 @@ from ..token_instrumentation import (
 )
 from ..deferred_tool_binding import (
     should_use_deferred_loading,
-    build_deferred_tool_list,
-    log_tool_binding_summary,
+    build_deferred_tool_list
 )
 
 logger = logging.getLogger(__name__)
@@ -224,9 +223,7 @@ class BaseAgent(ABC):
                 internal_tools=internal_tools,
                 allowlist=self._get_allowlist(),
             )
-            log_tool_binding_summary(
-                self.agent_config_key, conversation_id, tools, deferred_enabled=True
-            )
+
             return tools
         else:
             # Traditional mode: return all tools (with internal tools prepended)
@@ -314,27 +311,6 @@ class BaseAgent(ABC):
         except Exception:
             return None
 
-    def _is_openai_reasoning_summary_unsupported(self, exc: Exception) -> bool:
-        try:
-            text = str(exc)
-        except Exception:
-            text = repr(exc)
-
-        text_lower = text.lower()
-        if "reasoning.summary" not in text_lower:
-            return False
-
-        if "unsupported_value" in text_lower:
-            return True
-
-        if (
-            "organization must be verified" in text_lower
-            or "verify organization" in text_lower
-        ):
-            return True
-
-        return False
-
     async def _ainvoke_with_retries(
         self, llm_with_tools: Any, messages: List[BaseMessage]
     ) -> Any:
@@ -361,8 +337,7 @@ class BaseAgent(ABC):
                 return await llm_with_tools.ainvoke(messages)
             except Exception as exc:
                 last_exc = exc
-                if self._is_openai_reasoning_summary_unsupported(exc):
-                    raise
+   
                 if attempt >= attempts:
                     break
                 sleep_for = delay * (2 ** (attempt - 1))
@@ -570,17 +545,11 @@ class BaseAgent(ABC):
                     if (
                         openai_api_key
                         and openai_reasoning_summary_requested
-                        and self._is_openai_reasoning_summary_unsupported(exc)
                     ):
                         user_key = str(user_id).strip() if user_id else ""
                         if user_key:
                             _OPENAI_REASONING_SUMMARY_DISABLED_USERS.add(user_key)
 
-                        logger.warning(
-                            "%s: OpenAI reasoning summaries unavailable; retrying without them: %s",
-                            self.agent_id,
-                            exc,
-                        )
 
                         try:
                             from ..model_factory import ModelFactory

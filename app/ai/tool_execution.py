@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from typing import Any, Dict, List, Optional, Tuple
+from ..core.config import settings
+from .tool_search_tool import create_tool_search_tool
 
 from .utils import extract_content_from_result, normalize_tool_call
 
@@ -99,10 +101,8 @@ async def ensure_agent_tool_map(
 
     # If deferred loading is enabled, add tool_search to the map
     # This ensures tool_search can execute even though it's not in agent.tools
-    from ..core.config import settings
 
     if settings.mcp_tool_search_enabled:
-        from .tool_search_tool import create_tool_search_tool
 
         # Get agent's allowlist if available
         agent_key = getattr(agent, "agent_config_key", None)
@@ -129,8 +129,6 @@ def _mark_tool_used_if_deferred(tool_name: str) -> None:
     Args:
         tool_name: The name of the tool that was executed
     """
-    from ..core.config import settings
-
     if not settings.mcp_tool_search_enabled:
         return
 

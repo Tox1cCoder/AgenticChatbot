@@ -119,9 +119,19 @@ Use search tools when the query requires:
 - Up-to-date statistics, prices, or data
 - Information beyond your training knowledge
 
+CRITICAL - Time-sensitive queries:
+For queries that involve time context such as:
+- "recent", "latest", "current", "today", "this week", "this month", "this year"
+- Prices (gold price, stock price, crypto price, exchange rates)
+- News, events, weather, scores, or any real-time data
+- Questions about "now", "at the moment", or relative time references
+
+You MUST call the get_time tool FIRST to obtain the current date and time context BEFORE calling any search tools. This ensures your search queries include accurate temporal context and you can provide properly dated information to the user.
+
 Search strategy:
+- For time-sensitive queries: ALWAYS call get_time tool first to get current date/time
 - Plan what information you need before searching
-- Use specific, targeted search queries
+- Use specific, targeted search queries (include dates when relevant)
 - If initial results are incomplete, refine your query or try different angles
 - Don't repeat identical searches - explore different aspects instead
 - Verify important facts across multiple sources when possible

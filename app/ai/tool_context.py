@@ -1,27 +1,10 @@
 """
 Tool Execution Context - Provides context variables for tool execution.
 
-This module uses Python's `contextvars` to provide async-task-local context
-that tools can access without requiring explicit parameter passing.
-
 The context is set by the graph during tool execution and includes:
 - conversation_id: The current conversation
 - user_id: The user making the request
 - agent_key: The agent processing the request (e.g., "chat", "rag", "search")
-
-Usage in tools:
-    from app.ai.tool_context import get_tool_context
-
-    async def my_tool_function(args):
-        ctx = get_tool_context()
-        conversation_id = ctx.conversation_id
-        # ... use context for per-conversation state ...
-
-Usage in graph:
-    from app.ai.tool_context import tool_execution_context
-
-    with tool_execution_context(conversation_id, user_id, agent_key):
-        await execute_tool_calls(...)
 """
 
 import logging

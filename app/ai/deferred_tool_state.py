@@ -1,19 +1,5 @@
 """
 Deferred Tool State - Per-conversation tracking of loaded MCP tools.
-
-This module manages which MCP tools have been dynamically loaded for each
-conversation, enabling the deferred tool loading pattern where tools are
-only bound to the model after being selected via `tool_search`.
-
-Key features:
-- Per-conversation + per-agent tool tracking
-- LRU eviction when capacity is exceeded
-- TTL-based expiration of loaded tools
-- Generation-based invalidation when MCP config changes
-
-The state is keyed by (conversation_id, agent_key) to ensure:
-- Different conversations don't share loaded tools
-- Different agents in the same conversation can have different tools loaded
 """
 
 import logging
@@ -222,9 +208,6 @@ class DeferredToolState:
     """
     Global state manager for deferred tool loading across all conversations.
 
-    This is a singleton that tracks which tools have been loaded for each
-    (conversation_id, agent_key) pair.
-
     Thread-safe for concurrent access.
     """
 
@@ -289,16 +272,6 @@ class DeferredToolState:
                 )
                 if result:
                     loaded.append(ref)
-
-        if loaded:
-            logger.info(
-                "Autoloaded %d tools for conversation=%s agent=%s total_loaded=%d: %s",
-                len(loaded),
-                conversation_id,
-                agent_key,
-                len(tool_set.loaded),
-                [r.tool_name for r in loaded],
-            )
 
         return loaded
 

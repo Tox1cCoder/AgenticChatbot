@@ -1,20 +1,5 @@
 """
 Tool Search Tool - Claude-style deferred MCP tool discovery.
-
-This tool allows the model to search for and discover MCP tools dynamically,
-rather than having all tools bound upfront. This reduces token usage from
-tool schemas in the system prompt.
-
-The tool_search tool:
-1. Searches the MCP tool catalog based on a natural-language query
-2. Returns a ranked list of matching tools with metadata
-3. Automatically loads/binds the top-N results for the conversation
-4. Handles tool name collisions by showing all candidates
-
-Usage by the model:
-    tool_search(query="search the web", top_k=5)
-    # Returns list of matching tools
-    # Then the model can call the discovered tool directly
 """
 
 import json
@@ -29,8 +14,6 @@ from ..core.config import settings
 from .mcp_integration import get_global_mcp_manager
 from .mcp_registry import get_mcp_tools_generation
 from .mcp_tool_catalog import (
-    McpToolCatalog,
-    ToolDescriptor,
     ToolReference,
     get_tool_catalog,
 )
