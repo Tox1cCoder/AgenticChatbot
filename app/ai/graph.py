@@ -1210,7 +1210,7 @@ class MultiAgentWorkflow:
         state["planning_call_count"] = planning_call_count
 
         # Debug logging for observability
-        logger.info(
+        logger.debug(
             f"[Planning Node] phase={planning_phase}, call_count={planning_call_count}, "
             f"generate_plan_response={should_generate_plan_response}, "
             f"todos_count={len(todos)}, current_task_index={current_task_index}"
@@ -1287,7 +1287,7 @@ class MultiAgentWorkflow:
         tool_names = [
             normalize_tool_call(tc).get("name") for tc in last_message.tool_calls
         ]
-        logger.info(f"[Planning Tools Node] Executing tools: {tool_names}")
+        logger.debug(f"[Planning Tools Node] Executing tools: {tool_names}")
 
         # Wrap tool execution with context for deferred tool loading support
         with tool_execution_context(conversation_id, user_id, agent_key):
@@ -1483,7 +1483,7 @@ class MultiAgentWorkflow:
             context["plan_just_modified"] = False
             context["generate_plan_response"] = True
             state["context"] = context
-            logger.info(
+            logger.debug(
                 "[Should Continue Planning] Decision: planning_agent (plan_just_modified=True)"
             )
             return "planning_agent"
@@ -1495,14 +1495,14 @@ class MultiAgentWorkflow:
 
             # If last message is a ToolMessage, give agent a chance to process results
             if messages and isinstance(messages[-1], ToolMessage):
-                logger.info(
+                logger.debug(
                     "[Should Continue Planning] Decision: planning_agent "
                     "(last_message=ToolMessage, agent needs to respond)"
                 )
                 return "planning_agent"
 
             # Agent already responded with text - end planning loop
-            logger.info(
+            logger.debug(
                 f"[Should Continue Planning] Decision: end (planning_phase=planning, "
                 f"last_message_type={last_msg_type})"
             )
@@ -2126,7 +2126,7 @@ class MultiAgentWorkflow:
                                         }
                 else:
                     # Single mode or legacy format - try to handle gracefully
-                    logger.warning(f"Unexpected stream chunk format: {type(chunk)}")
+                    logger.debug(f"Unexpected stream chunk format: {type(chunk)}")
 
         except Exception as e:
             yield {"type": "error", "error": str(e)}

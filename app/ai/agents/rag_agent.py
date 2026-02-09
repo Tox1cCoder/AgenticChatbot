@@ -27,6 +27,7 @@ from ..prompts import build_rag_prompt, AGENTIC_RAG_SYSTEM_PROMPT
 from ..agent_config import create_langchain_model, create_gemini_client, AGENT_CONFIG
 from ..rag_tools import create_search_documents_tool
 from ..mcp_integration import get_global_mcp_manager
+from ..mcp_registry import get_mcp_tools_generation
 from ..model_factory import ModelFactory
 from ...core.config import settings, Settings
 
@@ -65,6 +66,7 @@ class RAGAgent:
         self.langchain_model = None
         self.mcp_manager = None
         self.tools = []
+        self._tools_generation_seen = 0
 
         # Store retrieval parameters
         self.top_k = settings.rag_top_k
@@ -90,13 +92,13 @@ class RAGAgent:
         try:
             self.gemini_client = create_gemini_client()
             self.langchain_model = create_langchain_model(agent_type="rag")
-            logger.info(f"RAGAgent initialized with model: {self.model_name}")
+            logger.debug(f"RAGAgent initialized with model: {self.model_name}")
         except Exception as e:
             logger.error(f"Error initializing Gemini for RAGAgent: {e}")
 
     def _init_reranker(self):
         self.reranker = CrossEncoder(self.settings.reranker_model)
-        logger.info(f"Re-ranker initialized: {self.settings.reranker_model}")
+        logger.debug(f"Re-ranker initialized: {self.settings.reranker_model}")
 
     def _resolve_model_request(self, model_request: Any) -> Optional[Dict[str, Any]]:
         if not model_request or not isinstance(model_request, dict):
@@ -170,14 +172,22 @@ class RAGAgent:
         raise last_exc or RuntimeError("Provider call failed")
 
     async def _init_tools(self):
-        if self.mcp_manager is not None:
+        current_generation = get_mcp_tools_generation()
+        needs_refresh = (
+            self.mcp_manager is None
+            or self._tools_generation_seen != current_generation
+        )
+
+        if not needs_refresh:
             return
 
         # Try to load MCP tools
         try:
             self.mcp_manager = await get_global_mcp_manager()
             all_tools = await self.mcp_manager.get_tools()
-            self.tools = self._deduplicate_tools(all_tools)
+            unique_tools = self._deduplicate_tools(all_tools)
+            self.tools = self._filter_tools_by_allowlist(unique_tools)
+            self._tools_generation_seen = current_generation
         except Exception as e:
             logger.error(
                 "Failed to get global MCP manager for RAGAgent: %s",
@@ -202,7 +212,8 @@ class RAGAgent:
             ]
             if self.tools:
                 logger.debug(
-                    "Loaded %d MCP tools for RAGAgent from %d servers",
+                    "RAG tools refreshed (generation=%s): %d tools from %d servers",
+                    current_generation,
                     len(self.tools),
                     len(active_servers),
                 )
@@ -223,6 +234,29 @@ class RAGAgent:
         for tool in tools or []:
             unique_tools.setdefault(tool.name, tool)
         return list(unique_tools.values())
+
+    def _filter_tools_by_allowlist(self, tools: List[BaseTool]) -> List[BaseTool]:
+        """
+        Filter tools based on rag_agent_allowed_tools allowlist.
+        """
+        allowlist = self._get_allowlist()
+        if not allowlist:
+            return tools
+
+        allowlist_set = set(allowlist)
+        filtered_tools = []
+
+        for tool in tools:
+            if tool.name in allowlist_set:
+                filtered_tools.append(tool)
+                continue
+
+            if self.mcp_manager:
+                server_name = self.mcp_manager.get_server_for_tool(tool)
+                if server_name and server_name in allowlist_set:
+                    filtered_tools.append(tool)
+
+        return filtered_tools
 
     @property
     def agent_config_key(self) -> str:
@@ -377,6 +411,13 @@ class RAGAgent:
             has_images=bool(images),
         )
 
+        tools_for_binding = (
+            self._get_tools_for_binding(conversation_id=conversation_id)
+            if self.langchain_model
+            else []
+        )
+        has_tool_binding = bool(tools_for_binding and self.langchain_model)
+
         response_text: str = ""
         tools_used: List[str] = []
         tool_artifacts: List[Dict[str, Any]] = []
@@ -390,7 +431,6 @@ class RAGAgent:
             AGENT_CONFIG.get("rag", {}).get("temperature", 1.0),
         )
         used_fallback = False
-        fallback_reason: Optional[str] = None
 
         if resolved_request and isinstance(resolved_request, dict):
             requested_provider = (
@@ -411,13 +451,11 @@ class RAGAgent:
                 api_key = self._get_openai_api_key(request_user_id)
                 if not api_key:
                     used_fallback = True
-                    fallback_reason = "OpenAI provider selected but no API key is configured for this user"
                     provider = "gemini"
                     effective_model_name = self.model_name
 
                 if provider == "openai" and images:
                     used_fallback = True
-                    fallback_reason = "OpenAI provider selected but multimodal document images are currently handled by Gemini"
                     provider = "gemini"
                     effective_model_name = self.model_name
 
@@ -437,7 +475,6 @@ class RAGAgent:
                         )
                     except Exception as exc:
                         used_fallback = True
-                        fallback_reason = f"{type(exc).__name__}"
                         provider = "gemini"
                         effective_model_name = self.model_name
                         response_text = await self._generate(prompt)
@@ -447,12 +484,16 @@ class RAGAgent:
 
             # Only process with images/tools if OpenAI wasn't used (to prevent overwriting OpenAI response)
             if provider != "openai":
-                if images and self.tools and self.langchain_model:
+                if images and has_tool_binding:
                     (
                         tool_response_text,
                         tools_used,
                         tool_artifacts,
-                    ) = await self._generate_with_tools(prompt)
+                    ) = await self._generate_with_tools(
+                        prompt,
+                        conversation_id=conversation_id,
+                        tools_to_bind=tools_for_binding,
+                    )
 
                     multimodal_prompt = self._augment_prompt_with_tool_context(
                         prompt, tool_response_text, tool_artifacts
@@ -462,10 +503,14 @@ class RAGAgent:
                     )
                 elif images:
                     response_text = await self._generate_with_vision(prompt, images)
-                elif self.tools and self.langchain_model:
+                elif has_tool_binding:
                     # Use tools without images
                     response_text, tools_used, tool_artifacts = (
-                        await self._generate_with_tools(prompt)
+                        await self._generate_with_tools(
+                            prompt,
+                            conversation_id=conversation_id,
+                            tools_to_bind=tools_for_binding,
+                        )
                     )
                 else:
                     # Regular text-only generation
@@ -565,19 +610,11 @@ class RAGAgent:
                 "avg_score": avg_score,
             },
             "persona_used": persona,
-            "tools_available": len(self.tools),
             "citation_verification_enabled": citation_verification_enabled,
             "citation_coverage": citation_coverage,
             "has_images": bool(images),
             "images_count": len(images) if images else 0,
         }
-
-        if used_fallback:
-            metadata["provider_fallback"] = {
-                "from": "openai",
-                "to": "gemini",
-                "reason": fallback_reason or "fallback",
-            }
 
         # Add image data to metadata for frontend display
         if images:
@@ -685,6 +722,13 @@ class RAGAgent:
             has_images=bool(images),
         )
 
+        tools_for_binding = (
+            self._get_tools_for_binding(conversation_id=conversation_id)
+            if self.langchain_model
+            else []
+        )
+        has_tool_binding = bool(tools_for_binding and self.langchain_model)
+
         accumulated_content = ""
         accumulated_thinking = ""  # Accumulate thinking content for metadata
         tools_used: List[str] = []
@@ -692,13 +736,17 @@ class RAGAgent:
         error_message: Optional[str] = None
 
         try:
-            if images and self.tools and self.langchain_model:
+            if images and has_tool_binding:
                 # Complex case: images + tools - use non-streaming fallback
                 (
                     tool_response_text,
                     tools_used,
                     tool_artifacts,
-                ) = await self._generate_with_tools(prompt)
+                ) = await self._generate_with_tools(
+                    prompt,
+                    conversation_id=conversation_id,
+                    tools_to_bind=tools_for_binding,
+                )
 
                 multimodal_prompt = self._augment_prompt_with_tool_context(
                     prompt, tool_response_text, tool_artifacts
@@ -714,9 +762,13 @@ class RAGAgent:
                 response_text = await self._generate_with_vision(prompt, images)
                 yield {"type": "token", "content": response_text}
                 accumulated_content = response_text
-            elif self.tools and self.langchain_model:
+            elif has_tool_binding:
                 # Tools only - stream
-                async for event in self._generate_with_tools_stream(prompt):
+                async for event in self._generate_with_tools_stream(
+                    prompt,
+                    conversation_id=conversation_id,
+                    tools_to_bind=tools_for_binding,
+                ):
                     if event["type"] == "token":
                         accumulated_content += event["content"]
                         yield event
@@ -827,7 +879,6 @@ class RAGAgent:
                 "avg_score": avg_score,
             },
             "persona_used": persona,
-            "tools_available": len(self.tools),
             "citation_verification_enabled": citation_verification_enabled,
             "citation_coverage": citation_coverage,
             "has_images": bool(images),
@@ -883,15 +934,25 @@ class RAGAgent:
         }
 
     async def _generate_with_tools_stream(
-        self, prompt: str
+        self,
+        prompt: str,
+        conversation_id: Optional[str] = None,
+        tools_to_bind: Optional[List[BaseTool]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         Generate streaming response with tool calling support.
         Yields token chunks and tool execution events.
         """
         try:
+            tools = tools_to_bind
+            if tools is None:
+                tools = self._get_tools_for_binding(conversation_id=conversation_id)
+
+            if not tools:
+                return
+
             # Create agent executor
-            agent_executor = self._create_agent_executor(self.tools, prompt)
+            agent_executor = self._create_agent_executor(tools, prompt)
 
             accumulated_text = ""
             tools_used = []
@@ -1133,11 +1194,22 @@ class RAGAgent:
             raise RuntimeError(f"Gemini streaming API error: {exc}") from exc
 
     async def _generate_with_tools(
-        self, prompt: str, streaming_callback=None
+        self,
+        prompt: str,
+        streaming_callback=None,
+        conversation_id: Optional[str] = None,
+        tools_to_bind: Optional[List[BaseTool]] = None,
     ) -> tuple[str, List[str], List[Dict[str, Any]]]:
         try:
+            tools = tools_to_bind
+            if tools is None:
+                tools = self._get_tools_for_binding(conversation_id=conversation_id)
+
+            if not tools:
+                return "", [], []
+
             # Create agent executor
-            agent_executor = self._create_agent_executor(self.tools, prompt)
+            agent_executor = self._create_agent_executor(tools, prompt)
 
             # Invoke agent with the user message
             agent_response = await agent_executor.ainvoke(
@@ -1772,7 +1844,6 @@ class RAGAgent:
             AGENT_CONFIG.get("rag", {}).get("temperature", 1.0),
         )
         used_fallback = False
-        fallback_reason: Optional[str] = None
 
         llm = self.langchain_model
         if resolved_request and isinstance(resolved_request, dict):
@@ -1804,7 +1875,6 @@ class RAGAgent:
                 )
             else:
                 used_fallback = True
-                fallback_reason = "OpenAI provider selected but no API key is configured for this user"
                 provider = "gemini"
                 effective_model_name = self.model_name
                 llm = create_langchain_model(agent_type="rag")
@@ -1817,7 +1887,6 @@ class RAGAgent:
             )
 
         from ..model_factory import ModelFactory
-        from ..deferred_tool_binding import should_use_deferred_loading
 
         # Get tools for binding - supports deferred loading when enabled
         tools_to_bind = self._get_tools_for_binding(
@@ -1897,7 +1966,6 @@ class RAGAgent:
                     )
                 except Exception as exc:
                     used_fallback = True
-                    fallback_reason = f"{type(exc).__name__}: {exc}"
                     provider = "gemini"
                     effective_model_name = self.model_name
                     llm = create_langchain_model(agent_type="rag")
@@ -1921,7 +1989,7 @@ class RAGAgent:
 
             if hasattr(response, "tool_calls") and response.tool_calls:
                 tool_calls = response.tool_calls
-                logger.info(
+                logger.debug(
                     f"Agentic RAG returned {len(tool_calls)} tool calls: "
                     f"{[tc.get('name', tc['name']) for tc in tool_calls]}"
                 )
@@ -1942,17 +2010,6 @@ class RAGAgent:
                     "conversation_id": conversation_id,
                     "agentic_mode": True,
                     "has_tool_calls": bool(tool_calls),
-                    **(
-                        {
-                            "provider_fallback": {
-                                "from": "openai",
-                                "to": "gemini",
-                                "reason": fallback_reason or "fallback",
-                            }
-                        }
-                        if used_fallback
-                        else {}
-                    ),
                 },
             )
 

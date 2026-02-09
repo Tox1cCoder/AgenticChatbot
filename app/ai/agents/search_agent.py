@@ -68,7 +68,6 @@ class SearchAgent(BaseAgent):
             "model": self.model_name,
             "conversation_id": conversation_id,
             "context_messages": len(conversation_history),
-            "tools_available": len(self.tools),
             "agent_type": "tool_calling",
             "persona_used": persona,
         }

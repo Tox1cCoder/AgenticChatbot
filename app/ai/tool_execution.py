@@ -74,10 +74,9 @@ async def ensure_agent_tool_map(
     """
     Build a tool map for executing tool calls.
 
-    When deferred tool loading is enabled, this includes:
-    - All tools from agent.tools (MCP tools)
-    - The tool_search tool
-    - Any deferred tools loaded for the conversation
+    In deferred mode, the execution map is built from the same reduced tool set
+    used for model binding (tool_search + pinned + loaded + required internal tools).
+    In non-deferred mode, it falls back to all initialized agent tools.
 
     Args:
         agent: The agent instance
@@ -89,32 +88,37 @@ async def ensure_agent_tool_map(
     if not agent:
         return {}
 
-    tools = getattr(agent, "tools", None) or []
-    if not tools:
+    initialized_tools = getattr(agent, "tools", None) or []
+    if not initialized_tools:
         if hasattr(agent, "_init_mcp"):
             await agent._init_mcp()
         elif hasattr(agent, "_init_tools"):
             await agent._init_tools()
-        tools = getattr(agent, "tools", None) or []
+        initialized_tools = getattr(agent, "tools", None) or []
 
-    tool_map = {t.name: t for t in tools if getattr(t, "name", None)}
+    tools = initialized_tools
 
-    # If deferred loading is enabled, add tool_search to the map
-    # This ensures tool_search can execute even though it's not in agent.tools
-
-    if settings.mcp_tool_search_enabled:
-
-        # Get agent's allowlist if available
+    # In deferred mode, keep execution permissions aligned with the tools that
+    # were actually exposed to the model for this turn.
+    if settings.mcp_tool_search_enabled and hasattr(agent, "_get_tools_for_binding"):
+        try:
+            tools = agent._get_tools_for_binding(conversation_id=conversation_id)
+        except TypeError:
+            # Backward-compat fallback for non-keyword signatures.
+            tools = agent._get_tools_for_binding(conversation_id)
+    elif settings.mcp_tool_search_enabled:
+        # Safety fallback for custom agents that don't implement binding helpers.
         agent_key = getattr(agent, "agent_config_key", None)
         allowlist = None
         if agent_key:
             allowlist_key = f"{agent_key}_agent_allowed_tools"
             allowlist = getattr(settings, allowlist_key, None) or []
-
-        # Create tool_search with the agent's allowlist
         tool_search = create_tool_search_tool(allowlist=allowlist)
-        if tool_search.name not in tool_map:
-            tool_map[tool_search.name] = tool_search
+        tools = list(initialized_tools)
+        if not any(getattr(t, "name", None) == tool_search.name for t in tools):
+            tools.append(tool_search)
+
+    tool_map = {t.name: t for t in tools if getattr(t, "name", None)}
 
     return tool_map
 

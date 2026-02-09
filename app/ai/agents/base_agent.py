@@ -65,7 +65,7 @@ class BaseAgent(ABC):
                 agent_type=self.agent_config_key,
                 model_override=self.model_name,
             )
-            logger.info(
+            logger.debug(
                 f"Initialized Gemini client and LangChain model with model: {self.model_name}"
             )
         except Exception as e:
@@ -114,13 +114,13 @@ class BaseAgent(ABC):
 
             # Log tool refresh with generation info
             if self._tools_generation_seen > 0:
-                logger.info(
+                logger.debug(
                     f"Refreshed tools for {self.agent_id} (generation={current_generation}): "
                     f"{len(self.tools)} tools (from {len(unique_tools)} available) "
                     f"from {len(active_servers)} active servers"
                 )
             else:
-                logger.info(
+                logger.debug(
                     f"Initialized {len(self.tools)} tools (from {len(unique_tools)} available) "
                     f"for {self.agent_id} from {len(active_servers)} MCP servers"
                 )
@@ -401,7 +401,6 @@ class BaseAgent(ABC):
                 "temperature", 1.0
             )
             used_fallback = False
-            fallback_reason: Optional[str] = None
             openai_api_key: Optional[str] = None
             openai_reasoning_summary_requested = False
 
@@ -459,7 +458,6 @@ class BaseAgent(ABC):
                         openai_reasoning_summary_requested = include_reasoning_summary
                     else:
                         used_fallback = True
-                        fallback_reason = "OpenAI provider selected but no API key is configured for this user"
                         provider = "gemini"
                         effective_model_name = self.model_name
                         effective_temperature = AGENT_CONFIG.get(
@@ -572,7 +570,6 @@ class BaseAgent(ABC):
                         except Exception as exc2:
                             # Retry exhausted or provider error: fall back to Gemini defaults.
                             used_fallback = True
-                            fallback_reason = f"{type(exc2).__name__}"
                             provider = "gemini"
                             effective_model_name = self.model_name
                             effective_temperature = AGENT_CONFIG.get(
@@ -590,7 +587,6 @@ class BaseAgent(ABC):
                     else:
                         # Retry exhausted or provider error: fall back to Gemini defaults.
                         used_fallback = True
-                        fallback_reason = f"{type(exc).__name__}"
                         provider = "gemini"
                         effective_model_name = self.model_name
                         effective_temperature = AGENT_CONFIG.get(
@@ -642,16 +638,8 @@ class BaseAgent(ABC):
                 "provider": provider,
                 "conversation_id": conversation_id,
                 "has_tool_calls": tool_calls is not None,
-                "tool_count": len(self.tools),
                 "token_breakdown": token_breakdown.to_dict(),
             }
-
-            if used_fallback:
-                metadata["provider_fallback"] = {
-                    "from": "openai",
-                    "to": "gemini",
-                    "reason": fallback_reason or "fallback",
-                }
 
             if thinking:
                 metadata["thinking"] = thinking

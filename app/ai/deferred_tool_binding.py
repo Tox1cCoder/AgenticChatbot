@@ -11,7 +11,6 @@ agents bind:
 This follows the Claude-style pattern for reducing tool schema token bloat.
 """
 
-import logging
 from typing import List, Optional, Set
 
 from langchain_core.tools import BaseTool
@@ -20,8 +19,6 @@ from ..core.config import settings
 from .mcp_integration import MCPManager
 from .deferred_tool_state import get_deferred_tool_state
 from .tool_search_tool import create_tool_search_tool
-
-logger = logging.getLogger(__name__)
 
 
 def get_pinned_tools(

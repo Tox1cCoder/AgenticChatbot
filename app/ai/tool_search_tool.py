@@ -204,7 +204,7 @@ async def _execute_tool_search(
     latency_ms = (time.time() - start_time) * 1000
 
     # Log search completion with metrics
-    logger.info(
+    logger.debug(
         "tool_search completed: latency=%.1fms results=%d autoloaded=%d "
         "truncated=%s conversation=%s agent=%s",
         latency_ms,
@@ -274,7 +274,7 @@ def create_tool_search_tool(allowlist: Optional[List[str]] = None):
         A LangChain tool configured for tool search
     """
 
-    @tool(args_schema=ToolSearchInput, name="tool_search")
+    @tool("tool_search", args_schema=ToolSearchInput)
     async def tool_search_impl(
         query: Optional[str] = None,
         top_k: Optional[int] = None,

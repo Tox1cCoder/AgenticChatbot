@@ -407,7 +407,7 @@ class Settings(BaseSettings):
         description="Tool names or server names that chat agent can use. Empty = all tools.",
     )
     search_agent_allowed_tools: List[str] = Field(
-        default=["tavily", "time"],
+        default=[],
         description="Tool names or server names that search agent can use. Empty = all tools.",
     )
     rag_agent_allowed_tools: List[str] = Field(
@@ -529,7 +529,7 @@ class Settings(BaseSettings):
 
     # MCP Tool Search Configuration (Deferred Loading)
     mcp_tool_search_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Enable deferred MCP tool loading via tool_search. When enabled, only tool_search + pinned tools are bound by default.",
     )
     mcp_tool_search_default_top_k: int = Field(

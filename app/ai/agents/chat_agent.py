@@ -8,10 +8,7 @@ from langchain_core.messages import HumanMessage
 from .base_agent import BaseAgent
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_chat_prompt, CHAT_SYSTEM_PROMPT
-from ..utils import (
-    coerce_response_text,
-    get_error_recovery_hint,
-)
+from ..utils import coerce_response_text
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +140,6 @@ class ChatAgent(BaseAgent):
             "model": self.model_name,
             "conversation_id": conversation_id,
             "context_messages": len(conversation_history),
-            "tools_available": len(self.tools),
             "persona_used": persona,
         }
 
@@ -169,22 +165,6 @@ class ChatAgent(BaseAgent):
             return response.text if hasattr(response, "text") else str(response)
         except Exception as exc:
             raise RuntimeError(f"Gemini API error: {exc}") from exc
-
-    async def _handle_generation_error(self, prompt: str, error: Exception) -> str:
-        error_message = f"{type(error).__name__}: {error}"
-        recovery_hint = get_error_recovery_hint(error, "chat_agent", {})
-
-        fallback_prompt = (
-            f"{prompt}\n\n"
-            "SYSTEM NOTE FOR ASSISTANT:\n"
-            "You attempted to respond to the user but encountered a system error.\n"
-            f"Error details: {error_message}\n"
-            f"Recovery hint: {recovery_hint}\n\n"
-            "Compose a concise, empathetic reply to the user acknowledging the issue and, if possible, suggesting a next step."
-        )
-
-        fallback_response = await self._generate(fallback_prompt)
-        return coerce_response_text(fallback_response)
 
     async def _generate_with_vision(self, prompt: str, attachments: List[dict]) -> str:
         """Generate response with vision support using multimodal content"""

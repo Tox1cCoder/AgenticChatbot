@@ -69,6 +69,27 @@ class PlanningAgent(BaseAgent):
             internal_tools=combined_internal,
         )
 
+    def _get_tools_for_binding(
+        self,
+        conversation_id: Optional[str] = None,
+        internal_tools: Optional[List[BaseTool]] = None,
+    ) -> List[BaseTool]:
+        """
+        Ensure write_todos is always present in both binding and execution maps.
+        """
+        write_todos_tool = create_write_todos_tool()
+        combined_internal = [write_todos_tool]
+
+        if internal_tools:
+            for tool in internal_tools:
+                if tool.name != write_todos_tool.name:
+                    combined_internal.append(tool)
+
+        return super()._get_tools_for_binding(
+            conversation_id=conversation_id,
+            internal_tools=combined_internal,
+        )
+
     async def _init_tools(self):
         # Initialize MCP tools from parent.
         await super()._init_tools()

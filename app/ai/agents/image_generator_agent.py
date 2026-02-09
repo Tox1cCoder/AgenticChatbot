@@ -110,7 +110,10 @@ class ImageGeneratorAgent(BaseAgent):
                         content=coerce_response_text(response.content),
                         tool_calls=tool_calls,
                     ),
-                    metadata={"tools_available": len(self.tools)},
+                    metadata={
+                        "model": self.model_name,
+                        "conversation_id": conversation_id,
+                    },
                 )
 
             # If no tool calls, the content is the Enhanced Prompt.
@@ -125,7 +128,6 @@ class ImageGeneratorAgent(BaseAgent):
                 "model": self.model_name,
                 "conversation_id": conversation_id,
                 "images": images,
-                "tools_available": len(self.tools),
             }
 
             return AgentResponse(
