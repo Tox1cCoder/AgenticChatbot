@@ -1,8 +1,10 @@
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage
+from langgraph.graph.message import RemoveMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from ..core.config import settings
@@ -16,18 +18,21 @@ logger = logging.getLogger(__name__)
 class SummarizationConfig:
     """Configuration for summarization behavior."""
 
-    trigger_tokens: int = 20000
-    trigger_messages: int = 50
-    trigger_fraction: float = 0.8
+    trigger_tokens: int = 18000
+    trigger_messages: int = 60
+    trigger_fraction: float = 0.55
 
-    keep_messages: int = 20  # Keep the last N messages (most recent context)
+    keep_messages: int = 8  # Keep the last N messages (most recent context)
 
     # Model context window size (for fraction calculation)
-    model_context_size: int = 1000000
+    model_context_size: int = 128000
 
     # Summarization model
     model: str = "gemini-3-flash-preview"
-    temperature: float = 1.0
+    temperature: float = 0.2
+
+    # Hard cap on the rolling summary (estimated tokens ≈ chars / 4).
+    max_summary_tokens: int = 1500
 
 
 # Default summarization prompt
@@ -41,17 +46,35 @@ Conversation:
 
 Provide a clear, structured summary in bullet points:"""
 
+# Rolling / incremental summarization prompt (merges existing summary with new messages)
+ROLLING_SUMMARIZATION_PROMPT = """You are a conversation summarizer. You have an existing summary and new messages to incorporate.
+
+EXISTING SUMMARY:
+{existing_summary}
+
+NEW MESSAGES TO INCORPORATE:
+{messages}
+
+Merge the existing summary with the new information. Produce a single, concise, updated summary in bullet points that preserves:
+- Key facts, names, and decisions made
+- Important context for continuing the conversation
+- Tool calls and their results (summarized)
+- Drop details that are superseded or no longer relevant
+
+Updated summary:"""
+
 
 def _get_config() -> SummarizationConfig:
     """Get summarization config from settings."""
     return SummarizationConfig(
-        trigger_tokens=getattr(settings, "summarization_trigger_tokens", 20000),
-        trigger_messages=getattr(settings, "summarization_trigger_messages", 50),
-        trigger_fraction=getattr(settings, "summarization_trigger_fraction", 0.8),
-        keep_messages=getattr(settings, "summarization_keep_messages", 20),
-        model_context_size=getattr(settings, "summarization_model_context_size", 1000000),
+        trigger_tokens=getattr(settings, "summarization_trigger_tokens", 18000),
+        trigger_messages=getattr(settings, "summarization_trigger_messages", 60),
+        trigger_fraction=getattr(settings, "summarization_trigger_fraction", 0.55),
+        keep_messages=getattr(settings, "summarization_keep_messages", 8),
+        model_context_size=getattr(settings, "summarization_model_context_size", 128000),
         model=getattr(settings, "summarization_model", "gemini-3-flash-preview"),
-        temperature=1.0,
+        temperature=0.2,
+        max_summary_tokens=getattr(settings, "summarization_max_summary_tokens", 1500),
     )
 
 
@@ -150,8 +173,9 @@ def _get_summarization_model(config: SummarizationConfig) -> ChatGoogleGenerativ
 async def generate_summary(
     messages_to_summarize: List[BaseMessage],
     config: Optional[SummarizationConfig] = None,
+    existing_summary: Optional[str] = None,
 ) -> str:
-    """Generate a summary of the given messages."""
+    """Generate a summary of the given messages, optionally merging with an existing summary."""
     if config is None:
         config = _get_config()
 
@@ -159,15 +183,36 @@ async def generate_summary(
         model = _get_summarization_model(config)
 
         formatted_messages = _format_messages_for_summary(messages_to_summarize)
-        prompt = SUMMARIZATION_PROMPT.format(messages=formatted_messages)
+
+        if existing_summary:
+            prompt = ROLLING_SUMMARIZATION_PROMPT.format(
+                existing_summary=existing_summary,
+                messages=formatted_messages,
+            )
+        else:
+            prompt = SUMMARIZATION_PROMPT.format(messages=formatted_messages)
 
         response = await model.ainvoke([HumanMessage(content=prompt)])
 
         summary = coerce_response_text(response.content)
 
+        # Hard-cap: truncate if the summary exceeds the configured budget.
+        # A max_summary_tokens of 0 means unlimited (no truncation).
+        max_chars = config.max_summary_tokens * 4  # rough token-to-char ratio
+        if max_chars > 0 and len(summary) > max_chars:
+            summary = summary[:max_chars].rsplit("\n", 1)[0] + "\n[...truncated]"
+            logger.info(
+                "Truncated summary from %d to %d chars (max_summary_tokens=%d)",
+                len(coerce_response_text(response.content)),
+                len(summary),
+                config.max_summary_tokens,
+            )
+
         logger.debug(
-            f"Generated summary for {len(messages_to_summarize)} messages "
-            f"({len(summary)} chars)"
+            "Generated %ssummary for %d messages (%d chars)",
+            "rolling " if existing_summary else "",
+            len(messages_to_summarize),
+            len(summary),
         )
         return summary
 
@@ -180,33 +225,57 @@ async def generate_summary(
 def apply_summarization_to_state(
     state: Dict[str, Any],
     summary: str,
+    messages_to_remove: List[BaseMessage],
     config: Optional[SummarizationConfig] = None,
 ) -> Dict[str, Any]:
+    """
+    Apply summarization results to graph state using explicit RemoveMessage
+    entries so the ``add_messages`` reducer correctly deletes covered messages
+    from the checkpoint instead of list-overwrite (which doesn't work with the
+    reducer).
+
+    Updates the rolling ``history_summary`` state key instead of injecting a
+    SystemMessage into the messages list — the summary is injected into agent
+    prompts at invocation time (Phase 3).
+    """
     if config is None:
         config = _get_config()
 
-    messages = state.get("messages", [])
+    # Build RemoveMessage entries for every message that was summarized.
+    # The add_messages reducer will delete messages with these IDs.
+    removals: List[RemoveMessage] = []
+    for msg in messages_to_remove:
+        msg_id = getattr(msg, "id", None)
+        if msg_id:
+            removals.append(RemoveMessage(id=msg_id))
 
-    # Separate system messages (keep all)
-    system_messages = [m for m in messages if isinstance(m, SystemMessage)]
-    non_system = [m for m in messages if not isinstance(m, SystemMessage)]
+    if removals:
+        state.setdefault("messages", []).extend(removals)
 
-    # Keep only recent messages
-    messages_to_keep = non_system[-config.keep_messages:]
+    # Record the cursor: the ID of the last message that was summarized.
+    # Future summarization runs can use this to avoid re-summarizing.
+    last_summarized = messages_to_remove[-1] if messages_to_remove else None
+    cursor_id = getattr(last_summarized, "id", None) if last_summarized else None
 
-    # Create summary message as SystemMessage
-    summary_message = SystemMessage(
-        content=f"[Summary of previous conversation]\n{summary}\n[End of summary]\n"
-    )
+    # Update rolling summary state keys
+    state["history_summary"] = summary
+    state["history_summary_updated_at"] = datetime.now(timezone.utc).isoformat()
+    if cursor_id:
+        state["summary_cursor_message_id"] = str(cursor_id)
 
-    state["messages"] = system_messages + [summary_message] + messages_to_keep
-
-    # Mark that summarization happened in context
+    # Legacy context flags (kept for backward compatibility)
     context = state.get("context", {})
     context["conversation_summarized"] = True
     context["summary_text"] = summary
-    context["messages_summarized_count"] = len(non_system) - len(messages_to_keep)
+    context["messages_summarized_count"] = len(messages_to_remove)
     state["context"] = context
+
+    logger.info(
+        "Applied summarization: removed %d messages, summary %d chars, cursor=%s",
+        len(removals),
+        len(summary),
+        cursor_id,
+    )
 
     return state
 
@@ -219,14 +288,18 @@ async def summarize_for_state(
     Main entry point for graph-level summarization.
 
     This function should be called from a graph node at the START of each request.
-    It checks if summarization is needed and applies it by mutating state.
+    It checks if summarization is needed and applies it using explicit
+    ``RemoveMessage`` entries (compatible with the ``add_messages`` reducer).
+
+    The rolling summary is stored in ``state["history_summary"]`` and merged
+    incrementally on subsequent triggers.
 
     Args:
         state: The LangGraph state dictionary
         config: Optional configuration override
 
     Returns:
-        Modified state (may have messages replaced with summary)
+        Modified state (old messages removed, summary updated)
     """
     if config is None:
         config = _get_config()
@@ -243,15 +316,20 @@ async def summarize_for_state(
     # Separate messages
     non_system = [m for m in messages if not isinstance(m, SystemMessage)]
 
-    # Calculate split point
+    # Calculate split point — keep the most recent `keep_messages`
     split_point = len(non_system) - config.keep_messages
     messages_to_summarize = non_system[:split_point]
 
     if not messages_to_summarize:
         return state
 
-    # Generate summary
-    summary = await generate_summary(messages_to_summarize, config)
+    # Get existing rolling summary for incremental merge
+    existing_summary = state.get("history_summary")
 
-    # Apply to state (REPLACE, not append)
-    return apply_summarization_to_state(state, summary, config)
+    # Generate (or merge) summary
+    summary = await generate_summary(
+        messages_to_summarize, config, existing_summary=existing_summary
+    )
+
+    # Apply to state using RemoveMessage (not list replacement)
+    return apply_summarization_to_state(state, summary, messages_to_summarize, config)

@@ -21,10 +21,12 @@ class ConversationMemory:
         conversation_id: UUID,
         user_id: UUID,
         batch_size: int = 100,
+        max_messages: int = 0,
     ):
         self.conversation_id = conversation_id
         self.user_id = user_id
         self.batch_size = max(1, batch_size)
+        self.max_messages = max(0, max_messages)
         self._messages: deque[AgentMessage] = deque()
         self._message_repo = MessageCRUDStrategy(Message)
         self._initialized = False
@@ -75,6 +77,14 @@ class ConversationMemory:
                 agent_msg = self._db_to_agent_message(msg)
                 if agent_msg:
                     collected.append(agent_msg)
+
+                # Stop early when memory_max_messages limit reached
+                if self.max_messages > 0 and len(collected) >= self.max_messages:
+                    break
+
+            # Stop paging if we've hit the cap
+            if self.max_messages > 0 and len(collected) >= self.max_messages:
+                break
 
             if paginator.meta.last_page <= page:
                 break
@@ -144,8 +154,10 @@ class MemoryManager:
     def __init__(
         self,
         batch_size: int = 100,
+        max_messages: int = 0,
     ):
         self.batch_size = max(1, batch_size)
+        self.max_messages = max(0, max_messages)
         self._memories: Dict[str, ConversationMemory] = {}
 
     async def get_memory(
@@ -158,6 +170,7 @@ class MemoryManager:
                 conversation_id,
                 user_id,
                 self.batch_size,
+                max_messages=self.max_messages,
             )
             self._memories[key] = memory
             await memory.initialize()
@@ -186,5 +199,6 @@ def get_memory_manager() -> MemoryManager:
     if _memory_manager is None:
         _memory_manager = MemoryManager(
             batch_size=settings.memory_load_batch_size,
+            max_messages=settings.memory_max_messages,
         )
     return _memory_manager

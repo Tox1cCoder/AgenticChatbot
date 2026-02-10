@@ -840,6 +840,7 @@ class MultiAgentWorkflow:
             conversation_id,
             user_id=user_id,
             model_request=state.get("model_request"),
+            history_summary=state.get("history_summary"),
         )
 
         self._merge_tool_artifacts(state, response)
@@ -886,6 +887,7 @@ class MultiAgentWorkflow:
             ),  # Pass images for multimodal LLM
             "model_request": state.get("model_request"),
             "user_id": user_id,
+            "history_summary": state.get("history_summary"),
         }
 
         agent_msg = AgentMessage(
@@ -1142,6 +1144,7 @@ class MultiAgentWorkflow:
             conversation_id,
             user_id=user_id,
             model_request=state.get("model_request"),
+            history_summary=state.get("history_summary"),
         )
 
         self._merge_tool_artifacts(state, response)
@@ -1154,6 +1157,8 @@ class MultiAgentWorkflow:
 
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
+        # NOTE: Image generator deliberately borrows the "chat" history budget.
+        # If independent tuning is needed, add image_generator_history_max_* settings.
         conversation_history = await self._get_conversation_history(
             conversation_id, user_id, agent_key="chat"
         )
@@ -1167,6 +1172,7 @@ class MultiAgentWorkflow:
             conversation_id,
             user_id=user_id,
             model_request=state.get("model_request"),
+            history_summary=state.get("history_summary"),
         )
 
         self._merge_tool_artifacts(state, response, append_images=True)
@@ -1229,6 +1235,7 @@ class MultiAgentWorkflow:
             conversation_id=conversation_id,
             user_id=user_id,
             model_request=state.get("model_request"),
+            history_summary=state.get("history_summary"),
             todos=todos,
             current_task_index=current_task_index,
             planning_phase=planning_phase,
@@ -1786,6 +1793,81 @@ class MultiAgentWorkflow:
             and not settings.agentic_rag_enabled
             and rag_provider != "openai"
         ):
+            # ── Fast-path summarization parity ──
+            # The LangGraph pipeline (summarize node) is bypassed on this
+            # path.  Load any existing history_summary from checkpoint state
+            # and run the summarization check so behaviour matches the
+            # graph-backed path.
+            history_summary: Optional[str] = None
+            if self.checkpointer and thread_id:
+                try:
+                    cp_snapshot = await self.graph.aget_state(config)
+                    cp_values = cp_snapshot.values if cp_snapshot else {}
+                    history_summary = cp_values.get("history_summary")
+
+                    # Run summarization against checkpoint messages so
+                    # the summary stays up-to-date even when only the
+                    # fast path is used.
+                    cp_messages = cp_values.get("messages", [])
+                    if cp_messages:
+                        from .summarization_middleware import (
+                            should_summarize,
+                            generate_summary,
+                        )
+
+                        # NOTE: ignore the persisted conversation_summarized
+                        # flag — it is a per-request guard, not a permanent
+                        # lock.  On the fast path each request is a fresh
+                        # opportunity to run rolling summarization.
+                        if should_summarize(cp_messages, already_summarized=False):
+                            from .summarization_middleware import (
+                                apply_summarization_to_state,
+                                _get_config as _get_summ_config,
+                            )
+                            from langchain_core.messages import SystemMessage as _SM
+
+                            s_cfg = _get_summ_config()
+                            non_sys = [
+                                m for m in cp_messages if not isinstance(m, _SM)
+                            ]
+                            split = len(non_sys) - s_cfg.keep_messages
+                            to_summarize = non_sys[:split]
+                            if to_summarize:
+                                history_summary = await generate_summary(
+                                    to_summarize,
+                                    s_cfg,
+                                    existing_summary=history_summary,
+                                )
+                                # Persist the updated summary back into
+                                # checkpoint via a minimal graph update.
+                                _tmp_state: Dict[str, Any] = {
+                                    "messages": cp_messages,
+                                    "context": cp_values.get("context", {}),
+                                }
+                                apply_summarization_to_state(
+                                    _tmp_state, history_summary, to_summarize, s_cfg
+                                )
+                                await self.graph.aupdate_state(
+                                    config,
+                                    {
+                                        "history_summary": _tmp_state["history_summary"],
+                                        "history_summary_updated_at": _tmp_state[
+                                            "history_summary_updated_at"
+                                        ],
+                                        "summary_cursor_message_id": _tmp_state.get(
+                                            "summary_cursor_message_id"
+                                        ),
+                                        "messages": _tmp_state["messages"],
+                                        "context": _tmp_state["context"],
+                                    },
+                                )
+                except Exception as e:
+                    logger.warning(
+                        "Fast-path summarization/checkpoint read failed "
+                        "(continuing without summary): %s",
+                        e,
+                    )
+
             conversation_history = await self._get_conversation_history(
                 conversation_id, user_id, agent_key="rag"
             )
@@ -1798,11 +1880,13 @@ class MultiAgentWorkflow:
                     "persona": persona,
                     "model_request": initial_state.get("model_request"),
                     "user_id": user_id,
+                    "history_summary": history_summary,
                 },
                 attachments=attachments,
             )
 
             try:
+                fast_path_response: Optional[AgentResponse] = None
                 async for event in self.rag_agent.stream_message(
                     agent_msg, conversation_id
                 ):
@@ -1810,11 +1894,41 @@ class MultiAgentWorkflow:
                     if event_type in ["thinking", "token", "tool_start", "tool_end"]:
                         yield event
                     elif event_type == "complete":
-                        if event.get("response"):
+                        fast_path_response = event.get("response")
+                        if fast_path_response:
                             yield {
                                 "type": "complete",
-                                "response": event.get("response"),
+                                "response": fast_path_response,
                             }
+                        # ── Persist turn to checkpoint ──
+                        # The fast path bypasses graph execution, so
+                        # user + assistant messages are never written
+                        # to checkpoint state.  Append them now so that
+                        # subsequent summarization runs see the full
+                        # conversation.
+                        if self.checkpointer and thread_id:
+                            try:
+                                reply_content = (
+                                    fast_path_response.message.content
+                                    if fast_path_response
+                                    and fast_path_response.message
+                                    else ""
+                                )
+                                await self.graph.aupdate_state(
+                                    config,
+                                    {
+                                        "messages": [
+                                            HumanMessage(content=message),
+                                            AIMessage(content=reply_content),
+                                        ],
+                                    },
+                                )
+                            except Exception as cp_err:
+                                logger.warning(
+                                    "Fast-path: failed to persist turn "
+                                    "to checkpoint: %s",
+                                    cp_err,
+                                )
                         return
                     elif event_type == "error":
                         yield event

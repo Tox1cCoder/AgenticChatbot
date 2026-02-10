@@ -250,7 +250,7 @@ class MCPManager:
                 if key in unsupported_keys:
                     continue
 
-                # Skip None values - Gemini can't handle them in schemas
+                # Skip None values
                 if value is None:
                     continue
 
@@ -312,16 +312,15 @@ class MCPManager:
             )
             if tool_had_no_schema:
                 # Add empty properties schema for tools without args_schema
-                # to satisfy OpenAI's requirement
-                # Note: Only set to dict for tools that originally had None
+                # Only set to dict for tools that originally had None
                 tool.args_schema = {"type": "object", "properties": {}}
                 cleaned_tools.append(tool)
                 continue
 
             args_schema = tool.args_schema
 
-            # Some MCP adapters expose JSON-schema dicts directly.
-            # Sanitize those in-place (schema-only) to keep GenAI tool formatting happy.
+            # Some MCP adapters expose JSON-schema dicts directly
+            # Sanitize those in-place (schema-only)
             if isinstance(args_schema, dict):
                 filtered = self._filter_schema_recursively(args_schema)
                 tool.args_schema = self._remove_non_string_enums(filtered)
@@ -351,7 +350,6 @@ class MCPManager:
                     if isinstance(schema, dict):
                         schema = self._filter_schema_recursively(schema)
                         schema = self._remove_non_string_enums(schema)
-                        # Ensure OpenAI-compatible schema
                         if not schema.get("properties"):
                             schema["properties"] = {}
                         if not schema.get("type"):

@@ -108,8 +108,9 @@ class PlanningAgent(BaseAgent):
         current_task_index: Optional[int] = None,
         planning_phase: Optional[str] = None,
         should_describe_plan: bool = False,
+        **kwargs: Any,
     ) -> str:
-        base_prompt = super()._build_system_prompt(persona, has_tool_context)
+        base_prompt = super()._build_system_prompt(persona, has_tool_context, **kwargs)
 
         phase = planning_phase or "planning"
         if phase == "planning":

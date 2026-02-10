@@ -140,6 +140,10 @@ class GraphState(TypedDict):
     planning_call_count: NotRequired[Optional[int]]
     # Planning phase: "planning" = create/edit only, "executing" = work through tasks
     planning_phase: NotRequired[Optional[str]]
+    # Rolling conversation summary memory (checkpoint-backed)
+    history_summary: NotRequired[Optional[str]]
+    history_summary_updated_at: NotRequired[Optional[str]]
+    summary_cursor_message_id: NotRequired[Optional[str]]
 
 
 class Task(BaseModel):

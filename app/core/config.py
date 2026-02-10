@@ -1,8 +1,9 @@
+import logging
 from functools import lru_cache
 from typing import List
 import os
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from pathlib import Path
@@ -188,22 +189,22 @@ class Settings(BaseSettings):
     )
     memory_load_batch_size: int = Field(
         default=100,
-        description="Number of messages to load per batch when hydrating memory from the database",
+        description="Number of messages to load per batch when hydrating memory from the database (max 100)",
     )
     chat_history_max_messages: int = Field(
-        default=0,
+        default=24,
         description="Maximum prior messages to include when building chat prompts (0 = no limit)",
     )
     chat_history_max_tokens: int = Field(
-        default=0,
+        default=9000,
         description="Approximate maximum tokens of chat history to include in prompts (0 = no limit)",
     )
     rag_history_max_messages: int = Field(
-        default=0,
+        default=12,
         description="Maximum prior messages to include when building RAG prompts (0 = no limit)",
     )
     rag_history_max_tokens: int = Field(
-        default=0,
+        default=3000,
         description="Approximate maximum tokens of RAG history to include in prompts (0 = no limit)",
     )
 
@@ -213,28 +214,34 @@ class Settings(BaseSettings):
         description="Enable automatic conversation summarization for long conversations",
     )
     summarization_trigger_tokens: int = Field(
-        default=20000,
+        default=18000,
         description="Trigger summarization when estimated tokens exceed this threshold",
     )
     summarization_trigger_messages: int = Field(
-        default=20,
+        default=60,
         description="Trigger summarization when message count exceeds this threshold",
     )
     summarization_trigger_fraction: float = Field(
-        default=0.8,
+        default=0.55,
         description="Trigger summarization when context usage exceeds this fraction of model's context window (0.0-1.0)",
     )
     summarization_model_context_size: int = Field(
-        default=1000000,
-        description="Model context window size in tokens",
+        default=128000,
+        description="Model context window size in tokens (cross-provider practical baseline)",
     )
     summarization_keep_messages: int = Field(
-        default=10,
+        default=8,
         description="Number of recent messages to keep after summarization",
     )
     summarization_model: str = Field(
         default="gemini-3-flash-preview",
         description="Model to use for generating conversation summaries",
+    )
+    summarization_max_summary_tokens: int = Field(
+        default=1500,
+        description="Hard cap on rolling summary size in estimated tokens. "
+        "Summaries exceeding this limit are truncated to stay within budget. "
+        "Set to 0 for unlimited (no truncation).",
     )
 
     # Redis Configuration
@@ -340,12 +347,22 @@ class Settings(BaseSettings):
 
     # Search Agent Configuration
     search_history_max_messages: int = Field(
-        default=0,
+        default=16,
         description="Maximum prior messages to include when building search prompts (0 = no limit)",
     )
     search_history_max_tokens: int = Field(
-        default=0,
+        default=5000,
         description="Approximate maximum tokens of search history to include in prompts (0 = no limit)",
+    )
+
+    # Planning Agent History Configuration
+    planning_history_max_messages: int = Field(
+        default=16,
+        description="Maximum prior messages to include when building planning prompts (0 = no limit)",
+    )
+    planning_history_max_tokens: int = Field(
+        default=5000,
+        description="Approximate maximum tokens of planning history to include in prompts (0 = no limit)",
     )
 
     # ReAct Agent Configuration
@@ -392,7 +409,7 @@ class Settings(BaseSettings):
 
     # Tool Result Token Management
     tool_result_max_chars: int = Field(
-        default=8000,
+        default=4000,
         description="Maximum characters to include in ToolMessage content sent to model (0 = no limit). Full output is preserved in artifacts for UI.",
     )
     tool_result_truncation_suffix: str = Field(
@@ -565,6 +582,84 @@ class Settings(BaseSettings):
         description="Log tool_search queries (disable in production to avoid logging sensitive queries).",
     )
 
+    # ── Validators ──────────────────────────────────────────────────────
+
+    @field_validator(
+        "chat_history_max_messages",
+        "chat_history_max_tokens",
+        "rag_history_max_messages",
+        "rag_history_max_tokens",
+        "search_history_max_messages",
+        "search_history_max_tokens",
+        "planning_history_max_messages",
+        "planning_history_max_tokens",
+        "summarization_trigger_tokens",
+        "summarization_trigger_messages",
+        "summarization_keep_messages",
+        "summarization_model_context_size",
+        "memory_max_messages",
+        "memory_load_batch_size",
+        "tool_result_max_chars",
+        "summarization_max_summary_tokens",
+        mode="before",
+    )
+    @classmethod
+    def _non_negative_int(cls, v: int) -> int:
+        v = int(v)
+        if v < 0:
+            raise ValueError("Value must be non-negative")
+        return v
+
+    @field_validator("summarization_trigger_fraction", mode="before")
+    @classmethod
+    def _validate_trigger_fraction(cls, v: float) -> float:
+        v = float(v)
+        if not (0.0 < v <= 1.0):
+            raise ValueError(
+                "summarization_trigger_fraction must be in the range (0.0, 1.0]"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _cross_field_checks(self) -> "Settings":
+        if self.summarization_keep_messages >= self.summarization_trigger_messages:
+            raise ValueError(
+                f"summarization_keep_messages ({self.summarization_keep_messages}) "
+                f"must be less than summarization_trigger_messages ({self.summarization_trigger_messages})"
+            )
+        if self.summarization_model_context_size < self.summarization_trigger_tokens:
+            raise ValueError(
+                f"summarization_model_context_size ({self.summarization_model_context_size}) "
+                f"must be >= summarization_trigger_tokens ({self.summarization_trigger_tokens})"
+            )
+        return self
+
+
+def _log_startup_warnings(s: "Settings") -> None:
+    """Log warnings for settings that may indicate misconfiguration."""
+    _logger = logging.getLogger(__name__)
+    zero_budget_fields = []
+    for attr in (
+        "chat_history_max_messages",
+        "chat_history_max_tokens",
+        "rag_history_max_messages",
+        "rag_history_max_tokens",
+        "search_history_max_messages",
+        "search_history_max_tokens",
+        "planning_history_max_messages",
+        "planning_history_max_tokens",
+    ):
+        if getattr(s, attr, 0) == 0:
+            zero_budget_fields.append(attr)
+
+    if zero_budget_fields and s.environment != "development":
+        _logger.warning(
+            "History budget(s) set to 0 (unlimited) in '%s' environment — "
+            "this may cause unbounded prompt growth: %s",
+            s.environment,
+            ", ".join(zero_budget_fields),
+        )
+
 
 @lru_cache()
 def get_settings() -> Settings:
@@ -579,3 +674,6 @@ def get_settings() -> Settings:
 
 # Create a global settings instance
 settings = get_settings()
+
+# Emit startup warnings for potentially misconfigured budgets
+_log_startup_warnings(settings)
