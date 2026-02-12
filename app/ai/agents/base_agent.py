@@ -25,9 +25,7 @@ from ..mcp_integration import get_global_mcp_manager
 from ..mcp_registry import get_mcp_tools_generation
 from ..token_instrumentation import (
     compute_token_breakdown,
-    extract_actual_usage,
-    log_token_breakdown,
-    TokenBudgetExceededWarning,
+    extract_actual_usage
 )
 from ..deferred_tool_binding import (
     should_use_deferred_loading,
@@ -524,20 +522,8 @@ class BaseAgent(ABC):
                 current_turn_messages=messages,
                 tools=bound_tools if bound_tools else None,
             )
-            log_token_breakdown(
-                breakdown=token_breakdown,
-                agent_id=self.agent_id,
-                conversation_id=conversation_id,
-                level=logging.DEBUG,
-            )
-            # Check for budget warnings
-            TokenBudgetExceededWarning.check_and_warn(
-                breakdown=token_breakdown,
-                agent_id=self.agent_id,
-            )
 
             # This ensures it runs ONCE per request, not on every agent iteration
-            # (prevents context bloat during ReAct loops)
             if provider == "openai" and not used_fallback:
                 try:
                     response = await self._ainvoke_with_retries(

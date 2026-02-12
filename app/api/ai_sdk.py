@@ -1,5 +1,6 @@
 import json
 import asyncio
+import base64
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, AsyncGenerator
 from uuid import UUID, uuid4
@@ -65,6 +66,113 @@ def _extract_user_text(messages: List[Dict[str, Any]]) -> str:
             return text.strip()
 
     return ""
+
+
+def _extract_data_from_candidate(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+
+    payload = value.strip()
+    if not payload:
+        return None
+
+    if payload.startswith("data:"):
+        _, _, b64 = payload.partition(",")
+        return b64.strip() or None
+
+    return payload
+
+
+def _extract_user_attachments(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """
+    Extract image attachments from the most recent user message in AI SDK payload.
+    Supports common UI payload variants:
+    - parts/content list entries with `type=image|file`
+    - message-level `attachments` / `experimental_attachments`
+    - data URLs and raw base64 payloads
+    """
+    for msg in reversed(messages or []):
+        if msg.get("role") != "user":
+            continue
+
+        candidates: List[Any] = []
+
+        # Parts-based message formats
+        parts = msg.get("parts")
+        content = msg.get("content")
+        if not isinstance(parts, list) and isinstance(content, list):
+            parts = content
+        if isinstance(parts, list):
+            candidates.extend(parts)
+
+        # Attachment-based message formats
+        for key in ("attachments", "experimental_attachments", "files"):
+            value = msg.get(key)
+            if isinstance(value, list):
+                candidates.extend(value)
+
+        attachments: List[Dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+
+            item_type = str(item.get("type") or "").lower()
+            if item_type and item_type not in {"image", "file"}:
+                continue
+
+            mime = (
+                item.get("mime")
+                or item.get("mimeType")
+                or item.get("mediaType")
+                or item.get("contentType")
+                or "image/jpeg"
+            )
+            mime = str(mime).strip() if mime else "image/jpeg"
+
+            name = item.get("name") or item.get("filename") or "attachment"
+            name = str(name)
+
+            raw_data: Optional[str] = None
+            data_candidates: List[Any] = [
+                item.get("data"),
+                item.get("base64"),
+                item.get("url"),
+                item.get("image"),
+                item.get("source"),
+            ]
+            for candidate in data_candidates:
+                if isinstance(candidate, dict):
+                    candidate = (
+                        candidate.get("data")
+                        or candidate.get("base64")
+                        or candidate.get("url")
+                    )
+                extracted = _extract_data_from_candidate(candidate)
+                if extracted:
+                    raw_data = extracted
+                    break
+
+            if not raw_data:
+                continue
+
+            # Best-effort sanity check that payload is decodable base64.
+            try:
+                base64.b64decode(raw_data, validate=False)
+            except Exception:
+                continue
+
+            key = (mime, raw_data)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            attachments.append({"name": name, "mime": mime, "data": raw_data})
+
+        return attachments
+
+    return []
 
 
 def _sse(data: Dict[str, Any]) -> str:
@@ -600,7 +708,8 @@ async def chat_ui_message_stream(
     Vercel AI SDK UI Message Stream protocol (SSE).
     """
     user_text = _extract_user_text(payload.messages)
-    if not user_text:
+    user_attachments = _extract_user_attachments(payload.messages)
+    if not user_text and not user_attachments:
         raise HTTPException(status_code=400, detail="No user message found")
 
     state = StreamState(
@@ -618,8 +727,9 @@ async def chat_ui_message_stream(
 
             message_create = MessageCreate(
                 conversation_id=conversation_id,
-                content=user_text,
+                content=user_text or "Please analyze the attached image.",
                 role=MessageRole.user,
+                attachments=user_attachments or None,
             )
 
             async for event in message_service.create_message_stream(

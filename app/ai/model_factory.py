@@ -219,16 +219,24 @@ class ModelFactory:
         # For Gemini: converts to tool_config={"function_calling_config": {"mode": ...}}
         # For OpenAI: uses tool_choice parameter directly
         if isinstance(model, ChatGoogleGenerativeAI):
-            # Gemini requires tool_config parameter
-            return model.bind_tools(
-                tools,
-                tool_config={
-                    "function_calling_config": {"mode": tool_choice_normalized}
-                },
-            )
-        else:
-            # OpenAI and others use standard tool_choice parameter
+            if isinstance(tool_choice, str) and tool_choice.lower() in {
+                "auto",
+                "any",
+                "none",
+            }:
+                # Gemini function_calling_config mode for standard choices.
+                return model.bind_tools(
+                    tools,
+                    tool_config={
+                        "function_calling_config": {"mode": tool_choice_normalized}
+                    },
+                )
+
+            # For specific tool names/lists, use native tool_choice forwarding.
             return model.bind_tools(tools, tool_choice=tool_choice)
+
+        # OpenAI and others use standard tool_choice parameter
+        return model.bind_tools(tools, tool_choice=tool_choice)
 
 
 # Convenience function for backward compatibility

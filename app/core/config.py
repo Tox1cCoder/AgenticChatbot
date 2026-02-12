@@ -134,6 +134,10 @@ class Settings(BaseSettings):
         default="high",
         description="Media resolution for vision models: low, medium, high (Gemini 3 supports per-part resolution)",
     )
+    enable_gemini_code_execution: bool = Field(
+        default=True,
+        description="Enable Gemini code execution tool for agentic vision workflows across agents",
+    )
 
     # Image Generation Configuration
     enable_image_generation: bool = Field(

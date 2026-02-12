@@ -8,9 +8,10 @@ This module provides:
 """
 
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from google import genai
+from google.genai import types
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from ..core.config import settings
@@ -82,6 +83,66 @@ def create_gemini_client() -> genai.Client:
     """
     api_key = get_api_key()
     return genai.Client(api_key=api_key)
+
+
+def _build_thinking_config(model_name: str) -> Optional[types.ThinkingConfig]:
+    if not settings.enable_thinking:
+        return None
+
+    thinking_kwargs: Dict[str, Any] = {
+        "include_thoughts": settings.include_thoughts_in_response
+    }
+
+    if "2.5" in model_name or "flash-latest" in model_name.lower():
+        thinking_budget = settings.thinking_budget
+        if thinking_budget == -1:
+            thinking_budget = 8192
+        thinking_kwargs["thinking_budget"] = thinking_budget
+    else:
+        thinking_kwargs["thinking_level"] = settings.thinking_level
+
+    return types.ThinkingConfig(**thinking_kwargs)
+
+
+def build_gemini_generate_config(
+    model_name: str,
+    include_thinking: bool = True,
+    enable_code_execution: Optional[bool] = None,
+    **extra_config: Any,
+) -> Optional[types.GenerateContentConfig]:
+    """
+    Build a shared Gemini GenerateContentConfig used by direct SDK calls.
+
+    Includes:
+    - Thinking configuration (if enabled)
+    - Gemini code execution tool for Agentic Vision (if enabled)
+    - Optional extra config fields
+    """
+    config_kwargs: Dict[str, Any] = {}
+
+    if include_thinking:
+        thinking_config = _build_thinking_config(model_name)
+        if thinking_config is not None:
+            config_kwargs["thinking_config"] = thinking_config
+
+    use_code_execution = (
+        settings.enable_gemini_code_execution
+        if enable_code_execution is None
+        else bool(enable_code_execution)
+    )
+    if use_code_execution:
+        existing_tools = extra_config.pop("tools", None) or []
+        code_execution_tool = types.Tool(code_execution=types.ToolCodeExecution())
+        config_kwargs["tools"] = [*existing_tools, code_execution_tool]
+
+    for key, value in extra_config.items():
+        if value is not None:
+            config_kwargs[key] = value
+
+    if not config_kwargs:
+        return None
+
+    return types.GenerateContentConfig(**config_kwargs)
 
 
 def create_langchain_model(

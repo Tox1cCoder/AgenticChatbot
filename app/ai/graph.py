@@ -827,21 +827,47 @@ class MultiAgentWorkflow:
 
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
+        context = state.get("context", {})
         conversation_history = await self._get_conversation_history(
             conversation_id, user_id, agent_key="chat"
         )
 
-        current_turn_messages = self._get_current_turn_messages(messages)
+        attachments = context.get("attachments") or []
+        if attachments:
+            # Use attachment-aware chat flow for multimodal requests.
+            last_human_idx = self._find_last_human_message_index(messages)
+            user_content = (
+                messages[last_human_idx].content
+                if last_human_idx is not None
+                else (
+                    messages[-1].content
+                    if hasattr(messages[-1], "content")
+                    else str(messages[-1])
+                )
+            )
 
-        response = await self.chat_agent.invoke_model_with_history(
-            current_turn_messages,
-            conversation_history,
-            state.get("persona"),
-            conversation_id,
-            user_id=user_id,
-            model_request=state.get("model_request"),
-            history_summary=state.get("history_summary"),
-        )
+            agent_msg = AgentMessage(
+                role=MessageRole.USER,
+                content=user_content,
+                metadata={
+                    "persona": state.get("persona"),
+                    "history": conversation_history,
+                    "history_summary": state.get("history_summary"),
+                },
+                attachments=attachments,
+            )
+            response = await self.chat_agent.process_message(agent_msg, conversation_id)
+        else:
+            current_turn_messages = self._get_current_turn_messages(messages)
+            response = await self.chat_agent.invoke_model_with_history(
+                current_turn_messages,
+                conversation_history,
+                state.get("persona"),
+                conversation_id,
+                user_id=user_id,
+                model_request=state.get("model_request"),
+                history_summary=state.get("history_summary"),
+            )
 
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)

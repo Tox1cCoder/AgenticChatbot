@@ -9,12 +9,16 @@ import html
 import re
 from html.parser import HTMLParser
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from upload_support import delete_document, get_uploaded_documents, upload_document
 from datetime import datetime, timedelta, timezone
 from dateutil import parser
 import markdown as _markdown  # type: ignore
 
 API_BASE_URL = "http://localhost:8000"
+REQUEST_TIMEOUT = (5, 30)
+STREAM_REQUEST_TIMEOUT = (10, 900)
 
 _MAX_PERSONA_LENGTH = 8000
 _MAX_IMAGE_ATTACHMENTS = 4
@@ -1021,6 +1025,7 @@ def group_conversations_by_date(
 
 SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
     "current_user_id": lambda: None,
+    "current_user_profile": lambda: None,
     "current_conversation_id": lambda: None,
     "messages": list,
     "conversations_list": list,
@@ -1068,6 +1073,7 @@ SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
     "task_plans_list": list,
     "planning_generate_input": str,
     "planning_manual_input": str,
+    "api_cache_version": lambda: 0,
 }
 
 
@@ -1354,7 +1360,6 @@ def reset_conversation_state() -> None:
     st.session_state.image_viewer_open = False
     st.session_state.image_viewer_payload = None
     st.session_state.message_image_thumbnails = {}
-    st.session_state.conversations_loaded = False
 
 
 def open_conversation_manager() -> None:
@@ -1397,16 +1402,88 @@ def refresh_conversations_list(
         ]
 
 
+@st.cache_resource(show_spinner=False)
+def get_http_session() -> requests.Session:
+    """Reuse HTTP connections to reduce API call latency across reruns."""
+    retry = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        backoff_factor=0.2,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "HEAD", "OPTIONS"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(
+        max_retries=retry,
+        pool_connections=20,
+        pool_maxsize=40,
+    )
+    session = requests.Session()
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+@st.cache_data(show_spinner=False, ttl=10, max_entries=1000)
+def _cached_get_request(
+    endpoint: str, auth_token: str, cache_version: int
+) -> Dict[str, Any]:
+    """Cache GET responses briefly to avoid refetching on every rerun."""
+    headers: Dict[str, str] = {}
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+
+    response = get_http_session().get(
+        f"{API_BASE_URL}{endpoint}",
+        headers=headers,
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    payload: Any = {}
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+
+    return {
+        "status_code": response.status_code,
+        "payload": payload if isinstance(payload, dict) else {},
+    }
+
+
 def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
-    url = f"{API_BASE_URL}{endpoint}"
-    headers = {}
-    if st.session_state.get("auth_token"):
-        headers["Authorization"] = f"Bearer {st.session_state.auth_token}"
+    method = method.strip().upper()
+    auth_token = st.session_state.get("auth_token")
+    response_data: Dict[str, Any]
 
     try:
-        response = getattr(requests, method.lower())(url, json=data, headers=headers)
-        response.raise_for_status()
-        response_data = response.json()
+        if method == "GET" and data is None:
+            cached = _cached_get_request(
+                endpoint=endpoint,
+                auth_token=str(auth_token or ""),
+                cache_version=int(st.session_state.get("api_cache_version", 0)),
+            )
+            status_code = int(cached.get("status_code") or 0)
+            response_data = cached.get("payload") or {}
+            if status_code >= 400:
+                st.toast(f"HTTP error {status_code}", icon=":material/cancel:")
+                return {}
+        else:
+            url = f"{API_BASE_URL}{endpoint}"
+            headers = {}
+            if auth_token:
+                headers["Authorization"] = f"Bearer {auth_token}"
+            response = get_http_session().request(
+                method,
+                url,
+                json=data,
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            parsed = response.json()
+            response_data = parsed if isinstance(parsed, dict) else {}
     except requests.exceptions.HTTPError as http_error:
         st.toast(
             f"HTTP error {http_error.response.status_code}", icon=":material/cancel:"
@@ -1429,11 +1506,17 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
         if error_code == "unauthenticated":
             st.session_state.auth_token = None
             st.session_state.current_user_id = None
+            st.session_state.current_user_profile = None
             st.session_state.show_login = True
             st.toast("Please log in", icon=":material/lock:")
         else:
             st.toast(f"{error_message}", icon=":material/cancel:")
         return {}
+
+    if method in {"POST", "PUT", "PATCH", "DELETE"}:
+        st.session_state.api_cache_version = int(
+            st.session_state.get("api_cache_version", 0)
+        ) + 1
 
     return response_data
 
@@ -1451,12 +1534,12 @@ def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
     stream_completed = False
     try:
         # Long-running MCP tools can block the stream for several minutes, so use a generous read timeout
-        response = requests.post(
+        response = get_http_session().post(
             url,
             json=data,
             headers=headers,
             stream=True,
-            timeout=(30, 900),
+            timeout=STREAM_REQUEST_TIMEOUT,
         )
         response.raise_for_status()
 
@@ -1945,6 +2028,8 @@ def render_login_page():
                             st.session_state.current_user_id = auth_response["data"][
                                 "userId"
                             ]
+                            st.session_state.current_user_profile = None
+                            st.session_state.active_view = "chat"
                             st.session_state.show_login = False
                             st.toast("Welcome back!", icon=":material/check_circle:")
                             st.rerun()
@@ -1998,6 +2083,8 @@ def render_login_page():
                                     st.session_state.current_user_id = auth_response[
                                         "data"
                                     ]["userId"]
+                                    st.session_state.current_user_profile = None
+                                    st.session_state.active_view = "chat"
                                     st.session_state.show_login = False
                                     st.toast(
                                         "Account created!",
@@ -2074,11 +2161,19 @@ def render_sidebar():
 
         # User section
         if st.session_state.current_user_id:
-            user = get_user(st.session_state.current_user_id)
+            user = st.session_state.get("current_user_profile")
+            if (
+                not isinstance(user, dict)
+                or user.get("id") != st.session_state.current_user_id
+            ):
+                user = get_user(st.session_state.current_user_id)
+                if user:
+                    st.session_state.current_user_profile = user
             if user:
                 st.markdown(f"**{user['username']}**")
                 if st.button("Sign Out", width='stretch'):
                     st.session_state.current_user_id = None
+                    st.session_state.current_user_profile = None
                     st.session_state.current_conversation_id = None
                     close_conversation_manager()
                     reset_conversation_state()
@@ -2087,6 +2182,7 @@ def render_sidebar():
                     st.session_state.conversations_last_fetch_params = None
                     st.session_state.auth_token = None
                     st.session_state.show_login = True
+                    st.session_state.active_view = "chat"
                     st.session_state.pending_image_attachments = []
                     st.session_state.message_image_thumbnails = {}
                     st.toast("Goodbye!", icon=":material/waving_hand:")
@@ -2554,7 +2650,7 @@ def render_thinking_summary(message_metadata: Dict[str, Any]):
             formatted_text = html.escape(thinking_summary)
             # Convert **text** to <strong>text</strong>
             formatted_text = re.sub(
-                r"\*\*(.*?)\*\*", r"<strong>\1</strong>", formatted_text
+                r"\*\*(.*?)\*\*", r"<strong>\1</strong>", formatted_text, flags=re.DOTALL
             )
 
             # Use custom styled container for thinking content
@@ -2585,7 +2681,7 @@ def render_reasoning_summary(message_metadata: Dict[str, Any]):
         formatted_text = html.escape(str(reasoning_summary))
         # Convert **text** to <strong>text</strong>
         formatted_text = re.sub(
-            r"\*\*(.*?)\*\*", r"<strong>\1</strong>", formatted_text
+            r"\*\*(.*?)\*\*", r"<strong>\1</strong>", formatted_text, flags=re.DOTALL
         )
 
         st.markdown(
@@ -4220,7 +4316,6 @@ def render_chat_view():
                         # If successful, update UI
                         if final_message:
                             st.session_state.pending_image_attachments = []
-                            refresh_conversations_list()
                             reset_conversation_state()
                             st.session_state.show_attachment_uploader = False
                             load_messages_page(1)

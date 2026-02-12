@@ -24,7 +24,12 @@ from langchain.agents import create_agent
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_rag_prompt, AGENTIC_RAG_SYSTEM_PROMPT
-from ..agent_config import create_langchain_model, create_gemini_client, AGENT_CONFIG
+from ..agent_config import (
+    create_langchain_model,
+    create_gemini_client,
+    build_gemini_generate_config,
+    AGENT_CONFIG,
+)
 from ..rag_tools import create_search_documents_tool
 from ..mcp_integration import get_global_mcp_manager
 from ..mcp_registry import get_mcp_tools_generation
@@ -326,17 +331,10 @@ class RAGAgent:
         )
 
         # Configure model with tool binding
-        llm_with_tools = self.langchain_model.bind_tools(
+        llm_with_tools = ModelFactory.bind_tools_to_model(
+            self.langchain_model,
             tools,
-            tool_config={
-                "function_calling_config": {
-                    "mode": (
-                        tool_choice.upper()
-                        if tool_choice in ["auto", "any", "none"]
-                        else "AUTO"
-                    )
-                }
-            },
+            tool_choice=tool_choice,
         )
 
         agent = create_agent(
@@ -1111,27 +1109,9 @@ class RAGAgent:
 
     async def _generate_stream(self, prompt: str):
         try:
-            config_kwargs = {}
-            if settings.enable_thinking:
-                # Build ThinkingConfig based on model version
-                thinking_config_kwargs = {
-                    "include_thoughts": settings.include_thoughts_in_response,
-                }
-                # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3
-                if (
-                    "2.5" in self.model_name
-                    or "flash-latest" in self.model_name.lower()
-                ):
-                    thinking_config_kwargs["thinking_budget"] = settings.thinking_budget
-                else:
-                    thinking_config_kwargs["thinking_level"] = settings.thinking_level
-
-                config_kwargs["thinking_config"] = types.ThinkingConfig(
-                    **thinking_config_kwargs
-                )
-
-            config = (
-                types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+            config = build_gemini_generate_config(
+                model_name=self.model_name,
+                include_thinking=True,
             )
 
             chunk_queue = queue.Queue()
@@ -1434,8 +1414,14 @@ class RAGAgent:
                 )
 
             parts.append(types.Part(text=prompt))
+            config = build_gemini_generate_config(
+                model_name=self.model_name,
+                include_thinking=True,
+            )
             response = self.gemini_client.models.generate_content(
-                model=self.model_name, contents=parts
+                model=self.model_name,
+                contents=parts,
+                config=config,
             )
 
             return response.text if hasattr(response, "text") else str(response)
@@ -1446,27 +1432,9 @@ class RAGAgent:
 
     async def _generate(self, prompt: str) -> str:
         try:
-            # Build generation config with thinking support
-            config_kwargs = {}
-            if settings.enable_thinking:
-                thinking_config_kwargs = {
-                    "include_thoughts": settings.include_thoughts_in_response,
-                }
-                # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3
-                if (
-                    "2.5" in self.model_name
-                    or "flash-latest" in self.model_name.lower()
-                ):
-                    thinking_config_kwargs["thinking_budget"] = settings.thinking_budget
-                else:
-                    thinking_config_kwargs["thinking_level"] = settings.thinking_level
-
-                config_kwargs["thinking_config"] = types.ThinkingConfig(
-                    **thinking_config_kwargs
-                )
-
-            config = (
-                types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+            config = build_gemini_generate_config(
+                model_name=self.model_name,
+                include_thinking=True,
             )
 
             response = self.gemini_client.models.generate_content(

@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
 
 from ...core.config import settings
+from ..model_factory import ModelFactory
 from ..planning_tools import create_write_todos_tool
 from ..prompts import PLANNING_EXECUTION_PROMPT
 from ..schemas import (
@@ -282,9 +283,10 @@ class PlanningAgent(BaseAgent):
 
         # Force a tool call so we can reliably extract a machine-readable plan.
         write_todos_tool = create_write_todos_tool()
-        llm = self.langchain_model.bind_tools(
+        llm = ModelFactory.bind_tools_to_model(
+            self.langchain_model,
             [write_todos_tool],
-            tool_config={"function_calling_config": {"mode": "ANY"}},
+            tool_choice="write_todos",
         )
 
         langchain_messages = [SystemMessage(content=system_prompt)]

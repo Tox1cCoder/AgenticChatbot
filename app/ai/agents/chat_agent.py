@@ -6,6 +6,7 @@ from google.genai import types
 from langchain_core.messages import HumanMessage
 
 from .base_agent import BaseAgent
+from ..agent_config import build_gemini_generate_config
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_chat_prompt, CHAT_SYSTEM_PROMPT
 from ..utils import coerce_response_text
@@ -98,11 +99,9 @@ class ChatAgent(BaseAgent):
                 "Error while processing message in ChatAgent: %s", exc, exc_info=True
             )
             return self._build_error_response(
-                error_message=f"{type(exc).__name__}: {exc}",
-                metadata={
-                    "conversation_id": conversation_id,
-                    "context_messages": len(conversation_history),
-                },
+                message="I encountered an error processing your request.",
+                conversation_id=conversation_id,
+                error=f"{type(exc).__name__}: {exc}",
             )
 
     async def invoke_model(
@@ -159,8 +158,14 @@ class ChatAgent(BaseAgent):
             raise RuntimeError("Gemini client not initialized")
 
         try:
+            generation_config = build_gemini_generate_config(
+                model_name=self.model_name,
+                include_thinking=True,
+            )
             response = self.gemini_client.models.generate_content(
-                model=self.model_name, contents=prompt
+                model=self.model_name,
+                contents=prompt,
+                config=generation_config,
             )
             return response.text if hasattr(response, "text") else str(response)
         except Exception as exc:
@@ -175,8 +180,18 @@ class ChatAgent(BaseAgent):
         # Add images from attachments
         for attachment in attachments:
             try:
+                raw_data = attachment.get("data", "")
+                if isinstance(raw_data, str) and raw_data.startswith("data:"):
+                    # Support data URLs: data:image/png;base64,<payload>
+                    header, _, payload = raw_data.partition(",")
+                    raw_data = payload or ""
+                    if not attachment.get("mime") and ";" in header:
+                        inferred_mime = header[5:].split(";", 1)[0].strip()
+                        if inferred_mime:
+                            attachment["mime"] = inferred_mime
+
                 # Decode base64 image data
-                image_data = base64.b64decode(attachment.get("data", ""))
+                image_data = base64.b64decode(raw_data)
                 mime_type = attachment.get("mime", "image/jpeg")
 
                 # Create image part from bytes
@@ -187,8 +202,14 @@ class ChatAgent(BaseAgent):
                 logger.error(f"Failed to process image attachment: {img_err}")
 
         # Generate response with multimodal content
+        generation_config = build_gemini_generate_config(
+            model_name=self.model_name,
+            include_thinking=True,
+        )
         response = self.gemini_client.models.generate_content(
-            model=self.model_name, contents=parts
+            model=self.model_name,
+            contents=parts,
+            config=generation_config,
         )
         return response.text if hasattr(response, "text") else str(response)
 

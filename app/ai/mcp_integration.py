@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-logging.getLogger("langchain_google_genai.functions_utils").setLevel(logging.ERROR)
+logging.getLogger("langchain_google_genai._function_utils").setLevel(logging.ERROR)
 
 
 class MCPManager:

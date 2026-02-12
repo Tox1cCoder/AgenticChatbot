@@ -126,10 +126,10 @@ For queries that involve time context such as:
 - News, events, weather, scores, or any real-time data
 - Questions about "now", "at the moment", or relative time references
 
-You MUST call the get_time tool FIRST to obtain the current date and time context BEFORE calling any search tools. This ensures your search queries include accurate temporal context and you can provide properly dated information to the user.
+You MUST call the get_current_time tool FIRST to obtain the current date and time context BEFORE calling any search tools. This ensures your search queries include accurate temporal context and you can provide properly dated information to the user.
 
 Search strategy:
-- For time-sensitive queries: ALWAYS call get_time tool first to get current date/time
+- For time-sensitive queries: ALWAYS call get_current_time tool first to get current date/time
 - Plan what information you need before searching
 - Use specific, targeted search queries (include dates when relevant)
 - If initial results are incomplete, refine your query or try different angles
@@ -212,25 +212,33 @@ Available agents:
 - image_generator_agent: Creating images, drawing, illustrating, visual content generation
 - planning_agent: Creating/editing task plans, adding/removing tasks, discussing task breakdown
 
-Routing rules (check in priority order):
-1. If documents are available AND question relates to document content → rag_agent
-2. If user wants to create/modify/view task plans → planning_agent
-3. If user needs current/recent information from the internet → search_agent
-4. If user requests image/picture/illustration creation → image_generator_agent
-5. Everything else (greetings, explanations, advice) → chat_agent
+Routing rules (strict priority):
+1. If documents are available, prefer rag_agent by default.
+2. Override rag_agent only when intent is clearly one of:
+   - planning/task-list management -> planning_agent
+   - explicit current/web lookup intent -> search_agent
+   - explicit image creation intent -> image_generator_agent
+3. If no documents are available:
+   - plan creation/modification/view -> planning_agent
+   - current/recent/web lookup -> search_agent
+   - image creation -> image_generator_agent
+   - otherwise -> chat_agent
 
 Planning clarification:
 - Route TO planning_agent: "create a plan", "add task", "remove task", "modify plan", "show tasks"
-- Route TO chat_agent: "start the plan", "work on task 1", "implement step 2" (execution, not planning)
+- Route TO chat_agent: "start the plan", "work on task 1", "implement step 2" (execution, not planning updates)
 
 Examples:
-Hello → chat_agent
-Explain quantum physics → chat_agent
-Latest AI news → search_agent
-Draw a sunset → image_generator_agent
-Create a plan to build a website → planning_agent
-What's in my document? → rag_agent (if documents available)
-Summarize the report → rag_agent (if documents available)"""
+Hello -> chat_agent
+Explain quantum physics -> chat_agent
+Latest AI news -> search_agent
+Draw a sunset -> image_generator_agent
+Create a plan to build a website -> planning_agent
+What's in my document? -> rag_agent (if documents available)
+Summarize the report -> rag_agent (if documents available)
+Documents available + "Summarize this" -> rag_agent
+Documents available + "What happened in the news today?" -> search_agent
+Documents available + "Draw a logo" -> image_generator_agent"""
 
 
 def _select_history_for_prompt(
