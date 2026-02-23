@@ -175,6 +175,169 @@ def _extract_user_attachments(messages: List[Dict[str, Any]]) -> List[Dict[str, 
     return []
 
 
+def _extract_mime_from_data_url(value: str) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+
+    payload = value.strip()
+    if not payload.startswith("data:"):
+        return None
+
+    header, _, _ = payload.partition(",")
+    mime = header[5:].split(";")[0].strip()
+    return mime if "/" in mime else None
+
+
+def _normalize_image_item_to_file_part(item: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(item, dict):
+        return None
+
+    mime = (
+        item.get("mime")
+        or item.get("mimeType")
+        or item.get("mediaType")
+        or item.get("contentType")
+        or "image/png"
+    )
+    mime = str(mime).strip() if mime else "image/png"
+
+    candidate_values: List[Any] = [
+        item.get("url"),
+        item.get("data"),
+        item.get("base64"),
+        item.get("image"),
+        item.get("source"),
+    ]
+
+    for candidate in candidate_values:
+        if isinstance(candidate, dict):
+            candidate = (
+                candidate.get("url")
+                or candidate.get("data")
+                or candidate.get("base64")
+            )
+        if not isinstance(candidate, str):
+            continue
+
+        raw_value = candidate.strip()
+        if not raw_value:
+            continue
+
+        if raw_value.startswith("data:"):
+            detected_mime = _extract_mime_from_data_url(raw_value)
+            if detected_mime:
+                mime = detected_mime
+            return {"url": raw_value, "mediaType": mime}
+
+        if raw_value.startswith(("http://", "https://", "blob:")):
+            return {"url": raw_value, "mediaType": mime}
+
+        try:
+            base64.b64decode(raw_value, validate=False)
+        except Exception:
+            continue
+
+        return {
+            "url": f"data:{mime};base64,{raw_value}",
+            "mediaType": mime,
+        }
+
+    return None
+
+
+def _extract_image_file_parts_from_metadata(
+    metadata: Optional[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    if not isinstance(metadata, dict):
+        return []
+
+    images = metadata.get("images")
+    if not isinstance(images, list):
+        return []
+
+    file_parts: List[Dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for item in images:
+        file_part = _normalize_image_item_to_file_part(item)
+        if not file_part:
+            continue
+
+        key = (file_part["url"], file_part["mediaType"])
+        if key in seen:
+            continue
+        seen.add(key)
+        file_parts.append(file_part)
+
+    return file_parts
+
+
+def _extract_image_file_parts_from_message(message: Dict[str, Any]) -> List[Dict[str, str]]:
+    if not isinstance(message, dict):
+        return []
+
+    metadata = None
+    for key in ("message_metadata", "messageMetadata", "metadata"):
+        value = message.get(key)
+        if isinstance(value, dict):
+            metadata = value
+            break
+
+    return _extract_image_file_parts_from_metadata(metadata)
+
+
+def _attach_image_parts_to_message(message: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(message, dict):
+        return message
+
+    payload = dict(message)
+
+    # Mirror backend metadata key to a generic `metadata` field for UI compatibility.
+    if "metadata" not in payload:
+        if isinstance(payload.get("message_metadata"), dict):
+            payload["metadata"] = payload["message_metadata"]
+        elif isinstance(payload.get("messageMetadata"), dict):
+            payload["metadata"] = payload["messageMetadata"]
+
+    image_parts = _extract_image_file_parts_from_message(payload)
+    if not image_parts:
+        return payload
+
+    existing_parts = payload.get("parts")
+    parts: List[Dict[str, Any]] = (
+        [p for p in existing_parts if isinstance(p, dict)]
+        if isinstance(existing_parts, list)
+        else []
+    )
+
+    if not isinstance(existing_parts, list):
+        content = payload.get("content")
+        if isinstance(content, str) and content.strip():
+            parts.append({"type": "text", "text": content})
+
+    existing_urls = {
+        p.get("url")
+        for p in parts
+        if p.get("type") == "file" and isinstance(p.get("url"), str)
+    }
+
+    for file_part in image_parts:
+        url = file_part["url"]
+        if url in existing_urls:
+            continue
+        parts.append(
+            {
+                "type": "file",
+                "url": url,
+                "mediaType": file_part["mediaType"],
+            }
+        )
+        existing_urls.add(url)
+
+    payload["parts"] = parts
+    return payload
+
+
 def _sse(data: Dict[str, Any]) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
@@ -488,6 +651,8 @@ class CompleteEventHandler(EventHandler):
         self, event: Dict[str, Any], state: StreamState
     ) -> AsyncGenerator[str, None]:
         message = event.get("message") or {}
+        if isinstance(message, dict):
+            message = _attach_image_parts_to_message(message)
 
         if not state.any_text_delta:
             content = ""
@@ -500,6 +665,16 @@ class CompleteEventHandler(EventHandler):
                         "type": "text-delta",
                         "id": state.text_id,
                         "delta": content,
+                    }
+                )
+
+        if isinstance(message, dict):
+            for file_part in _extract_image_file_parts_from_message(message):
+                yield _sse(
+                    {
+                        "type": "file",
+                        "url": file_part["url"],
+                        "mediaType": file_part["mediaType"],
                     }
                 )
 
@@ -679,15 +854,24 @@ async def get_conversation_messages_ai_sdk(
         include_feedback=False,
     )
 
-    messages = [
-        {
+    messages = []
+    for msg in paginated_result.items:
+        role = "user" if msg.sender == 1 else "assistant"
+        message_payload: Dict[str, Any] = {
             "id": str(msg.id),
-            "role": "user" if msg.sender == 1 else "assistant",
+            "role": role,
             "content": msg.content,
             "created_at": msg.created_at.isoformat() if msg.created_at else None,
         }
-        for msg in paginated_result.items
-    ]
+
+        if isinstance(msg.message_metadata, dict):
+            message_payload["message_metadata"] = msg.message_metadata
+            message_payload["metadata"] = msg.message_metadata
+
+        if role == "assistant":
+            message_payload = _attach_image_parts_to_message(message_payload)
+
+        messages.append(message_payload)
 
     return {
         "messages": messages,

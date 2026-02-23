@@ -74,9 +74,9 @@ class BaseAgent(ABC):
         """
         Initialize or refresh tools from MCP manager.
 
-        This method now checks the tools_generation version from the registry
+        This method checks the tools_generation version from the registry
         to detect when tools need to be refreshed (e.g., after a server is
-        disabled). This ensures disabled server tools are never bound to the model.
+        disabled).
 
         Tools are also filtered based on per-agent allowlists configured in settings.
         """
@@ -105,23 +105,6 @@ class BaseAgent(ABC):
             # Update our tracked generation
             self._tools_generation_seen = current_generation
 
-            server_status = self.mcp_manager.get_servers_status()
-            active_servers = [
-                name for name, status in server_status.items() if status.get("enabled")
-            ]
-
-            # Log tool refresh with generation info
-            if self._tools_generation_seen > 0:
-                logger.debug(
-                    f"Refreshed tools for {self.agent_id} (generation={current_generation}): "
-                    f"{len(self.tools)} tools (from {len(unique_tools)} available) "
-                    f"from {len(active_servers)} active servers"
-                )
-            else:
-                logger.debug(
-                    f"Initialized {len(self.tools)} tools (from {len(unique_tools)} available) "
-                    f"for {self.agent_id} from {len(active_servers)} MCP servers"
-                )
 
         except Exception as e:
             logger.error(f"Error initializing MCP tools: {e}")
@@ -151,7 +134,7 @@ class BaseAgent(ABC):
         if not allowlist:
             return tools
 
-        # Build set of allowed names for fast lookup
+        # Build set of allowed names
         allowed_set = set(allowlist)
 
         filtered_tools = []

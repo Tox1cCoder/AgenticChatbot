@@ -1971,6 +1971,12 @@ class MultiAgentWorkflow:
             set()
         )  # Track which tool calls have had tool_start emitted
 
+        # For image_generator_agent the streamed LLM tokens are the internal
+        # enhanced prompt — not meant for the user.  Suppress token events and
+        # let the final "complete" response (which holds the user-facing text)
+        # be the only content the client sees.
+        suppress_tokens = selected_agent == "image_generator_agent"
+
         try:
             # - "messages": Stream LLM tokens with metadata (includes tool_call_chunks)
             # - "updates": Stream state updates after each node (includes completed messages)
@@ -2004,7 +2010,7 @@ class MultiAgentWorkflow:
                                             accumulated_content, text_content
                                         )
                                     )
-                                    if delta:
+                                    if delta and not suppress_tokens:
                                         yield {"type": "token", "content": delta}
 
                                 # Handle thinking block type
@@ -2104,7 +2110,7 @@ class MultiAgentWorkflow:
                                                 accumulated_content, text_content
                                             )
                                         )
-                                        if delta:
+                                        if delta and not suppress_tokens:
                                             yield {"type": "token", "content": delta}
                                 elif isinstance(part, str) and part:
                                     accumulated_content, delta = (
@@ -2112,7 +2118,7 @@ class MultiAgentWorkflow:
                                             accumulated_content, part
                                         )
                                     )
-                                    if delta:
+                                    if delta and not suppress_tokens:
                                         yield {"type": "token", "content": delta}
 
                         # Fallback: Handle legacy string content attribute
@@ -2127,7 +2133,7 @@ class MultiAgentWorkflow:
                                     accumulated_content, content
                                 )
                             )
-                            if delta:
+                            if delta and not suppress_tokens:
                                 yield {"type": "token", "content": delta}
 
                         # Check for chunk completion and emit complete tool calls
@@ -2310,7 +2316,8 @@ class MultiAgentWorkflow:
                         response.metadata["thinking_summary"] = accumulated_thinking
 
                     if (
-                        accumulated_content
+                        not suppress_tokens
+                        and accumulated_content
                         and not (response.message.content or "").strip()
                     ):
                         response.message.content = accumulated_content
@@ -2331,7 +2338,7 @@ class MultiAgentWorkflow:
                             response.metadata["planning_budget_reached"] = True
 
                     yield {"type": "complete", "response": response}
-                elif accumulated_content:
+                elif accumulated_content and not suppress_tokens:
                     metadata_model = (
                         settings.chat_agent_model
                         if selected_agent == "chat_agent"
@@ -2367,7 +2374,7 @@ class MultiAgentWorkflow:
             except Exception as e:
                 yield {"type": "error", "error": str(e)}
         else:
-            if accumulated_content:
+            if accumulated_content and not suppress_tokens:
                 metadata = {}
                 # Include thinking summary in metadata
                 if accumulated_thinking:

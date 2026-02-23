@@ -2,6 +2,7 @@ import base64
 import logging
 from typing import Optional, List, Dict, Any, AsyncIterator
 
+from langchain_core.messages import BaseMessage, HumanMessage as LCHumanMessage
 from google.genai import types
 
 from .base_agent import BaseAgent
@@ -73,6 +74,11 @@ class ImageGeneratorAgent(BaseAgent):
                 enhanced_prompt, message.content
             )
 
+            # Generate a natural user-facing response instead of showing the enhanced prompt
+            user_facing = narrative or await self._generate_user_facing_response(
+                message.content
+            )
+
             response_metadata = {
                 "model": self.model_name,
                 "conversation_id": conversation_id,
@@ -83,7 +89,7 @@ class ImageGeneratorAgent(BaseAgent):
             return AgentResponse(
                 agent_type=AgentType.IMAGE_GENERATOR,
                 agent_id="image_generator_agent",
-                message=AgentMessage(role=MessageRole.ASSISTANT, content=narrative),
+                message=AgentMessage(role=MessageRole.ASSISTANT, content=user_facing),
                 metadata=response_metadata,
             )
 
@@ -124,6 +130,11 @@ class ImageGeneratorAgent(BaseAgent):
                 enhanced_prompt, message.content
             )
 
+            # Generate a natural user-facing response instead of showing the enhanced prompt
+            user_facing = narrative or await self._generate_user_facing_response(
+                message.content
+            )
+
             response_metadata = {
                 "model": self.model_name,
                 "conversation_id": conversation_id,
@@ -135,7 +146,7 @@ class ImageGeneratorAgent(BaseAgent):
                 agent_id="image_generator_agent",
                 message=AgentMessage(
                     role=MessageRole.ASSISTANT,
-                    content=narrative or "Here is the image I created.",
+                    content=user_facing,
                 ),
                 metadata=response_metadata,
             )
@@ -153,6 +164,80 @@ You have access to external tools to fetch real-time context (like weather, time
 If the user asks for "a picture of the current weather in NY", use the weather tool first.
 Once you have sufficient information, output the FINAL detailed prompt for the image generator.
 Do not output anything else, just the prompt."""
+
+    async def invoke_model_with_history(
+        self,
+        messages: List[BaseMessage],
+        conversation_history: List[Any],
+        persona: Optional[str],
+        conversation_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        model_request: Optional[Dict[str, Any]] = None,
+        history_summary: Optional[str] = None,
+        **system_prompt_kwargs: Any,
+    ) -> AgentResponse:
+        """Override to add image generation after LLM prompt-engineering step.
+
+        The base class handles LLM invocation with tool calling.  When the LLM
+        returns tool calls we pass them through so the graph can execute the
+        tools and route back.  When the LLM returns text (the enhanced prompt)
+        we feed it into the Gemini image generator and attach the resulting
+        images to the response metadata.
+        """
+        response = await super().invoke_model_with_history(
+            messages,
+            conversation_history,
+            persona,
+            conversation_id,
+            user_id=user_id,
+            model_request=model_request,
+            history_summary=history_summary,
+            **system_prompt_kwargs,
+        )
+
+        # If the LLM requested tool calls, let the graph handle them first.
+        if response.message.tool_calls:
+            return response
+
+        # If there's an error, return as-is.
+        if response.error:
+            return response
+
+        # The LLM produced a text response — treat it as the enhanced prompt.
+        enhanced_prompt = (response.message.content or "").strip()
+        if not enhanced_prompt:
+            return response
+
+        # Derive the original user request from the current turn messages.
+        original_prompt = enhanced_prompt
+        for msg in reversed(messages):
+            if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content.strip():
+                if isinstance(msg, LCHumanMessage):
+                    original_prompt = msg.content.strip()
+                    break
+
+        try:
+            images, narrative = await self._generate_images(
+                enhanced_prompt, original_prompt
+            )
+        except Exception as e:
+            logger.error("Image generation failed: %s", e, exc_info=True)
+            return response
+
+        if images:
+            if not response.metadata:
+                response.metadata = {}
+            response.metadata["images"] = images
+
+        # Replace the enhanced prompt with a natural user-facing message
+        if narrative:
+            response.message.content = narrative
+        elif images:
+            response.message.content = await self._generate_user_facing_response(
+                original_prompt
+            )
+
+        return response
 
     async def process_message(
         self,
@@ -173,6 +258,30 @@ Do not output anything else, just the prompt."""
             return
 
         yield {"type": "complete", "response": result}
+
+    async def _generate_user_facing_response(self, original_request: str) -> str:
+        """Ask the LLM to produce a short, friendly message about the generated image."""
+        try:
+            llm = self.langchain_model
+            prompt_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a helpful assistant. The user asked you to generate an image and "
+                        "it has been created successfully. Write a brief, friendly response "
+                        "acknowledging that the image is ready. Mention what was requested so "
+                        "the user knows which image was created. Do NOT include the image "
+                        "itself or any technical details — just a short conversational message."
+                    ),
+                },
+                {"role": "user", "content": original_request},
+            ]
+            result = await llm.ainvoke(prompt_messages)
+            text = coerce_response_text(result.content).strip()
+            return text if text else "Your image has been generated!"
+        except Exception as e:
+            logger.warning("Failed to generate user-facing response: %s", e)
+            return "Your image has been generated!"
 
     async def _generate_images(
         self, prepared_prompt: str, original_prompt: str
@@ -200,17 +309,13 @@ Do not output anything else, just the prompt."""
         images: List[dict] = []
         narrative_parts: List[str] = []
 
-        stream = self.gemini_client.models.generate_content_stream(
+        response = self.gemini_client.models.generate_content(
             model=self.model_name,
             contents=contents,
             config=generate_config,
         )
 
-        for chunk in stream:
-            if not getattr(chunk, "candidates", None):
-                continue
-
-            candidate = chunk.candidates[0]
+        for candidate in getattr(response, "candidates", []) or []:
             if not candidate or not getattr(candidate, "content", None):
                 continue
 
@@ -235,12 +340,12 @@ Do not output anything else, just the prompt."""
                 if text_segment:
                     narrative_parts.append(text_segment)
 
-            if len(images) >= self.max_images:
-                break
-
             top_level_text = getattr(candidate, "text", None)
             if top_level_text:
                 narrative_parts.append(top_level_text)
+
+            if len(images) >= self.max_images:
+                break
 
         narrative = " ".join(segment.strip() for segment in narrative_parts if segment)
         return images, narrative.strip()

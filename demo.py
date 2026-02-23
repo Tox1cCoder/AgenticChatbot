@@ -22,6 +22,12 @@ STREAM_REQUEST_TIMEOUT = (10, 900)
 
 _MAX_PERSONA_LENGTH = 8000
 _MAX_IMAGE_ATTACHMENTS = 4
+_PLACEHOLDER_CONVERSATION_TITLES = {
+    "",
+    "new conversation",
+    "untitled",
+    "untitled conversation",
+}
 
 PERSONA_TEMPLATES: Dict[str, str] = {
     "Friendly Tutor": (
@@ -1376,6 +1382,79 @@ def close_conversation_manager() -> None:
     st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = False
 
 
+def find_conversation_in_state(conversation_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Find a conversation from session state by ID."""
+    if not conversation_id:
+        return None
+
+    return next(
+        (
+            conv
+            for conv in st.session_state.conversations_list
+            if conv.get("id") == conversation_id
+        ),
+        None,
+    )
+
+
+def upsert_conversation_in_state(conversation: Optional[Dict[str, Any]]) -> None:
+    """Insert or merge a conversation in session state without refetching all items."""
+    if not isinstance(conversation, dict):
+        return
+
+    conversation_id = conversation.get("id")
+    if not conversation_id:
+        return
+
+    merged_items: List[Dict[str, Any]] = []
+    replaced = False
+    for existing in st.session_state.conversations_list:
+        if existing.get("id") == conversation_id:
+            merged_items.append({**existing, **conversation})
+            replaced = True
+        else:
+            merged_items.append(existing)
+
+    if not replaced:
+        merged_items.insert(0, conversation)
+
+    st.session_state.conversations_list = merged_items
+
+
+def is_placeholder_conversation_title(title: Optional[str]) -> bool:
+    """Return True when title is still a default placeholder."""
+    normalized = (title or "").strip().lower()
+    return normalized in _PLACEHOLDER_CONVERSATION_TITLES
+
+
+def sync_conversation_title_from_server(conversation_id: Optional[str]) -> None:
+    """
+    Fetch one conversation and sync title only when the local title is a placeholder.
+    Avoids a full conversations list refresh.
+    """
+    if not conversation_id or conversation_id == "pending_new":
+        return
+
+    current_conversation = find_conversation_in_state(conversation_id)
+    current_title = current_conversation.get("title") if current_conversation else ""
+    if not is_placeholder_conversation_title(current_title):
+        return
+
+    response = make_api_request("GET", f"/conversations/{conversation_id}")
+    if not response:
+        return
+
+    server_conversation = response.get("data")
+    if not isinstance(server_conversation, dict):
+        return
+
+    server_title = server_conversation.get("title")
+    if not server_title:
+        return
+
+    upsert_conversation_in_state(server_conversation)
+
+
 def refresh_conversations_list(
     *, fallback_conversation: Optional[Dict[str, Any]] = None
 ) -> None:
@@ -1392,14 +1471,7 @@ def refresh_conversations_list(
         return
 
     if fallback_conversation:
-        st.session_state.conversations_list = [
-            fallback_conversation,
-            *(
-                conv
-                for conv in st.session_state.conversations_list
-                if conv.get("id") != fallback_conversation.get("id")
-            ),
-        ]
+        upsert_conversation_in_state(fallback_conversation)
 
 
 @st.cache_resource(show_spinner=False)
@@ -2236,13 +2308,35 @@ def render_attachment_gallery(attachments: List[Dict[str, str]], *, align: str) 
         name = attachment.get("name") or f"Image {idx}"
         data_b64 = attachment.get("data")
         url_value = attachment.get("url")
+        mime = attachment.get("mime", "image/png")
+
+        if isinstance(data_b64, str):
+            data_b64 = data_b64.strip()
+            if data_b64.startswith("data:"):
+                header, _, payload = data_b64.partition(",")
+                if payload:
+                    data_b64 = payload.strip()
+                    header_mime = header[5:].split(";")[0].strip() if header else ""
+                    if "/" in header_mime:
+                        mime = header_mime
+
+        if isinstance(url_value, str):
+            url_value = url_value.strip()
+            if url_value.startswith("data:"):
+                header, _, payload = url_value.partition(",")
+                if payload:
+                    data_b64 = payload.strip()
+                    url_value = None
+                    header_mime = header[5:].split(";")[0].strip() if header else ""
+                    if "/" in header_mime:
+                        mime = header_mime
 
         if isinstance(data_b64, str) and data_b64:
             valid_attachments.append(
                 {
                     "name": name,
                     "data": data_b64,
-                    "mime": attachment.get("mime", "image/png"),
+                    "mime": mime,
                     "type": "base64",
                 }
             )
@@ -2310,33 +2404,163 @@ def render_agent_images(message_metadata: dict):
     if not images:
         return
 
-    gallery_items: List[Dict[str, str]] = []
-
+    image_items: List[Dict[str, Any]] = []
     for idx, image in enumerate(images, start=1):
         if not isinstance(image, dict):
             continue
 
         url_value = image.get("url")
         data_value = image.get("data")
+        image_name = (
+            image.get("name")
+            or image.get("description")
+            or image.get("caption")
+            or f"Image {idx}"
+        )
 
         if isinstance(url_value, str) and url_value:
-            gallery_items.append(
+            image_items.append(
                 {
                     "url": url_value,
-                    "name": image.get("description") or f"Image {idx}",
+                    "name": image_name,
                 }
             )
         elif isinstance(data_value, str) and data_value:
-            gallery_items.append(
+            payload = data_value.strip()
+            mime = image.get("mime", "image/png")
+
+            if payload.startswith("data:"):
+                header, _, raw_payload = payload.partition(",")
+                if raw_payload:
+                    payload = raw_payload.strip()
+                header_mime = header[5:].split(";")[0].strip() if header else ""
+                if "/" in header_mime:
+                    mime = header_mime
+
+            image_items.append(
                 {
-                    "data": data_value,
-                    "mime": image.get("mime", "image/png"),
-                    "name": image.get("name") or f"Generated image {idx}",
+                    "data": payload,
+                    "mime": mime,
+                    "name": image_name,
                 }
             )
 
-    if gallery_items:
-        render_attachment_gallery(gallery_items, align="left")
+    if not image_items:
+        return
+
+    import streamlit.components.v1 as _stc
+
+    # Collect image sources for the JS-based lightbox
+    thumb_entries: List[Dict[str, str]] = []
+    for idx, item in enumerate(image_items):
+        caption = item.get("name") or ""
+        if item.get("url"):
+            src = item["url"]
+        else:
+            data_b64 = item.get("data")
+            if not isinstance(data_b64, str) or not data_b64.strip():
+                continue
+            mime = item.get("mime", "image/png")
+            src = f"data:{mime};base64,{data_b64}"
+        thumb_entries.append({"src": src, "caption": html.escape(caption)})
+
+    if not thumb_entries:
+        return
+
+    # Build thumbnail <img> tags
+    thumbs_html = ""
+    for i, entry in enumerate(thumb_entries):
+        cap_html = (
+            f'<div style="font-size:.8em;color:#888;margin-top:2px;">{entry["caption"]}</div>'
+            if entry["caption"] else ""
+        )
+        thumbs_html += (
+            f'<div style="display:inline-block;vertical-align:top;margin:0 8px 8px 0;text-align:center;">'
+            f'  <img src="{entry["src"]}" alt="{entry["caption"]}" '
+            f'       title="Click to view full size" data-idx="{i}" '
+            f'       style="width:150px;cursor:zoom-in;border-radius:6px;transition:opacity .2s;" '
+            f'       onmouseover="this.style.opacity=0.82" onmouseout="this.style.opacity=1" />'
+            f'  {cap_html}'
+            f'</div>'
+        )
+
+    # The JS injects a lightbox overlay into the TOP-LEVEL document (parent
+    # of the Streamlit iframe) so it covers the entire browser window
+    # including the sidebar.  Clicking the overlay closes it.
+    # We JSON-encode the sources list for safe embedding.
+    import json as _json
+    sources_json = _json.dumps([e["src"] for e in thumb_entries])
+
+    component_html = f"""
+    <div id="thumb-gallery" style="display:flex;flex-wrap:wrap;gap:4px;">
+      {thumbs_html}
+    </div>
+    <script>
+    (function() {{
+      var sources = {sources_json};
+
+      // Find the top-level document (escape iframe)
+      var topDoc = window.top.document;
+
+      // Ensure overlay exists in top document (create once)
+      var OVERLAY_ID = '__agent_img_lightbox';
+      var overlay = topDoc.getElementById(OVERLAY_ID);
+      if (!overlay) {{
+        overlay = topDoc.createElement('div');
+        overlay.id = OVERLAY_ID;
+        overlay.style.cssText = (
+          'display:none;position:fixed;z-index:999999;left:0;top:0;'
+          + 'width:100vw;height:100vh;background:rgba(0,0,0,.88);'
+          + 'align-items:center;justify-content:center;cursor:zoom-out;'
+        );
+        var img = topDoc.createElement('img');
+        img.id = OVERLAY_ID + '_img';
+        img.style.cssText = (
+          'max-width:90vw;max-height:90vh;border-radius:8px;'
+          + 'box-shadow:0 0 40px rgba(0,0,0,.6);'
+        );
+        overlay.appendChild(img);
+        overlay.addEventListener('click', function() {{
+          overlay.style.display = 'none';
+        }});
+        topDoc.body.appendChild(overlay);
+      }}
+
+      // Attach click handlers to thumbnails
+      var gallery = document.getElementById('thumb-gallery');
+      gallery.addEventListener('click', function(e) {{
+        var t = e.target;
+        if (t.tagName === 'IMG' && t.hasAttribute('data-idx')) {{
+          var idx = parseInt(t.getAttribute('data-idx'), 10);
+          var src = sources[idx];
+          if (src) {{
+            var topOverlay = window.top.document.getElementById(OVERLAY_ID);
+            var topImg = window.top.document.getElementById(OVERLAY_ID + '_img');
+            topImg.src = src;
+            topOverlay.style.display = 'flex';
+          }}
+        }}
+      }});
+    }})();
+    </script>
+    """
+
+    row_count = (len(thumb_entries) + 3) // 4
+    estimated_height = row_count * 195 + 10
+    _stc.html(component_html, height=estimated_height, scrolling=False)
+
+
+def get_message_metadata(msg: Dict[str, Any]) -> Dict[str, Any]:
+    """Read metadata regardless of snake_case/camelCase payload shape."""
+    if not isinstance(msg, dict):
+        return {}
+
+    for key in ("messageMetadata", "message_metadata", "metadata"):
+        value = msg.get(key)
+        if isinstance(value, dict):
+            return value
+
+    return {}
 
 
 def render_tool_artifacts(tool_artifacts: List[Dict[str, Any]]):
@@ -2726,7 +2950,7 @@ def render_message_bubble(msg: Dict[str, Any], is_user: bool):
     avatar = "user" if is_user else "assistant"
 
     with st.chat_message(avatar):
-        message_metadata = msg.get("messageMetadata", {}) or {}
+        message_metadata = get_message_metadata(msg)
 
         # Show thinking summary first for assistant messages
         if not is_user:
@@ -2770,18 +2994,18 @@ def render_message_bubble(msg: Dict[str, Any], is_user: bool):
 
     # Show agent-sent images for assistant messages
     if not is_user:
-        render_agent_images(msg.get("messageMetadata", {}))
+        render_agent_images(get_message_metadata(msg))
 
     # Show tool artifacts for assistant messages
     if not is_user:
-        message_metadata = msg.get("messageMetadata", {})
+        message_metadata = get_message_metadata(msg)
         tool_artifacts = message_metadata.get("tool_artifacts")
         if tool_artifacts:
             render_tool_artifacts(tool_artifacts)
 
     # Show citations for assistant messages
     if not is_user:
-        render_citations(msg.get("messageMetadata", {}), str(msg.get("id", "")))
+        render_citations(get_message_metadata(msg), str(msg.get("id", "")))
 
     # Show feedback for assistant messages
     if not is_user:
@@ -3784,7 +4008,7 @@ def render_chat_view():
             for item in items:
                 msg_id = item.get("id")
                 if msg_id:
-                    metadata = item.get("messageMetadata") or {}
+                    metadata = get_message_metadata(item)
                     attachments = metadata.get("attachments") or []
                     normalized_attachments: List[Dict[str, str]] = []
 
@@ -4004,7 +4228,7 @@ def render_chat_view():
 
         # Show suggestion buttons for the last assistant message only
         if not is_user_message and msg.get("id") == last_assistant_msg_id:
-            metadata = msg.get("messageMetadata", {})
+            metadata = get_message_metadata(msg)
             suggestions = msg.get("suggestedQuestions") or metadata.get(
                 "suggested_questions"
             )
@@ -4104,6 +4328,7 @@ def render_chat_view():
                     message_to_send = stripped_message or _format_image_only_message(
                         pending_attachments
                     )
+                    title_sync_conversation_id: Optional[str] = None
 
                     if conversation_id == "pending_new":
                         saved_attachments = list(pending_attachments)
@@ -4131,9 +4356,8 @@ def render_chat_view():
                                 st.session_state.current_conversation_id = (
                                     new_conversation["id"]
                                 )
-                                refresh_conversations_list(
-                                    fallback_conversation=new_conversation
-                                )
+                                upsert_conversation_in_state(new_conversation)
+                                st.session_state.conversations_loaded = True
                                 reset_conversation_state()
                                 st.session_state.pending_image_attachments = (
                                     saved_attachments
@@ -4151,6 +4375,12 @@ def render_chat_view():
                                     icon=":material/cancel:",
                                 )
                                 return
+
+                    current_conv = find_conversation_in_state(conversation_id)
+                    if current_conv and is_placeholder_conversation_title(
+                        current_conv.get("title")
+                    ):
+                        title_sync_conversation_id = conversation_id
 
                     message_data = {
                         "content": message_to_send,
@@ -4170,6 +4400,7 @@ def render_chat_view():
                         final_message = None
                         interrupt_data = None
                         selected_agent = None  # Track which agent is processing
+                        received_title_update = False
 
                         # Stream the response
                         for event in make_streaming_request(
@@ -4302,12 +4533,16 @@ def render_chat_view():
                                 # Update conversation title in real-time
                                 new_title = event.get("title")
                                 if new_title:
-                                    # Update in conversations list
-                                    if "conversations_list" in st.session_state:
-                                        for conv in st.session_state.conversations_list:
-                                            if conv.get("id") == conversation_id:
-                                                conv["title"] = new_title
-                                                break
+                                    target_conversation_id = (
+                                        event.get("conversation_id") or conversation_id
+                                    )
+                                    upsert_conversation_in_state(
+                                        {
+                                            "id": target_conversation_id,
+                                            "title": new_title,
+                                        }
+                                    )
+                                    received_title_update = True
 
                         # Handle interrupt - show approval UI
                         if st.session_state.get("pending_interrupt"):
@@ -4315,6 +4550,13 @@ def render_chat_view():
 
                         # If successful, update UI
                         if final_message:
+                            if (
+                                title_sync_conversation_id
+                                and not received_title_update
+                            ):
+                                sync_conversation_title_from_server(
+                                    title_sync_conversation_id
+                                )
                             st.session_state.pending_image_attachments = []
                             reset_conversation_state()
                             st.session_state.show_attachment_uploader = False
