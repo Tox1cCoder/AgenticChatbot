@@ -105,6 +105,15 @@ class MessageRead(BaseModel):
           ]
         - has_images: Boolean indicating if images were included
         - images_count: Number of images included
+
+        For canvas responses, includes:
+        - canvas_artifact: Self-contained renderable code artifact
+          {
+            "content":  "<full self-contained HTML / SVG document>",
+            "language": "html" | "svg" | "react",
+            "title":    "Short human-readable title",
+            "editable": true
+          }
         """,
     )
     feedback: Optional[FeedbackRead] = Field(

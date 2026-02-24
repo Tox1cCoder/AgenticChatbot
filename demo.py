@@ -745,6 +745,53 @@ APP_STYLE = """
     .suggestion-btn:active {
         transform: translateY(0);
     }
+
+    /* Canvas Artifact */
+    .canvas-artifact-wrapper {
+        margin: 12px 0 4px 0;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        overflow: hidden;
+        background: #fff;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+    .canvas-artifact-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 14px;
+        background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+        border-bottom: 1px solid #bae6fd;
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: #0369a1;
+        gap: 8px;
+    }
+    .canvas-artifact-header .canvas-lang-badge {
+        background: #0369a1;
+        color: #fff;
+        border-radius: 6px;
+        padding: 1px 8px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+    }
+    .canvas-artifact-header a.canvas-newtab {
+        color: #0369a1;
+        text-decoration: none;
+        font-size: 0.78rem;
+        font-weight: 500;
+        border: 1px solid #bae6fd;
+        border-radius: 6px;
+        padding: 2px 8px;
+        background: #fff;
+        cursor: pointer;
+        transition: background 0.15s;
+    }
+    .canvas-artifact-header a.canvas-newlab:hover {
+        background: #bae6fd;
+    }
 </style>
 """
 
@@ -1080,6 +1127,8 @@ SESSION_STATE_DEFAULTS: Dict[str, Callable[[], Any] | Any] = {
     "planning_generate_input": str,
     "planning_manual_input": str,
     "api_cache_version": lambda: 0,
+    # localStorage bridge
+    "_ls_op": lambda: None,
 }
 
 
@@ -1344,6 +1393,65 @@ st.set_page_config(
 st.markdown(APP_STYLE, unsafe_allow_html=True)
 st.markdown(IMAGE_LIGHTBOX_JS, unsafe_allow_html=True)
 initialize_session_state()
+
+# ── localStorage session-persistence bridge ──────────────────────────────────
+# Allows the auth token to survive F5 / browser refresh without extra packages.
+import streamlit.components.v1 as _stc_ls
+import json as _json
+
+# Step 1: flush any pending localStorage write/clear from the previous run.
+_ls_op = st.session_state.get("_ls_op")
+if _ls_op is not None:
+    st.session_state._ls_op = None
+    if isinstance(_ls_op, dict):  # save
+        _tok = _json.dumps(_ls_op.get("token", ""))
+        _uid = _json.dumps(_ls_op.get("uid", ""))
+        _stc_ls.html(
+            f"<script>try{{localStorage.setItem('cbtoken',{_tok});"
+            f"localStorage.setItem('cbuid',{_uid});}}catch(e){{}}</script>",
+            height=0,
+        )
+    elif _ls_op == "clear":  # logout
+        _stc_ls.html(
+            "<script>try{localStorage.removeItem('cbtoken');"
+            "localStorage.removeItem('cbuid');}catch(e){}</script>",
+            height=0,
+        )
+
+# Step 2: if not authenticated, try to restore from localStorage.
+if not st.session_state.get("auth_token"):
+    _qp = st.query_params
+    if "__t" in _qp and "__u" in _qp:
+        # Bridge already fired and injected params — restore session.
+        st.session_state.auth_token = _qp["__t"]
+        st.session_state.current_user_id = _qp["__u"]
+        st.session_state.show_login = False
+        # Remove sensitive params from URL; keep __restore=1 to stop the
+        # bridge from firing again on the next rerun.
+        del st.query_params["__t"]
+        del st.query_params["__u"]
+    elif "__restore" not in _qp:
+        # Inject the bridge that reads localStorage and redirects once.
+        _stc_ls.html(
+            """<script>
+(function(){
+  try{
+    var u=new URL(window.parent.location.href);
+    if(u.searchParams.has('__restore'))return;
+    var t=localStorage.getItem('cbtoken');
+    var i=localStorage.getItem('cbuid');
+    if(t&&i){
+      u.searchParams.set('__restore','1');
+      u.searchParams.set('__t',t);
+      u.searchParams.set('__u',i);
+      window.parent.location.replace(u.toString());
+    }
+  }catch(e){}
+})();
+</script>""",
+            height=0,
+        )
+# ── end localStorage bridge ──────────────────────────────────────────────────
 
 # Clear any old cached functions on first run
 if "cache_cleared_v2" not in st.session_state:
@@ -2103,6 +2211,10 @@ def render_login_page():
                             st.session_state.current_user_profile = None
                             st.session_state.active_view = "chat"
                             st.session_state.show_login = False
+                            st.session_state._ls_op = {
+                                "token": auth_response["data"]["accessToken"],
+                                "uid": auth_response["data"]["userId"],
+                            }
                             st.toast("Welcome back!", icon=":material/check_circle:")
                             st.rerun()
                         else:
@@ -2158,6 +2270,10 @@ def render_login_page():
                                     st.session_state.current_user_profile = None
                                     st.session_state.active_view = "chat"
                                     st.session_state.show_login = False
+                                    st.session_state._ls_op = {
+                                        "token": auth_response["data"]["accessToken"],
+                                        "uid": auth_response["data"]["userId"],
+                                    }
                                     st.toast(
                                         "Account created!",
                                         icon=":material/check_circle:",
@@ -2252,6 +2368,9 @@ def render_sidebar():
                     st.session_state.conversations_list = []
                     st.session_state.conversations_loaded = False
                     st.session_state.conversations_last_fetch_params = None
+                    st.session_state._ls_op = "clear"
+                    if "__restore" in st.query_params:
+                        del st.query_params["__restore"]
                     st.session_state.auth_token = None
                     st.session_state.show_login = True
                     st.session_state.active_view = "chat"
@@ -2393,6 +2512,106 @@ def render_attachment_gallery(attachments: List[Dict[str, str]], *, align: str) 
     )
 
     st.markdown(gallery_html, unsafe_allow_html=True)
+
+
+def render_canvas_artifact(message_metadata: dict):
+    """Render a canvas_artifact (HTML/SVG/React) from agent response metadata."""
+    if not message_metadata:
+        return
+
+    artifact = message_metadata.get("canvas_artifact")
+    if not isinstance(artifact, dict):
+        return
+
+    content = artifact.get("content", "").strip()
+    if not content:
+        return
+
+    language = artifact.get("language") or "html"
+    title = artifact.get("title") or "Canvas"
+
+    import streamlit.components.v1 as _stc
+
+    # Base64-encode the ORIGINAL (unpatched) content so the Open button can
+    # recreate it as a Blob URL — avoids the data: URI browser block.
+    orig_b64 = base64.b64encode(content.encode()).decode()
+    esc_title = html.escape(title)
+    esc_lang = html.escape(language.upper())
+
+    # Toolbar injected INTO the iframe content.
+    # Uses a Blob URL instead of data: URI so window.open() is not blocked.
+    injected_toolbar = f"""<div id="__canvas_tb__" style="
+        position:fixed;top:0;left:0;right:0;z-index:2147483647;
+        background:linear-gradient(135deg,#f0f9ff,#e0f2fe);
+        border-bottom:1px solid #bae6fd;
+        padding:5px 12px;
+        display:flex;align-items:center;justify-content:space-between;
+        font-family:-apple-system,BlinkMacSystemFont,sans-serif;
+        font-size:13px;color:#0369a1;
+        box-sizing:border-box;height:36px;
+    ">
+      <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{esc_title}</span>
+      <span style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+        <span style="background:#0369a1;color:#fff;border-radius:4px;padding:0 7px;
+                     font-size:10px;text-transform:uppercase;letter-spacing:.04em">{esc_lang}</span>
+        <button id="__canvas_open__" style="
+            border:1px solid #bae6fd;background:#fff;color:#0369a1;
+            border-radius:5px;padding:2px 10px;cursor:pointer;font-size:12px;
+            font-family:inherit;
+        ">&#x2197; Open</button>
+      </span>
+    </div>
+    <div style="height:36px"></div>
+    <script>
+    (function(){{
+      var b64="{orig_b64}";
+      function dec(s){{
+        var bin=atob(s),arr=new Uint8Array(bin.length);
+        for(var i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
+        return new TextDecoder().decode(arr);
+      }}
+      document.getElementById('__canvas_open__').addEventListener('click',function(){{
+        try{{
+          var src=dec(b64);
+          var blob=new Blob([src],{{type:'text/html'}});
+          var url=URL.createObjectURL(blob);
+          window.open(url,'_blank');
+        }}catch(e){{alert('Could not open: '+e.message);}}
+      }});
+    }})();
+    </script>"""
+
+    # Patch content:
+    #  1. Inject <base target="_blank"> in <head> — all links/form actions open
+    #     in a new tab instead of navigating the iframe and triggering a
+    #     Streamlit page reload.
+    #  2. Inject the toolbar at the start of <body>.
+    patched = content
+    lower = patched.lower()
+    base_tag = '<base target="_blank">'
+
+    head_open = lower.find('<head>')
+    if head_open != -1:
+        ins = head_open + len('<head>')
+        patched = patched[:ins] + '\n' + base_tag + '\n' + patched[ins:]
+        lower = patched.lower()
+
+    body_open = lower.find('<body')
+    if body_open != -1:
+        body_tag_end = lower.find('>', body_open)
+        if body_tag_end != -1:
+            ins = body_tag_end + 1
+            patched = patched[:ins] + '\n' + injected_toolbar + '\n' + patched[ins:]
+    elif head_open == -1:
+        # Bare fragment — no html/head/body structure
+        patched = base_tag + '\n' + injected_toolbar + '\n' + patched
+
+    # ── Live iframe ───────────────────────────────────────────────────────────
+    _stc.html(patched, height=520, scrolling=True)
+
+    # ── Collapsible source code ───────────────────────────────────────────────
+    with st.expander(f"Source Code ({language})", expanded=False):
+        st.code(content, language=language)
 
 
 def render_agent_images(message_metadata: dict):
@@ -2995,6 +3214,10 @@ def render_message_bubble(msg: Dict[str, Any], is_user: bool):
     # Show agent-sent images for assistant messages
     if not is_user:
         render_agent_images(get_message_metadata(msg))
+
+    # Show canvas artifact for assistant messages (HTML/SVG live preview)
+    if not is_user:
+        render_canvas_artifact(get_message_metadata(msg))
 
     # Show tool artifacts for assistant messages
     if not is_user:

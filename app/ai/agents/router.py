@@ -22,6 +22,15 @@ class Router:
         r"\b(draw|sketch|paint|illustrate|render|design|generate|create|make)\b.*\b(image|picture|photo|illustration|art|artwork|logo|icon|poster|banner)\b|\b(image|picture|photo)\s+of\b",
         re.IGNORECASE,
     )
+    _CANVAS_PATTERN = re.compile(
+        r"\b(build|create|make|generate|write|code|develop|design)\b.*\b"
+        r"(app|application|game|calculator|widget|tool|dashboard|chart|graph"
+        r"|visualization|visualisation|animation|interactive|component|webpage"
+        r"|website|timer|clock|quiz|simulator|form|todo list|to-do|counter"
+        r"|canvas|svg|html|react|web app)\b"
+        r"|\b(interactive|playable|runnable|live preview|render on canvas)\b",
+        re.IGNORECASE,
+    )
     _SEARCH_PATTERN = re.compile(
         r"\b(search|look up|lookup|google|web|internet|online|news|headline|weather|forecast|stock price|crypto price|exchange rate|live score|current events)\b",
         re.IGNORECASE,
@@ -194,10 +203,13 @@ class Router:
         has_search = "search_agent" in available_agents
         has_image = "image_generator_agent" in available_agents
         has_chat = "chat_agent" in available_agents
+        has_canvas = "canvas_agent" in available_agents
 
         if has_documents and has_rag:
             if self._is_planning_intent(content) and has_planning:
                 return "planning_agent"
+            if self._is_canvas_intent(content) and has_canvas:
+                return "canvas_agent"
             if self._is_image_generation_intent(content) and has_image:
                 return "image_generator_agent"
             if (
@@ -220,6 +232,8 @@ class Router:
 
         if self._is_planning_intent(content) and has_planning:
             return "planning_agent"
+        if self._is_canvas_intent(content) and has_canvas:
+            return "canvas_agent"
         if self._is_image_generation_intent(content) and has_image:
             return "image_generator_agent"
         if self._is_explicit_search_intent(content) and has_search:
@@ -255,6 +269,9 @@ class Router:
     def _is_planning_intent(self, text: str) -> bool:
         return bool(self._PLANNING_PATTERN.search(text or ""))
 
+    def _is_canvas_intent(self, text: str) -> bool:
+        return bool(self._CANVAS_PATTERN.search(text or ""))
+
     def _is_image_generation_intent(self, text: str) -> bool:
         return bool(self._IMAGE_PATTERN.search(text or ""))
 
@@ -288,6 +305,8 @@ class Router:
 
     def _should_force_rag(self, content: str, selected_agent: str) -> bool:
         if selected_agent == "planning_agent" and self._is_planning_intent(content):
+            return False
+        if selected_agent == "canvas_agent" and self._is_canvas_intent(content):
             return False
         if selected_agent == "image_generator_agent" and self._is_image_generation_intent(
             content

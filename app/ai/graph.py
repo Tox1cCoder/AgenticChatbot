@@ -26,6 +26,7 @@ from .agents.rag_agent import RAGAgent
 from .agents.search_agent import SearchAgent
 from .agents.image_generator_agent import ImageGeneratorAgent
 from .agents.planning_agent import PlanningAgent
+from .agents.canvas_agent import CanvasAgent
 from .summarization_middleware import summarize_for_state
 from .memory import get_memory_manager
 from ..core.config import settings
@@ -74,12 +75,14 @@ class MultiAgentWorkflow:
         self.search_agent = SearchAgent()
         self.image_generator_agent = ImageGeneratorAgent()
         self.planning_agent = PlanningAgent()
+        self.canvas_agent = CanvasAgent()
         self.agents = {
             "chat_agent": self.chat_agent,
             "rag_agent": self.rag_agent,
             "search_agent": self.search_agent,
             "image_generator_agent": self.image_generator_agent,
             "planning_agent": self.planning_agent,
+            "canvas_agent": self.canvas_agent,
         }
 
         self.checkpointer = checkpointer
@@ -95,6 +98,7 @@ class MultiAgentWorkflow:
             self.search_agent,
             self.rag_agent,
             self.image_generator_agent,
+            self.canvas_agent,
         ]
         self._initialized = False
 
@@ -377,6 +381,7 @@ class MultiAgentWorkflow:
         workflow.add_node("search_agent", self._search_node)
         workflow.add_node("image_generator_agent", self._image_generator_node)
         workflow.add_node("planning_agent", self._planning_node)
+        workflow.add_node("canvas_agent", self._canvas_node)
         workflow.add_node("planning_tools", self._planning_tools_node)
         workflow.add_node("rag_tools", self._rag_tools_node)
         workflow.add_node("approval", self._approval_node)
@@ -396,12 +401,13 @@ class MultiAgentWorkflow:
                 "search_agent": "search_agent",
                 "image_generator_agent": "image_generator_agent",
                 "planning_agent": "planning_agent",
+                "canvas_agent": "canvas_agent",
                 "end": END,
             },
         )
 
         # Consolidate conditional edges for agents that use standard tool calling
-        tool_calling_agents = ["chat_agent", "search_agent", "image_generator_agent"]
+        tool_calling_agents = ["chat_agent", "search_agent", "image_generator_agent", "canvas_agent"]
         for agent_name in tool_calling_agents:
             workflow.add_conditional_edges(
                 agent_name,
@@ -1204,6 +1210,33 @@ class MultiAgentWorkflow:
         self._merge_tool_artifacts(state, response, append_images=True)
         return self._finalize_agent_response(state, response)
 
+    async def _canvas_node(self, state: GraphState) -> GraphState:
+        """Canvas agent node — generates self-contained HTML/SVG/React artifacts."""
+        messages = state.get("messages", [])
+        if not messages:
+            return state
+
+        conversation_id = state.get("conversation_id")
+        user_id = state.get("user_id")
+        conversation_history = await self._get_conversation_history(
+            conversation_id, user_id, agent_key="chat"
+        )
+
+        current_turn_messages = self._get_current_turn_messages(messages)
+
+        response = await self.canvas_agent.invoke_model_with_history(
+            current_turn_messages,
+            conversation_history,
+            state.get("persona"),
+            conversation_id,
+            user_id=user_id,
+            model_request=state.get("model_request"),
+            history_summary=state.get("history_summary"),
+        )
+
+        self._merge_tool_artifacts(state, response)
+        return self._finalize_agent_response(state, response)
+
     async def _planning_node(self, state: GraphState) -> GraphState:
         """
         Planning agent node with tool-calling ReAct pattern.
@@ -1583,6 +1616,7 @@ class MultiAgentWorkflow:
             "search_agent": AgentType.SEARCH,
             "image_generator_agent": AgentType.IMAGE_GENERATOR,
             "planning_agent": AgentType.PLANNING,
+            "canvas_agent": AgentType.CANVAS,
         }
         return agent_type_map.get(selected_agent, AgentType.CHAT)
 

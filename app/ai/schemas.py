@@ -11,6 +11,7 @@ class AgentType(str, Enum):
     SEARCH = "search"
     IMAGE_GENERATOR = "image_generator"
     PLANNING = "planning"
+    CANVAS = "canvas"
 
 
 class MessageRole(str, Enum):

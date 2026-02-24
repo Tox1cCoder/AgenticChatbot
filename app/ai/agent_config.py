@@ -43,6 +43,10 @@ AGENT_CONFIG = {
         "temperature": 1.0,
         "langchain_model": "gemini-3-flash-preview",  # For tool calling
     },
+    "canvas": {
+        "model": settings.chat_agent_model,
+        "temperature": 1.0,
+    },
     "suggestion": {
         "model": "gemini-3-flash-preview",
         "temperature": 1.0,

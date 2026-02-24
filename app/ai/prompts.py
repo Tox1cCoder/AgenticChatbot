@@ -211,18 +211,26 @@ Available agents:
 - search_agent: Current events, news, recent information, fact-checking, time-sensitive queries
 - image_generator_agent: Creating images, drawing, illustrating, visual content generation
 - planning_agent: Creating/editing task plans, adding/removing tasks, discussing task breakdown
+- canvas_agent: Building interactive web apps, games, calculators, charts, animations, SVG graphics, HTML components, or any renderable/runnable code artifact
 
 Routing rules (strict priority):
 1. If documents are available, prefer rag_agent by default.
 2. Override rag_agent only when intent is clearly one of:
    - planning/task-list management -> planning_agent
+   - interactive/runnable code artifact -> canvas_agent
    - explicit current/web lookup intent -> search_agent
    - explicit image creation intent -> image_generator_agent
 3. If no documents are available:
    - plan creation/modification/view -> planning_agent
+   - interactive/code artifact -> canvas_agent
    - current/recent/web lookup -> search_agent
    - image creation -> image_generator_agent
    - otherwise -> chat_agent
+
+Canvas clarification:
+- Route TO canvas_agent: "build a calculator", "make a memory game", "create a bar chart", "write a todo app", "render an SVG logo", "make an interactive form", "build a web timer"
+- Route TO chat_agent: "explain how a calculator works", "write pseudocode for a game" (non-renderable)
+- Route TO image_generator_agent: "draw a calculator icon", "generate a logo image" (pixel images, not code)
 
 Planning clarification:
 - Route TO planning_agent: "create a plan", "add task", "remove task", "modify plan", "show tasks"
@@ -233,12 +241,16 @@ Hello -> chat_agent
 Explain quantum physics -> chat_agent
 Latest AI news -> search_agent
 Draw a sunset -> image_generator_agent
+Build a snake game -> canvas_agent
+Make a calculator app -> canvas_agent
+Create an animated SVG clock -> canvas_agent
 Create a plan to build a website -> planning_agent
 What's in my document? -> rag_agent (if documents available)
 Summarize the report -> rag_agent (if documents available)
 Documents available + "Summarize this" -> rag_agent
 Documents available + "What happened in the news today?" -> search_agent
-Documents available + "Draw a logo" -> image_generator_agent"""
+Documents available + "Draw a logo" -> image_generator_agent
+Documents available + "Build a quiz from this content" -> canvas_agent"""
 
 
 def _select_history_for_prompt(
