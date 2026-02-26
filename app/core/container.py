@@ -28,10 +28,12 @@ from app.services.jwt_service import JwtService
 from app.services.task_plan_service import TaskPlanService
 from app.services.provider_service import ProviderService
 from app.services.model_config_service import ModelConfigService
+from app.services.skills_service import SkillsService
 
 from app.ai.checkpoint import CheckpointManager
 from app.ai.mcp_integration import MCPManager
 from app.ai.mcp_registry import MCPRegistry
+from app.ai.skills_registry import SkillsRegistry, get_skills_registry
 from app.ai.agents.planning_agent import PlanningAgent
 from app.repositories.document_image import DocumentImageRepository
 
@@ -76,6 +78,7 @@ class Container(containers.DeclarativeContainer):
             "app.api.ai_sdk",
             "app.api.providers",
             "app.api.model_config",
+            "app.api.skills",
         ]
     )
 
@@ -294,6 +297,16 @@ class Container(containers.DeclarativeContainer):
     mcp_service = providers.Factory(
         MCPService,
         mcp_manager=mcp_manager,
+    )
+
+    # Skills
+    skills_registry = providers.Singleton(
+        lambda: get_skills_registry(),
+    )
+
+    skills_service = providers.Factory(
+        SkillsService,
+        registry=skills_registry,
     )
 
     provider_service = providers.Factory(

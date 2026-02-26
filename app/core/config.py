@@ -371,7 +371,7 @@ class Settings(BaseSettings):
 
     # ReAct Agent Configuration
     react_agent_max_iterations: int = Field(
-        default=24,
+        default=50,
         description="Maximum number of refinement iterations before stopping",
     )
     react_agent_quality_threshold: float = Field(
@@ -379,7 +379,7 @@ class Settings(BaseSettings):
         description="Minimum quality score (0.0-1.0) to accept response without refinement",
     )
     react_agent_recursion_limit: int = Field(
-        default=50,
+        default=101,
         description="LangGraph recursion limit for agent execution. Should be set to 2 * react_agent_max_iterations + 1 per LangGraph best practices",
     )
     tool_choice_mode: str = Field(
@@ -413,7 +413,7 @@ class Settings(BaseSettings):
 
     # Tool Result Token Management
     tool_result_max_chars: int = Field(
-        default=4000,
+        default=16000,
         description="Maximum characters to include in ToolMessage content sent to model (0 = no limit). Full output is preserved in artifacts for UI.",
     )
     tool_result_truncation_suffix: str = Field(

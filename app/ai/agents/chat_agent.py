@@ -158,9 +158,11 @@ class ChatAgent(BaseAgent):
             raise RuntimeError("Gemini client not initialized")
 
         try:
+            system_prompt = self._get_full_system_prompt()
             generation_config = build_gemini_generate_config(
                 model_name=self.model_name,
                 include_thinking=True,
+                system_instruction=system_prompt,
             )
             response = self.gemini_client.models.generate_content(
                 model=self.model_name,
@@ -202,9 +204,11 @@ class ChatAgent(BaseAgent):
                 logger.error(f"Failed to process image attachment: {img_err}")
 
         # Generate response with multimodal content
+        system_prompt = self._get_full_system_prompt()
         generation_config = build_gemini_generate_config(
             model_name=self.model_name,
             include_thinking=True,
+            system_instruction=system_prompt,
         )
         response = self.gemini_client.models.generate_content(
             model=self.model_name,

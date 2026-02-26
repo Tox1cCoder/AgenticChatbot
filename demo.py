@@ -2171,6 +2171,35 @@ def add_mcp_server_from_url(url_config: Dict[str, Any]) -> bool:
     return response.get("success", False) if response else False
 
 
+# ── Skills API helpers ─────────────────────────────────────────
+
+
+def get_skills_list() -> Optional[Dict[str, Any]]:
+    """Fetch all skills with enabled state."""
+    response = make_api_request("GET", "/skills")
+    return response.get("data") if response else None
+
+
+def get_skill_detail(name: str) -> Optional[Dict[str, Any]]:
+    """Fetch full detail (incl. Markdown content) for one skill."""
+    response = make_api_request("GET", f"/skills/{name}")
+    return response.get("data") if response else None
+
+
+def toggle_skill(name: str, enabled: bool) -> Optional[Dict[str, Any]]:
+    """Enable or disable a skill."""
+    response = make_api_request(
+        "PATCH", f"/skills/{name}/toggle?enabled={str(enabled).lower()}"
+    )
+    return response.get("data") if response else None
+
+
+def reload_skills() -> Optional[Dict[str, Any]]:
+    """Trigger a hot-reload of skills from disk."""
+    response = make_api_request("POST", "/skills/reload")
+    return response.get("data") if response else None
+
+
 def render_login_page():
     st.markdown("<br><br>", unsafe_allow_html=True)
 
@@ -3929,6 +3958,155 @@ def render_tools_tab():
         if st.button("Clear Result"):
             st.session_state.tool_execution_result = None
             st.rerun()
+
+
+def render_skills_tab():
+    """Render the Skills management interface."""
+    st.markdown("# :material/psychology: Skills Management")
+    st.markdown(
+        "Manage agent skills — Markdown instruction sets that extend every agent's "
+        "system prompt. Skills are stored in the `skills/` folder as `SKILL.md` files."
+    )
+
+    col_refresh, col_reload = st.columns(2)
+    with col_refresh:
+        if st.button("Refresh", icon=":material/refresh:", key="skills_refresh", use_container_width=True):
+            st.rerun()
+    with col_reload:
+        if st.button("Reload from Disk", icon=":material/sync:", key="skills_reload", use_container_width=True):
+            with st.spinner("Rescanning skills folder..."):
+                result = reload_skills()
+                if result:
+                    msg = result.get("message", "Skills reloaded")
+                    st.success(msg, icon=":material/check_circle:")
+                    import time
+                    time.sleep(0.8)
+                    st.rerun()
+                else:
+                    st.error("Failed to reload skills. Is the API running?")
+
+    st.markdown("---")
+
+    # Fetch skills
+    skills_data = get_skills_list()
+
+    if not skills_data:
+        st.error("Failed to load skills. Make sure the API is running.")
+        return
+
+    skills = skills_data.get("skills", [])
+    total_count = skills_data.get("totalCount", 0)
+    enabled_count = skills_data.get("enabledCount", 0)
+
+    # Summary metrics
+    col_total, col_enabled, col_disabled = st.columns(3)
+    with col_total:
+        st.metric("Total Skills", total_count)
+    with col_enabled:
+        st.metric("Enabled", enabled_count)
+    with col_disabled:
+        st.metric("Disabled", total_count - enabled_count)
+
+    st.markdown("---")
+
+    if not skills:
+        st.info(
+            "No skills found. Drop a folder with a `SKILL.md` file into the `skills/` "
+            "directory and click **Reload from Disk**.",
+            icon=":material/lightbulb:",
+        )
+        return
+
+    # Render each skill as a card
+    for skill in skills:
+        skill_name = skill.get("name", "Unknown")
+        description = skill.get("description", "No description")
+        enabled = skill.get("enabled", False)
+        folder_path = skill.get("folderPath", "")
+
+        status_icon = ":material/check_circle:" if enabled else ":material/cancel:"
+        status_text = "Enabled" if enabled else "Disabled"
+        badge_color = "green" if enabled else "red"
+
+        with st.expander(
+            f"**{status_icon} {skill_name}** — {status_text}",
+            expanded=False,
+        ):
+            st.markdown(f"**Description:** {description}")
+            st.caption(f"Folder: `{folder_path}`")
+
+            # Toggle button
+            col_toggle, col_view = st.columns(2)
+
+            with col_toggle:
+                toggle_label = "Disable" if enabled else "Enable"
+                toggle_icon = ":material/toggle_off:" if enabled else ":material/toggle_on:"
+                if st.button(
+                    toggle_label,
+                    key=f"skill_toggle_{skill_name}",
+                    icon=toggle_icon,
+                    use_container_width=True,
+                ):
+                    with st.spinner(f"{'Disabling' if enabled else 'Enabling'} skill..."):
+                        result = toggle_skill(skill_name, not enabled)
+                        if result:
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to toggle skill '{skill_name}'")
+
+            with col_view:
+                if st.button(
+                    "View Content",
+                    key=f"skill_view_{skill_name}",
+                    icon=":material/visibility:",
+                    use_container_width=True,
+                ):
+                    st.session_state[f"skill_detail_{skill_name}"] = True
+
+            # Show full content on demand
+            if st.session_state.get(f"skill_detail_{skill_name}", False):
+                detail = get_skill_detail(skill_name)
+                if detail:
+                    content = detail.get("content", "_No content_")
+                    st.markdown("---")
+                    st.markdown("#### Skill Instructions")
+                    st.markdown(content)
+
+                    if st.button(
+                        "Hide Content",
+                        key=f"skill_hide_{skill_name}",
+                        icon=":material/visibility_off:",
+                    ):
+                        st.session_state[f"skill_detail_{skill_name}"] = False
+                        st.rerun()
+                else:
+                    st.error("Failed to load skill details.")
+
+    # Help section
+    st.markdown("---")
+    with st.expander(":material/help: How to add a new skill", expanded=False):
+        st.markdown(
+            """
+1. Create a new folder inside `skills/`, e.g. `skills/my-skill/`
+2. Add a `SKILL.md` file with YAML front-matter:
+
+```markdown
+---
+name: my-skill
+description: >
+  A short description of what this skill does and when to activate it.
+---
+
+# My Skill
+
+Your Markdown instructions go here. These will be appended to every
+agent's system prompt when the skill is enabled.
+```
+
+3. Click **Reload from Disk** above to pick it up.
+4. Toggle it on or off as needed.
+"""
+        )
 
 
 def render_interrupt_approval_ui():
@@ -6085,7 +6263,7 @@ def main():
     render_chunk_preview_modal()
 
     # Tab-based navigation across primary workspaces
-    tab_chat, tab_planning, tab_docs, tab_instructions, tab_models, tab_mcp = st.tabs(
+    tab_chat, tab_planning, tab_docs, tab_instructions, tab_models, tab_mcp, tab_skills = st.tabs(
         [
             ":material/chat: Chat",
             ":material/checklist: Planning",
@@ -6093,6 +6271,7 @@ def main():
             ":material/settings: Instructions",
             ":material/smart_toy: Models",
             ":material/extension: MCP Config",
+            ":material/psychology: Skills",
         ]
     )
 
@@ -6113,6 +6292,9 @@ def main():
 
     with tab_mcp:
         render_tools_tab()
+
+    with tab_skills:
+        render_skills_tab()
 
 
 if __name__ == "__main__":

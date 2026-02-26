@@ -26,6 +26,7 @@ from app.repositories.document import DocumentRepository
 from app.repositories.task_plan import TaskPlanRepository
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.mcp_service import MCPService
+from app.services.skills_service import SkillsService
 from app.services.jwt_service import JwtService
 from app.services.ai_service import AIService
 from app.services.provider_service import ProviderService
@@ -129,6 +130,7 @@ class AppAutoInjector(AutoInjector):
                 container_ref, "document_processing_service"
             ),
             MCPService: getattr(container_ref, "mcp_service"),
+            SkillsService: getattr(container_ref, "skills_service"),
             JwtService: getattr(container_ref, "jwt_service"),
             AIService: getattr(container_ref, "ai_service"),
             ProviderService: getattr(container_ref, "provider_service"),

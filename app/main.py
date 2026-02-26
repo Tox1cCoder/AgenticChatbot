@@ -25,6 +25,7 @@ from app.api.task_plans import router as task_plans_router
 from app.api.ai_sdk import router as ai_sdk_router
 from app.api.providers import router as providers_router
 from app.api.model_config import router as model_config_router
+from app.api.skills import router as skills_router
 from app.database.session import get_engine
 from app.api.auth import router as auth_router
 from app.utils.exception_handler import register_exception_handlers
@@ -61,14 +62,37 @@ async def init_agents():
         logger.error(f"Failed to initialize agents: {e}")
 
 
+async def init_skills():
+    """Pre-scan skills folder at startup."""
+    try:
+        from app.ai.skills_registry import get_skills_registry
+
+        registry = get_skills_registry()
+        skills = registry.get_all_skills()
+        logger.info(
+            f"Loaded {len(skills)} skills ({sum(s.enabled for s in skills)} enabled)"
+        )
+    except Exception as e:
+        logger.warning(f"Skills init failed (non-fatal): {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
     # Startup
     await init_checkpoint_tables()
     await init_agents()
+    await init_skills()
     yield
-    # Shutdown (add cleanup code here if needed in the future)
+    # Shutdown
+    try:
+        from app.ai.mcp_integration import get_global_mcp_manager
+        mcp_manager = await get_global_mcp_manager()
+        if mcp_manager:
+            await mcp_manager.cleanup()
+            logger.info("MCP sessions closed cleanly")
+    except Exception as e:
+        logger.debug(f"MCP cleanup during shutdown (non-fatal): {e}")
 
 
 def create_app() -> FastAPI:
@@ -91,6 +115,7 @@ def create_app() -> FastAPI:
             "app.api.ai_sdk",
             "app.api.providers",
             "app.api.model_config",
+            "app.api.skills",
         ]
     )
 
@@ -130,6 +155,7 @@ def create_app() -> FastAPI:
     app.include_router(ai_sdk_router)
     app.include_router(providers_router)
     app.include_router(model_config_router)
+    app.include_router(skills_router)
 
     # Initialize and register event listeners
     event_bus = get_event_bus()

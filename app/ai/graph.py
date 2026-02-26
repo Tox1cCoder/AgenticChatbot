@@ -1,8 +1,11 @@
+import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from collections import defaultdict
 from typing import Optional, TYPE_CHECKING, List, Dict, Any, Tuple
 from uuid import UUID
+
+from cachetools import TTLCache
 
 from langgraph.graph import StateGraph, END, START
 from langgraph.types import Command, interrupt
@@ -32,7 +35,14 @@ from .memory import get_memory_manager
 from ..core.config import settings
 from .hitl_config import build_interrupt_response, requires_human_approval
 from .rag_tool_actions import execute_search_documents_action
-from .tool_execution import ensure_agent_tool_map, execute_tool_calls, invoke_tool
+from .tool_execution import (
+    ensure_agent_tool_map,
+    execute_tool_calls,
+    invoke_tool,
+    build_tool_artifact,
+    extract_images_from_tool_result,
+)
+from .hand_off_tool import MAX_DELEGATION_DEPTH
 from .todo_actions import apply_write_todos_action
 from .utils import (
     normalize_tool_call,
@@ -88,9 +98,14 @@ class MultiAgentWorkflow:
         self.checkpointer = checkpointer
         self.document_repository = document_repository
 
-        # Conversation history cache: conversation_id -> (history, timestamp)
-        self._history_cache: Dict[str, Tuple[List, datetime]] = {}
-        self._history_cache_ttl_seconds: int = 60  # Cache for 60 seconds
+        # Conversation history cache with bounded size + automatic TTL eviction.
+        # Replaces the plain dict to prevent unbounded memory growth.
+        self._history_cache_ttl_seconds: int = 60
+        self._history_cache: TTLCache = TTLCache(
+            maxsize=256, ttl=self._history_cache_ttl_seconds
+        )
+        # Per-conversation lock to prevent duplicate DB lookups under concurrency.
+        self._history_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
         self.graph = self._build_graph()
         self._cleanup_agents = [
@@ -98,6 +113,7 @@ class MultiAgentWorkflow:
             self.search_agent,
             self.rag_agent,
             self.image_generator_agent,
+            self.planning_agent,
             self.canvas_agent,
         ]
         self._initialized = False
@@ -167,8 +183,9 @@ class MultiAgentWorkflow:
         """
         Get conversation history with caching and budget trimming.
 
-        Caches history per conversation_id with TTL to avoid
-        redundant database queries within a single graph execution.
+        Uses a bounded TTLCache (auto-evicts after ``_history_cache_ttl_seconds``)
+        and a per-conversation ``asyncio.Lock`` to prevent duplicate DB lookups
+        when concurrent requests hit the same conversation.
 
         History is trimmed according to agent-specific settings:
         - {agent_key}_history_max_messages
@@ -182,16 +199,12 @@ class MultiAgentWorkflow:
         if not conversation_id or not user_id:
             return []
 
-        # Check cache first
         cache_key = conversation_id
-        now = datetime.now(timezone.utc)
 
-        if cache_key in self._history_cache:
-            cached_history, cached_time = self._history_cache[cache_key]
-            age_seconds = (now - cached_time).total_seconds()
-
-            if age_seconds < self._history_cache_ttl_seconds:
-                # Apply history budget trimming based on agent type
+        async with self._history_locks[cache_key]:
+            # TTLCache handles expiry automatically — a simple ``in`` check suffices.
+            if cache_key in self._history_cache:
+                cached_history = self._history_cache[cache_key]
                 if agent_key:
                     budget_config = HistoryBudgetConfig.for_agent(agent_key, settings)
                     return trim_history_to_budget(
@@ -201,27 +214,26 @@ class MultiAgentWorkflow:
                     )
                 return cached_history
 
-        try:
-            memory_manager = get_memory_manager()
-            conv_memory = await memory_manager.get_memory(
-                UUID(conversation_id), UUID(user_id), force_refresh=True
-            )
-            history = conv_memory.get_recent_messages(limit=None, exclude_last=1)
-
-            # Cache the full (untrimmed) result
-            self._history_cache[cache_key] = (history, now)
-
-            # Apply history budget trimming based on agent type before returning
-            if agent_key:
-                budget_config = HistoryBudgetConfig.for_agent(agent_key, settings)
-                return trim_history_to_budget(
-                    history,
-                    max_messages=budget_config.max_messages,
-                    max_tokens=budget_config.max_tokens,
+            try:
+                memory_manager = get_memory_manager()
+                conv_memory = await memory_manager.get_memory(
+                    UUID(conversation_id), UUID(user_id), force_refresh=True
                 )
-            return history
-        except Exception:
-            return []
+                history = conv_memory.get_recent_messages(limit=None, exclude_last=1)
+
+                # Cache the full (untrimmed) history; TTLCache auto-evicts.
+                self._history_cache[cache_key] = history
+
+                if agent_key:
+                    budget_config = HistoryBudgetConfig.for_agent(agent_key, settings)
+                    return trim_history_to_budget(
+                        history,
+                        max_messages=budget_config.max_messages,
+                        max_tokens=budget_config.max_tokens,
+                    )
+                return history
+            except Exception:
+                return []
 
     def invalidate_history_cache(self, conversation_id: str) -> None:
         """Invalidate cached history for a conversation (call when new messages added)."""
@@ -460,10 +472,10 @@ class MultiAgentWorkflow:
         workflow.add_edge("approval", "tools")
 
         # Dynamic tool routing map based on agent registry
+        # Include ALL agents (including rag_agent) so hand_off delegation works.
         tool_routing_map = {
             agent_name: agent_name
             for agent_name in self.agents.keys()
-            if agent_name != "rag_agent"
         }
         tool_routing_map["end"] = END
 
@@ -487,6 +499,15 @@ class MultiAgentWorkflow:
         selected_agent_name = state.get("selected_agent")
         agent = self.agents.get(selected_agent_name)
         if not agent:
+            logger.warning(
+                "Skipping tool execution: selected_agent '%s' not in agent registry",
+                selected_agent_name,
+            )
+            # Strip tool_calls from the last AIMessage to prevent downstream
+            # routing confusion (the tools node didn't execute anything).
+            if messages and isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
+                sanitized = AIMessage(content=messages[-1].content or "")
+                state["messages"] = messages[:-1] + [sanitized]
             return state
 
         tool_map = await ensure_agent_tool_map(
@@ -557,6 +578,74 @@ class MultiAgentWorkflow:
             context["tool_images"] = existing_images
         state["context"] = context
 
+        # ── Inter-agent delegation (hand_off tool) ──────────────────────
+        state = self._apply_hand_off_if_present(state, tool_outputs)
+
+        return state
+
+    # ------------------------------------------------------------------
+    # hand_off delegation helper
+    # ------------------------------------------------------------------
+    def _apply_hand_off_if_present(
+        self, state: GraphState, tool_outputs: list
+    ) -> GraphState:
+        """Detect a hand_off tool result and re-route to the target agent.
+
+        If ``delegation_count`` exceeds ``MAX_DELEGATION_DEPTH`` the delegation
+        is rejected and an explanatory ToolMessage is appended instead.
+        """
+        hand_off_output = None
+        for output in tool_outputs:
+            if output.get("name") == "hand_off":
+                hand_off_output = output
+                break
+        if hand_off_output is None:
+            return state
+
+        try:
+            payload = json.loads(hand_off_output["content"])
+            target_agent = payload.get("hand_off")
+            reason = payload.get("reason", "")
+        except (json.JSONDecodeError, KeyError):
+            logger.warning("Malformed hand_off tool output; ignoring delegation")
+            return state
+
+        # Validate target agent exists
+        if target_agent not in self.agents:
+            logger.warning(
+                "hand_off requested unknown agent '%s'; ignoring", target_agent
+            )
+            return state
+
+        # Circuit-breaker: cap delegation depth
+        delegation_count = state.get("delegation_count") or 0
+        if delegation_count >= MAX_DELEGATION_DEPTH:
+            logger.warning(
+                "Delegation depth %d reached limit of %d; refusing hand_off to '%s'",
+                delegation_count,
+                MAX_DELEGATION_DEPTH,
+                target_agent,
+            )
+            state.setdefault("messages", []).append(
+                ToolMessage(
+                    content=(
+                        f"Delegation refused: maximum depth of {MAX_DELEGATION_DEPTH} reached. "
+                        "Please answer the user's request directly."
+                    ),
+                    tool_call_id=hand_off_output["tool_call_id"],
+                    name="hand_off",
+                )
+            )
+            return state
+
+        logger.info(
+            "Delegating from '%s' → '%s' (reason: %s)",
+            state.get("selected_agent"),
+            target_agent,
+            reason,
+        )
+        state["selected_agent"] = target_agent
+        state["delegation_count"] = delegation_count + 1
         return state
 
     async def _approval_node(self, state: GraphState) -> GraphState:
@@ -759,6 +848,9 @@ class MultiAgentWorkflow:
         return state
 
     async def _route_node(self, state: GraphState) -> GraphState:
+        # Reset delegation counter at the start of each new user turn
+        state["delegation_count"] = 0
+
         if state.get("selected_agent"):
             return state
 
@@ -1349,56 +1441,174 @@ class MultiAgentWorkflow:
             self.planning_agent, conversation_id=conversation_id
         )
 
-        # Debug logging for observability
-        tool_names = [
-            normalize_tool_call(tc).get("name") for tc in last_message.tool_calls
+        # Separate write_todos calls from external/MCP tool calls
+        normalized_calls = [
+            normalize_tool_call(tc) for tc in last_message.tool_calls
         ]
-        logger.debug(f"[Planning Tools Node] Executing tools: {tool_names}")
+        external_tool_calls = [
+            tc for tc in normalized_calls if tc.get("name") != "write_todos"
+        ]
+        write_todos_calls = [
+            tc for tc in normalized_calls if tc.get("name") == "write_todos"
+        ]
+
+        tool_names_all = [tc.get("name") for tc in normalized_calls]
+        logger.debug(f"[Planning Tools Node] Executing tools: {tool_names_all}")
+
+        # --- HITL approval gate for external (non-write_todos) tool calls ---
+        rejected_tool_ids: Dict[str, str] = {}  # tool_call_id -> rejection reason
+        approved_external_calls = list(external_tool_calls)
+
+        if external_tool_calls:
+            ext_tool_names = [tc.get("name") for tc in external_tool_calls]
+            if requires_human_approval(ext_tool_names):
+                human_decisions = interrupt(
+                    {
+                        "action_requests": external_tool_calls,
+                        "message": "Planning tool execution requires human approval",
+                    }
+                )
+
+                if not human_decisions:
+                    # All rejected — no approval provided
+                    for tc in external_tool_calls:
+                        rejected_tool_ids[tc.get("id")] = (
+                            "Tool execution cancelled: No approval provided"
+                        )
+                    approved_external_calls = []
+                else:
+                    decisions = (
+                        human_decisions
+                        if isinstance(human_decisions, list)
+                        else [human_decisions]
+                    )
+                    decision_map: Dict[str, Any] = {}
+                    for d in decisions:
+                        if isinstance(d, dict):
+                            task_id = d.get("task_id") or d.get("tool_call_id")
+                            if task_id:
+                                decision_map[task_id] = d
+
+                    approved_external_calls = []
+                    for tc in external_tool_calls:
+                        tool_call_id = tc.get("id")
+                        tool_name = tc.get("name")
+                        decision = decision_map.get(tool_call_id, {})
+                        decision_type = decision.get("type", "reject")
+
+                        if decision_type in ("accept", "approve"):
+                            approved_external_calls.append(tc)
+                        elif decision_type == "edit":
+                            modified_args = decision.get("args", tc.get("args", {}))
+                            approved_external_calls.append(
+                                {
+                                    "name": tool_name,
+                                    "args": modified_args,
+                                    "id": tool_call_id,
+                                }
+                            )
+                        else:
+                            feedback = decision.get("args", {}).get(
+                                "message", "Tool execution rejected by user"
+                            )
+                            rejected_tool_ids[tool_call_id] = feedback
+
+        # Emit rejection ToolMessages for rejected external calls
+        for tc in external_tool_calls:
+            tc_id = tc.get("id")
+            if tc_id in rejected_tool_ids:
+                tool_outputs.append(
+                    {
+                        "tool_call_id": tc_id,
+                        "name": tc.get("name"),
+                        "content": rejected_tool_ids[tc_id],
+                    }
+                )
+
+        # --- Artifact + image tracking (BP-1) ---
+        tool_artifacts: List[Dict[str, Any]] = []
+        all_images: List[Dict[str, str]] = []
 
         # Wrap tool execution with context for deferred tool loading support
         with tool_execution_context(conversation_id, user_id, agent_key):
-            for tool_call in last_message.tool_calls:
-                tool_call_data = normalize_tool_call(tool_call)
+            # Execute approved external tool calls
+            for tool_call_data in approved_external_calls:
                 tool_name = tool_call_data.get("name")
                 tool_id = tool_call_data.get("id")
                 tool_args = tool_call_data.get("args", {})
 
-                if tool_name != "write_todos":
-                    try:
-                        tool = tool_map.get(tool_name) if tool_name else None
-                        if tool is not None:
-                            result = await invoke_tool(tool, tool_args)
-                            result = extract_content_from_result(result)
-                            tool_outputs.append(
-                                {
-                                    "tool_call_id": tool_id,
-                                    "name": tool_name,
-                                    "content": (
-                                        str(result)
-                                        if result
-                                        else "Tool executed successfully"
-                                    ),
-                                }
-                            )
-                        else:
-                            tool_outputs.append(
-                                {
-                                    "tool_call_id": tool_id,
-                                    "name": tool_name,
-                                    "content": f"Tool not found: {tool_name}",
-                                }
-                            )
-                    except Exception as e:
-                        logger.error(f"Error executing MCP tool {tool_name}: {e}")
+                try:
+                    tool = tool_map.get(tool_name) if tool_name else None
+                    if tool is not None:
+                        result = await invoke_tool(tool, tool_args)
+                        result = extract_content_from_result(result)
+                        result_str = (
+                            str(result) if result else "Tool executed successfully"
+                        )
                         tool_outputs.append(
                             {
                                 "tool_call_id": tool_id,
                                 "name": tool_name,
-                                "content": f"Error executing tool: {str(e)}",
+                                "content": result_str,
                             }
                         )
-                        had_error = True  # Mark error for circuit breaker
-                    continue
+                        # Collect artifacts and images for UI (BP-1)
+                        tool_artifacts.append(
+                            build_tool_artifact(
+                                tool_call_id=tool_id,
+                                tool_name=tool_name,
+                                tool_args=tool_args,
+                                output_text=result_str,
+                                error=None,
+                            )
+                        )
+                        found_images = extract_images_from_tool_result(result_str)
+                        if found_images:
+                            all_images.extend(found_images)
+                    else:
+                        error_msg = f"Tool not found: {tool_name}"
+                        tool_outputs.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "content": error_msg,
+                            }
+                        )
+                        tool_artifacts.append(
+                            build_tool_artifact(
+                                tool_call_id=tool_id,
+                                tool_name=tool_name,
+                                tool_args=tool_args,
+                                output_text=None,
+                                error=error_msg,
+                            )
+                        )
+                except Exception as e:
+                    logger.error(f"Error executing MCP tool {tool_name}: {e}")
+                    error_msg = f"Error executing tool: {str(e)}"
+                    tool_outputs.append(
+                        {
+                            "tool_call_id": tool_id,
+                            "name": tool_name,
+                            "content": error_msg,
+                        }
+                    )
+                    tool_artifacts.append(
+                        build_tool_artifact(
+                            tool_call_id=tool_id,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            output_text=None,
+                            error=error_msg,
+                        )
+                    )
+                    had_error = True  # Mark error for circuit breaker
+
+            # Execute write_todos calls (always permitted — internal state mutations)
+            for tool_call_data in write_todos_calls:
+                tool_name = tool_call_data.get("name")
+                tool_id = tool_call_data.get("id")
+                tool_args = tool_call_data.get("args", {})
 
                 try:
                     todos, current_task_index, result, action = (
@@ -1465,7 +1675,17 @@ class MultiAgentWorkflow:
                 logger.debug(f"Switched to executing phase due to {action} action")
         state["context"] = context
 
-        # Add tool artifacts to response for UI visibility
+        # Add tool artifacts to state context for UI visibility (BP-1)
+        if tool_artifacts:
+            existing_artifacts = context.get("tool_artifacts", [])
+            existing_artifacts.extend(tool_artifacts)
+            context["tool_artifacts"] = existing_artifacts
+        if all_images:
+            existing_images = context.get("tool_images", [])
+            existing_images.extend(all_images)
+            context["tool_images"] = existing_images
+
+        # Also attach to response object for backward compatibility
         response = state.get("response")
         if response and tool_outputs:
             if response.tool_artifacts is None:
@@ -1505,10 +1725,7 @@ class MultiAgentWorkflow:
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return "end"
 
-        if last_message.tool_calls:
-            return "planning_tools"
-
-        return "end"
+        return "planning_tools"
 
     def _should_continue_planning(self, state: GraphState) -> str:
         planning_call_count = state.get("planning_call_count", 0)
@@ -1794,6 +2011,127 @@ class MultiAgentWorkflow:
 
         return response
 
+    # ------------------------------------------------------------------
+    # Fast-path helpers (traditional RAG streaming)
+    # ------------------------------------------------------------------
+
+    async def _run_fast_path_summarization(
+        self, config: Dict[str, Any], thread_id: Optional[str]
+    ) -> Optional[str]:
+        """Load checkpoint state and run summarization for fast-path RAG.
+
+        The LangGraph pipeline (summarize node) is bypassed on the
+        traditional-RAG streaming path.  This helper replicates the
+        rolling summarization logic so fast-path and graph-path behave
+        identically.
+
+        Returns the (possibly updated) history_summary, or ``None``.
+        """
+        if not self.checkpointer or not thread_id:
+            return None
+
+        try:
+            cp_snapshot = await self.graph.aget_state(config)
+            cp_values = cp_snapshot.values if cp_snapshot else {}
+            history_summary = cp_values.get("history_summary")
+
+            cp_messages = cp_values.get("messages", [])
+            if not cp_messages:
+                return history_summary
+
+            from .summarization_middleware import (
+                should_summarize,
+                generate_summary,
+                apply_summarization_to_state,
+                _get_config as _get_summ_config,
+            )
+            from langchain_core.messages import SystemMessage as _SM
+
+            # Ignore persisted conversation_summarized flag — each
+            # fast-path request is a fresh opportunity for rolling
+            # summarization.
+            if not should_summarize(cp_messages, already_summarized=False):
+                return history_summary
+
+            s_cfg = _get_summ_config()
+            non_sys = [m for m in cp_messages if not isinstance(m, _SM)]
+            split = len(non_sys) - s_cfg.keep_messages
+            to_summarize = non_sys[:split]
+            if not to_summarize:
+                return history_summary
+
+            history_summary = await generate_summary(
+                to_summarize, s_cfg, existing_summary=history_summary
+            )
+
+            # Persist updated summary into checkpoint.
+            _tmp_state: Dict[str, Any] = {
+                "messages": cp_messages,
+                "context": cp_values.get("context", {}),
+            }
+            apply_summarization_to_state(
+                _tmp_state, history_summary, to_summarize, s_cfg
+            )
+            await self.graph.aupdate_state(
+                config,
+                {
+                    "history_summary": _tmp_state["history_summary"],
+                    "history_summary_updated_at": _tmp_state[
+                        "history_summary_updated_at"
+                    ],
+                    "summary_cursor_message_id": _tmp_state.get(
+                        "summary_cursor_message_id"
+                    ),
+                    "messages": _tmp_state["messages"],
+                    "context": _tmp_state["context"],
+                },
+            )
+            return history_summary
+        except Exception as e:
+            logger.warning(
+                "Fast-path summarization/checkpoint read failed "
+                "(continuing without summary): %s",
+                e,
+            )
+            return None
+
+    async def _persist_fast_path_turn(
+        self,
+        config: Dict[str, Any],
+        thread_id: Optional[str],
+        user_message: str,
+        response: Optional[AgentResponse],
+    ) -> None:
+        """Persist user + assistant messages to checkpoint after fast-path RAG.
+
+        The fast path bypasses graph execution, so messages are never
+        written to checkpoint state.  This helper appends them so that
+        subsequent summarization runs see the full conversation.
+        """
+        if not self.checkpointer or not thread_id:
+            return
+
+        try:
+            reply_content = (
+                response.message.content
+                if response and response.message
+                else ""
+            )
+            await self.graph.aupdate_state(
+                config,
+                {
+                    "messages": [
+                        HumanMessage(content=user_message),
+                        AIMessage(content=reply_content),
+                    ],
+                },
+            )
+        except Exception as cp_err:
+            logger.warning(
+                "Fast-path: failed to persist turn to checkpoint: %s",
+                cp_err,
+            )
+
     async def execute_stream(
         self,
         message: str,
@@ -1853,80 +2191,10 @@ class MultiAgentWorkflow:
             and not settings.agentic_rag_enabled
             and rag_provider != "openai"
         ):
-            # ── Fast-path summarization parity ──
-            # The LangGraph pipeline (summarize node) is bypassed on this
-            # path.  Load any existing history_summary from checkpoint state
-            # and run the summarization check so behaviour matches the
-            # graph-backed path.
-            history_summary: Optional[str] = None
-            if self.checkpointer and thread_id:
-                try:
-                    cp_snapshot = await self.graph.aget_state(config)
-                    cp_values = cp_snapshot.values if cp_snapshot else {}
-                    history_summary = cp_values.get("history_summary")
-
-                    # Run summarization against checkpoint messages so
-                    # the summary stays up-to-date even when only the
-                    # fast path is used.
-                    cp_messages = cp_values.get("messages", [])
-                    if cp_messages:
-                        from .summarization_middleware import (
-                            should_summarize,
-                            generate_summary,
-                        )
-
-                        # NOTE: ignore the persisted conversation_summarized
-                        # flag — it is a per-request guard, not a permanent
-                        # lock.  On the fast path each request is a fresh
-                        # opportunity to run rolling summarization.
-                        if should_summarize(cp_messages, already_summarized=False):
-                            from .summarization_middleware import (
-                                apply_summarization_to_state,
-                                _get_config as _get_summ_config,
-                            )
-                            from langchain_core.messages import SystemMessage as _SM
-
-                            s_cfg = _get_summ_config()
-                            non_sys = [
-                                m for m in cp_messages if not isinstance(m, _SM)
-                            ]
-                            split = len(non_sys) - s_cfg.keep_messages
-                            to_summarize = non_sys[:split]
-                            if to_summarize:
-                                history_summary = await generate_summary(
-                                    to_summarize,
-                                    s_cfg,
-                                    existing_summary=history_summary,
-                                )
-                                # Persist the updated summary back into
-                                # checkpoint via a minimal graph update.
-                                _tmp_state: Dict[str, Any] = {
-                                    "messages": cp_messages,
-                                    "context": cp_values.get("context", {}),
-                                }
-                                apply_summarization_to_state(
-                                    _tmp_state, history_summary, to_summarize, s_cfg
-                                )
-                                await self.graph.aupdate_state(
-                                    config,
-                                    {
-                                        "history_summary": _tmp_state["history_summary"],
-                                        "history_summary_updated_at": _tmp_state[
-                                            "history_summary_updated_at"
-                                        ],
-                                        "summary_cursor_message_id": _tmp_state.get(
-                                            "summary_cursor_message_id"
-                                        ),
-                                        "messages": _tmp_state["messages"],
-                                        "context": _tmp_state["context"],
-                                    },
-                                )
-                except Exception as e:
-                    logger.warning(
-                        "Fast-path summarization/checkpoint read failed "
-                        "(continuing without summary): %s",
-                        e,
-                    )
+            # Traditional RAG streaming — bypasses the graph pipeline.
+            history_summary = await self._run_fast_path_summarization(
+                config, thread_id
+            )
 
             conversation_history = await self._get_conversation_history(
                 conversation_id, user_id, agent_key="rag"
@@ -1960,35 +2228,11 @@ class MultiAgentWorkflow:
                                 "type": "complete",
                                 "response": fast_path_response,
                             }
-                        # ── Persist turn to checkpoint ──
-                        # The fast path bypasses graph execution, so
-                        # user + assistant messages are never written
-                        # to checkpoint state.  Append them now so that
-                        # subsequent summarization runs see the full
-                        # conversation.
-                        if self.checkpointer and thread_id:
-                            try:
-                                reply_content = (
-                                    fast_path_response.message.content
-                                    if fast_path_response
-                                    and fast_path_response.message
-                                    else ""
-                                )
-                                await self.graph.aupdate_state(
-                                    config,
-                                    {
-                                        "messages": [
-                                            HumanMessage(content=message),
-                                            AIMessage(content=reply_content),
-                                        ],
-                                    },
-                                )
-                            except Exception as cp_err:
-                                logger.warning(
-                                    "Fast-path: failed to persist turn "
-                                    "to checkpoint: %s",
-                                    cp_err,
-                                )
+                        # Persist turn to checkpoint so subsequent
+                        # summarization runs see the full conversation.
+                        await self._persist_fast_path_turn(
+                            config, thread_id, message, fast_path_response
+                        )
                         return
                     elif event_type == "error":
                         yield event

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from typing import Any, Dict, List, Optional, Tuple
+
+from anyio import ClosedResourceError, BrokenResourceError
+
 from ..core.config import settings
 from .tool_search_tool import create_tool_search_tool
 
 from .utils import extract_content_from_result, normalize_tool_call
+
+logger = logging.getLogger(__name__)
 
 
 def extract_images_from_tool_result(result_text: str) -> List[Dict[str, str]]:
@@ -148,19 +155,25 @@ def _mark_tool_used_if_deferred(tool_name: str) -> None:
 
 
 async def invoke_tool(tool: Any, tool_args: Any) -> Any:
+    """Execute a tool, preferring async paths to avoid blocking the event loop.
+
+    Priority: coroutine attr → ainvoke → invoke (via asyncio.to_thread) → callable.
+    Sync fallbacks are wrapped in ``asyncio.to_thread`` so MCP or other I/O-bound
+    tools never block the running event loop.
+    """
     if getattr(tool, "coroutine", None):
         return await tool.ainvoke(tool_args)
-
-    invoke = getattr(tool, "invoke", None)
-    if callable(invoke):
-        return invoke(tool_args)
 
     ainvoke = getattr(tool, "ainvoke", None)
     if callable(ainvoke):
         return await ainvoke(tool_args)
 
+    invoke = getattr(tool, "invoke", None)
+    if callable(invoke):
+        return await asyncio.to_thread(invoke, tool_args)
+
     if callable(tool):
-        return tool(tool_args)
+        return await asyncio.to_thread(tool, tool_args)
 
     raise TypeError("Tool has no invoke/ainvoke and is not callable")
 
@@ -244,6 +257,72 @@ async def execute_tool_calls(
 
             # Update LRU timestamp for deferred tools on successful execution
             _mark_tool_used_if_deferred(tool_name)
+        except (ClosedResourceError, BrokenResourceError) as session_exc:
+            # MCP session died – attempt reconnect once, then retry
+            logger.warning(
+                "Session error executing tool '%s': %s. Attempting reconnect…",
+                tool_name,
+                session_exc,
+            )
+            reconnected = False
+            try:
+                from .mcp_integration import get_global_mcp_manager
+
+                manager = await get_global_mcp_manager()
+                fresh_tool = await manager.reconnect_and_get_tool(tool_name)
+                if fresh_tool:
+                    # Update tool_map so later calls in the same batch also use it
+                    tool_map[tool_name] = fresh_tool
+                    result = await invoke_tool(fresh_tool, tool_args)
+                    result = extract_content_from_result(result)
+                    result_text = str(result)
+
+                    outputs.append(
+                        {
+                            "tool_call_id": tool_id,
+                            "name": tool_name,
+                            "content": result_text,
+                        }
+                    )
+                    artifacts.append(
+                        build_tool_artifact(
+                            tool_call_id=tool_id,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            output_text=result_text,
+                            error=None,
+                            max_output_chars=artifact_max_output_chars,
+                        )
+                    )
+                    if capture_images:
+                        images.extend(extract_images_from_tool_result(result_text))
+                    _mark_tool_used_if_deferred(tool_name)
+                    reconnected = True
+            except Exception as retry_exc:
+                logger.error(
+                    "Retry after reconnect failed for tool '%s': %s",
+                    tool_name,
+                    retry_exc,
+                )
+
+            if not reconnected:
+                error_msg = (
+                    f"Error: MCP session lost for tool {tool_name}. "
+                    f"Reconnection failed. Please try again."
+                )
+                outputs.append(
+                    {"tool_call_id": tool_id, "name": tool_name, "content": error_msg}
+                )
+                artifacts.append(
+                    build_tool_artifact(
+                        tool_call_id=tool_id,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        output_text=None,
+                        error=str(session_exc),
+                        max_output_chars=artifact_max_output_chars,
+                    )
+                )
         except Exception as exc:
             error_msg = f"Error: {exc}"
             outputs.append(

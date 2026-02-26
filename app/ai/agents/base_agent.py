@@ -13,7 +13,7 @@ from langchain_core.messages import (
 from langchain_core.tools import BaseTool
 
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import TOOL_CONTEXT_SUFFIX
+from ..prompts import TOOL_CONTEXT_SUFFIX, DELEGATION_SUFFIX
 from ..utils import (
     coerce_response_text,
     extract_openai_reasoning_summary,
@@ -23,6 +23,9 @@ from ..agent_config import create_langchain_model, create_gemini_client, AGENT_C
 from ...core.config import settings
 from ..mcp_integration import get_global_mcp_manager
 from ..mcp_registry import get_mcp_tools_generation
+from ..hand_off_tool import hand_off as _hand_off_tool
+from ..skills_registry import get_skills_registry, get_skills_generation
+from ..skills_tool import create_activate_skill_tool
 from ..token_instrumentation import (
     compute_token_breakdown,
     extract_actual_usage
@@ -53,6 +56,10 @@ class BaseAgent(ABC):
 
         # Track tools generation to detect when refresh is needed
         self._tools_generation_seen: int = 0
+
+        # Track skills generation to detect when skills suffix needs rebuild
+        self._skills_generation_seen: int = 0
+        self._cached_skills_suffix: str = ""
 
         self._init_gemini()
 
@@ -101,6 +108,19 @@ class BaseAgent(ABC):
 
             # Apply per-agent tool allowlist filtering
             self.tools = self._filter_tools_by_allowlist(unique_tools)
+
+            # Ensure activate_skill is present when skills are active
+            skill_tools = self._get_skills_internal_tools()
+            existing_names = {t.name for t in self.tools}
+            for t in skill_tools:
+                if t.name not in existing_names:
+                    self.tools.insert(0, t)
+                    existing_names.add(t.name)
+
+            # Add inter-agent delegation tool so every agent can hand off
+            if _hand_off_tool.name not in existing_names:
+                self.tools.append(_hand_off_tool)
+                existing_names.add(_hand_off_tool.name)
 
             # Update our tracked generation
             self._tools_generation_seen = current_generation
@@ -169,6 +189,16 @@ class BaseAgent(ABC):
         allowlist_key = f"{self.agent_config_key}_agent_allowed_tools"
         return getattr(settings, allowlist_key, []) or []
 
+    def _get_skills_internal_tools(self) -> List[BaseTool]:
+        """Return the activate_skill tool if any skills are active."""
+        try:
+            registry = get_skills_registry()
+            if registry.get_active_skills():
+                return [create_activate_skill_tool()]
+        except Exception:
+            pass
+        return []
+
     def _get_tools_for_binding(
         self,
         conversation_id: Optional[str] = None,
@@ -178,7 +208,7 @@ class BaseAgent(ABC):
         Get the tools to bind to the model for this invocation.
 
         When mcp_tool_search_enabled is True, returns a reduced set:
-        - Internal tools (if provided)
+        - Internal tools (if provided) + activate_skill
         - tool_search tool
         - Pinned MCP tools
         - Loaded deferred tools for this conversation
@@ -192,6 +222,18 @@ class BaseAgent(ABC):
         Returns:
             List of tools to bind to the model
         """
+        # Prepend activate_skill to internal tools when skills are active
+        skills_tools = self._get_skills_internal_tools()
+        if skills_tools:
+            merged_internal = list(skills_tools)
+            if internal_tools:
+                seen = {t.name for t in merged_internal}
+                for t in internal_tools:
+                    if t.name not in seen:
+                        merged_internal.append(t)
+                        seen.add(t.name)
+            internal_tools = merged_internal
+
         use_deferred = should_use_deferred_loading(self.agent_config_key)
 
         if use_deferred:
@@ -650,6 +692,14 @@ class BaseAgent(ABC):
     ) -> str:
         system_prompt = self._get_base_system_prompt()
 
+        # Append active skills
+        skills_suffix = self._build_skills_suffix()
+        if skills_suffix:
+            system_prompt = f"{system_prompt}{skills_suffix}"
+
+        # Append delegation instructions (hand_off tool awareness)
+        system_prompt = f"{system_prompt}{DELEGATION_SUFFIX}"
+
         # Inject rolling conversation summary as a dedicated memory block
         if history_summary:
             system_prompt = (
@@ -676,6 +726,59 @@ class BaseAgent(ABC):
     @abstractmethod
     def _get_base_system_prompt(self) -> str:
         pass
+
+    def _build_skills_suffix(self) -> str:
+        """Build a suffix listing active skill *summaries* only.
+
+        Full skill content is loaded on-demand via the ``activate_skill``
+        tool (progressive disclosure).  The suffix tells the LLM which
+        skills exist and instructs it to call the tool when relevant.
+
+        Uses a generation counter to cache: the suffix is only rebuilt
+        when a skill is toggled or the registry is reloaded.
+        """
+        current_gen = get_skills_generation()
+        if current_gen == self._skills_generation_seen and self._cached_skills_suffix is not None:
+            return self._cached_skills_suffix
+
+        try:
+            registry = get_skills_registry()
+            active_skills = registry.get_active_skills()
+        except Exception as exc:
+            logger.warning("Failed to load active skills: %s", exc)
+            active_skills = []
+
+        if not active_skills:
+            self._cached_skills_suffix = ""
+        else:
+            parts = [
+                "\n\n── Available Skills ──",
+                "You have access to the following skills. Each skill contains "
+                "detailed instructions that you can load on demand using the "
+                "`activate_skill` tool. When a user's request seems related to "
+                "a skill below, call `activate_skill` with the skill name to "
+                "load its full instructions before responding.\n",
+            ]
+            for skill in active_skills:
+                parts.append(f"• **{skill.name}** – {skill.description}")
+            parts.append("\n── End Available Skills ──")
+            self._cached_skills_suffix = "\n".join(parts)
+
+        self._skills_generation_seen = current_gen
+        return self._cached_skills_suffix
+
+    def _get_full_system_prompt(self) -> str:
+        """Return base system prompt + active skills suffix.
+
+        Used by code paths that call the Gemini SDK directly (e.g. ChatAgent
+        vision, RAGAgent traditional _generate) where _build_system_prompt()
+        is not invoked.
+        """
+        base = self._get_base_system_prompt()
+        suffix = self._build_skills_suffix()
+        if suffix:
+            return f"{base}{suffix}"
+        return base
 
     def _build_error_response(
         self, message: str, conversation_id: Optional[str], error: Optional[str] = None

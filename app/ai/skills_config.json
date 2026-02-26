@@ -1,0 +1,13 @@
+{
+  "skills": {
+    "example-skill": {
+      "enabled": false
+    },
+    "playwright-cli": {
+      "enabled": true
+    },
+    "take100-timesheet": {
+      "enabled": true
+    }
+  }
+}

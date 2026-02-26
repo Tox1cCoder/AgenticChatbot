@@ -203,6 +203,16 @@ You have already called some tools in this turn. Their results are in the messag
 
 Focus on providing a complete answer using available information."""
 
+DELEGATION_SUFFIX = """
+
+INTER-AGENT DELEGATION:
+You have a `hand_off` tool that lets you delegate to a specialist agent.
+Use it ONLY when the user's request clearly falls outside your expertise AND
+another agent is better suited.  Never delegate if you can handle the request
+yourself — prefer answering directly over passing work around.
+Available targets: chat_agent, rag_agent, search_agent, image_generator_agent,
+planning_agent, canvas_agent."""
+
 ROUTER_SYSTEM_PROMPT = """Route the user's message to the most appropriate agent. Respond with ONLY the agent name.
 
 Available agents:

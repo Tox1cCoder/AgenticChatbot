@@ -26,7 +26,6 @@ from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..prompts import build_rag_prompt, AGENTIC_RAG_SYSTEM_PROMPT
 from ..agent_config import (
     create_langchain_model,
-    create_gemini_client,
     build_gemini_generate_config,
     AGENT_CONFIG,
 )
@@ -35,15 +34,12 @@ from ..mcp_integration import get_global_mcp_manager
 from ..mcp_registry import get_mcp_tools_generation
 from ..model_factory import ModelFactory
 from ...core.config import settings, Settings
+from .base_agent import BaseAgent
 
 from ..utils import (
     coerce_response_text,
     extract_agent_execution_info,
     get_error_recovery_hint,
-)
-from ..deferred_tool_binding import (
-    should_use_deferred_loading,
-    build_deferred_tool_list,
 )
 from ...repositories.document_image import DocumentImageRepository
 from ...database.session import SessionLocal
@@ -51,7 +47,7 @@ from ...database.session import SessionLocal
 logger = logging.getLogger(__name__)
 
 
-class RAGAgent:
+class RAGAgent(BaseAgent):
 
     def __init__(
         self,
@@ -60,20 +56,18 @@ class RAGAgent:
         embedding_model: SentenceTransformer,
         collection_name: str = "documents_gemma",
     ):
+        # Initialise BaseAgent (sets model_name, gemini_client, langchain_model,
+        # mcp_manager, tools, skills tracking, etc.)
+        super().__init__(agent_config_key="rag")
+
+        # RAG-specific fields
         self.settings = settings
         self.qdrant_client = qdrant_client
         self.embedding_model = embedding_model
-
         self.collection_name = collection_name
         self.embedding_dimension = settings.embedding_dimension
-        self.model_name = AGENT_CONFIG["rag"]["model"]
-        self.gemini_client = None
-        self.langchain_model = None
-        self.mcp_manager = None
-        self.tools = []
-        self._tools_generation_seen = 0
 
-        # Store retrieval parameters
+        # Retrieval parameters
         self.top_k = settings.rag_top_k
         self.score_threshold = settings.rag_score_threshold
         self.enable_reranking = settings.enable_reranking
@@ -87,94 +81,53 @@ class RAGAgent:
         self.agentic_max_iterations = settings.agentic_max_iterations
         self.agentic_preview_chars = settings.agentic_preview_chars
 
-        self._init_gemini()
-
         # Initialize re-ranker if enabled
         if self.enable_reranking:
             self._init_reranker()
 
-    def _init_gemini(self):
-        try:
-            self.gemini_client = create_gemini_client()
-            self.langchain_model = create_langchain_model(agent_type="rag")
-            logger.debug(f"RAGAgent initialized with model: {self.model_name}")
-        except Exception as e:
-            logger.error(f"Error initializing Gemini for RAGAgent: {e}")
+    # ------------------------------------------------------------------
+    # Abstract member implementations
+    # ------------------------------------------------------------------
+
+    @property
+    def agent_type(self) -> AgentType:
+        return AgentType.RAG
+
+    @property
+    def agent_id(self) -> str:
+        return "rag_agent"
+
+    def _get_base_system_prompt(self) -> str:
+        """Return the default agentic RAG system prompt.
+
+        RAGAgent uses different prompts for different paths (traditional
+        RAG uses ``build_rag_prompt()``, agentic uses
+        ``AGENTIC_RAG_SYSTEM_PROMPT``).  This base implementation returns
+        the agentic prompt as the default; callers that need the
+        traditional prompt construct it themselves via ``build_rag_prompt()``.
+        """
+        return AGENTIC_RAG_SYSTEM_PROMPT
 
     def _init_reranker(self):
         self.reranker = CrossEncoder(self.settings.reranker_model)
         logger.debug(f"Re-ranker initialized: {self.settings.reranker_model}")
 
-    def _resolve_model_request(self, model_request: Any) -> Optional[Dict[str, Any]]:
-        if not model_request or not isinstance(model_request, dict):
-            return None
+    def _get_full_system_prompt(self, base_prompt: str) -> str:
+        """Return base prompt + active skills suffix.
 
-        override = model_request.get("rag")
-        if isinstance(override, dict):
-            return override
-
-        shared = model_request.get("all")
-        return shared if isinstance(shared, dict) else None
-
-    def _get_openai_api_key(self, user_id: Any) -> Optional[str]:
-        if not user_id:
-            return None
-
-        try:
-            user_uuid = UUID(str(user_id))
-        except Exception:
-            return None
-
-        try:
-            from app.core.container import container
-
-            provider_service = container.provider_service()
-            return provider_service.get_decrypted_api_key(user_uuid, "openai")
-        except Exception:
-            return None
+        RAGAgent doesn't have a single base prompt — different paths use
+        different prompts, so caller passes the base in.  Overrides
+        BaseAgent's no-arg version.
+        """
+        suffix = self._build_skills_suffix()
+        if suffix:
+            return f"{base_prompt}{suffix}"
+        return base_prompt
 
     def _coerce_temperature(self, value: Any, default: float) -> float:
         if isinstance(value, (int, float)):
             return float(value)
         return float(default)
-
-    async def _ainvoke_with_retries(self, runnable: Any, payload: Any) -> Any:
-        attempts = getattr(settings, "provider_retry_attempts", 3) or 3
-        delay = getattr(settings, "provider_retry_delay_seconds", 1.0) or 1.0
-
-        try:
-            attempts = int(attempts)
-        except Exception:
-            attempts = 3
-        try:
-            delay = float(delay)
-        except Exception:
-            delay = 1.0
-
-        if attempts < 1:
-            attempts = 1
-        if delay < 0:
-            delay = 0.0
-
-        last_exc: Optional[Exception] = None
-        for attempt in range(1, attempts + 1):
-            try:
-                return await runnable.ainvoke(payload)
-            except Exception as exc:
-                last_exc = exc
-                if attempt >= attempts:
-                    break
-                sleep_for = delay * (2 ** (attempt - 1))
-                logger.warning(
-                    "rag_agent: provider call failed (attempt %s/%s): %s",
-                    attempt,
-                    attempts,
-                    exc,
-                )
-                if sleep_for:
-                    await asyncio.sleep(sleep_for)
-
-        raise last_exc or RuntimeError("Provider call failed")
 
     async def _init_tools(self):
         current_generation = get_mcp_tools_generation()
@@ -209,6 +162,14 @@ class RAGAgent:
             if search_documents_tool.name not in tool_names:
                 self.tools.insert(0, search_documents_tool)
 
+        # Ensure activate_skill is present when skills are active
+        skill_tools = self._get_skills_internal_tools()
+        existing_names = {t.name for t in self.tools}
+        for t in skill_tools:
+            if t.name not in existing_names:
+                self.tools.insert(0, t)
+                existing_names.add(t.name)
+
         # Log status if MCP manager is available
         if self.mcp_manager:
             server_status = self.mcp_manager.get_servers_status()
@@ -233,94 +194,6 @@ class RAGAgent:
                     "RAGAgent running with %d tools (MCP unavailable)",
                     len(self.tools),
                 )
-
-    def _deduplicate_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
-        unique_tools: Dict[str, BaseTool] = {}
-        for tool in tools or []:
-            unique_tools.setdefault(tool.name, tool)
-        return list(unique_tools.values())
-
-    def _filter_tools_by_allowlist(self, tools: List[BaseTool]) -> List[BaseTool]:
-        """
-        Filter tools based on rag_agent_allowed_tools allowlist.
-        """
-        allowlist = self._get_allowlist()
-        if not allowlist:
-            return tools
-
-        allowlist_set = set(allowlist)
-        filtered_tools = []
-
-        for tool in tools:
-            if tool.name in allowlist_set:
-                filtered_tools.append(tool)
-                continue
-
-            if self.mcp_manager:
-                server_name = self.mcp_manager.get_server_for_tool(tool)
-                if server_name and server_name in allowlist_set:
-                    filtered_tools.append(tool)
-
-        return filtered_tools
-
-    @property
-    def agent_config_key(self) -> str:
-        """Return the agent config key for consistency with BaseAgent."""
-        return "rag"
-
-    def _get_allowlist(self) -> Optional[List[str]]:
-        """Get the per-agent tool allowlist from settings."""
-        allowlist_key = f"{self.agent_config_key}_agent_allowed_tools"
-        return getattr(settings, allowlist_key, []) or []
-
-    def _get_tools_for_binding(
-        self,
-        conversation_id: Optional[str] = None,
-        internal_tools: Optional[List[BaseTool]] = None,
-    ) -> List[BaseTool]:
-        """
-        Get the tools to bind to the model for this invocation.
-
-        When mcp_tool_search_enabled is True, returns a reduced set:
-        - Internal tools (if provided)
-        - tool_search tool
-        - Pinned MCP tools
-        - Loaded deferred tools for this conversation
-
-        When mcp_tool_search_enabled is False, returns all tools (current behavior).
-
-        Args:
-            conversation_id: Current conversation ID for deferred tool lookup
-            internal_tools: Non-MCP internal tools to always include
-
-        Returns:
-            List of tools to bind to the model
-        """
-
-        use_deferred = should_use_deferred_loading(self.agent_config_key)
-
-        if use_deferred:
-            # Build deferred tool list
-            return build_deferred_tool_list(
-                conversation_id=conversation_id,
-                agent_key=self.agent_config_key,
-                mcp_manager=self.mcp_manager,
-                all_mcp_tools=self.tools,
-                internal_tools=internal_tools,
-                allowlist=self._get_allowlist(),
-            )
-        else:
-            # Traditional mode: return all tools (with internal tools prepended)
-            if internal_tools:
-                # Combine internal tools with MCP tools, avoiding duplicates
-                seen = {t.name for t in internal_tools}
-                combined = list(internal_tools)
-                for tool in self.tools:
-                    if tool.name not in seen:
-                        combined.append(tool)
-                        seen.add(tool.name)
-                return combined
-            return self.tools
 
     def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
 
@@ -410,6 +283,9 @@ class RAGAgent:
             has_images=bool(images),
             history_summary=history_summary,
         )
+
+        # Append active skills to the prompt
+        prompt = self._get_full_system_prompt(prompt)
 
         tools_for_binding = (
             self._get_tools_for_binding(conversation_id=conversation_id)
@@ -723,6 +599,9 @@ class RAGAgent:
             has_images=bool(images),
             history_summary=history_summary,
         )
+
+        # Append active skills to the prompt
+        prompt = self._get_full_system_prompt(prompt)
 
         tools_for_binding = (
             self._get_tools_for_binding(conversation_id=conversation_id)
@@ -1474,11 +1353,12 @@ class RAGAgent:
         return True
 
     async def cleanup(self):
-        # Cleanup MCP resources
+        # Cleanup MCP resources and tools via BaseAgent
         if self.mcp_manager:
             await self.mcp_manager.cleanup()
+        await super().cleanup()
 
-        # Cleanup Qdrant
+        # Cleanup Qdrant (RAG-specific)
         if hasattr(self.qdrant_client, "close"):
             self.qdrant_client.close()
 
@@ -1802,6 +1682,11 @@ class RAGAgent:
         history_summary = message.metadata.get("history_summary")
 
         system_prompt = AGENTIC_RAG_SYSTEM_PROMPT
+
+        # Append active skills
+        skills_suffix = self._build_skills_suffix()
+        if skills_suffix:
+            system_prompt = f"{system_prompt}{skills_suffix}"
 
         # Inject rolling conversation summary when present
         if history_summary:

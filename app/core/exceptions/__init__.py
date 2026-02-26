@@ -10,6 +10,7 @@ from .mcp import (
     ServerConfigurationError,
 )
 from .planning import PlanExecutionPausedException, PauseReason
+from .skills import SkillNotFoundError
 
 __all__ = [
     "CustomHTTPException",
@@ -27,4 +28,5 @@ __all__ = [
     "ServerConfigurationError",
     "PlanExecutionPausedException",
     "PauseReason",
+    "SkillNotFoundError",
 ]

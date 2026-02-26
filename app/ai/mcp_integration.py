@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Iterable, TYPE_CHECKING
 
+from anyio import ClosedResourceError, BrokenResourceError
+
 from app.core.config import settings
 from app.core.exceptions.mcp import (
     ServerNotFoundError,
@@ -596,6 +598,94 @@ class MCPManager:
 
         return tools_info
 
+    @staticmethod
+    def _is_session_error(error: Exception) -> bool:
+        """Check if an error indicates a dead/closed MCP session."""
+        return isinstance(error, (ClosedResourceError, BrokenResourceError))
+
+    async def reconnect_server(self, server_name: str) -> List[BaseTool]:
+        """
+        Close and re-establish the session for *server_name*, returning fresh tools.
+
+        This is the recovery path when a ``ClosedResourceError`` (or similar)
+        is raised during tool execution – the underlying MCP server process
+        likely crashed.
+        """
+        logger.info("Reconnecting MCP server '%s' after session error", server_name)
+
+        # 1. Tear down old session context
+        old = self._session_contexts.pop(server_name, None)
+        if old:
+            try:
+                await asyncio.shield(old["context"].__aexit__(None, None, None))
+            except Exception:
+                pass  # best-effort cleanup
+
+        # 2. Drop cached tools so get_server_tools re-creates everything
+        removed_tools = self._server_tools.pop(server_name, [])
+        for tool in removed_tools:
+            self._tool_server_map.pop(id(tool), None)
+            indexed = self._tool_index.get(tool.name)
+            if indexed:
+                self._tool_index[tool.name] = [
+                    t for t in indexed if t is not tool
+                ]
+                if not self._tool_index[tool.name]:
+                    del self._tool_index[tool.name]
+        self._tools = [t for t in self._tools if t not in removed_tools]
+
+        # 3. Re-create client entry if needed (config unchanged)
+        if not self.client:
+            await self.initialize()
+
+        # 4. Load fresh tools via a new session
+        fresh_tools = await self.get_server_tools(server_name)
+
+        # Rebuild the combined tools list
+        combined: List[BaseTool] = []
+        for sn in self._get_enabled_server_names():
+            combined.extend(self._server_tools.get(sn, []))
+        self._tools = combined
+
+        logger.info(
+            "Reconnected MCP server '%s' – %d tools available",
+            server_name,
+            len(fresh_tools),
+        )
+        return fresh_tools
+
+    async def reconnect_and_get_tool(
+        self, tool_name: str
+    ) -> Optional[BaseTool]:
+        """
+        Reconnect whichever server owns *tool_name* and return a fresh tool.
+
+        Returns ``None`` when the server cannot be determined or the tool no
+        longer appears after reconnect.
+        """
+        # Determine which server provided this tool
+        server_name: Optional[str] = None
+        for sname, tools in self._server_tools.items():
+            if any(t.name == tool_name for t in tools):
+                server_name = sname
+                break
+
+        if not server_name:
+            # Fallback: look at tool_server_map via the stale index
+            for tool in self._tool_index.get(tool_name, []):
+                server_name = self._tool_server_map.get(id(tool))
+                if server_name:
+                    break
+
+        if not server_name:
+            logger.warning(
+                "Cannot reconnect for tool '%s': server unknown", tool_name
+            )
+            return None
+
+        await self.reconnect_server(server_name)
+        return self._tool_index.get(tool_name, [None])[0]
+
     async def get_tool_by_name(
         self, tool_name: str, server_name: Optional[str] = None
     ) -> Optional[BaseTool]:
@@ -658,6 +748,58 @@ class MCPManager:
                 "tool_name": tool_name,
                 "server_name": server_name,
             }
+        except (ClosedResourceError, BrokenResourceError) as session_err:
+            # MCP session died – try to reconnect once and retry
+            logger.warning(
+                "Session error executing tool '%s' on server '%s': %s. "
+                "Attempting reconnect…",
+                tool_name,
+                server_name,
+                session_err,
+            )
+            try:
+                fresh_tool = await self.reconnect_and_get_tool(tool_name)
+                if fresh_tool:
+                    result = await fresh_tool.ainvoke(arguments)
+                    execution_time = time.time() - start_time
+                    return {
+                        "success": True,
+                        "result": result,
+                        "error": None,
+                        "execution_time": execution_time,
+                        "tool_name": tool_name,
+                        "server_name": server_name,
+                    }
+            except Exception as retry_err:
+                logger.error(
+                    "Retry after reconnect also failed for '%s': %s",
+                    tool_name,
+                    retry_err,
+                )
+                # Fall through to the normal error handling below
+                session_err = retry_err  # use retry error for reporting
+
+            execution_time = time.time() - start_time
+            e = session_err  # noqa: F841 – reuse variable for shared path
+
+            recovery_hint = get_error_recovery_hint(e, tool_name, arguments)
+            error_category = self._categorize_error(e)
+
+            logger.error(
+                f"Tool execution failed for {tool_name} with args {arguments}: {e}",
+                exc_info=True,
+            )
+
+            return {
+                "success": False,
+                "result": None,
+                "error": f"{type(e).__name__}: {str(e)}",
+                "error_category": error_category,
+                "error_hint": recovery_hint,
+                "execution_time": execution_time,
+                "tool_name": tool_name,
+                "server_name": server_name,
+            }
         except Exception as e:
             execution_time = time.time() - start_time
 
@@ -688,7 +830,9 @@ class MCPManager:
         """Categorize error for structured error handling."""
         error_msg = str(error).lower()
 
-        if isinstance(error, TypeError):
+        if isinstance(error, (ClosedResourceError, BrokenResourceError)):
+            return "session_error"
+        elif isinstance(error, TypeError):
             return "argument_error"
         elif isinstance(error, ValueError):
             return "value_error"
@@ -698,6 +842,7 @@ class MCPManager:
             "connection" in error_msg
             or "network" in error_msg
             or "timeout" in error_msg
+            or "closedresource" in error_msg
         ):
             return "network_error"
         elif "permission" in error_msg or "unauthorized" in error_msg:
