@@ -13,6 +13,7 @@ description: Automates entering daily working time schedules on take100dot.com u
 - **All other tasks**: Project = **F131**, Category = **Logic Handle**
 
 ## Rules
+- Call playwright-cli skill.
 - Every `playwright-cli` command returns a snapshot. **Never** call `playwright-cli snapshot` separately.
 - If a command fails, retry once, then stop and report the error.
 - **Never** search projects with an empty keyword — it loads ~4000 rows and crashes the browser.

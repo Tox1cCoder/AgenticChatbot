@@ -638,8 +638,28 @@ APP_STYLE = """
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         color: #374151;
     }
+
+    .thinking-content-rendered {
+        line-height: 1.65;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        color: #374151;
+        white-space: normal;
+    }
+
+    .thinking-content-rendered p {
+        margin: 0.35em 0;
+    }
+
+    .thinking-content-rendered p:first-child {
+        margin-top: 0;
+    }
+
+    .thinking-content-rendered p:last-child {
+        margin-bottom: 0;
+    }
     
-    .thinking-content strong {
+    .thinking-content strong,
+    .thinking-content-rendered strong {
         font-weight: 600;
         color: #1f2937;
     }
@@ -1459,6 +1479,66 @@ if "cache_cleared_v2" not in st.session_state:
     st.session_state.cache_cleared_v2 = True
 
 
+def _clear_inflight_state() -> None:
+    """Clear all in-flight streaming state keys."""
+    st.session_state.stream_inflight = False
+    st.session_state.stream_conversation_id = ""
+    st.session_state.stream_user_message_id = ""
+    st.session_state.stream_partial_text = ""
+    st.session_state.stream_partial_thinking = ""
+    st.session_state.stream_selected_agent = None
+
+
+def _handle_stop_rerun(conversation_id: str) -> None:
+    """
+    Phase 2 of two-phase stop: called on the rerun after the streaming
+    connection was dropped (by the user clicking Stop or navigating away).
+    Calls ``POST /messages/stop`` to signal the backend, then syncs UI.
+    """
+    user_message_id = st.session_state.get("stream_user_message_id", "")
+    partial_preview = st.session_state.get("stream_partial_text", "")
+
+    # Show partial text preview while the stop call completes
+    if partial_preview:
+        with st.chat_message("assistant"):
+            st.markdown(partial_preview + " *(stopped)*")
+
+    if not user_message_id:
+        _clear_inflight_state()
+        st.rerun()
+        return
+
+    # Call the stop endpoint
+    stop_data = {
+        "conversationId": conversation_id,
+        "userMessageId": user_message_id,
+    }
+    stop_response = make_api_request("POST", "/messages/stop", data=stop_data)
+
+    # Process the response
+    if stop_response and stop_response.get("success"):
+        result_data = stop_response.get("data", {})
+        stop_status = result_data.get("status", "not_inflight")
+
+        if stop_status == "cancelled" and result_data.get("message"):
+            # Backend persisted a partial message – append to local state
+            bot_msg = result_data["message"]
+            st.session_state.messages.append(bot_msg)
+            st.toast("Generation stopped", icon=":material/stop_circle:")
+        else:
+            # Fallback: reset conversation state so next rerun reloads messages
+            st.session_state.conversation_messages_page = 0
+            st.session_state.has_more_messages = True
+            st.toast("Generation stopped", icon=":material/stop_circle:")
+    else:
+        # Stop call failed or generation already completed – reset for refresh
+        st.session_state.conversation_messages_page = 0
+        st.session_state.has_more_messages = True
+
+    _clear_inflight_state()
+    st.rerun()
+
+
 def reset_conversation_state() -> None:
     st.session_state.messages = []
     st.session_state.conversation_messages_meta = None
@@ -1474,6 +1554,11 @@ def reset_conversation_state() -> None:
     st.session_state.image_viewer_open = False
     st.session_state.image_viewer_payload = None
     st.session_state.message_image_thumbnails = {}
+    # Clear in-flight streaming state
+    _clear_inflight_state()
+
+
+_MANAGER_PAGE_SIZE = 100
 
 
 def open_conversation_manager() -> None:
@@ -1481,6 +1566,11 @@ def open_conversation_manager() -> None:
     st.session_state.conversation_manager_visible = True
     st.session_state.show_conversation_manager = True
     st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = True
+    # Reset lazy-load state so the dialog fetches fresh data on open
+    st.session_state.pop("manager_conversations", None)
+    st.session_state.pop("manager_conv_page", None)
+    st.session_state.pop("manager_conv_has_more", None)
+    st.session_state.pop("manager_conv_total", None)
 
 
 def close_conversation_manager() -> None:
@@ -1488,6 +1578,11 @@ def close_conversation_manager() -> None:
     st.session_state.conversation_manager_visible = False
     st.session_state.show_conversation_manager = False
     st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = False
+    # Free memory held by the manager conversation cache
+    st.session_state.pop("manager_conversations", None)
+    st.session_state.pop("manager_conv_page", None)
+    st.session_state.pop("manager_conv_has_more", None)
+    st.session_state.pop("manager_conv_total", None)
 
 
 def find_conversation_in_state(conversation_id: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -1705,6 +1800,8 @@ def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
     """
     Make a streaming API request using Server-Sent Events (SSE).
     Yields parsed JSON events from the stream.
+    Heartbeat events from the server are silently consumed (no-op) so the
+    connection stays alive and Streamlit gets frequent yield-points.
     """
     url = f"{API_BASE_URL}{endpoint}"
     headers = {}
@@ -1712,6 +1809,7 @@ def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
         headers["Authorization"] = f"Bearer {st.session_state.auth_token}"
 
     stream_completed = False
+    response = None
     try:
         # Long-running MCP tools can block the stream for several minutes, so use a generous read timeout
         response = get_http_session().post(
@@ -1732,6 +1830,11 @@ def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
                     try:
                         event = json.loads(event_data)
                         event_type = event.get("type")
+
+                        # Silently consume heartbeat events (keep-alive)
+                        if event_type == "heartbeat":
+                            continue
+
                         yield event
                         if event_type in ["complete", "error", "interrupt"]:
                             stream_completed = True
@@ -1753,6 +1856,13 @@ def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
     except Exception as exc:
         st.toast(f"Error: {exc}", icon=":material/cancel:")
         yield {"type": "error", "error": str(exc)}
+    finally:
+        # Ensure the response connection is closed to avoid resource leaks
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
 
 
 def get_user(user_id: str) -> Dict[str, Any]:
@@ -2715,19 +2825,26 @@ def render_agent_images(message_metadata: dict):
     if not thumb_entries:
         return
 
-    # Build thumbnail <img> tags
+    # Build thumbnail <img> tags with fixed-size cells and broken-image handling
     thumbs_html = ""
     for i, entry in enumerate(thumb_entries):
+        # Truncate caption for display (keep full text in title attribute)
+        short_cap = entry["caption"]
+        if len(short_cap) > 40:
+            short_cap = html.escape(entry["caption"][:37] + "...")
+        else:
+            short_cap = entry["caption"]  # already escaped
+
         cap_html = (
-            f'<div style="font-size:.8em;color:#888;margin-top:2px;">{entry["caption"]}</div>'
+            f'<div class="agent-thumb-caption" title="{entry["caption"]}">{short_cap}</div>'
             if entry["caption"] else ""
         )
         thumbs_html += (
-            f'<div style="display:inline-block;vertical-align:top;margin:0 8px 8px 0;text-align:center;">'
-            f'  <img src="{entry["src"]}" alt="{entry["caption"]}" '
+            f'<div class="agent-thumb-cell">'
+            f'  <img src="{entry["src"]}" alt="{short_cap}" '
             f'       title="Click to view full size" data-idx="{i}" '
-            f'       style="width:150px;cursor:zoom-in;border-radius:6px;transition:opacity .2s;" '
-            f'       onmouseover="this.style.opacity=0.82" onmouseout="this.style.opacity=1" />'
+            f'       class="agent-thumb-img" '
+            f'       onerror="this.parentElement.classList.add(\'broken\')" />'
             f'  {cap_html}'
             f'</div>'
         )
@@ -2740,7 +2857,54 @@ def render_agent_images(message_metadata: dict):
     sources_json = _json.dumps([e["src"] for e in thumb_entries])
 
     component_html = f"""
-    <div id="thumb-gallery" style="display:flex;flex-wrap:wrap;gap:4px;">
+    <style>
+      #thumb-gallery {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: flex-start;
+      }}
+      .agent-thumb-cell {{
+        width: 150px;
+        flex-shrink: 0;
+        text-align: center;
+        border-radius: 8px;
+        overflow: hidden;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        transition: box-shadow .2s;
+      }}
+      .agent-thumb-cell:hover {{
+        box-shadow: 0 4px 12px rgba(0,0,0,.12);
+      }}
+      /* Hide entire cell when image is broken */
+      .agent-thumb-cell.broken {{
+        display: none !important;
+      }}
+      .agent-thumb-img {{
+        width: 150px;
+        height: 120px;
+        object-fit: cover;
+        display: block;
+        cursor: zoom-in;
+        border-radius: 8px 8px 0 0;
+        transition: opacity .2s;
+      }}
+      .agent-thumb-img:hover {{
+        opacity: 0.82;
+      }}
+      .agent-thumb-caption {{
+        font-size: .75em;
+        color: #64748b;
+        padding: 4px 6px;
+        line-height: 1.3;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 150px;
+      }}
+    </style>
+    <div id="thumb-gallery">
       {thumbs_html}
     </div>
     <script>
@@ -2789,12 +2953,24 @@ def render_agent_images(message_metadata: dict):
           }}
         }}
       }});
+
+      // After load, shrink iframe to actual content height to remove blank space
+      requestAnimationFrame(function() {{
+        var h = document.getElementById('thumb-gallery').offsetHeight;
+        if (h > 0) {{
+          document.body.style.margin = '0';
+          document.body.style.overflow = 'hidden';
+          var frame = window.frameElement;
+          if (frame) frame.style.height = h + 'px';
+        }}
+      }});
     }})();
     </script>
     """
 
-    row_count = (len(thumb_entries) + 3) // 4
-    estimated_height = row_count * 195 + 10
+    cols_per_row = 4
+    row_count = (len(thumb_entries) + cols_per_row - 1) // cols_per_row
+    estimated_height = row_count * 160 + 4
     _stc.html(component_html, height=estimated_height, scrolling=False)
 
 
@@ -3115,21 +3291,14 @@ def render_thinking_summary(message_metadata: Dict[str, Any]):
     thinking_summary = message_metadata.get("thinking_summary")
     if thinking_summary:
         with st.expander("Thought Process", expanded=False):
-            # Convert markdown to HTML for proper formatting
-            import re
-
-            # Simple markdown conversion for bold text
-            formatted_text = html.escape(thinking_summary)
-            # Convert **text** to <strong>text</strong>
-            formatted_text = re.sub(
-                r"\*\*(.*?)\*\*", r"<strong>\1</strong>", formatted_text, flags=re.DOTALL
+            # Convert markdown to HTML using the markdown library for reliable rendering
+            formatted_html = _markdown.markdown(
+                thinking_summary, extensions=["nl2br"]
             )
 
             # Use custom styled container for thinking content
             st.markdown(
-                f"""<div class="thinking-container">
-                    <div class="thinking-content">{formatted_text}</div>
-                </div>""",
+                f'<div class="thinking-container"><div class="thinking-content-rendered">{formatted_html}</div></div>',
                 unsafe_allow_html=True,
             )
 
@@ -3146,20 +3315,13 @@ def render_reasoning_summary(message_metadata: Dict[str, Any]):
         title = f"{title} - {tokens} tokens"
 
     with st.expander(title, expanded=False):
-        # Convert markdown to HTML for proper formatting
-        import re
-
-        # Simple markdown conversion for bold text
-        formatted_text = html.escape(str(reasoning_summary))
-        # Convert **text** to <strong>text</strong>
-        formatted_text = re.sub(
-            r"\*\*(.*?)\*\*", r"<strong>\1</strong>", formatted_text, flags=re.DOTALL
+        # Convert markdown to HTML using the markdown library for reliable rendering
+        formatted_html = _markdown.markdown(
+            str(reasoning_summary), extensions=["nl2br"]
         )
 
         st.markdown(
-            f"""<div class="thinking-container">
-                <div class="thinking-content">{formatted_text}</div>
-            </div>""",
+            f'<div class="thinking-container"><div class="thinking-content-rendered">{formatted_html}</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -4685,14 +4847,30 @@ def render_chat_view():
                 _handle_new_image_attachments(uploaded_files)
 
         # Message form
+        # ── Handle interrupted stream on rerun (Phase 2 of two-phase stop) ──
+        if (
+            st.session_state.get("stream_inflight")
+            and st.session_state.get("stream_user_message_id")
+            and conversation_id
+        ):
+            _handle_stop_rerun(str(conversation_id))
+            return
+
         # Check for pending suggestion from suggestion buttons
         pending_suggestion = st.session_state.pop("pending_suggestion", "")
+
+        # ── Message form ──
+        # Capture form values first; heavy processing (streaming) happens AFTER
+        # the form context exits so we can freely use st.button() etc.
+        _form_send = False
+        _form_attach = False
+        _form_message = ""
 
         with st.form("message_form", clear_on_submit=True):
             col1, col2, col3 = st.columns([6, 1, 1])
 
             with col1:
-                message_content = st.text_area(
+                _form_message = st.text_area(
                     "Message",
                     value=pending_suggestion,
                     placeholder="Type your message...",
@@ -4702,270 +4880,320 @@ def render_chat_view():
                 )
 
             with col2:
-                send_button = st.form_submit_button(
+                _form_send = st.form_submit_button(
                     "\nSend", use_container_width=True, type="primary"
                 )
 
             with col3:
-                attach_button = st.form_submit_button(
+                _form_attach = st.form_submit_button(
                     "Attach", use_container_width=True
                 )
 
-            if attach_button:
-                st.session_state.show_attachment_uploader = not st.session_state.get(
-                    "show_attachment_uploader", False
+        # Placeholder for the "Stop generating" button lives OUTSIDE the form
+        # but directly below it, so it appears next to Send / Attach.
+        stop_button_placeholder = st.empty()
+
+        # ── Process form actions OUTSIDE the form context ──
+        if _form_attach:
+            st.session_state.show_attachment_uploader = not st.session_state.get(
+                "show_attachment_uploader", False
+            )
+            st.rerun()
+
+        if _form_send:
+            pending_attachments = list(
+                st.session_state.get("pending_image_attachments", [])
+            )
+            stripped_message = _form_message.strip()
+
+            if not stripped_message and not pending_attachments:
+                st.toast("Please enter a message", icon=":material/warning:")
+            else:
+                message_to_send = stripped_message or _format_image_only_message(
+                    pending_attachments
                 )
-                st.rerun()
+                title_sync_conversation_id: Optional[str] = None
 
-            if send_button:
-                pending_attachments = list(
-                    st.session_state.get("pending_image_attachments", [])
-                )
-                stripped_message = message_content.strip()
+                if conversation_id == "pending_new":
+                    saved_attachments = list(pending_attachments)
 
-                if not stripped_message and not pending_attachments:
-                    st.toast("Please enter a message", icon=":material/warning:")
-                else:
-                    message_to_send = stripped_message or _format_image_only_message(
-                        pending_attachments
-                    )
-                    title_sync_conversation_id: Optional[str] = None
+                    with st.status(
+                        "Creating conversation...", expanded=True
+                    ) as status:
+                        # Use placeholder title - backend will generate and update it in parallel
+                        conversation_data = {"title": "New Conversation"}
+                        pending_persona = st.session_state.get(
+                            "pending_persona_prompt", ""
+                        )
+                        persona_payload = normalize_persona_input(pending_persona)
+                        if persona_payload:
+                            conversation_data["personaPrompt"] = persona_payload
 
-                    if conversation_id == "pending_new":
-                        saved_attachments = list(pending_attachments)
-
-                        with st.status(
-                            "Creating conversation...", expanded=True
-                        ) as status:
-                            # Use placeholder title - backend will generate and update it in parallel
-                            conversation_data = {"title": "New Conversation"}
-                            pending_persona = st.session_state.get(
-                                "pending_persona_prompt", ""
+                        status.update(
+                            label="Creating conversation...", state="running"
+                        )
+                        conv_response = make_api_request(
+                            "POST", "/conversations/", conversation_data
+                        )
+                        if conv_response and conv_response.get("data"):
+                            new_conversation = conv_response["data"]
+                            st.session_state.current_conversation_id = (
+                                new_conversation["id"]
                             )
-                            persona_payload = normalize_persona_input(pending_persona)
-                            if persona_payload:
-                                conversation_data["personaPrompt"] = persona_payload
+                            upsert_conversation_in_state(new_conversation)
+                            st.session_state.conversations_loaded = True
+                            reset_conversation_state()
+                            st.session_state.pending_image_attachments = (
+                                saved_attachments
+                            )
+                            conversation_id = (
+                                st.session_state.current_conversation_id
+                            )
+                            pending_attachments = list(saved_attachments)
+                            status.update(
+                                label="Conversation created!", state="complete"
+                            )
+                        else:
+                            st.toast(
+                                "Failed to create conversation",
+                                icon=":material/cancel:",
+                            )
+                            return
+
+                current_conv = find_conversation_in_state(conversation_id)
+                if current_conv and is_placeholder_conversation_title(
+                    current_conv.get("title")
+                ):
+                    title_sync_conversation_id = conversation_id
+
+                message_data = {
+                    "content": message_to_send,
+                    "conversationId": st.session_state.current_conversation_id,
+                }
+
+                if pending_attachments:
+                    message_data["attachments"] = pending_attachments
+
+                # Use streaming endpoint for real-time response
+                with st.status("Sending message...", expanded=True) as status:
+                    # Create placeholder for streaming response
+                    response_placeholder = st.empty()
+                    thinking_placeholder = st.empty()
+                    accumulated_content = ""  # Initialize empty for accumulation
+                    accumulated_thinking = ""  # Accumulate thinking content
+                    final_message = None
+                    interrupt_data = None
+                    selected_agent = None  # Track which agent is processing
+                    received_title_update = False
+
+                    # Mark stream as in-flight BEFORE starting (survives rerun)
+                    st.session_state.stream_inflight = True
+                    st.session_state.stream_conversation_id = str(conversation_id)
+                    st.session_state.stream_partial_text = ""
+                    st.session_state.stream_partial_thinking = ""
+                    st.session_state.stream_selected_agent = None
+
+                    # Render stop button into the placeholder that lives
+                    # OUTSIDE the form.  Clicking it triggers a Streamlit
+                    # rerun which drops the HTTP connection; on the next
+                    # rerun stream_inflight==True triggers _handle_stop_rerun().
+                    stop_button_placeholder.button(
+                        "Stop generating",
+                        key="stop_generating_btn",
+                        type="secondary",
+                        icon=":material/stop_circle:",
+                    )
+
+                    # Stream the response
+                    for event in make_streaming_request(
+                        "/messages/stream", message_data
+                    ):
+                        event_type = event.get("type")
+
+                        if event_type == "user_message_created":
+                            # Store user_message_id for stop endpoint
+                            user_msg = event.get("message", {})
+                            st.session_state.stream_user_message_id = str(
+                                user_msg.get("id", "")
+                            )
+                            status.update(
+                                label="Generating response...", state="running"
+                            )
+
+                        elif event_type == "agent_selected":
+                            # Track which agent was selected for processing
+                            selected_agent = event.get("agent", "unknown")
+                            st.session_state.stream_selected_agent = selected_agent
+                            status.update(
+                                label=f"{selected_agent.replace('_', ' ').title()} is processing...",
+                                state="running",
+                            )
+
+                        elif event_type == "thinking":
+                            # Accumulate and display thinking content with animated indicator
+                            content = event.get("content", "")
+                            accumulated_thinking += content
+                            st.session_state.stream_partial_thinking = accumulated_thinking
+                            with thinking_placeholder.container():
+                                # Animated thinking header with dots
+                                st.markdown(
+                                    """<div class="thinking-container">
+                                        <div class="thinking-header">
+                                            <span class="thinking-indicator">
+                                                Thinking
+                                                <span class="thinking-dots">
+                                                    <span class="thinking-dot"></span>
+                                                    <span class="thinking-dot"></span>
+                                                    <span class="thinking-dot"></span>
+                                                </span>
+                                            </span>
+                                        </div>
+                                        <div class="thinking-content">"""
+                                    + re.sub(
+                                        r"\*\*(.*?)\*\*",
+                                        r"<strong>\1</strong>",
+                                        html.escape(accumulated_thinking),
+                                    )
+                                    + """</div>
+                                    </div>""",
+                                    unsafe_allow_html=True,
+                                )
+                            status.update(label="Thinking...", state="running")
+
+                        elif event_type == "token":
+                            # Accumulate and display tokens in real-time
+                            content = event.get("content", "")
+                            accumulated_content += (
+                                content  # Append each token chunk
+                            )
+                            st.session_state.stream_partial_text = accumulated_content
+                            # Collapse thinking when answer starts - just show summary
+                            if accumulated_thinking and accumulated_content:
+                                _bold_pattern = r"\*\*(.*?)\*\*"
+                                _bold_repl = r"<strong>\1</strong>"
+                                _thinking_html = re.sub(
+                                    _bold_pattern,
+                                    _bold_repl,
+                                    html.escape(accumulated_thinking),
+                                )
+                                thinking_placeholder.markdown(
+                                    f"""<details>
+                                        <summary style="cursor: pointer; font-weight: bold; padding: 8px; background: #f0f2f6; border-radius: 4px; margin-bottom: 8px;">
+                                            <span class="material-symbols-outlined" aria-hidden="true" style="margin-right: 6px;">psychology</span> Thought Process
+                                        </summary>
+                                        <div class="thinking-container" style="padding: 8px;">
+                                            <div class="thinking-content">{_thinking_html}</div>
+                                        </div>
+                                    </details>""",
+                                    unsafe_allow_html=True,
+                                )
+                            # Display with native markdown for LaTeX support
+                            response_placeholder.markdown(accumulated_content)
+
+                        elif event_type == "tool":
+                            # Show tool execution
+                            tool_name = event.get("name", "unknown")
+                            tool_status = event.get("status", "running")
+                            status.update(
+                                label=f"Tool: {tool_name} ({tool_status})",
+                                state="running",
+                            )
+
+                        elif event_type == "interrupt":
+                            # Workflow paused for human approval
+                            thread_id = event.get("thread_id")
+                            pending_tool_calls = (
+                                event.get("pending_tool_calls") or []
+                            )
+                            # Extract the full interrupt response data
+                            interrupt_data = event.get("interrupt")
 
                             status.update(
-                                label="Creating conversation...", state="running"
+                                label="Workflow paused - Tool approval required",
+                                state="running",
                             )
-                            conv_response = make_api_request(
-                                "POST", "/conversations/", conversation_data
-                            )
-                            if conv_response and conv_response.get("data"):
-                                new_conversation = conv_response["data"]
-                                st.session_state.current_conversation_id = (
-                                    new_conversation["id"]
-                                )
-                                upsert_conversation_in_state(new_conversation)
-                                st.session_state.conversations_loaded = True
-                                reset_conversation_state()
-                                st.session_state.pending_image_attachments = (
-                                    saved_attachments
-                                )
-                                conversation_id = (
-                                    st.session_state.current_conversation_id
-                                )
-                                pending_attachments = list(saved_attachments)
-                                status.update(
-                                    label="Conversation created!", state="complete"
+
+                            # Store interrupt state in session for the approval UI
+                            if interrupt_data:
+                                st.session_state.pending_interrupt = interrupt_data
+                                st.session_state.interrupt_conversation_id = (
+                                    conversation_id
                                 )
                             else:
-                                st.toast(
-                                    "Failed to create conversation",
-                                    icon=":material/cancel:",
+                                st.error(
+                                    "Interrupt detected but no interrupt data provided. Check HITL configuration.",
+                                    icon=":material/error:",
                                 )
-                                return
 
-                    current_conv = find_conversation_in_state(conversation_id)
-                    if current_conv and is_placeholder_conversation_title(
-                        current_conv.get("title")
-                    ):
-                        title_sync_conversation_id = conversation_id
+                            # Display info message
+                            st.info(
+                                "The assistant wants to use tools. Please review and approve below.",
+                                icon=":material/handyman:",
+                            )
 
-                    message_data = {
-                        "content": message_to_send,
-                        "conversationId": st.session_state.current_conversation_id,
-                    }
+                            # Stop processing further events and rerun to show approval UI
+                            _clear_inflight_state()
+                            break
 
-                    if pending_attachments:
-                        message_data["attachments"] = pending_attachments
+                        elif event_type == "complete":
+                            # Store final message and complete
+                            final_message = event.get("message")
+                            status.update(label="Message sent!", state="complete")
 
-                    # Use streaming endpoint for real-time response
-                    with st.status("Sending message...", expanded=True) as status:
-                        # Create placeholder for streaming response
-                        response_placeholder = st.empty()
-                        thinking_placeholder = st.empty()
-                        accumulated_content = ""  # Initialize empty for accumulation
-                        accumulated_thinking = ""  # Accumulate thinking content
-                        final_message = None
-                        interrupt_data = None
-                        selected_agent = None  # Track which agent is processing
-                        received_title_update = False
+                        elif event_type == "error":
+                            # Handle error
+                            error_msg = event.get("error", "Unknown error")
+                            status.update(
+                                label=f"Error: {error_msg}", state="error"
+                            )
+                            st.toast(
+                                f"Error: {error_msg}", icon=":material/cancel:"
+                            )
+                            _clear_inflight_state()
+                            break
 
-                        # Stream the response
-                        for event in make_streaming_request(
-                            "/messages/stream", message_data
+                        elif event_type == "title_updated":
+                            # Update conversation title in real-time
+                            new_title = event.get("title")
+                            if new_title:
+                                target_conversation_id = (
+                                    event.get("conversation_id") or conversation_id
+                                )
+                                upsert_conversation_in_state(
+                                    {
+                                        "id": target_conversation_id,
+                                        "title": new_title,
+                                    }
+                                )
+                                received_title_update = True
+
+                    # Clear stop button placeholder after stream ends
+                    stop_button_placeholder.empty()
+
+                    # Handle interrupt - show approval UI
+                    if st.session_state.get("pending_interrupt"):
+                        st.rerun()
+
+                    # Clear inflight state on normal completion
+                    _clear_inflight_state()
+
+                    # If successful, update UI
+                    if final_message:
+                        if (
+                            title_sync_conversation_id
+                            and not received_title_update
                         ):
-                            event_type = event.get("type")
-
-                            if event_type == "user_message_created":
-                                status.update(
-                                    label="Generating response...", state="running"
-                                )
-
-                            elif event_type == "agent_selected":
-                                # Track which agent was selected for processing
-                                selected_agent = event.get("agent", "unknown")
-                                status.update(
-                                    label=f"{selected_agent.replace('_', ' ').title()} is processing...",
-                                    state="running",
-                                )
-
-                            elif event_type == "thinking":
-                                # Accumulate and display thinking content with animated indicator
-                                content = event.get("content", "")
-                                accumulated_thinking += content
-                                with thinking_placeholder.container():
-                                    # Animated thinking header with dots
-                                    st.markdown(
-                                        """<div class="thinking-container">
-                                            <div class="thinking-header">
-                                                <span class="thinking-indicator">
-                                                    Thinking
-                                                    <span class="thinking-dots">
-                                                        <span class="thinking-dot"></span>
-                                                        <span class="thinking-dot"></span>
-                                                        <span class="thinking-dot"></span>
-                                                    </span>
-                                                </span>
-                                            </div>
-                                            <div class="thinking-content">"""
-                                        + html.escape(accumulated_thinking)
-                                        + """</div>
-                                        </div>""",
-                                        unsafe_allow_html=True,
-                                    )
-                                status.update(label="Thinking...", state="running")
-
-                            elif event_type == "token":
-                                # Accumulate and display tokens in real-time
-                                content = event.get("content", "")
-                                accumulated_content += (
-                                    content  # Append each token chunk
-                                )
-                                # Collapse thinking when answer starts - just show summary
-                                if accumulated_thinking and accumulated_content:
-                                    thinking_placeholder.markdown(
-                                        f"""<details>
-                                            <summary style="cursor: pointer; font-weight: bold; padding: 8px; background: #f0f2f6; border-radius: 4px; margin-bottom: 8px;">
-                                                <span class="material-symbols-outlined" aria-hidden="true" style="margin-right: 6px;">psychology</span> Thought Process
-                                            </summary>
-                                            <div class="thinking-container" style="padding: 8px;">
-                                                <div class="thinking-content">{html.escape(accumulated_thinking)}</div>
-                                            </div>
-                                        </details>""",
-                                        unsafe_allow_html=True,
-                                    )
-                                # Display with native markdown for LaTeX support
-                                response_placeholder.markdown(accumulated_content)
-
-                            elif event_type == "tool":
-                                # Show tool execution
-                                tool_name = event.get("name", "unknown")
-                                tool_status = event.get("status", "running")
-                                status.update(
-                                    label=f"Tool: {tool_name} ({tool_status})",
-                                    state="running",
-                                )
-
-                            elif event_type == "interrupt":
-                                # Workflow paused for human approval
-                                thread_id = event.get("thread_id")
-                                pending_tool_calls = (
-                                    event.get("pending_tool_calls") or []
-                                )
-                                # Extract the full interrupt response data
-                                interrupt_data = event.get("interrupt")
-
-                                status.update(
-                                    label="Workflow paused - Tool approval required",
-                                    state="running",
-                                )
-
-                                # Store interrupt state in session for the approval UI
-                                if interrupt_data:
-                                    st.session_state.pending_interrupt = interrupt_data
-                                    st.session_state.interrupt_conversation_id = (
-                                        conversation_id
-                                    )
-                                else:
-                                    st.error(
-                                        "Interrupt detected but no interrupt data provided. Check HITL configuration.",
-                                        icon=":material/error:",
-                                    )
-
-                                # Display info message
-                                st.info(
-                                    "The assistant wants to use tools. Please review and approve below.",
-                                    icon=":material/handyman:",
-                                )
-
-                                # Stop processing further events and rerun to show approval UI
-                                break
-
-                            elif event_type == "complete":
-                                # Store final message and complete
-                                final_message = event.get("message")
-                                status.update(label="Message sent!", state="complete")
-
-                            elif event_type == "error":
-                                # Handle error
-                                error_msg = event.get("error", "Unknown error")
-                                status.update(
-                                    label=f"Error: {error_msg}", state="error"
-                                )
-                                st.toast(
-                                    f"Error: {error_msg}", icon=":material/cancel:"
-                                )
-                                break
-
-                            elif event_type == "title_updated":
-                                # Update conversation title in real-time
-                                new_title = event.get("title")
-                                if new_title:
-                                    target_conversation_id = (
-                                        event.get("conversation_id") or conversation_id
-                                    )
-                                    upsert_conversation_in_state(
-                                        {
-                                            "id": target_conversation_id,
-                                            "title": new_title,
-                                        }
-                                    )
-                                    received_title_update = True
-
-                        # Handle interrupt - show approval UI
-                        if st.session_state.get("pending_interrupt"):
-                            st.rerun()
-
-                        # If successful, update UI
-                        if final_message:
-                            if (
+                            sync_conversation_title_from_server(
                                 title_sync_conversation_id
-                                and not received_title_update
-                            ):
-                                sync_conversation_title_from_server(
-                                    title_sync_conversation_id
-                                )
-                            st.session_state.pending_image_attachments = []
-                            reset_conversation_state()
-                            st.session_state.show_attachment_uploader = False
-                            load_messages_page(1)
-                            st.toast("Message sent!", icon=":material/check_circle:")
-                            st.rerun()
-                        elif event_type != "error" and not interrupt_data:
-                            st.toast("Failed to send message", icon=":material/cancel:")
+                            )
+                        st.session_state.pending_image_attachments = []
+                        reset_conversation_state()
+                        st.session_state.show_attachment_uploader = False
+                        load_messages_page(1)
+                        st.toast("Message sent!", icon=":material/check_circle:")
+                        st.rerun()
+                    elif event_type != "error" and not interrupt_data:
+                        st.toast("Failed to send message", icon=":material/cancel:")
 
 
 def render_manage_modal():
@@ -4997,21 +5225,41 @@ def render_manage_modal():
                 deduped.append(conv)
             return deduped
 
+        def _load_manager_page(page: int) -> None:
+            """Fetch one page of conversations and append to session state."""
+            resp = get_conversations(
+                page=page,
+                limit=_MANAGER_PAGE_SIZE,
+                include_messages=True,
+                latest_messages=3,
+                fetch_all_pages=False,
+            )
+            if resp and resp.get("data"):
+                items = resp["data"]["items"]
+                meta = resp["data"].get("meta") or {}
+                current_page = meta.get("currentPage", page)
+                last_page = meta.get("lastPage", 1)
+                total = meta.get("total", 0)
+                st.session_state.manager_conversations.extend(items)
+                st.session_state.manager_conv_page = current_page
+                st.session_state.manager_conv_has_more = current_page < last_page
+                st.session_state.manager_conv_total = total
+            else:
+                st.session_state.manager_conv_has_more = False
+
+        # ------- initial / lazy load -------
         if st.session_state.current_user_id:
-            with st.status("Loading conversations...", expanded=False):
-                # Get conversations with latest 3 messages for preview
-                manager_conversations_response = get_conversations(
-                    include_messages=True, latest_messages=3, fetch_all_pages=True
-                )
-                if (
-                    manager_conversations_response
-                    and manager_conversations_response.get("data")
-                ):
-                    manager_conversations = manager_conversations_response["data"][
-                        "items"
-                    ]
-                else:
-                    manager_conversations = []
+            if "manager_conversations" not in st.session_state:
+                st.session_state.manager_conversations = []
+                st.session_state.manager_conv_page = 0
+                st.session_state.manager_conv_has_more = False
+                st.session_state.manager_conv_total = 0
+
+            if st.session_state.manager_conv_page == 0:
+                with st.status("Loading conversations...", expanded=False):
+                    _load_manager_page(1)
+
+            manager_conversations = list(st.session_state.manager_conversations)
         else:
             manager_conversations = []
 
@@ -5049,7 +5297,14 @@ def render_manage_modal():
             display_conversations = _deduplicate_conversations(filtered_convs)
 
             if display_conversations:
-                st.caption(f"Found {len(display_conversations)} conversation(s)")
+                total_known = st.session_state.get("manager_conv_total", len(display_conversations))
+                loaded_count = len(manager_conversations)
+                if total_known > loaded_count:
+                    st.caption(
+                        f"Showing {len(display_conversations)} of {total_known} conversation(s) "
+                    )   
+                else:
+                    st.caption(f"Found {len(display_conversations)} conversation(s)")
 
                 for idx, conv in enumerate(display_conversations):
                     conv_id = conv.get("id")
@@ -5130,6 +5385,14 @@ def render_manage_modal():
                                     )
                                     if result:
                                         st.session_state.conversations_list = []
+                                        # Remove from manager cache
+                                        st.session_state.manager_conversations = [
+                                            c
+                                            for c in st.session_state.get(
+                                                "manager_conversations", []
+                                            )
+                                            if c.get("id") != conv_id
+                                        ]
                                         if (
                                             st.session_state.current_conversation_id
                                             == conv_id
@@ -5144,6 +5407,22 @@ def render_manage_modal():
                                             icon=":material/check_circle:",
                                         )
                                         st.rerun()
+
+                # ------- Load-more button -------
+                has_more = st.session_state.get("manager_conv_has_more", False)
+                if has_more and not search_term:
+                    remaining = max(
+                        0,
+                        st.session_state.get("manager_conv_total", 0)
+                        - len(st.session_state.get("manager_conversations", [])),
+                    )
+                    if st.button(
+                        f"Load more conversations ({remaining} remaining)",
+                        key="manager_load_more",
+                        use_container_width=True,
+                    ):
+                        next_page = st.session_state.manager_conv_page + 1
+                        _load_manager_page(next_page)
             else:
                 st.info("No conversations found matching your search.")
         else:

@@ -70,3 +70,19 @@ class IMessageService(ABC):
     ) -> MessageRead:
         """Resume a paused workflow and return the bot's response message"""
         pass
+
+    @abstractmethod
+    async def stop_message_generation(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        user_message_id: UUID,
+    ) -> dict:
+        """
+        Request cancellation of an in-flight streaming generation.
+
+        Returns a dict with:
+          - ``status``: ``"cancelled"`` | ``"not_inflight"``
+          - ``message``: optional ``MessageRead`` (the persisted partial/final message)
+        """
+        pass

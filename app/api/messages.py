@@ -1,15 +1,22 @@
 from typing import List
 from uuid import UUID
+import asyncio
 import json
-from fastapi import APIRouter, status, Query, Response
+import logging
+from fastapi import APIRouter, status, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.message_service_interface import IMessageService
-from app.schemas.message import MessageCreate, MessageRead, InterruptResumeRequest
+from app.schemas.message import MessageCreate, MessageRead, InterruptResumeRequest, StopGenerationRequest
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.schemas.pagination import MessagePaginationParams
+
+logger = logging.getLogger(__name__)
+
+# Heartbeat interval in seconds (MVP: 1.0s for Streamlit responsiveness)
+HEARTBEAT_INTERVAL_SECONDS = 1.0
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
@@ -55,30 +62,75 @@ async def create_message_stream(
     message_data: MessageCreate,
     message_service: IMessageService,
     user_id: UUID,
+    request: Request,
 ):
     """
     Create a new message and stream the bot response.
+
+    Uses an asyncio.Queue + producer-task pattern so that heartbeat events can
+    be emitted even while the service-layer generator is blocked (e.g. waiting
+    for a long tool call).  This keeps the SSE connection alive and gives
+    Streamlit frequent yield-points for a responsive "Stop generating" UX.
     """
 
     async def event_generator():
-        """Generate Server-Sent Events (SSE) from the message stream"""
+        """Generate SSE events with heartbeat injection."""
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def producer():
+            """Drain the service-layer async generator into the queue."""
+            try:
+                async for event in message_service.create_message_stream(
+                    message_data, user_id
+                ):
+                    await queue.put(event)
+            except asyncio.CancelledError:
+                # Producer cancelled (e.g. client disconnect) – push sentinel.
+                return
+            except Exception as exc:
+                await queue.put({"type": "error", "error": str(exc)})
+            finally:
+                await queue.put(None)  # sentinel: end of stream
+
+        task = asyncio.create_task(producer())
         try:
-            async for event in message_service.create_message_stream(
-                message_data, user_id
-            ):
-                event_type = event.get("type")
-
-                # Format as SSE: data: {json}\n\n
-                event_json = json.dumps(event)
-                yield f"data: {event_json}\n\n"
-
-                if event_type in ["complete", "error", "interrupt"]:
+            while True:
+                # Check for client disconnect
+                if await request.is_disconnected():
+                    logger.debug("Client disconnected during SSE stream")
                     break
 
+                try:
+                    event = await asyncio.wait_for(
+                        queue.get(), timeout=HEARTBEAT_INTERVAL_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    # No event within the heartbeat window – emit keepalive
+                    yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                    continue
+
+                if event is None:
+                    # Sentinel: producer finished
+                    break
+
+                event_type = event.get("type")
+                yield f"data: {json.dumps(event)}\n\n"
+
+                if event_type in ("complete", "error", "interrupt"):
+                    break
+
+        except asyncio.CancelledError:
+            # Starlette/Uvicorn cancels the generator on disconnect
+            return
         except Exception as exc:
-            # Send error event
             error_event = {"type": "error", "error": str(exc)}
             yield f"data: {json.dumps(error_event)}\n\n"
+        finally:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     return StreamingResponse(
         event_generator(),
@@ -88,6 +140,40 @@ async def create_message_stream(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",  # Disable buffering in nginx
         },
+    )
+
+
+@router.post(
+    "/stop",
+    response_model=ApiResponse,
+    status_code=status.HTTP_200_OK,
+)
+@AppAutoInjector.auto_inject()
+async def stop_message_generation(
+    stop_request: StopGenerationRequest,
+    message_service: IMessageService,
+    user_id: UUID,
+) -> ApiResponse:
+    """
+    Request cancellation of an in-flight streaming generation.
+
+    Idempotent: calling stop multiple times is safe.  If the generation has
+    already completed, returns ``status: "not_inflight"`` so the UI can
+    refresh messages normally.
+    """
+    result = await message_service.stop_message_generation(
+        conversation_id=stop_request.conversation_id,
+        user_id=user_id,
+        user_message_id=stop_request.user_message_id,
+    )
+    return ApiResponse(
+        success=True,
+        message=(
+            "Generation stopped"
+            if result.get("status") == "cancelled"
+            else "Generation not in flight"
+        ),
+        data=result,
     )
 
 

@@ -201,3 +201,28 @@ class MessageInDB(BaseModel):
     message_metadata: Optional[Dict[str, Any]] = Field(
         default_factory=dict, description="Message metadata including persona used"
     )
+
+
+class StopGenerationRequest(BaseModel):
+    """Request to stop an in-flight streaming generation."""
+
+    conversation_id: UUID = Field(..., description="Conversation ID")
+    user_message_id: UUID = Field(
+        ..., description="User message ID from the user_message_created SSE event"
+    )
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class StopGenerationResponse(BaseModel):
+    """Response from the stop generation endpoint."""
+
+    status: str = Field(
+        ..., description="'cancelled' or 'not_inflight'"
+    )
+    message: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Persisted assistant message (partial or final), if available",
+    )
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)

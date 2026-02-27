@@ -75,15 +75,10 @@
       },
       "enabled": true
     },
-    "postgres": {
-      "transport": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-postgres",
-        "${DATABASE_URL}"
-      ],
-      "enabled": false
+    "mcp": {
+      "enabled": true,
+      "transport": "streamable_http",
+      "url": "http://192.168.2.182:8100/mcp"
     }
   }
 }

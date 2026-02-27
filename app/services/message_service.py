@@ -8,6 +8,7 @@ import redis
 
 
 from app.repositories.message import MessageRepository
+from app.services.generation_registry import get_generation_registry, InflightEntry
 from app.repositories.tool_approval import ToolApprovalRepository
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
@@ -421,6 +422,10 @@ class MessageService(IMessageService):
         """
         Create a message and stream the bot response.
         Yields chunks as they arrive from the AI service.
+
+        Integrates with GenerationRegistry so that in-flight streams can be
+        cancelled via ``POST /messages/stop`` or HTTP disconnect without
+        persisting cancellation/disconnect artifacts as error messages.
         """
         self.conversation_validation_utils.validate_conversation_access(
             user_id, message_create_data.conversation_id
@@ -431,6 +436,15 @@ class MessageService(IMessageService):
             message_create_data, message_create_data.role
         )
         created_message = self.repository.create(message_entity)
+        user_message_id = created_message.id  # stable key for registry
+
+        # Register in-flight entry
+        registry = get_generation_registry()
+        inflight = registry.register(
+            user_message_id=user_message_id,
+            conversation_id=message_create_data.conversation_id,
+            user_id=user_id,
+        )
 
         # Yield user message creation event
         yield {
@@ -521,22 +535,35 @@ class MessageService(IMessageService):
                     existing_tasks=existing_tasks_dict,
                     model_request=model_request,
                 ):
+                    # ---- Check cancellation before processing each event ----
+                    if inflight.is_cancelled:
+                        logging.info(
+                            "Stream cancelled for user_message_id=%s",
+                            user_message_id,
+                        )
+                        break
+
                     event_type = event.get("type")
 
                     if event_type == "agent_selected":
-                        # Yield agent selection notification to client
+                        inflight.selected_agent = event.get("agent")
+                        inflight.touch()
                         yield {"type": "agent_selected", "agent": event.get("agent")}
 
                     elif event_type == "token":
-                        # Yield token to client
-                        yield {"type": "token", "content": event.get("content", "")}
+                        token_content = event.get("content", "")
+                        inflight.partial_text += token_content
+                        inflight.touch()
+                        yield {"type": "token", "content": token_content}
 
                     elif event_type == "thinking":
-                        # Yield thinking/reasoning content to client
-                        yield {"type": "thinking", "content": event.get("content", "")}
+                        thinking_content = event.get("content", "")
+                        inflight.partial_thinking += thinking_content
+                        inflight.touch()
+                        yield {"type": "thinking", "content": thinking_content}
 
                     elif event_type == "tool":
-                        # Yield tool execution event
+                        inflight.touch()
                         yield {
                             "type": "tool",
                             "name": event.get("name"),
@@ -578,8 +605,9 @@ class MessageService(IMessageService):
                             ).model_dump(mode="json"),
                         }
                         # Workflow is paused - don't create a bot message yet
-                        # The resume endpoint will handle that
                         _cancel_title_task()
+                        inflight.resolve()
+                        registry.remove(user_message_id)
                         return
 
                     elif event_type == "complete":
@@ -599,6 +627,29 @@ class MessageService(IMessageService):
                         )
                         break
 
+                # ---- Handle cancellation after the loop exits ----
+                if inflight.is_cancelled:
+                    _cancel_title_task()
+                    partial = inflight.partial_text.strip()
+                    if partial:
+                        partial = fix_markdown_code_blocks(partial)
+                        bot_message = self._create_bot_response_message(
+                            conversation_id=message_create_data.conversation_id,
+                            content=partial,
+                            metadata={
+                                "stopped": True,
+                                "partial": True,
+                                "stop_reason": "user_requested",
+                                "persona_used": sanitized_persona,
+                                "reply_to_user_message_id": str(user_message_id),
+                            },
+                        )
+                        inflight.resolve(bot_message.model_dump(mode="json"))
+                    else:
+                        inflight.resolve(None)
+                    registry.remove(user_message_id)
+                    return
+
                 # Ensure content is valid (not empty)
                 if not bot_response_content or not bot_response_content.strip():
                     bot_response_content = NO_RESPONSE_GENERATED
@@ -607,6 +658,7 @@ class MessageService(IMessageService):
 
                 # Create metadata for bot response
                 bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
+                bot_metadata["reply_to_user_message_id"] = str(user_message_id)
 
                 plan_saved, has_existing_plan = self._sync_plan_from_response_metadata(
                     conversation_id=message_create_data.conversation_id,
@@ -653,6 +705,10 @@ class MessageService(IMessageService):
                     metadata=bot_metadata,
                 )
 
+                # Resolve the inflight future with the final message
+                inflight.resolve(bot_message.model_dump(mode="json"))
+                registry.remove(user_message_id)
+
                 # Yield final completion event with full message
                 yield {
                     "type": "complete",
@@ -669,6 +725,30 @@ class MessageService(IMessageService):
                             "conversation_id": str(message_create_data.conversation_id),
                         }
 
+            except (asyncio.CancelledError, GeneratorExit):
+                # Cancellation / disconnect: persist partial text if available,
+                # do NOT create an error message.
+                _cancel_title_task()
+                partial = inflight.partial_text.strip()
+                if partial:
+                    partial = fix_markdown_code_blocks(partial)
+                    bot_msg = self._create_bot_response_message(
+                        conversation_id=message_create_data.conversation_id,
+                        content=partial,
+                        metadata={
+                            "stopped": True,
+                            "partial": True,
+                            "stop_reason": "disconnect",
+                            "persona_used": sanitized_persona,
+                            "reply_to_user_message_id": str(user_message_id),
+                        },
+                    )
+                    inflight.resolve(bot_msg.model_dump(mode="json"))
+                else:
+                    inflight.resolve(None)
+                registry.remove(user_message_id)
+                return
+
             except Exception as exc:
                 error_content = f"Error generating response: {str(exc)}"
                 error_metadata = {"error": str(exc)}
@@ -678,6 +758,9 @@ class MessageService(IMessageService):
                     content=error_content,
                     metadata=error_metadata,
                 )
+
+                inflight.resolve(error_message.model_dump(mode="json"))
+                registry.remove(user_message_id)
 
                 yield {
                     "type": "error",
@@ -818,6 +901,48 @@ class MessageService(IMessageService):
             content=bot_response_content,
             metadata=bot_metadata,
         )
+
+    async def stop_message_generation(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        user_message_id: UUID,
+    ) -> dict:
+        """
+        Request cancellation of an in-flight streaming generation.
+
+        Returns a dict with:
+          - ``status``: ``"cancelled"`` | ``"not_inflight"``
+          - ``message``: optional MessageRead dict (the persisted partial/final message)
+        """
+        self.conversation_validation_utils.validate_conversation_access(
+            user_id, conversation_id
+        )
+
+        registry = get_generation_registry()
+        entry = registry.get(user_message_id)
+
+        if entry is None:
+            # Not in flight – generation already completed or never started.
+            return {"status": "not_inflight", "message": None}
+
+        # Verify the caller owns this entry
+        if entry.conversation_id != conversation_id or entry.user_id != user_id:
+            return {"status": "not_inflight", "message": None}
+
+        # Signal cancellation
+        entry.request_cancel()
+
+        # Wait for the producer to finish (with a timeout)
+        try:
+            result = await asyncio.wait_for(asyncio.shield(entry.done), timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            result = None
+
+        # Clean up
+        registry.remove(user_message_id)
+
+        return {"status": "cancelled", "message": result}
 
     def get_by_id(self, message_id: UUID, user_id: UUID) -> MessageRead:
         self.message_validation_utils.validate_message_access(user_id, message_id)
