@@ -285,6 +285,14 @@ class AIService:
                 error_msg = event.get("error", UNKNOWN_ERROR)
                 yield {"type": "error", "error": error_msg}
 
+            elif event_type == "continuation_start":
+                # Pass through auto-continue round markers for UX/debugging
+                yield event
+
+            elif event_type == "node_complete":
+                # Pass through node completion events
+                yield event
+
             elif event_type == "interrupt":
                 next_nodes = event.get("next", [])
                 pending_tool_calls = event.get("pending_tool_calls")

@@ -688,6 +688,42 @@ class CompleteEventHandler(EventHandler):
             )
 
 
+class ContinuationEventHandler(EventHandler):
+    """Handles auto-continue round marker events."""
+
+    async def handle(
+        self, event: Dict[str, Any], state: StreamState
+    ) -> AsyncGenerator[str, None]:
+        yield _sse(
+            {
+                "type": "data-continuation",
+                "data": {
+                    "round": event.get("round"),
+                    "max_rounds": event.get("max_rounds"),
+                    "reason": event.get("reason"),
+                },
+                "transient": True,
+            }
+        )
+
+
+class NodeCompleteEventHandler(EventHandler):
+    """Handles node completion events."""
+
+    async def handle(
+        self, event: Dict[str, Any], state: StreamState
+    ) -> AsyncGenerator[str, None]:
+        yield _sse(
+            {
+                "type": "data-node-complete",
+                "data": {
+                    "node": event.get("node"),
+                },
+                "transient": True,
+            }
+        )
+
+
 class EventHandlerFactory:
     """Factory for creating event handlers."""
 
@@ -700,6 +736,8 @@ class EventHandlerFactory:
         "interrupt": InterruptEventHandler(),
         "error": ErrorEventHandler(),
         "complete": CompleteEventHandler(),
+        "continuation_start": ContinuationEventHandler(),
+        "node_complete": NodeCompleteEventHandler(),
     }
 
     @classmethod

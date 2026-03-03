@@ -610,6 +610,16 @@ class MessageService(IMessageService):
                         registry.remove(user_message_id)
                         return
 
+                    elif event_type == "continuation_start":
+                        # Auto-continue round marker — pass through without breaking
+                        inflight.touch()
+                        yield event
+
+                    elif event_type == "node_complete":
+                        # Node completion event — pass through without breaking
+                        inflight.touch()
+                        yield event
+
                     elif event_type == "complete":
                         # Store final response
                         bot_response = event.get("response")

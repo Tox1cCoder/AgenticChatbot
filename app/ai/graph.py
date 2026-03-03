@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from collections import defaultdict
 from typing import Optional, TYPE_CHECKING, List, Dict, Any, Tuple
 from uuid import UUID
@@ -8,6 +9,7 @@ from uuid import UUID
 from cachetools import TTLCache
 
 from langgraph.graph import StateGraph, END, START
+from langgraph.errors import GraphRecursionError
 from langgraph.types import Command, interrupt
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
@@ -763,12 +765,28 @@ class MultiAgentWorkflow:
 
     def _route_tool_output(self, state: GraphState) -> str:
         iteration_count = state.get("iteration_count", 0)
-        max_iterations = getattr(settings, "react_agent_max_iterations")
+        max_iterations = settings.react_agent_max_iterations
+
+        # Soft-limit: if auto-continue is enabled, trigger continuation at
+        # a fraction of the budget so the outer loop can start a new round
+        # before the hard LangGraph recursion limit is hit.
+        if settings.auto_continue_enabled:
+            soft_limit = int(max_iterations * settings.auto_continue_soft_limit_ratio)
+            if iteration_count >= soft_limit:
+                context = dict(state.get("context") or {})
+                context["max_iterations_reached"] = True
+                context["auto_continue_requested"] = {
+                    "reason": "soft_budget",
+                    "iteration_count": iteration_count,
+                    "soft_limit": soft_limit,
+                }
+                state["context"] = context
+                return "end"
 
         if iteration_count >= max_iterations:
             messages = state.get("messages", [])
             if messages:
-                context = state.get("context", {})
+                context = dict(state.get("context") or {})
                 context["max_iterations_reached"] = True
                 state["context"] = context
             return "end"
@@ -1729,11 +1747,30 @@ class MultiAgentWorkflow:
 
     def _should_continue_planning(self, state: GraphState) -> str:
         planning_call_count = state.get("planning_call_count", 0)
-        max_iterations = getattr(settings, "planning_max_iterations", 20)
+        max_iterations = settings.planning_max_iterations
 
-        # Check iteration budget
+        # Soft-limit: if auto-continue is enabled, trigger continuation at
+        # a fraction of the planning budget.
+        if settings.auto_continue_enabled:
+            soft_limit = int(max_iterations * settings.auto_continue_soft_limit_ratio)
+            if planning_call_count >= soft_limit:
+                context = dict(state.get("context") or {})
+                context["planning_budget_reached"] = True
+                context["auto_continue_requested"] = {
+                    "reason": "soft_budget",
+                    "planning_call_count": planning_call_count,
+                    "soft_limit": soft_limit,
+                }
+                state["context"] = context
+                logger.info(
+                    "Planning soft-limit reached: %d >= %d, requesting auto-continue",
+                    planning_call_count, soft_limit,
+                )
+                return "end"
+
+        # Check iteration budget (hard limit)
         if planning_call_count >= max_iterations:
-            context = state.get("context", {})
+            context = dict(state.get("context") or {})
             context["planning_budget_reached"] = True
             context["pause_reason"] = "max_iterations_reached"
             state["context"] = context
@@ -1745,9 +1782,7 @@ class MultiAgentWorkflow:
         # Circuit breaker: check consecutive errors
         context = state.get("context", {})
         consecutive_errors = context.get("consecutive_errors", 0)
-        max_consecutive_errors = getattr(
-            settings, "planning_consecutive_errors_limit", 3
-        )
+        max_consecutive_errors = settings.planning_consecutive_errors_limit
 
         if consecutive_errors >= max_consecutive_errors:
             context["planning_budget_reached"] = True
@@ -1837,6 +1872,70 @@ class MultiAgentWorkflow:
         }
         return agent_type_map.get(selected_agent, AgentType.CHAT)
 
+    # ------------------------------------------------------------------
+    # Auto-Continue helpers
+    # ------------------------------------------------------------------
+
+    def _build_continuation_state(
+        self,
+        previous_state: Dict[str, Any],
+        round_num: int,
+        reason: str,
+    ) -> GraphState:
+        """Build a new initial state that carries forward context from a previous round.
+
+        Keeps routing stable (selected_agent preserved), resets per-round
+        counters so each round has a fresh budget, and clears "stop" flags
+        that would immediately short-circuit the next round.
+        """
+        state: Dict[str, Any] = dict(previous_state or {})
+
+        # Reset per-round counters so the next round has fresh budget.
+        state["iteration_count"] = 0
+        state["planning_call_count"] = 0
+
+        # Clear response artifacts from previous round (only the final
+        # round's response is used).
+        state.pop("response", None)
+
+        # Clear "stop" flags so they don't immediately short-circuit the
+        # next round.
+        ctx = dict(state.get("context") or {})
+        ctx.pop("max_iterations_reached", None)
+        ctx.pop("planning_budget_reached", None)
+        ctx.pop("pause_reason", None)
+        ctx.pop("auto_continue_requested", None)
+
+        # Add lightweight trace context (helpful for logs/prompts).
+        ctx["continuation_round"] = round_num
+        ctx["continuation_reason"] = reason
+        state["context"] = ctx
+
+        return state
+
+    async def _capture_state_for_continuation(
+        self,
+        config: Optional[Dict[str, Any]],
+        thread_id: Optional[str],
+        fallback_state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Capture current graph state for continuation.
+
+        When using checkpointer, reads the latest checkpoint snapshot.
+        Otherwise, falls back to the in-memory state accumulated from
+        the streaming loop's "updates" events.
+        """
+        if self.checkpointer and thread_id:
+            try:
+                snapshot = await self.graph.aget_state(config)
+                if snapshot and hasattr(snapshot, "values") and snapshot.values:
+                    return dict(snapshot.values)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to capture checkpoint state for continuation: %s", exc
+                )
+        return dict(fallback_state) if fallback_state else {}
+
     async def execute(
         self,
         message: str,
@@ -1868,8 +1967,99 @@ class MultiAgentWorkflow:
         )
 
         config = self._build_graph_config(thread_id)
-        result = await self.graph.ainvoke(initial_state, config=config)
 
+        # ── Auto-Continue outer loop ──────────────────────────────────
+        max_rounds = (
+            settings.auto_continue_max_rounds
+            if settings.auto_continue_enabled
+            else 1
+        )
+        total_iterations = 0
+        start_time = time.monotonic()
+        current_state = initial_state
+        result: Optional[Dict[str, Any]] = None
+
+        for round_num in range(1, max_rounds + 1):
+            # Safety: wall-clock timeout
+            if (
+                round_num > 1
+                and time.monotonic() - start_time
+                > settings.auto_continue_timeout_seconds
+            ):
+                logger.warning(
+                    "Auto-continue timeout reached after %d rounds (execute)",
+                    round_num - 1,
+                )
+                break
+
+            should_continue = False
+            continue_reason: Optional[str] = None
+
+            try:
+                result = await self.graph.ainvoke(current_state, config=config)
+            except GraphRecursionError:
+                logger.warning(
+                    "GraphRecursionError caught in round %d (execute) — will attempt continuation",
+                    round_num,
+                )
+                should_continue = True
+                continue_reason = "recursion_limit"
+                result = None
+
+            # Detect soft-budget continuation signal from the result
+            if not should_continue and result:
+                ctx = result.get("context", {})
+                if isinstance(ctx, dict) and ctx.get("auto_continue_requested"):
+                    should_continue = True
+                    continue_reason = (
+                        ctx.get("auto_continue_requested", {}).get("reason")
+                        or "soft_budget"
+                    )
+                elif isinstance(ctx, dict) and ctx.get("max_iterations_reached") and settings.auto_continue_enabled:
+                    should_continue = True
+                    continue_reason = "max_iterations_reached"
+
+            if not should_continue:
+                break  # Normal completion
+
+            # Safety: total iteration cap
+            captured = await self._capture_state_for_continuation(
+                config=config,
+                thread_id=thread_id,
+                fallback_state=result,
+            )
+            round_iterations = int(
+                (captured.get("iteration_count") or 0)
+                + (captured.get("planning_call_count") or 0)
+            )
+            total_iterations += round_iterations
+            if total_iterations >= settings.auto_continue_max_total_iterations:
+                logger.warning(
+                    "Auto-continue total iteration cap reached: %d (execute)",
+                    total_iterations,
+                )
+                break
+
+            if round_num >= max_rounds:
+                logger.info(
+                    "Auto-continue max rounds (%d) reached (execute)", max_rounds
+                )
+                break
+
+            # Prepare state for next round
+            current_state = self._build_continuation_state(
+                previous_state=captured,
+                round_num=round_num + 1,
+                reason=continue_reason or "soft_budget",
+            )
+            logger.info(
+                "Auto-continue (execute): starting round %d (reason=%s, total_iters=%d)",
+                round_num + 1,
+                continue_reason,
+                total_iterations,
+            )
+
+        # ── Post-loop: finalize response ──────────────────────────────
         if self.checkpointer and thread_id:
             state_snapshot = await self.graph.aget_state(config)
             if state_snapshot.next and len(state_snapshot.next) > 0:
@@ -1879,21 +2069,34 @@ class MultiAgentWorkflow:
                 if interrupt_agent_response:
                     return interrupt_agent_response
 
-        agent_response = result.get("response")
+        if result is None:
+            # GraphRecursionError on last round with no usable result
+            result = await self._capture_state_for_continuation(
+                config=config, thread_id=thread_id, fallback_state=None
+            )
 
-        final_todos = result.get("todos", [])
+        agent_response = result.get("response") if isinstance(result, dict) else None
+
+        final_todos = result.get("todos", []) if isinstance(result, dict) else []
         if agent_response and final_todos:
             if agent_response.metadata is None:
                 agent_response.metadata = {}
             agent_response.metadata["todos"] = final_todos
-            context = result.get("context", {})
+            context = result.get("context", {}) if isinstance(result, dict) else {}
             if context.get("all_tasks_completed"):
                 agent_response.metadata["all_tasks_completed"] = True
             if context.get("planning_budget_reached"):
                 agent_response.metadata["planning_budget_reached"] = True
             agent_response.metadata["planning_call_count"] = result.get(
                 "planning_call_count", 0
-            )
+            ) if isinstance(result, dict) else 0
+
+        # Add continuation metadata when multiple rounds ran
+        if agent_response and total_iterations > 0:
+            if agent_response.metadata is None:
+                agent_response.metadata = {}
+            agent_response.metadata["continuation_rounds"] = round_num
+            agent_response.metadata["total_iterations"] = total_iterations
 
         if (
             agent_response
@@ -2255,134 +2458,71 @@ class MultiAgentWorkflow:
         # be the only content the client sees.
         suppress_tokens = selected_agent == "image_generator_agent"
 
-        try:
-            # - "messages": Stream LLM tokens with metadata (includes tool_call_chunks)
-            # - "updates": Stream state updates after each node (includes completed messages)
-            async for chunk in self.graph.astream(
-                initial_state, config=config, stream_mode=["messages", "updates"]
+        # ── Auto-Continue outer loop ──────────────────────────────────
+        max_rounds = (
+            settings.auto_continue_max_rounds
+            if settings.auto_continue_enabled
+            else 1
+        )
+        round_num = 1
+        continue_reason: Optional[str] = "initial"
+        total_iterations = 0
+        start_time = time.monotonic()
+        current_state = initial_state
+        last_state_values: Optional[Dict[str, Any]] = None
+
+        while round_num <= max_rounds:
+            # Safety: wall-clock timeout across all rounds
+            if (
+                round_num > 1
+                and time.monotonic() - start_time
+                > settings.auto_continue_timeout_seconds
             ):
-                # Handle tuple format from multiple stream modes
-                if isinstance(chunk, tuple) and len(chunk) == 2:
-                    mode, data = chunk
+                logger.warning(
+                    "Auto-continue timeout reached after %d rounds", round_num - 1
+                )
+                break
 
-                    if mode == "messages":
-                        # LLM token streaming - data is (message_chunk, metadata)
-                        message_chunk, metadata = data
+            # Emit continuation_start event for rounds > 1
+            if round_num > 1 and settings.auto_continue_emit_events:
+                yield {
+                    "type": "continuation_start",
+                    "round": round_num,
+                    "max_rounds": max_rounds,
+                    "reason": continue_reason,
+                }
 
-                        # Skip ToolMessage - tool results are handled in updates mode
-                        if isinstance(message_chunk, ToolMessage):
-                            continue
+            should_continue = False
+            continue_reason = None
 
-                        # Handle text content using content_blocks (latest pattern)
-                        if (
-                            hasattr(message_chunk, "content_blocks")
-                            and message_chunk.content_blocks
-                        ):
-                            for block in message_chunk.content_blocks:
-                                block_type = block.get("type")
+            try:
+                # - "messages": Stream LLM tokens with metadata (includes tool_call_chunks)
+                # - "updates": Stream state updates after each node (includes completed messages)
+                async for chunk in self.graph.astream(
+                    current_state, config=config, stream_mode=["messages", "updates"]
+                ):
+                    # Handle tuple format from multiple stream modes
+                    if isinstance(chunk, tuple) and len(chunk) == 2:
+                        mode, data = chunk
 
-                                if block_type == "text":
-                                    text_content = block.get("text", "")
-                                    accumulated_content, delta = (
-                                        self._consume_stream_text_chunk(
-                                            accumulated_content, text_content
-                                        )
-                                    )
-                                    if delta and not suppress_tokens:
-                                        yield {"type": "token", "content": delta}
+                        if mode == "messages":
+                            # LLM token streaming - data is (message_chunk, metadata)
+                            message_chunk, metadata = data
 
-                                # Handle thinking block type
-                                elif block_type == "thinking":
-                                    thinking_content = block.get(
-                                        "thinking", ""
-                                    ) or block.get("text", "")
-                                    if thinking_content:
-                                        accumulated_thinking += thinking_content
-                                        yield {
-                                            "type": "thinking",
-                                            "content": thinking_content,
-                                        }
+                            # Skip ToolMessage - tool results are handled in updates mode
+                            if isinstance(message_chunk, ToolMessage):
+                                continue
 
-                                # Handle reasoning block type (LangChain Google GenAI)
-                                elif block_type == "reasoning":
-                                    reasoning_content = block.get(
-                                        "reasoning", ""
-                                    ) or block.get("text", "")
-                                    if reasoning_content:
-                                        accumulated_thinking += reasoning_content
-                                        yield {
-                                            "type": "thinking",
-                                            "content": reasoning_content,
-                                        }
+                            # Handle text content using content_blocks (latest pattern)
+                            if (
+                                hasattr(message_chunk, "content_blocks")
+                                and message_chunk.content_blocks
+                            ):
+                                for block in message_chunk.content_blocks:
+                                    block_type = block.get("type")
 
-                                elif block_type == "tool_call_chunk":
-                                    # Stream tool call chunks as they arrive
-                                    tool_index = block.get("index", 0)
-                                    tool_id = block.get("id")
-                                    tool_name = block.get("name")
-                                    tool_args = block.get("args", "")
-
-                                    # Initialize or update tool call tracking
-                                    if tool_index not in current_tool_calls:
-                                        current_tool_calls[tool_index] = {
-                                            "id": tool_id,
-                                            "name": tool_name,
-                                            "args": "",
-                                        }
-
-                                    # Accumulate args
-                                    if tool_args:
-                                        current_tool_calls[tool_index][
-                                            "args"
-                                        ] += tool_args
-
-                                    # Update name/id if present
-                                    if (
-                                        tool_name
-                                        and not current_tool_calls[tool_index]["name"]
-                                    ):
-                                        current_tool_calls[tool_index][
-                                            "name"
-                                        ] = tool_name
-                                    if (
-                                        tool_id
-                                        and not current_tool_calls[tool_index]["id"]
-                                    ):
-                                        current_tool_calls[tool_index]["id"] = tool_id
-
-                            pass  # Content blocks handled
-
-                        # Handle content as list (when include_thoughts=True)
-                        # LangChain returns content as list with thinking/reasoning and text parts
-                        elif hasattr(message_chunk, "content") and isinstance(
-                            message_chunk.content, list
-                        ):
-                            for part in message_chunk.content:
-                                if isinstance(part, dict):
-                                    part_type = part.get("type", "")
-
-                                    if part_type == "thinking":
-                                        thinking_content = part.get(
-                                            "thinking", ""
-                                        ) or part.get("text", "")
-                                        if thinking_content:
-                                            accumulated_thinking += thinking_content
-                                            yield {
-                                                "type": "thinking",
-                                                "content": thinking_content,
-                                            }
-                                    elif part_type == "reasoning":
-                                        reasoning_content = part.get(
-                                            "reasoning", ""
-                                        ) or part.get("text", "")
-                                        if reasoning_content:
-                                            accumulated_thinking += reasoning_content
-                                            yield {
-                                                "type": "thinking",
-                                                "content": reasoning_content,
-                                            }
-                                    elif part_type == "text":
-                                        text_content = part.get("text", "")
+                                    if block_type == "text":
+                                        text_content = block.get("text", "")
                                         accumulated_content, delta = (
                                             self._consume_stream_text_chunk(
                                                 accumulated_content, text_content
@@ -2390,172 +2530,348 @@ class MultiAgentWorkflow:
                                         )
                                         if delta and not suppress_tokens:
                                             yield {"type": "token", "content": delta}
-                                elif isinstance(part, str) and part:
-                                    accumulated_content, delta = (
-                                        self._consume_stream_text_chunk(
-                                            accumulated_content, part
+
+                                    # Handle thinking block type
+                                    elif block_type == "thinking":
+                                        thinking_content = block.get(
+                                            "thinking", ""
+                                        ) or block.get("text", "")
+                                        if thinking_content:
+                                            accumulated_thinking += thinking_content
+                                            yield {
+                                                "type": "thinking",
+                                                "content": thinking_content,
+                                            }
+
+                                    # Handle reasoning block type (LangChain Google GenAI)
+                                    elif block_type == "reasoning":
+                                        reasoning_content = block.get(
+                                            "reasoning", ""
+                                        ) or block.get("text", "")
+                                        if reasoning_content:
+                                            accumulated_thinking += reasoning_content
+                                            yield {
+                                                "type": "thinking",
+                                                "content": reasoning_content,
+                                            }
+
+                                    elif block_type == "tool_call_chunk":
+                                        # Stream tool call chunks as they arrive
+                                        tool_index = block.get("index", 0)
+                                        tool_id = block.get("id")
+                                        tool_name = block.get("name")
+                                        tool_args = block.get("args", "")
+
+                                        # Initialize or update tool call tracking
+                                        if tool_index not in current_tool_calls:
+                                            current_tool_calls[tool_index] = {
+                                                "id": tool_id,
+                                                "name": tool_name,
+                                                "args": "",
+                                            }
+
+                                        # Accumulate args
+                                        if tool_args:
+                                            current_tool_calls[tool_index][
+                                                "args"
+                                            ] += tool_args
+
+                                        # Update name/id if present
+                                        if (
+                                            tool_name
+                                            and not current_tool_calls[tool_index]["name"]
+                                        ):
+                                            current_tool_calls[tool_index][
+                                                "name"
+                                            ] = tool_name
+                                        if (
+                                            tool_id
+                                            and not current_tool_calls[tool_index]["id"]
+                                        ):
+                                            current_tool_calls[tool_index]["id"] = tool_id
+
+                                pass  # Content blocks handled
+
+                            # Handle content as list (when include_thoughts=True)
+                            # LangChain returns content as list with thinking/reasoning and text parts
+                            elif hasattr(message_chunk, "content") and isinstance(
+                                message_chunk.content, list
+                            ):
+                                for part in message_chunk.content:
+                                    if isinstance(part, dict):
+                                        part_type = part.get("type", "")
+
+                                        if part_type == "thinking":
+                                            thinking_content = part.get(
+                                                "thinking", ""
+                                            ) or part.get("text", "")
+                                            if thinking_content:
+                                                accumulated_thinking += thinking_content
+                                                yield {
+                                                    "type": "thinking",
+                                                    "content": thinking_content,
+                                                }
+                                        elif part_type == "reasoning":
+                                            reasoning_content = part.get(
+                                                "reasoning", ""
+                                            ) or part.get("text", "")
+                                            if reasoning_content:
+                                                accumulated_thinking += reasoning_content
+                                                yield {
+                                                    "type": "thinking",
+                                                    "content": reasoning_content,
+                                                }
+                                        elif part_type == "text":
+                                            text_content = part.get("text", "")
+                                            accumulated_content, delta = (
+                                                self._consume_stream_text_chunk(
+                                                    accumulated_content, text_content
+                                                )
+                                            )
+                                            if delta and not suppress_tokens:
+                                                yield {"type": "token", "content": delta}
+                                    elif isinstance(part, str) and part:
+                                        accumulated_content, delta = (
+                                            self._consume_stream_text_chunk(
+                                                accumulated_content, part
+                                            )
                                         )
+                                        if delta and not suppress_tokens:
+                                            yield {"type": "token", "content": delta}
+
+                            # Fallback: Handle legacy string content attribute
+                            elif (
+                                hasattr(message_chunk, "content")
+                                and message_chunk.content
+                                and isinstance(message_chunk.content, str)
+                            ):
+                                content = coerce_response_text(message_chunk.content)
+                                accumulated_content, delta = (
+                                    self._consume_stream_text_chunk(
+                                        accumulated_content, content
                                     )
-                                    if delta and not suppress_tokens:
-                                        yield {"type": "token", "content": delta}
-
-                        # Fallback: Handle legacy string content attribute
-                        elif (
-                            hasattr(message_chunk, "content")
-                            and message_chunk.content
-                            and isinstance(message_chunk.content, str)
-                        ):
-                            content = coerce_response_text(message_chunk.content)
-                            accumulated_content, delta = (
-                                self._consume_stream_text_chunk(
-                                    accumulated_content, content
                                 )
-                            )
-                            if delta and not suppress_tokens:
-                                yield {"type": "token", "content": delta}
+                                if delta and not suppress_tokens:
+                                    yield {"type": "token", "content": delta}
 
-                        # Check for chunk completion and emit complete tool calls
-                        if (
-                            hasattr(message_chunk, "chunk_position")
-                            and message_chunk.chunk_position == "last"
-                        ):
-                            # Emit accumulated tool calls
-                            for tool_call in current_tool_calls.values():
-                                if tool_call["name"]:  # Only emit if we have a name
-                                    tool_call_id = tool_call["id"]
-                                    # Skip if already emitted
+                            # Check for chunk completion and emit complete tool calls
+                            if (
+                                hasattr(message_chunk, "chunk_position")
+                                and message_chunk.chunk_position == "last"
+                            ):
+                                # Emit accumulated tool calls
+                                for tool_call in current_tool_calls.values():
+                                    if tool_call["name"]:  # Only emit if we have a name
+                                        tool_call_id = tool_call["id"]
+                                        # Skip if already emitted
+                                        if (
+                                            tool_call_id
+                                            and tool_call_id in emitted_tool_call_ids
+                                        ):
+                                            continue
+                                        if tool_call_id:
+                                            emitted_tool_call_ids.add(tool_call_id)
+
+                                        try:
+                                            # Parse args if it's a JSON string
+                                            args = (
+                                                json.loads(tool_call["args"])
+                                                if tool_call["args"]
+                                                else {}
+                                            )
+                                        except:
+                                            args = tool_call["args"]
+
+                                        yield {
+                                            "type": "tool_start",
+                                            "name": tool_call["name"],
+                                            "tool_call_id": tool_call_id,
+                                            "args": make_json_safe(args),
+                                        }
+                                # Clear for next message
+                                current_tool_calls = {}
+
+                        elif mode == "updates":
+                            # State updates - check for completed messages with thinking/tools
+                            for node_name, node_state in data.items():
+                                # Track latest state values for continuation fallback
+                                if isinstance(node_state, dict):
+                                    if last_state_values is None:
+                                        last_state_values = {}
+                                    last_state_values.update(node_state)
+
+                                # Emit node completion event for planning nodes
+                                if node_name in ("planning_agent", "planning_tools"):
+                                    # Extract relevant info from the node state
+                                    node_info = {"node": node_name}
+
+                                    # For planning_agent, include tool call info
                                     if (
-                                        tool_call_id
-                                        and tool_call_id in emitted_tool_call_ids
+                                        node_name == "planning_agent"
+                                        and "messages" in node_state
                                     ):
-                                        continue
-                                    if tool_call_id:
-                                        emitted_tool_call_ids.add(tool_call_id)
+                                        messages = node_state.get("messages", [])
+                                        if messages:
+                                            last_msg = (
+                                                messages[-1]
+                                                if isinstance(messages, list)
+                                                else messages
+                                            )
+                                            if (
+                                                isinstance(last_msg, AIMessage)
+                                                and hasattr(last_msg, "tool_calls")
+                                                and last_msg.tool_calls
+                                            ):
+                                                node_info["tool_calls"] = [
+                                                    {
+                                                        "name": tc.get("name"),
+                                                        "id": tc.get("id"),
+                                                        "args": make_json_safe(
+                                                            tc.get("args", {})
+                                                        ),
+                                                    }
+                                                    for tc in last_msg.tool_calls
+                                                ]
 
-                                    try:
-                                        # Parse args if it's a JSON string
-                                        args = (
-                                            json.loads(tool_call["args"])
-                                            if tool_call["args"]
-                                            else {}
-                                        )
-                                    except:
-                                        args = tool_call["args"]
+                                    # For planning_tools, include execution results
+                                    if node_name == "planning_tools":
+                                        todos = node_state.get("todos", [])
+                                        if todos:
+                                            node_info["todos_count"] = len(todos)
+                                            node_info["current_task_index"] = (
+                                                node_state.get("current_task_index")
+                                            )
 
-                                    yield {
-                                        "type": "tool_start",
-                                        "name": tool_call["name"],
-                                        "tool_call_id": tool_call_id,
-                                        "args": make_json_safe(args),
-                                    }
-                            # Clear for next message
-                            current_tool_calls = {}
+                                    yield {"type": "node_complete", **node_info}
 
-                    elif mode == "updates":
-                        # State updates - check for completed messages with thinking/tools
-                        for node_name, node_state in data.items():
-                            # Emit node completion event for planning nodes
-                            if node_name in ("planning_agent", "planning_tools"):
-                                # Extract relevant info from the node state
-                                node_info = {"node": node_name}
-
-                                # For planning_agent, include tool call info
-                                if (
-                                    node_name == "planning_agent"
-                                    and "messages" in node_state
-                                ):
-                                    messages = node_state.get("messages", [])
+                                if "messages" in node_state:
+                                    messages = node_state["messages"]
                                     if messages:
                                         last_msg = (
                                             messages[-1]
                                             if isinstance(messages, list)
                                             else messages
                                         )
-                                        if (
-                                            isinstance(last_msg, AIMessage)
-                                            and hasattr(last_msg, "tool_calls")
-                                            and last_msg.tool_calls
-                                        ):
-                                            node_info["tool_calls"] = [
-                                                {
-                                                    "name": tc.get("name"),
-                                                    "id": tc.get("id"),
-                                                    "args": make_json_safe(
-                                                        tc.get("args", {})
-                                                    ),
-                                                }
-                                                for tc in last_msg.tool_calls
-                                            ]
 
-                                # For planning_tools, include execution results
-                                if node_name == "planning_tools":
-                                    todos = node_state.get("todos", [])
-                                    if todos:
-                                        node_info["todos_count"] = len(todos)
-                                        node_info["current_task_index"] = (
-                                            node_state.get("current_task_index")
-                                        )
-
-                                yield {"type": "node_complete", **node_info}
-
-                            if "messages" in node_state:
-                                messages = node_state["messages"]
-                                if messages:
-                                    last_msg = (
-                                        messages[-1]
-                                        if isinstance(messages, list)
-                                        else messages
-                                    )
-
-                                    # Handle AIMessage - extract tool_calls only
-                                    if isinstance(last_msg, AIMessage):
-                                        # Handle tool calls
-                                        if (
-                                            hasattr(last_msg, "tool_calls")
-                                            and last_msg.tool_calls
-                                        ):
-                                            for tool_call in last_msg.tool_calls:
-                                                tool_call_id = tool_call.get("id")
-                                                # Only emit if not already emitted from messages mode
-                                                if (
-                                                    tool_call_id
-                                                    and tool_call_id
-                                                    not in emitted_tool_call_ids
-                                                ):
-                                                    emitted_tool_call_ids.add(
+                                        # Handle AIMessage - extract tool_calls only
+                                        if isinstance(last_msg, AIMessage):
+                                            # Handle tool calls
+                                            if (
+                                                hasattr(last_msg, "tool_calls")
+                                                and last_msg.tool_calls
+                                            ):
+                                                for tool_call in last_msg.tool_calls:
+                                                    tool_call_id = tool_call.get("id")
+                                                    # Only emit if not already emitted from messages mode
+                                                    if (
                                                         tool_call_id
-                                                    )
-                                                    yield {
-                                                        "type": "tool_start",
-                                                        "name": tool_call.get(
-                                                            "name", "unknown"
-                                                        ),
-                                                        "tool_call_id": tool_call_id,
-                                                        "args": make_json_safe(
-                                                            tool_call.get("args", {})
-                                                        ),
-                                                    }
+                                                        and tool_call_id
+                                                        not in emitted_tool_call_ids
+                                                    ):
+                                                        emitted_tool_call_ids.add(
+                                                            tool_call_id
+                                                        )
+                                                        yield {
+                                                            "type": "tool_start",
+                                                            "name": tool_call.get(
+                                                                "name", "unknown"
+                                                            ),
+                                                            "tool_call_id": tool_call_id,
+                                                            "args": make_json_safe(
+                                                                tool_call.get("args", {})
+                                                            ),
+                                                        }
 
-                                    # Handle ToolMessage (result)
-                                    elif isinstance(last_msg, ToolMessage):
-                                        yield {
-                                            "type": "tool_end",
-                                            "name": getattr(
-                                                last_msg, "name", "unknown"
-                                            ),
-                                            "tool_call_id": getattr(
-                                                last_msg, "tool_call_id", None
-                                            ),
-                                            "result": make_json_safe(last_msg.content),
-                                        }
-                else:
-                    # Single mode or legacy format - try to handle gracefully
-                    logger.debug(f"Unexpected stream chunk format: {type(chunk)}")
+                                        # Handle ToolMessage (result)
+                                        elif isinstance(last_msg, ToolMessage):
+                                            yield {
+                                                "type": "tool_end",
+                                                "name": getattr(
+                                                    last_msg, "name", "unknown"
+                                                ),
+                                                "tool_call_id": getattr(
+                                                    last_msg, "tool_call_id", None
+                                                ),
+                                                "result": make_json_safe(last_msg.content),
+                                            }
+                    else:
+                        # Single mode or legacy format - try to handle gracefully
+                        logger.debug(f"Unexpected stream chunk format: {type(chunk)}")
 
-        except Exception as e:
-            yield {"type": "error", "error": str(e)}
-            return
+            except GraphRecursionError:
+                logger.warning(
+                    "GraphRecursionError caught in round %d — will attempt continuation",
+                    round_num,
+                )
+                should_continue = True
+                continue_reason = "recursion_limit"
 
+            except Exception as e:
+                yield {"type": "error", "error": str(e)}
+                return
+
+            # ── Check if graph ended because we *want* to continue ─────
+            if not should_continue and last_state_values:
+                ctx = (
+                    last_state_values.get("context", {})
+                    if isinstance(last_state_values, dict)
+                    else {}
+                )
+                if ctx.get("auto_continue_requested"):
+                    should_continue = True
+                    continue_reason = (
+                        ctx.get("auto_continue_requested", {}).get("reason")
+                        or "soft_budget"
+                    )
+                elif ctx.get("max_iterations_reached") and settings.auto_continue_enabled:
+                    should_continue = True
+                    continue_reason = "max_iterations_reached"
+
+            if not should_continue:
+                break  # Normal completion — exit loop and finalize
+
+            # ── Safety: total iteration cap ────────────────────────────
+            captured = await self._capture_state_for_continuation(
+                config=config,
+                thread_id=thread_id,
+                fallback_state=last_state_values,
+            )
+            round_iterations = int(
+                (captured.get("iteration_count") or 0)
+                + (captured.get("planning_call_count") or 0)
+            )
+            total_iterations += round_iterations
+            if total_iterations >= settings.auto_continue_max_total_iterations:
+                logger.warning(
+                    "Auto-continue total iteration cap reached: %d",
+                    total_iterations,
+                )
+                break
+
+            if round_num >= max_rounds:
+                logger.info(
+                    "Auto-continue max rounds (%d) reached — returning partial result",
+                    max_rounds,
+                )
+                break
+
+            # ── Prepare state for next round ───────────────────────────
+            current_state = self._build_continuation_state(
+                previous_state=captured,
+                round_num=round_num + 1,
+                reason=continue_reason or "soft_budget",
+            )
+            logger.info(
+                "Auto-continue: starting round %d (reason=%s, total_iters=%d)",
+                round_num + 1,
+                continue_reason,
+                total_iterations,
+            )
+            round_num += 1
+            # Reset per-round tool call tracking (accumulators persist)
+            current_tool_calls = {}
+
+        # ── Post-stream: finalize response ─────────────────────────────
         if self.checkpointer and thread_id:
             try:
                 snapshot = await self.graph.aget_state(config)
@@ -2615,6 +2931,11 @@ class MultiAgentWorkflow:
                         if context.get("planning_budget_reached"):
                             response.metadata["planning_budget_reached"] = True
 
+                    # Add continuation metadata when multiple rounds ran
+                    if round_num > 1:
+                        response.metadata["continuation_rounds"] = round_num
+                        response.metadata["total_iterations"] = total_iterations
+
                     yield {"type": "complete", "response": response}
                 elif accumulated_content and not suppress_tokens:
                     metadata_model = (
@@ -2637,6 +2958,11 @@ class MultiAgentWorkflow:
                             "planning_call_count", 0
                         )
 
+                    # Add continuation metadata when multiple rounds ran
+                    if round_num > 1:
+                        metadata["continuation_rounds"] = round_num
+                        metadata["total_iterations"] = total_iterations
+
                     agent_type = self._get_agent_type(selected_agent)
                     response = AgentResponse(
                         agent_type=agent_type,
@@ -2657,6 +2983,11 @@ class MultiAgentWorkflow:
                 # Include thinking summary in metadata
                 if accumulated_thinking:
                     metadata["thinking_summary"] = accumulated_thinking
+
+                # Add continuation metadata when multiple rounds ran
+                if round_num > 1:
+                    metadata["continuation_rounds"] = round_num
+                    metadata["total_iterations"] = total_iterations
 
                 agent_type = self._get_agent_type(selected_agent)
                 response = AgentResponse(

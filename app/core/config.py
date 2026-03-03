@@ -548,6 +548,42 @@ class Settings(BaseSettings):
         description="Characters to include in document preview during scan phase (~1 page)",
     )
 
+    # Auto-Continue Configuration
+    auto_continue_enabled: bool = Field(
+        default=True,
+        description="Enable automatic continuation when agent hits iteration limits",
+    )
+    auto_continue_max_rounds: int = Field(
+        default=5,
+        description="Maximum number of continuation rounds per user message (safety cap)",
+    )
+    auto_continue_soft_limit_ratio: float = Field(
+        default=0.8,
+        description="Fraction of the loop budget to consume per round before rolling to the next round (0.1-1.0)",
+    )
+    auto_continue_emit_events: bool = Field(
+        default=False,
+        description="Emit continuation_start events during streaming (debug/UX)",
+    )
+    auto_continue_max_total_iterations: int = Field(
+        default=200,
+        description="Absolute max iterations across all continuation rounds",
+    )
+    auto_continue_timeout_seconds: int = Field(
+        default=300,
+        description="Maximum wall-clock time for all continuation rounds (seconds)",
+    )
+
+    # Planning Agent Explicit Settings (promoted from getattr defaults)
+    planning_max_iterations: int = Field(
+        default=20,
+        description="Maximum planning tool calls before pausing for user",
+    )
+    planning_consecutive_errors_limit: int = Field(
+        default=3,
+        description="Maximum consecutive planning tool errors before stopping",
+    )
+
     # MCP Tool Search Configuration (Deferred Loading)
     mcp_tool_search_enabled: bool = Field(
         default=True,
@@ -614,13 +650,13 @@ class Settings(BaseSettings):
             raise ValueError("Value must be non-negative")
         return v
 
-    @field_validator("summarization_trigger_fraction", mode="before")
+    @field_validator("summarization_trigger_fraction", "auto_continue_soft_limit_ratio", mode="before")
     @classmethod
-    def _validate_trigger_fraction(cls, v: float) -> float:
+    def _validate_fraction_fields(cls, v: float) -> float:
         v = float(v)
         if not (0.0 < v <= 1.0):
             raise ValueError(
-                "summarization_trigger_fraction must be in the range (0.0, 1.0]"
+                "Value must be in the range (0.0, 1.0]"
             )
         return v
 
