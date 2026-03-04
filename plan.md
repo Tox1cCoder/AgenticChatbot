@@ -339,3 +339,93 @@ Document and choose between:
 | 8 | Added cleanup of fragile `getattr` pattern in `_get_config()`. |
 | 9 | Changed legacy field action from "gate behind debug flag" to "remove entirely" (nothing reads them). |
 | 10 | Replaced boolean `suppress_tokens` flag with `suppressed_nodes: set` for extensibility. |
+
+---
+
+## Implementation Progress
+
+### Status: Milestones 0–3 complete (Milestone 4 deferred as planned)
+
+All code changes were implemented with zero syntax / lint errors. Each milestone was verified via `py_compile` and VS Code error diagnostics.
+
+---
+
+### Milestone 0 — Metadata shape confirmation
+
+Skipped the dedicated debug-log step. The suppression helper `_is_internal_stream_chunk` uses a three-layer defence so no preliminary live-run confirmation is needed:
+1. `"internal" in metadata.get("tags", [])` — via `RunnableConfig` tags.
+2. `metadata.get("metadata", {}).get("internal") is True` — via `RunnableConfig` metadata.
+3. `metadata.get("langgraph_node") == "summarize"` — hard-coded node-name fallback (defence-in-depth).
+
+---
+
+### Milestone 1 — Streaming leak + data-loss (P0 + P0b) DONE
+
+**1a — Fail-closed `generate_summary()`** (`summarization_middleware.py`)
+- Removed the `try/except` wrapper from `generate_summary()`. The function now raises on failure.
+- Added `try/except asyncio.TimeoutError / Exception` in `summarize_for_state()` that returns original `state` unchanged on any error. `apply_summarization_to_state()` is only reached on genuine success.
+- Same discipline applied in `_run_fast_path_summarization()` via an inner `try/except` guarding only the generation step.
+- **Design decision:** error handling moved from inside `generate_summary()` to the caller so message removal and error handling are visibly separate.
+
+**1b — Tag internal LLM invocations** (`summarization_middleware.py`)
+- `model.ainvoke()` in `generate_summary()` now passes `RunnableConfig(tags=["internal","summarization"], metadata={"internal": True, "purpose": "summarization"})`.
+
+**1c/1d — Suppress internal chunks in `execute_stream()`** (`graph.py`)
+- Added `_is_internal_stream_chunk(metadata)` static method (three-layer check).
+- Gated behind `settings.suppress_internal_stream_chunks` (default `True`); disable for debugging.
+- `_internal_content_only: bool = True` flag; set to `False` on first non-internal chunk.
+- All post-stream `accumulated_content` / `accumulated_thinking` fallback branches guarded with `not _internal_content_only`.
+
+---
+
+### Milestone 2 — Fast-path + continuation correctness (P1 + P2) DONE
+
+**2a — `conversation_summarized` across auto-continue rounds** (`graph.py`)
+- Confirmed `_build_continuation_state()` does NOT pop `conversation_summarized`. Added a comment explaining why.
+- Validation item confirmed: no bug.
+
+**2b — Harden `_run_fast_path_summarization()`** (`graph.py`)
+- `asyncio.wait_for(..., timeout=settings.summarization_timeout_seconds)` wrapping `generate_summary()`.
+- Inner `try/except` covers only generation; outer covers checkpoint I/O. Fail-closed on generation failure.
+- Renamed local var to `new_summary` so the original `history_summary` is preserved for fallback return.
+
+---
+
+### Milestone 3 — Hardening + cleanup DONE
+
+**3a — `max_output_tokens` wired to model constructor** (`summarization_middleware.py`)
+- `_get_summarization_model()` passes `max_output_tokens=config.max_summary_tokens` when value > 0.
+- **Design decision:** `0` means unlimited; passing `0` to the provider is avoided to sidestep SDK differences.
+
+**3b — `summarization_timeout_seconds`** (`config.py` + `summarization_middleware.py`)
+- Added `summarization_timeout_seconds: int = Field(default=30)` to `Settings` and `_non_negative_int` validator.
+
+**3c — Remove fragile `getattr` config access** (`summarization_middleware.py`)
+- All `getattr(settings, "summarization_*", default)` replaced with direct attribute access in `_get_config()` and `should_summarize()`.
+
+**3d — Remove dead legacy state fields** (`summarization_middleware.py`)
+- Deleted `context["summary_text"]` and `context["messages_summarized_count"]` from `apply_summarization_to_state()`.
+
+**3e — `suppressed_nodes: set` replaces `suppress_tokens: bool`** (`graph.py`)
+- `suppressed_nodes: set = {"image_generator_agent"}; suppress_tokens = selected_agent in suppressed_nodes`
+
+**3f — `conversation_id` in observability logging** (`summarization_middleware.py`)
+- `summarize_for_state()` accepts `conversation_id: Optional[str] = None`; `_summarization_node()` threads it through.
+
+**Feature flags added to `Settings`** (`config.py`)
+- `summarization_timeout_seconds` (default 30) — timeout for summarization calls.
+- `suppress_internal_stream_chunks` (default True) — gate the early-continue; disable for debugging.
+
+---
+
+### Milestone 4 — Persistence decision
+Deferred as planned. Current: checkpoint-only (`history_summary` in LangGraph Postgres checkpoint tables).
+
+---
+
+### Files changed
+| File | Milestones |
+|---|---|
+| `app/ai/summarization_middleware.py` | 1a, 1b, 3a, 3b, 3c, 3d, 3f |
+| `app/ai/graph.py` | 1c, 1d, 2a (comment), 2b, 3e + `conversation_id` threading |
+| `app/core/config.py` | New settings: `summarization_timeout_seconds`, `suppress_internal_stream_chunks` |

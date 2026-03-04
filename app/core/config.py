@@ -247,6 +247,17 @@ class Settings(BaseSettings):
         "Summaries exceeding this limit are truncated to stay within budget. "
         "Set to 0 for unlimited (no truncation).",
     )
+    summarization_timeout_seconds: int = Field(
+        default=30,
+        description="Maximum seconds to wait for a summarization model call before timing out. "
+        "On timeout the original state is returned unchanged (fail-closed).",
+    )
+    suppress_internal_stream_chunks: bool = Field(
+        default=True,
+        description="When True, stream chunks tagged as 'internal' (e.g. summarization node output) "
+        "are silently dropped before being forwarded to clients. "
+        "Disable only for debugging.",
+    )
 
     # Redis Configuration
     redis_url: str = Field(
@@ -641,6 +652,7 @@ class Settings(BaseSettings):
         "memory_load_batch_size",
         "tool_result_max_chars",
         "summarization_max_summary_tokens",
+        "summarization_timeout_seconds",
         mode="before",
     )
     @classmethod

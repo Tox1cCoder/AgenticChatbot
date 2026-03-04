@@ -1,9 +1,11 @@
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph.message import RemoveMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -67,14 +69,14 @@ Updated summary:"""
 def _get_config() -> SummarizationConfig:
     """Get summarization config from settings."""
     return SummarizationConfig(
-        trigger_tokens=getattr(settings, "summarization_trigger_tokens", 18000),
-        trigger_messages=getattr(settings, "summarization_trigger_messages", 60),
-        trigger_fraction=getattr(settings, "summarization_trigger_fraction", 0.55),
-        keep_messages=getattr(settings, "summarization_keep_messages", 8),
-        model_context_size=getattr(settings, "summarization_model_context_size", 128000),
-        model=getattr(settings, "summarization_model", "gemini-3-flash-preview"),
+        trigger_tokens=settings.summarization_trigger_tokens,
+        trigger_messages=settings.summarization_trigger_messages,
+        trigger_fraction=settings.summarization_trigger_fraction,
+        keep_messages=settings.summarization_keep_messages,
+        model_context_size=settings.summarization_model_context_size,
+        model=settings.summarization_model,
         temperature=0.2,
-        max_summary_tokens=getattr(settings, "summarization_max_summary_tokens", 1500),
+        max_summary_tokens=settings.summarization_max_summary_tokens,
     )
 
 
@@ -105,7 +107,7 @@ def should_summarize(
 
     Returns True if ANY threshold is exceeded.
     """
-    if not getattr(settings, "enable_summarization", True):
+    if not settings.enable_summarization:
         return False
 
     if already_summarized:
@@ -163,11 +165,14 @@ def _format_messages_for_summary(messages: List[BaseMessage]) -> str:
 
 def _get_summarization_model(config: SummarizationConfig) -> ChatGoogleGenerativeAI:
     """Create a LangChain model for summarization."""
-    return ChatGoogleGenerativeAI(
+    kwargs: Dict[str, Any] = dict(
         model=config.model,
         google_api_key=get_api_key(),
         temperature=config.temperature,
     )
+    if config.max_summary_tokens > 0:
+        kwargs["max_output_tokens"] = config.max_summary_tokens
+    return ChatGoogleGenerativeAI(**kwargs)
 
 
 async def generate_summary(
@@ -175,51 +180,56 @@ async def generate_summary(
     config: Optional[SummarizationConfig] = None,
     existing_summary: Optional[str] = None,
 ) -> str:
-    """Generate a summary of the given messages, optionally merging with an existing summary."""
+    """Generate a summary of the given messages, optionally merging with an existing summary.
+
+    Raises on failure — callers are responsible for catching and deciding whether to
+    skip state mutation (fail-closed behaviour).
+    """
     if config is None:
         config = _get_config()
 
-    try:
-        model = _get_summarization_model(config)
+    model = _get_summarization_model(config)
 
-        formatted_messages = _format_messages_for_summary(messages_to_summarize)
+    formatted_messages = _format_messages_for_summary(messages_to_summarize)
 
-        if existing_summary:
-            prompt = ROLLING_SUMMARIZATION_PROMPT.format(
-                existing_summary=existing_summary,
-                messages=formatted_messages,
-            )
-        else:
-            prompt = SUMMARIZATION_PROMPT.format(messages=formatted_messages)
-
-        response = await model.ainvoke([HumanMessage(content=prompt)])
-
-        summary = coerce_response_text(response.content)
-
-        # Hard-cap: truncate if the summary exceeds the configured budget.
-        # A max_summary_tokens of 0 means unlimited (no truncation).
-        max_chars = config.max_summary_tokens * 4  # rough token-to-char ratio
-        if max_chars > 0 and len(summary) > max_chars:
-            summary = summary[:max_chars].rsplit("\n", 1)[0] + "\n[...truncated]"
-            logger.info(
-                "Truncated summary from %d to %d chars (max_summary_tokens=%d)",
-                len(coerce_response_text(response.content)),
-                len(summary),
-                config.max_summary_tokens,
-            )
-
-        logger.debug(
-            "Generated %ssummary for %d messages (%d chars)",
-            "rolling " if existing_summary else "",
-            len(messages_to_summarize),
-            len(summary),
+    if existing_summary:
+        prompt = ROLLING_SUMMARIZATION_PROMPT.format(
+            existing_summary=existing_summary,
+            messages=formatted_messages,
         )
-        return summary
+    else:
+        prompt = SUMMARIZATION_PROMPT.format(messages=formatted_messages)
 
-    except Exception as e:
-        logger.error(f"Error generating summary: {e}")
-        # Return a simple fallback
-        return f"[Previous conversation with {len(messages_to_summarize)} messages]"
+    # Tag the run as internal so the streaming layer can suppress its output.
+    internal_run_config = RunnableConfig(
+        tags=["internal", "summarization"],
+        metadata={"internal": True, "purpose": "summarization"},
+    )
+    response = await model.ainvoke([HumanMessage(content=prompt)], internal_run_config)
+
+    summary = coerce_response_text(response.content)
+
+    # Hard-cap: truncate if the summary exceeds the configured budget.
+    # A max_summary_tokens of 0 means unlimited (no truncation).
+    # Note: the model is also constructed with max_output_tokens set, so this is a
+    # secondary safeguard in case the provider ignores the cap.
+    max_chars = config.max_summary_tokens * 4  # rough token-to-char ratio
+    if max_chars > 0 and len(summary) > max_chars:
+        summary = summary[:max_chars].rsplit("\n", 1)[0] + "\n[...truncated]"
+        logger.info(
+            "Truncated summary from %d to %d chars (max_summary_tokens=%d)",
+            len(coerce_response_text(response.content)),
+            len(summary),
+            config.max_summary_tokens,
+        )
+
+    logger.debug(
+        "Generated %ssummary for %d messages (%d chars)",
+        "rolling " if existing_summary else "",
+        len(messages_to_summarize),
+        len(summary),
+    )
+    return summary
 
 
 def apply_summarization_to_state(
@@ -263,11 +273,8 @@ def apply_summarization_to_state(
     if cursor_id:
         state["summary_cursor_message_id"] = str(cursor_id)
 
-    # Legacy context flags (kept for backward compatibility)
     context = state.get("context", {})
     context["conversation_summarized"] = True
-    context["summary_text"] = summary
-    context["messages_summarized_count"] = len(messages_to_remove)
     state["context"] = context
 
     logger.info(
@@ -283,6 +290,7 @@ def apply_summarization_to_state(
 async def summarize_for_state(
     state: Dict[str, Any],
     config: Optional[SummarizationConfig] = None,
+    conversation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Main entry point for graph-level summarization.
@@ -294,12 +302,17 @@ async def summarize_for_state(
     The rolling summary is stored in ``state["history_summary"]`` and merged
     incrementally on subsequent triggers.
 
+    Fail-closed: on any error (including timeout) the original state is returned
+    unchanged so that no messages are silently removed.
+
     Args:
         state: The LangGraph state dictionary
         config: Optional configuration override
+        conversation_id: Optional conversation ID for observability logging
 
     Returns:
-        Modified state (old messages removed, summary updated)
+        Modified state (old messages removed, summary updated), or the original
+        state unchanged if summarization failed.
     """
     if config is None:
         config = _get_config()
@@ -326,10 +339,33 @@ async def summarize_for_state(
     # Get existing rolling summary for incremental merge
     existing_summary = state.get("history_summary")
 
-    # Generate (or merge) summary
-    summary = await generate_summary(
-        messages_to_summarize, config, existing_summary=existing_summary
-    )
+    timeout_seconds: int = settings.summarization_timeout_seconds
+
+    try:
+        summary = await asyncio.wait_for(
+            generate_summary(messages_to_summarize, config, existing_summary=existing_summary),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "summarize_for_state: generate_summary timed out after %ds, skipping summarization%s",
+            timeout_seconds,
+            f" (conversation_id={conversation_id})" if conversation_id else "",
+        )
+        return state
+    except Exception as e:
+        logger.error(
+            "summarize_for_state: generate_summary failed, skipping summarization%s: %s",
+            f" (conversation_id={conversation_id})" if conversation_id else "",
+            e,
+        )
+        return state
 
     # Apply to state using RemoveMessage (not list replacement)
-    return apply_summarization_to_state(state, summary, messages_to_summarize, config)
+    result = apply_summarization_to_state(state, summary, messages_to_summarize, config)
+    logger.info(
+        "summarize_for_state: completed%s — %d messages summarized",
+        f" (conversation_id={conversation_id})" if conversation_id else "",
+        len(messages_to_summarize),
+    )
+    return result

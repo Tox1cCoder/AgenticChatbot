@@ -138,6 +138,25 @@ class MultiAgentWorkflow:
         return messages[last_human_idx:]
 
     @staticmethod
+    def _is_internal_stream_chunk(metadata: dict) -> bool:
+        """Return True if this stream chunk originates from an internal (non-user-facing) LLM run.
+
+        Checks, in priority order:
+        1. The `tags` list for the 'internal' tag (set via RunnableConfig in generate_summary).
+        2. The nested `metadata` dict's `internal` key (also set via RunnableConfig).
+        3. The `langgraph_node` key as a hard-coded fallback for the summarize node.
+        """
+        tags: list = metadata.get("tags") or []
+        if "internal" in tags:
+            return True
+        if metadata.get("metadata", {}).get("internal") is True:
+            return True
+        # Hard-coded fallback: always suppress the summarize node regardless of tags.
+        if metadata.get("langgraph_node") == "summarize":
+            return True
+        return False
+
+    @staticmethod
     def _consume_stream_text_chunk(
         accumulated_content: str, text_chunk: Any
     ) -> Tuple[str, Optional[str]]:
@@ -856,12 +875,14 @@ class MultiAgentWorkflow:
         Summarization node that runs ONCE at the start of each user request.
         """
         try:
-            # This will check thresholds and apply summarization if needed
-            # The function mutates state by replacing old messages with summary
-            state = await summarize_for_state(state)
+            conversation_id: Optional[str] = state.get("conversation_id")
+            # This will check thresholds and apply summarization if needed.
+            # summarize_for_state is fail-closed: on any error it returns state unchanged.
+            state = await summarize_for_state(state, conversation_id=conversation_id)
         except Exception as e:
-            # Log but don't fail the request if summarization errors
-            logger.warning(f"Summarization node error (continuing anyway): {e}")
+            # Defensive catch — summarize_for_state is already fail-closed but keep
+            # the node from crashing the graph on any unexpected exception.
+            logger.warning("Summarization node error (continuing anyway): %s", e)
 
         return state
 
@@ -1906,6 +1927,12 @@ class MultiAgentWorkflow:
         ctx.pop("pause_reason", None)
         ctx.pop("auto_continue_requested", None)
 
+        # NOTE (P2 regression-check): `conversation_summarized` is deliberately
+        # *not* popped here so the summarize node skips re-summarization in
+        # subsequent auto-continue rounds within the same user turn.
+        # If this key were cleared, each continuation round would re-trigger
+        # summarization and double-remove messages already covered.
+
         # Add lightweight trace context (helpful for logs/prompts).
         ctx["continuation_round"] = round_num
         ctx["continuation_reason"] = reason
@@ -2228,6 +2255,9 @@ class MultiAgentWorkflow:
         rolling summarization logic so fast-path and graph-path behave
         identically.
 
+        Fail-closed: on any error or timeout the existing summary is returned
+        unchanged and no checkpoint updates are performed.
+
         Returns the (possibly updated) history_summary, or ``None``.
         """
         if not self.checkpointer or not thread_id:
@@ -2263,17 +2293,32 @@ class MultiAgentWorkflow:
             if not to_summarize:
                 return history_summary
 
-            history_summary = await generate_summary(
-                to_summarize, s_cfg, existing_summary=history_summary
-            )
+            timeout_seconds: int = settings.summarization_timeout_seconds
+            try:
+                new_summary = await asyncio.wait_for(
+                    generate_summary(to_summarize, s_cfg, existing_summary=history_summary),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Fast-path summarization timed out after %ds — keeping existing summary",
+                    timeout_seconds,
+                )
+                return history_summary
+            except Exception as gen_err:
+                logger.warning(
+                    "Fast-path generate_summary failed — keeping existing summary: %s",
+                    gen_err,
+                )
+                return history_summary
 
-            # Persist updated summary into checkpoint.
+            # Only persist checkpoint updates on genuine success.
             _tmp_state: Dict[str, Any] = {
                 "messages": cp_messages,
                 "context": cp_values.get("context", {}),
             }
             apply_summarization_to_state(
-                _tmp_state, history_summary, to_summarize, s_cfg
+                _tmp_state, new_summary, to_summarize, s_cfg
             )
             await self.graph.aupdate_state(
                 config,
@@ -2289,7 +2334,7 @@ class MultiAgentWorkflow:
                     "context": _tmp_state["context"],
                 },
             )
-            return history_summary
+            return new_summary
         except Exception as e:
             logger.warning(
                 "Fast-path summarization/checkpoint read failed "
@@ -2456,7 +2501,15 @@ class MultiAgentWorkflow:
         # enhanced prompt — not meant for the user.  Suppress token events and
         # let the final "complete" response (which holds the user-facing text)
         # be the only content the client sees.
-        suppress_tokens = selected_agent == "image_generator_agent"
+        # Extend this set with any future agent whose raw tokens are internal.
+        suppressed_nodes: set = {"image_generator_agent"}
+        suppress_tokens = selected_agent in suppressed_nodes
+
+        # Track whether *every* content chunk received so far has been internal.
+        # When True the accumulated_content / accumulated_thinking fallbacks remain
+        # empty (no internal content should leak into them) and we guard the
+        # post-stream fallback branch accordingly.
+        _internal_content_only: bool = True
 
         # ── Auto-Continue outer loop ──────────────────────────────────
         max_rounds = (
@@ -2512,6 +2565,15 @@ class MultiAgentWorkflow:
                             # Skip ToolMessage - tool results are handled in updates mode
                             if isinstance(message_chunk, ToolMessage):
                                 continue
+
+                            # Drop output from internal LLM runs (e.g. summarization node)
+                            # so that internal summaries, reasoning, and tool-call chunks
+                            # from those nodes never reach the client or pollute accumulators.
+                            if settings.suppress_internal_stream_chunks and self._is_internal_stream_chunk(metadata):
+                                continue
+
+                            # Mark that at least one non-internal chunk has arrived.
+                            _internal_content_only = False
 
                             # Handle text content using content_blocks (latest pattern)
                             if (
@@ -2904,13 +2966,14 @@ class MultiAgentWorkflow:
 
                 response = snapshot.values.get("response")
                 if response:
-                    if accumulated_thinking and not response.metadata.get(
+                    if accumulated_thinking and not _internal_content_only and not response.metadata.get(
                         "thinking_summary"
                     ):
                         response.metadata["thinking_summary"] = accumulated_thinking
 
                     if (
                         not suppress_tokens
+                        and not _internal_content_only
                         and accumulated_content
                         and not (response.message.content or "").strip()
                     ):
@@ -2937,7 +3000,7 @@ class MultiAgentWorkflow:
                         response.metadata["total_iterations"] = total_iterations
 
                     yield {"type": "complete", "response": response}
-                elif accumulated_content and not suppress_tokens:
+                elif accumulated_content and not suppress_tokens and not _internal_content_only:
                     metadata_model = (
                         settings.chat_agent_model
                         if selected_agent == "chat_agent"
@@ -2978,7 +3041,7 @@ class MultiAgentWorkflow:
             except Exception as e:
                 yield {"type": "error", "error": str(e)}
         else:
-            if accumulated_content and not suppress_tokens:
+            if accumulated_content and not suppress_tokens and not _internal_content_only:
                 metadata = {}
                 # Include thinking summary in metadata
                 if accumulated_thinking:
