@@ -272,8 +272,6 @@ class DocumentProcessingService:
                     "true",
                     "-t",
                     "false",
-                    "-b",
-                    "pipeline",
                 ],
                 timeout=self.settings.mineru_timeout,
                 check=True,

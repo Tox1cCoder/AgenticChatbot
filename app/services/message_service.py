@@ -107,13 +107,15 @@ class MessageService(IMessageService):
         return resolved_user_id, persona
 
     def _create_bot_response_message(
-        self, conversation_id: UUID, content: str, metadata: Dict[str, Any]
+        self, conversation_id: UUID, content: str, metadata: Dict[str, Any],
+        message_id: UUID | None = None,
     ) -> MessageRead:
         """Create and persist a bot response message."""
         bot_response_entity = MessageFactory.create_bot_response(
             conversation_id=conversation_id,
             content=content,
             message_metadata=metadata,
+            id=message_id,
         )
         bot_message = self.repository.create(bot_response_entity)
         try:
@@ -303,18 +305,16 @@ class MessageService(IMessageService):
         created_message = self.repository.create(message_entity)
 
         if message_create_data.role == MessageRole.user:
-            # Get the user_id and persona from the conversation
-            user_id, persona = self._get_conversation_context(
-                message_create_data.conversation_id, user_id
-            )
-            sanitized_persona = sanitize_persona(persona)
-
-            # Get conversation for planning mode check
+            # Load conversation once — reused for context and planning mode
             conversation = (
                 self.conversation_validation_utils.conversation_repository.get_by_id(
                     message_create_data.conversation_id
                 )
             )
+            user_id = user_id or (conversation.owner_id if conversation else None)
+            persona = conversation.persona_prompt if conversation else None
+            sanitized_persona = sanitize_persona(persona)
+
             planning_mode_enabled = (
                 conversation.planning_mode_enabled if conversation else False
             )
@@ -374,6 +374,7 @@ class MessageService(IMessageService):
                 attachments=attachments,
                 auto_execute_plan=auto_execute_plan,
                 model_request=model_request,
+                persona=sanitized_persona,
             )
 
             if interrupt_payload:
@@ -417,7 +418,8 @@ class MessageService(IMessageService):
         return MessageRead.model_validate(created_message)
 
     async def create_message_stream(
-        self, message_create_data: MessageCreate, user_id: UUID
+        self, message_create_data: MessageCreate, user_id: UUID,
+        bot_message_id: UUID | None = None,
     ):
         """
         Create a message and stream the bot response.
@@ -457,8 +459,16 @@ class MessageService(IMessageService):
         # Start async title generation only if this is a user message and the first one
         title_task = None
         if message_create_data.role == MessageRole.user:
-            needs_title = self._is_first_user_message(
-                message_create_data.conversation_id
+            # Load conversation once — reused for title check, context, and planning mode
+            conversation = (
+                self.conversation_validation_utils.conversation_repository.get_by_id(
+                    message_create_data.conversation_id
+                )
+            )
+            default_titles = {"New Conversation", "Untitled", ""}
+            needs_title = (
+                conversation is not None
+                and (conversation.title in default_titles or conversation.title is None)
             )
             if needs_title:
                 title_task = asyncio.create_task(
@@ -473,18 +483,11 @@ class MessageService(IMessageService):
                 title_task.cancel()
 
         if message_create_data.role == MessageRole.user:
-            # Get the user_id and persona from the conversation
-            user_id, persona = self._get_conversation_context(
-                message_create_data.conversation_id, user_id
-            )
+            # Extract context from the already-loaded conversation
+            user_id = user_id or (conversation.owner_id if conversation else None)
+            persona = conversation.persona_prompt if conversation else None
             sanitized_persona = sanitize_persona(persona)
 
-            # Get conversation for planning mode check
-            conversation = (
-                self.conversation_validation_utils.conversation_repository.get_by_id(
-                    message_create_data.conversation_id
-                )
-            )
             planning_mode_enabled = (
                 conversation.planning_mode_enabled if conversation else False
             )
@@ -522,6 +525,7 @@ class MessageService(IMessageService):
             # Stream bot response generation
             bot_response_content = ERROR_NO_RESPONSE
             bot_response = None
+            bot_message_persisted = False
 
             try:
                 async for event in self.ai_service.generate_bot_response_stream(
@@ -534,6 +538,7 @@ class MessageService(IMessageService):
                     has_existing_plan=has_existing_plan,
                     existing_tasks=existing_tasks_dict,
                     model_request=model_request,
+                    persona=sanitized_persona,
                 ):
                     # ---- Check cancellation before processing each event ----
                     if inflight.is_cancelled:
@@ -653,6 +658,7 @@ class MessageService(IMessageService):
                                 "persona_used": sanitized_persona,
                                 "reply_to_user_message_id": str(user_message_id),
                             },
+                            message_id=bot_message_id,
                         )
                         inflight.resolve(bot_message.model_dump(mode="json"))
                     else:
@@ -713,7 +719,9 @@ class MessageService(IMessageService):
                     conversation_id=message_create_data.conversation_id,
                     content=bot_response_content,
                     metadata=bot_metadata,
+                    message_id=bot_message_id,
                 )
+                bot_message_persisted = True
 
                 # Resolve the inflight future with the final message
                 inflight.resolve(bot_message.model_dump(mode="json"))
@@ -739,27 +747,32 @@ class MessageService(IMessageService):
                 # Cancellation / disconnect: persist partial text if available,
                 # do NOT create an error message.
                 _cancel_title_task()
-                partial = inflight.partial_text.strip()
-                if partial:
-                    partial = fix_markdown_code_blocks(partial)
-                    bot_msg = self._create_bot_response_message(
-                        conversation_id=message_create_data.conversation_id,
-                        content=partial,
-                        metadata={
-                            "stopped": True,
-                            "partial": True,
-                            "stop_reason": "disconnect",
-                            "persona_used": sanitized_persona,
-                            "reply_to_user_message_id": str(user_message_id),
-                        },
-                    )
-                    inflight.resolve(bot_msg.model_dump(mode="json"))
-                else:
-                    inflight.resolve(None)
-                registry.remove(user_message_id)
+                if not bot_message_persisted:
+                    partial = inflight.partial_text.strip()
+                    if partial:
+                        partial = fix_markdown_code_blocks(partial)
+                        bot_msg = self._create_bot_response_message(
+                            conversation_id=message_create_data.conversation_id,
+                            content=partial,
+                            metadata={
+                                "stopped": True,
+                                "partial": True,
+                                "stop_reason": "disconnect",
+                                "persona_used": sanitized_persona,
+                                "reply_to_user_message_id": str(user_message_id),
+                            },
+                            message_id=bot_message_id,
+                        )
+                        inflight.resolve(bot_msg.model_dump(mode="json"))
+                    else:
+                        inflight.resolve(None)
+                    registry.remove(user_message_id)
                 return
 
             except Exception as exc:
+                _cancel_title_task()
+                if bot_message_persisted:
+                    return
                 error_content = f"Error generating response: {str(exc)}"
                 error_metadata = {"error": str(exc)}
 
@@ -767,6 +780,7 @@ class MessageService(IMessageService):
                     conversation_id=message_create_data.conversation_id,
                     content=error_content,
                     metadata=error_metadata,
+                    message_id=bot_message_id,
                 )
 
                 inflight.resolve(error_message.model_dump(mode="json"))
@@ -1210,6 +1224,7 @@ class MessageService(IMessageService):
         attachments: Optional[list],
         auto_execute_plan: bool,
         model_request: Optional[Dict[str, Any]] = None,
+        persona: Optional[str] = None,
     ) -> Tuple[
         Optional[str],
         Dict[str, Any],
@@ -1239,6 +1254,7 @@ class MessageService(IMessageService):
             has_existing_plan=has_plan,
             existing_tasks=existing_tasks_dict,
             model_request=model_request,
+            persona=persona,
         )
 
         # Handle interrupts (HITL)

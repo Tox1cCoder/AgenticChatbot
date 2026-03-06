@@ -1353,14 +1353,7 @@ class RAGAgent(BaseAgent):
         return True
 
     async def cleanup(self):
-        # Cleanup MCP resources and tools via BaseAgent
-        if self.mcp_manager:
-            await self.mcp_manager.cleanup()
         await super().cleanup()
-
-        # Cleanup Qdrant (RAG-specific)
-        if hasattr(self.qdrant_client, "close"):
-            self.qdrant_client.close()
 
     def get_status(self) -> dict:
         try:

@@ -30,7 +30,6 @@ Entry JSON format (write to a .json file with UTF-8 encoding):
 
 import argparse
 import json
-import os
 import re
 import sys
 import urllib.parse

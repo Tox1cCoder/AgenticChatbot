@@ -1,4 +1,5 @@
 import logging
+import secrets
 from functools import lru_cache
 from typing import List
 import os
@@ -30,7 +31,7 @@ class Settings(BaseSettings):
     }
     # Database settings
     database_url: str = Field(
-        default="postgresql://postgres:123123123@localhost:5432/chatbot",
+        default="postgresql://localhost:5432/chatbot",
         description="Database URL for PostgreSQL connection",
     )
 
@@ -44,7 +45,7 @@ class Settings(BaseSettings):
         description="API port",
     )
     api_debug: bool = Field(
-        default=True,
+        default=False,
         description="Debug mode",
     )
 
@@ -56,7 +57,7 @@ class Settings(BaseSettings):
 
     # Security
     secret_key: str = Field(
-        default="secret-key",
+        default="",
         description="Secret key for security",
     )
     jwt_algorithm: str = Field(
@@ -674,6 +675,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _cross_field_checks(self) -> "Settings":
+        if not self.secret_key or self.secret_key == "secret-key":
+            if self.environment == "development":
+                self.secret_key = secrets.token_urlsafe(48)
+                logging.getLogger(__name__).warning(
+                    "SECRET_KEY is not set; generated ephemeral development key. "
+                    "Set SECRET_KEY in .env for stable local auth sessions."
+                )
+            else:
+                raise ValueError(
+                    "secret_key must be set to a strong value outside development"
+                )
+        if self.environment != "development" and self.api_debug:
+            raise ValueError("api_debug must be disabled outside development")
         if self.summarization_keep_messages >= self.summarization_trigger_messages:
             raise ValueError(
                 f"summarization_keep_messages ({self.summarization_keep_messages}) "

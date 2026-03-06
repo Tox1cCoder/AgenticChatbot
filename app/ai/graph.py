@@ -138,7 +138,7 @@ class MultiAgentWorkflow:
         return messages[last_human_idx:]
 
     @staticmethod
-    def _is_internal_stream_chunk(metadata: dict) -> bool:
+    def _is_internal_stream_chunk(metadata: Any) -> bool:
         """Return True if this stream chunk originates from an internal (non-user-facing) LLM run.
 
         Checks, in priority order:
@@ -146,11 +146,17 @@ class MultiAgentWorkflow:
         2. The nested `metadata` dict's `internal` key (also set via RunnableConfig).
         3. The `langgraph_node` key as a hard-coded fallback for the summarize node.
         """
-        tags: list = metadata.get("tags") or []
+        if not isinstance(metadata, dict):
+            return False
+
+        tags = metadata.get("tags") or []
         if "internal" in tags:
             return True
-        if metadata.get("metadata", {}).get("internal") is True:
+
+        nested_metadata = metadata.get("metadata") or {}
+        if isinstance(nested_metadata, dict) and nested_metadata.get("internal") is True:
             return True
+
         # Hard-coded fallback: always suppress the summarize node regardless of tags.
         if metadata.get("langgraph_node") == "summarize":
             return True
@@ -2274,11 +2280,11 @@ class MultiAgentWorkflow:
 
             from .summarization_middleware import (
                 should_summarize,
+                get_messages_to_summarize,
                 generate_summary,
                 apply_summarization_to_state,
                 _get_config as _get_summ_config,
             )
-            from langchain_core.messages import SystemMessage as _SM
 
             # Ignore persisted conversation_summarized flag — each
             # fast-path request is a fresh opportunity for rolling
@@ -2287,9 +2293,7 @@ class MultiAgentWorkflow:
                 return history_summary
 
             s_cfg = _get_summ_config()
-            non_sys = [m for m in cp_messages if not isinstance(m, _SM)]
-            split = len(non_sys) - s_cfg.keep_messages
-            to_summarize = non_sys[:split]
+            to_summarize = get_messages_to_summarize(cp_messages, s_cfg)
             if not to_summarize:
                 return history_summary
 
@@ -2318,7 +2322,11 @@ class MultiAgentWorkflow:
                 "context": cp_values.get("context", {}),
             }
             apply_summarization_to_state(
-                _tmp_state, new_summary, to_summarize, s_cfg
+                _tmp_state,
+                new_summary,
+                to_summarize,
+                s_cfg,
+                conversation_id=str(cp_values.get("conversation_id") or ""),
             )
             await self.graph.aupdate_state(
                 config,
@@ -2411,11 +2419,21 @@ class MultiAgentWorkflow:
 
         config = self._build_graph_config(thread_id)
 
+        # Prefetch conversation history in parallel with the router LLM call.
+        # By the time the agent node needs history, the cache will be warm.
+        history_prefetch: Optional[asyncio.Task] = None
+        if conversation_id and user_id:
+            history_prefetch = asyncio.create_task(
+                self._get_conversation_history(conversation_id, user_id)
+            )
+
         try:
             routed_state = await self._route_node(initial_state)
             selected_agent = routed_state.get("selected_agent")
             initial_state["selected_agent"] = selected_agent
         except Exception as e:
+            if history_prefetch and not history_prefetch.done():
+                history_prefetch.cancel()
             yield {"type": "error", "error": str(e)}
             return
 

@@ -77,14 +77,16 @@ class AIService:
         has_existing_plan: bool = False,
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
         model_request: Optional[Dict[str, Any]] = None,
+        persona: Optional[str] = None,
     ) -> AgentResponse:
 
         thread_id = (
             str(conversation_id) if conversation_id and self.checkpointer else None
         )
 
-        persona = self._load_persona(conversation_id)
-        persona = sanitize_persona(persona)
+        if persona is None:
+            persona = self._load_persona(conversation_id)
+            persona = sanitize_persona(persona)
 
         response = await self.workflow.execute(
             message=message,
@@ -120,6 +122,7 @@ class AIService:
         has_existing_plan: bool = False,
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
         model_request: Optional[Dict[str, Any]] = None,
+        persona: Optional[str] = None,
     ) -> AgentResponse:
 
         if conversation_id is None or user_id is None:
@@ -151,6 +154,7 @@ class AIService:
             has_existing_plan=has_existing_plan,
             existing_tasks=existing_tasks,
             model_request=model_request,
+            persona=persona,
         )
 
     async def resume_workflow(
@@ -210,13 +214,13 @@ class AIService:
         has_existing_plan: bool = False,
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
         model_request: Optional[Dict[str, Any]] = None,
+        persona: Optional[str] = None,
     ):
         thread_id = (
             str(conversation_id) if conversation_id and self.checkpointer else None
         )
 
-        persona = None
-        if conversation_id:
+        if persona is None and conversation_id:
             persona = self._load_persona(conversation_id)
             persona = sanitize_persona(persona)
 

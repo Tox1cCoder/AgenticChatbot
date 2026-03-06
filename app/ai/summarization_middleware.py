@@ -175,6 +175,21 @@ def _get_summarization_model(config: SummarizationConfig) -> ChatGoogleGenerativ
     return ChatGoogleGenerativeAI(**kwargs)
 
 
+def get_messages_to_summarize(
+    messages: List[BaseMessage],
+    config: Optional[SummarizationConfig] = None,
+) -> List[BaseMessage]:
+    """Return the oldest non-system messages eligible for summarization."""
+    if config is None:
+        config = _get_config()
+
+    non_system = [m for m in messages if not isinstance(m, SystemMessage)]
+    split_point = len(non_system) - config.keep_messages
+    if split_point <= 0:
+        return []
+    return non_system[:split_point]
+
+
 async def generate_summary(
     messages_to_summarize: List[BaseMessage],
     config: Optional[SummarizationConfig] = None,
@@ -237,6 +252,7 @@ def apply_summarization_to_state(
     summary: str,
     messages_to_remove: List[BaseMessage],
     config: Optional[SummarizationConfig] = None,
+    conversation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Apply summarization results to graph state using explicit RemoveMessage
@@ -278,7 +294,8 @@ def apply_summarization_to_state(
     state["context"] = context
 
     logger.info(
-        "Applied summarization: removed %d messages, summary %d chars, cursor=%s",
+        "Applied summarization%s: removed %d messages, summary %d chars, cursor=%s",
+        f" (conversation_id={conversation_id})" if conversation_id else "",
         len(removals),
         len(summary),
         cursor_id,
@@ -326,12 +343,7 @@ async def summarize_for_state(
     if not should_summarize(messages, config, already_summarized):
         return state
 
-    # Separate messages
-    non_system = [m for m in messages if not isinstance(m, SystemMessage)]
-
-    # Calculate split point — keep the most recent `keep_messages`
-    split_point = len(non_system) - config.keep_messages
-    messages_to_summarize = non_system[:split_point]
+    messages_to_summarize = get_messages_to_summarize(messages, config)
 
     if not messages_to_summarize:
         return state
@@ -362,7 +374,13 @@ async def summarize_for_state(
         return state
 
     # Apply to state using RemoveMessage (not list replacement)
-    result = apply_summarization_to_state(state, summary, messages_to_summarize, config)
+    result = apply_summarization_to_state(
+        state,
+        summary,
+        messages_to_summarize,
+        config,
+        conversation_id=conversation_id,
+    )
     logger.info(
         "summarize_for_state: completed%s — %d messages summarized",
         f" (conversation_id={conversation_id})" if conversation_id else "",

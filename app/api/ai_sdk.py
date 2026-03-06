@@ -13,7 +13,11 @@ from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.message_service_interface import IMessageService
 from app.interfaces.conversation_service_interface import IConversationService
 from app.models.enums import MessageRole
-from app.schemas.message import MessageCreate
+from app.schemas.conversation import ConversationCreate, ConversationUpdate, ConversationRead
+from app.schemas.message import MessageCreate, MessageRead, InterruptResumeRequest
+from app.schemas.responses import ApiResponse
+from app.schemas.responses.paginated_response import PaginatedApiResponse
+from app.schemas.pagination import ConversationPaginationParams
 
 router = APIRouter(tags=["ai-sdk"])
 
@@ -28,6 +32,79 @@ class AISDKChatRequest(BaseModel):
     user_id: Optional[UUID] = Field(default=None, alias="userId")
 
     model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+
+class AISDKMessagePart(BaseModel):
+    """
+    A part within a Vercel AI SDK UIMessage.
+
+    Matches the ``UIPart`` discriminated union used by ``useChat()``:
+    - ``type='text'``      → plain text delta
+    - ``type='file'``      → image / binary attachment (data URL or remote URL)
+    - ``type='reasoning'`` → chain-of-thought / thinking text
+    """
+
+    type: str = Field(..., description="Part type: 'text', 'file', or 'reasoning'")
+    text: Optional[str] = Field(None, description="Text content (when type='text')")
+    url: Optional[str] = Field(
+        None, description="File or data URL (when type='file')"
+    )
+    media_type: Optional[str] = Field(
+        None, alias="mediaType", description="MIME type (when type='file')"
+    )
+    reasoning: Optional[str] = Field(
+        None, description="Reasoning text (when type='reasoning')"
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AISDKUIMessage(BaseModel):
+    """
+    Vercel AI SDK ``UIMessage`` format.
+
+    Compatible with the ``initialMessages`` prop of ``useChat()`` and
+    ``useAssistant()``.  Each item in the ``messages`` array returned by
+    ``GET /ai/conversations/{conversationId}/messages`` is one of these.
+
+    Reference: https://sdk.vercel.ai/docs/reference/ai-sdk-ui/use-chat
+    """
+
+    id: str = Field(..., description="Unique message ID (UUID string)")
+    role: str = Field(..., description="'user' or 'assistant'")
+    content: str = Field(..., description="Plain-text content of the message")
+    parts: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description=(
+            "Structured message parts (text / file / reasoning) for multimodal messages. "
+            "Mirrors the ``parts`` field of the AI SDK UIMessage spec."
+        ),
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        None, description="AI SDK client-side metadata"
+    )
+    message_metadata: Optional[Dict[str, Any]] = Field(
+        None,
+        alias="messageMetadata",
+        description=(
+            "Backend metadata: RAG citations, images, canvas artifacts, "
+            "suggested questions, etc."
+        ),
+    )
+    created_at: Optional[str] = Field(
+        None, alias="createdAt", description="ISO-8601 creation timestamp"
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AISDKMessagesData(BaseModel):
+    """Paginated AI SDK messages payload (returned by the messages listing endpoint)."""
+
+    messages: List[AISDKUIMessage] = Field(
+        ..., description="Messages in Vercel AI SDK UIMessage format"
+    )
+    total: int = Field(..., description="Total number of messages in the conversation")
 
 
 def _extract_user_text(messages: List[Dict[str, Any]]) -> str:
@@ -679,13 +756,23 @@ class CompleteEventHandler(EventHandler):
                 )
 
         if message:
-            yield _sse(
-                {
-                    "type": "data-assistant-message",
-                    "data": {"message": message},
-                    "transient": True,
-                }
-            )
+            # Strip `content` from the data event — the content has already
+            # been conveyed char-by-char via `text-delta` events.  Re-sending
+            # it here causes the response to appear twice if the client renders
+            # from both the streamed text and this data payload.  We only send
+            # side-channel metadata that is not available in the stream itself
+            # (backend message ID, citations, suggested questions, etc.).
+            STRIP_KEYS = {"content"}
+            message_meta = {
+                k: v for k, v in message.items() if k not in STRIP_KEYS
+            }
+            if message_meta:
+                yield _sse(
+                    {
+                        "type": "data-assistant-message",
+                        "data": {"message": message_meta},
+                    }
+                )
 
 
 class ContinuationEventHandler(EventHandler):
@@ -748,140 +835,142 @@ class EventHandlerFactory:
 
 @router.post(
     "/ai/conversations",
-    response_model=Dict[str, Any],
+    response_model=ApiResponse[ConversationRead],
     status_code=status.HTTP_201_CREATED,
+    summary="Create conversation (AI SDK)",
+    description=(
+        "Create a new conversation. Functionally identical to `POST /conversations/` "
+        "but under the `/ai/` namespace for AI SDK clients."
+    ),
 )
 @AppAutoInjector.auto_inject()
 async def create_conversation_ai_sdk(
+    conversation_data: ConversationCreate,
     conversation_service: IConversationService,
     current_user_id: UUID,
-) -> Dict[str, Any]:
-    """Create a new conversation for AI SDK client"""
-    from app.schemas.conversation import ConversationCreate
-    from app.interfaces.conversation_service_interface import IConversationService
-
-    conversation_data = ConversationCreate(title="New Conversation")
-    result = conversation_service.create_conversation(
-        conversation_data, current_user_id
+) -> ApiResponse[ConversationRead]:
+    """Create a new conversation for AI SDK client."""
+    result = conversation_service.create_conversation(conversation_data, current_user_id)
+    return ApiResponse(
+        success=True, message="Conversation created successfully", data=result
     )
-    return {
-        "id": str(result.id),
-        "title": result.title,
-        "created_at": result.created_at.isoformat() if result.created_at else None,
-        "updated_at": result.updated_at.isoformat() if result.updated_at else None,
-    }
 
 
-@router.get("/ai/conversations", response_model=Dict[str, Any])
+@router.get(
+    "/ai/conversations",
+    response_model=PaginatedApiResponse[ConversationRead],
+    summary="List conversations (AI SDK)",
+    description=(
+        "List conversations with pagination. Functionally identical to "
+        "`GET /conversations/` but under the `/ai/` namespace for AI SDK clients."
+    ),
+)
 @AppAutoInjector.auto_inject()
 async def get_conversations_ai_sdk(
     conversation_service: IConversationService,
     current_user_id: UUID,
-    page: int = Query(default=1, ge=1),
-    limit: int = Query(default=100, ge=1, le=100),
-    order_by: str = Query(default="updatedAt", alias="orderBy"),
-    order_direction: str = Query(default="desc", alias="orderDirection"),
-) -> Dict[str, Any]:
-    """Get all conversations for AI SDK client"""
-
-    # Convert camelCase to snake_case for order_by
-    order_by_mapping = {"createdAt": "created_at", "updatedAt": "updated_at"}
-    order_by_snake = order_by_mapping.get(order_by, "updated_at")
-
+    pagination: ConversationPaginationParams,
+) -> PaginatedApiResponse[ConversationRead]:
+    """Get all conversations for AI SDK client."""
     paginated_result = conversation_service.get_by_user_id(
         current_user_id,
-        page=page,
-        limit=limit,
-        order_by=order_by_snake,
-        order_direction=order_direction,
+        page=pagination.page,
+        limit=pagination.limit,
+        order_by=pagination.order_by.to_snake_case(),
+        order_direction=pagination.order_direction.value,
         include=[],
         latest_messages=0,
     )
-
-    conversations = [
-        {
-            "id": str(conv.id),
-            "title": conv.title,
-            "created_at": conv.created_at.isoformat() if conv.created_at else None,
-            "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
-        }
-        for conv in paginated_result.items
-    ]
-
-    return {
-        "conversations": conversations,
-        "total": paginated_result.meta.total,
-    }
+    return PaginatedApiResponse.from_paginator(
+        paginated_result, "Conversations retrieved successfully"
+    )
 
 
-@router.get("/ai/conversations/{conversation_id}", response_model=Dict[str, Any])
+@router.get(
+    "/ai/conversations/{conversation_id}",
+    response_model=ApiResponse[ConversationRead],
+    summary="Get conversation (AI SDK)",
+    description=(
+        "Get a conversation by ID. Functionally identical to "
+        "`GET /conversations/{conversationId}`."
+    ),
+)
 @AppAutoInjector.auto_inject()
 async def get_conversation_ai_sdk(
     conversation_id: UUID,
     conversation_service: IConversationService,
     current_user_id: UUID,
-) -> Dict[str, Any]:
-    """Get conversation by ID for AI SDK client"""
-    from app.interfaces.conversation_service_interface import IConversationService
-
+) -> ApiResponse[ConversationRead]:
+    """Get conversation by ID for AI SDK client."""
     result = conversation_service.get_by_id_for_user(conversation_id, current_user_id)
-    return {
-        "id": str(result.id),
-        "title": result.title,
-        "created_at": result.created_at.isoformat() if result.created_at else None,
-        "updated_at": result.updated_at.isoformat() if result.updated_at else None,
-    }
+    return ApiResponse(
+        success=True, message="Conversation retrieved successfully", data=result
+    )
 
 
-@router.patch("/ai/conversations/{conversation_id}", response_model=Dict[str, Any])
+@router.patch(
+    "/ai/conversations/{conversation_id}",
+    response_model=ApiResponse[ConversationRead],
+    summary="Update conversation (AI SDK)",
+    description=(
+        "Update a conversation's title, persona prompt, or planning mode. "
+        "Functionally identical to `PATCH /conversations/{conversationId}`. "
+        "Accepts the same `ConversationUpdate` body (camelCase fields)."
+    ),
+)
 @AppAutoInjector.auto_inject()
 async def update_conversation_ai_sdk(
     conversation_id: UUID,
-    payload: Dict[str, Any],
+    conversation_data: ConversationUpdate,
     conversation_service: IConversationService,
     current_user_id: UUID,
-) -> Dict[str, Any]:
-    """Update conversation for AI SDK client"""
-    from app.schemas.conversation import ConversationUpdate
-    from app.interfaces.conversation_service_interface import IConversationService
-
-    conversation_data = ConversationUpdate(title=payload.get("title"))
+) -> ApiResponse[ConversationRead]:
+    """Update conversation for AI SDK client."""
     result = conversation_service.update_conversation(
         conversation_id, current_user_id, conversation_data
     )
-    return {
-        "id": str(result.id),
-        "title": result.title,
-        "created_at": result.created_at.isoformat() if result.created_at else None,
-        "updated_at": result.updated_at.isoformat() if result.updated_at else None,
-    }
+    return ApiResponse(
+        success=True, message="Conversation updated successfully", data=result
+    )
 
 
 @router.delete(
-    "/ai/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT
+    "/ai/conversations/{conversation_id}",
+    response_model=ApiResponse[Any],
+    summary="Delete conversation (AI SDK)",
+    description=(
+        "Delete a conversation. Functionally identical to "
+        "`DELETE /conversations/{conversationId}`."
+    ),
 )
 @AppAutoInjector.auto_inject()
 async def delete_conversation_ai_sdk(
     conversation_id: UUID,
     conversation_service: IConversationService,
     current_user_id: UUID,
-):
-    """Delete conversation for AI SDK client"""
-    from app.interfaces.conversation_service_interface import IConversationService
-
+) -> ApiResponse[Any]:
+    """Delete conversation for AI SDK client."""
     conversation_service.delete_conversation(conversation_id, current_user_id)
+    return ApiResponse(success=True, message="Conversation deleted successfully")
 
 
 @router.get(
-    "/ai/conversations/{conversation_id}/messages", response_model=Dict[str, Any]
+    "/ai/conversations/{conversation_id}/messages",
+    response_model=ApiResponse[AISDKMessagesData],
+    summary="Get messages (AI SDK UIMessage format)",
+    description=(
+        "Returns conversation messages formatted as Vercel AI SDK `UIMessage` objects. "
+        "Pass `response.data.messages` directly to the `initialMessages` prop of "
+        "`useChat()`. Image attachments are embedded as `file` parts inside each message."
+    ),
 )
 @AppAutoInjector.auto_inject()
 async def get_conversation_messages_ai_sdk(
     conversation_id: UUID,
     message_service: IMessageService,
     current_user_id: UUID,
-) -> Dict[str, Any]:
-    """Get conversation messages for AI SDK client"""
+) -> ApiResponse[AISDKMessagesData]:
+    """Get conversation messages in Vercel AI SDK UIMessage format."""
     paginated_result = message_service.get_conversation_messages(
         conversation_id,
         current_user_id,
@@ -892,33 +981,68 @@ async def get_conversation_messages_ai_sdk(
         include_feedback=False,
     )
 
-    messages = []
+    messages: List[AISDKUIMessage] = []
     for msg in paginated_result.items:
         role = "user" if msg.sender == 1 else "assistant"
         message_payload: Dict[str, Any] = {
             "id": str(msg.id),
             "role": role,
             "content": msg.content,
-            "created_at": msg.created_at.isoformat() if msg.created_at else None,
+            "createdAt": msg.created_at.isoformat() if msg.created_at else None,
         }
 
         if isinstance(msg.message_metadata, dict):
-            message_payload["message_metadata"] = msg.message_metadata
+            message_payload["messageMetadata"] = msg.message_metadata
             message_payload["metadata"] = msg.message_metadata
 
         if role == "assistant":
             message_payload = _attach_image_parts_to_message(message_payload)
 
-        messages.append(message_payload)
+        messages.append(AISDKUIMessage.model_validate(message_payload))
 
-    return {
-        "messages": messages,
-        "total": paginated_result.meta.total,
-    }
+    return ApiResponse(
+        success=True,
+        message="Messages retrieved successfully",
+        data=AISDKMessagesData(messages=messages, total=paginated_result.meta.total),
+    )
 
 
-@router.post("/ai/chat/{conversation_id}")
-@router.post("/api/chat/{conversation_id}")
+@router.post(
+    "/api/chat/{conversation_id}",
+    summary="Chat stream (AI SDK)",
+    description=(
+        "Send a user message and receive a streaming assistant response using the "
+        "**Vercel AI SDK UI Message Stream** protocol. "
+        "Configure `useChat({ api: '/api/chat/<conversationId>' })` in your Next.js app. "
+        "The `messages` array must contain the full conversation history per the AI SDK spec. "
+        "Streams `text/event-stream` SSE events: `text-delta`, `tool-input-start`, "
+        "`tool-output-available`, `data-interrupt`, `finish`, `[DONE]`, etc."
+    ),
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Vercel AI SDK UI Message Stream (SSE)",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        }
+    },
+)
+@router.post(
+    "/ai/chat/{conversation_id}",
+    summary="Chat stream (AI SDK — /ai/ alias)",
+    description=(
+        "Alias of `POST /api/chat/{conversationId}`. "
+        "Streams a response using the Vercel AI SDK UI Message Stream protocol. "
+        "Prefer `POST /api/chat/{conversationId}` for new integrations."
+    ),
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Vercel AI SDK UI Message Stream (SSE)",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        }
+    },
+    include_in_schema=False,
+)
 @AppAutoInjector.auto_inject()
 async def chat_ui_message_stream(
     conversation_id: UUID,
@@ -934,16 +1058,23 @@ async def chat_ui_message_stream(
     if not user_text and not user_attachments:
         raise HTTPException(status_code=400, detail="No user message found")
 
+    # Pre-generate the bot message UUID so the stream's messageId matches the
+    # DB record.  This prevents the Next.js client from showing a duplicate
+    # message (one from the stream, one from the API) after re-fetching.
+    bot_message_id = uuid4()
+
     state = StreamState(
-        message_id=str(uuid4()), text_id=str(uuid4()), reasoning_id=str(uuid4())
+        message_id=str(bot_message_id), text_id=str(uuid4()), reasoning_id=str(uuid4())
     )
 
     async def event_generator():
         try:
-            yield _sse({"type": "start-step"})
-
-            # Start assistant message + first text block.
+            # `start` must come before `start-step` so the SDK creates the
+            # assistant message object first.  Sending `start-step` before
+            # `start` makes the SDK attach the step to the *previous* message
+            # and then create a second message on `start`, causing duplication.
             yield _sse({"type": "start", "messageId": state.message_id})
+            yield _sse({"type": "start-step"})
             yield _sse({"type": "text-start", "id": state.text_id})
             state.text_started = True
 
@@ -955,7 +1086,7 @@ async def chat_ui_message_stream(
             )
 
             async for event in message_service.create_message_stream(
-                message_create, current_user_id
+                message_create, current_user_id, bot_message_id=bot_message_id
             ):
                 event_type = event.get("type")
                 handler = EventHandlerFactory.get_handler(event_type)
@@ -1005,23 +1136,24 @@ async def chat_ui_message_stream(
     )
 
 
-@router.post("/ai/resume-interrupt", response_model=Dict[str, Any])
+@router.post(
+    "/ai/resume-interrupt",
+    response_model=ApiResponse[MessageRead],
+    summary="Resume interrupt (AI SDK)",
+    description=(
+        "Resume execution after the user approves or rejects a tool-call interrupt. "
+        "Functionally identical to `POST /messages/resume-interrupt` — accepts the same "
+        "`InterruptResumeRequest` body (camelCase fields: `threadId`, `conversationId`, "
+        "`interruptId`, `decisions`)."
+    ),
+)
 @AppAutoInjector.auto_inject()
 async def resume_interrupt_ai_sdk(
-    payload: Dict[str, Any],
+    resume_request: InterruptResumeRequest,
     message_service: IMessageService,
     current_user_id: UUID,
-) -> Dict[str, Any]:
-    """Resume execution after handling tool execution interrupts for AI SDK client"""
-    from app.schemas.message import InterruptResumeRequest
-
-    resume_request = InterruptResumeRequest(
-        thread_id=payload.get("threadId"),
-        conversation_id=UUID(payload.get("conversationId")),
-        interrupt_id=payload.get("interruptId"),
-        decisions=payload.get("decisions", {}),
-    )
-
+) -> ApiResponse[MessageRead]:
+    """Resume execution after handling tool execution interrupts for AI SDK client."""
     result = await message_service.resume_message_creation(
         thread_id=resume_request.thread_id,
         conversation_id=resume_request.conversation_id,
@@ -1029,10 +1161,8 @@ async def resume_interrupt_ai_sdk(
         interrupt_id=resume_request.interrupt_id,
         decisions=resume_request.decisions,
     )
-
-    return {
-        "id": str(result.id),
-        "role": result.role.value if hasattr(result.role, "value") else result.role,
-        "content": result.content,
-        "created_at": result.created_at.isoformat() if result.created_at else None,
-    }
+    return ApiResponse(
+        success=True,
+        message="Message creation resumed successfully",
+        data=result,
+    )

@@ -72,11 +72,12 @@ class MessageFactory:
         conversation_id: UUID,
         content: str,
         message_metadata: Dict[str, Any] | None = None,
+        id: UUID | None = None,
     ) -> Dict[str, Any]:
         """Create bot response message data dictionary"""
         metadata = dict(message_metadata) if message_metadata else {}
         return {
-            "id": uuid4(),
+            "id": id or uuid4(),
             "conversation_id": conversation_id,
             "sender": MessageRole.assistant.value,
             "content": MessageFactory._normalize_content(content),
