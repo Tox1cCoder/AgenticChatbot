@@ -4282,6 +4282,10 @@ def render_interrupt_approval_ui():
     interrupt_id = interrupt_info.get("interrupt_id")
     action_requests = interrupt_info.get("action_requests", [])
 
+    # Key all pending decisions under the interrupt_id to avoid cross-contamination
+    # on reload or when multiple interrupts occur in a single session.
+    decisions_key = f"pending_decisions_{interrupt_id}" if interrupt_id else "pending_decisions"
+
     if not action_requests:
         st.warning("No tool actions to approve")
         if st.button("Cancel"):
@@ -4294,9 +4298,9 @@ def render_interrupt_approval_ui():
         "The AI assistant wants to execute the following tool(s). Please review and approve:"
     )
 
-    # Initialize decisions in session state if not present
-    if "pending_decisions" not in st.session_state:
-        st.session_state.pending_decisions = {}
+    # Initialize decisions in session state if not present for this interrupt
+    if decisions_key not in st.session_state:
+        st.session_state[decisions_key] = {}
 
     for idx, action_request in enumerate(action_requests):
         tool_name = action_request.get("action", "unknown")
@@ -4313,8 +4317,20 @@ def render_interrupt_approval_ui():
             or tool_call_id
         )
 
+        # Determine which decision types are allowed for this tool
+        allowed_raw = (
+            action_request.get("allowed_decisions")
+            or action_request.get("allowedDecisions")
+        )
+        if allowed_raw:
+            allowed_decisions = {
+                str(d).strip().lower() for d in allowed_raw if isinstance(d, str)
+            }
+        else:
+            allowed_decisions = {"approve", "edit", "reject"}
+
         # Check if this tool already has a decision
-        current_decision = st.session_state.pending_decisions.get(task_id)
+        current_decision = st.session_state[decisions_key].get(task_id)
 
         st.markdown(f"### Tool {idx + 1}: `{tool_name}`")
         if description:
@@ -4325,16 +4341,16 @@ def render_interrupt_approval_ui():
         # Show decision status if already decided
         if current_decision:
             decision_type = current_decision.get("type", "")
-            if decision_type in ("accept", "approve"):
+            if decision_type == "approve":
                 st.success(f"Approved", icon=":material/check_circle:")
             elif decision_type == "edit":
                 st.info(f"Edited and approved", icon=":material/edit:")
-            elif decision_type in ("reject", "respond"):
+            elif decision_type == "reject":
                 st.error(f"Rejected", icon=":material/cancel:")
 
             # Option to change decision
             if st.button(f"Change decision", key=f"change_{idx}"):
-                st.session_state.pending_decisions.pop(task_id, None)
+                st.session_state[decisions_key].pop(task_id, None)
                 st.session_state.pop(f"editing_tool_{idx}", None)
                 st.rerun()
         else:
@@ -4342,38 +4358,41 @@ def render_interrupt_approval_ui():
             with st.expander("Tool Arguments", expanded=True):
                 st.json(tool_args)
 
-            # Decision options
+            # Decision options — only show buttons for allowed decision types
             col1, col2, col3 = st.columns(3)
 
             with col1:
-                if st.button(
-                    f"Accept",
-                    key=f"accept_{idx}",
-                    width='stretch',
-                    type="primary",
-                ):
-                    st.session_state.pending_decisions[task_id] = {
-                        "type": "accept",
-                        "task_id": task_id,
-                        "action": tool_name,
-                        "args": None,
-                    }
-                    st.rerun()
+                if "approve" in allowed_decisions:
+                    if st.button(
+                        f"Approve",
+                        key=f"approve_{idx}",
+                        width='stretch',
+                        type="primary",
+                    ):
+                        st.session_state[decisions_key][task_id] = {
+                            "type": "approve",
+                            "task_id": task_id,
+                            "action": tool_name,
+                            "args": None,
+                        }
+                        st.rerun()
 
             with col2:
-                if st.button(f"Edit Args", key=f"edit_{idx}", width='stretch'):
-                    st.session_state[f"editing_tool_{idx}"] = True
-                    st.rerun()
+                if "edit" in allowed_decisions:
+                    if st.button(f"Edit Args", key=f"edit_{idx}", width='stretch'):
+                        st.session_state[f"editing_tool_{idx}"] = True
+                        st.rerun()
 
             with col3:
-                if st.button(f"Reject", key=f"reject_{idx}", width='stretch'):
-                    st.session_state.pending_decisions[task_id] = {
-                        "type": "respond",
-                        "task_id": task_id,
-                        "action": tool_name,
-                        "args": {"message": f"User rejected execution of {tool_name}"},
-                    }
-                    st.rerun()
+                if "reject" in allowed_decisions:
+                    if st.button(f"Reject", key=f"reject_{idx}", width='stretch'):
+                        st.session_state[decisions_key][task_id] = {
+                            "type": "reject",
+                            "task_id": task_id,
+                            "action": tool_name,
+                            "args": {"message": f"User rejected execution of {tool_name}"},
+                        }
+                        st.rerun()
 
             # Show edit form if editing
             if st.session_state.get(f"editing_tool_{idx}"):
@@ -4388,11 +4407,11 @@ def render_interrupt_approval_ui():
                     col_save, col_cancel = st.columns(2)
                     with col_save:
                         if st.form_submit_button(
-                            "Save & Accept", width='stretch', type="primary"
+                            "Save & Approve", width='stretch', type="primary"
                         ):
                             try:
                                 edited_args = json.loads(edited_args_text)
-                                st.session_state.pending_decisions[task_id] = {
+                                st.session_state[decisions_key][task_id] = {
                                     "type": "edit",
                                     "task_id": task_id,
                                     "action": tool_name,
@@ -4424,7 +4443,7 @@ def render_interrupt_approval_ui():
         if task_id:
             all_task_ids.add(task_id)
 
-    decided_task_ids = set(st.session_state.pending_decisions.keys())
+    decided_task_ids = set(st.session_state[decisions_key].keys())
     all_decided = all_task_ids == decided_task_ids and len(all_task_ids) > 0
 
     st.divider()
@@ -4433,7 +4452,7 @@ def render_interrupt_approval_ui():
     st.progress(len(decided_task_ids) / max(len(all_task_ids), 1))
     st.caption(f"Decided: {len(decided_task_ids)} / {len(all_task_ids)} tools")
 
-    # Submit button - only enabled when all tools have decisions
+    # Submit button — disabled until all tools have a decision
     col_submit, col_approve_all, col_cancel = st.columns(3)
 
     with col_submit:
@@ -4441,11 +4460,12 @@ def render_interrupt_approval_ui():
             "Submit Decisions",
             width='stretch',
             type="primary",
+            disabled=not all_decided,
         ):
-            _submit_interrupt_decisions(thread_id, interrupt_id, action_requests)
+            _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisions_key)
 
     with col_approve_all:
-        if st.button("Accept All", width='stretch'):
+        if st.button("Approve All", width='stretch'):
             # Auto-approve all remaining tools
             for req in action_requests:
                 task_id = (
@@ -4455,15 +4475,15 @@ def render_interrupt_approval_ui():
                     or req.get("toolCallId")
                     or req.get("id")
                 )
-                if task_id and task_id not in st.session_state.pending_decisions:
-                    st.session_state.pending_decisions[task_id] = {
-                        "type": "accept",
+                if task_id and task_id not in st.session_state[decisions_key]:
+                    st.session_state[decisions_key][task_id] = {
+                        "type": "approve",
                         "task_id": task_id,
                         "action": req.get("action"),
                         "args": None,
                     }
             # Submit immediately
-            _submit_interrupt_decisions(thread_id, interrupt_id, action_requests)
+            _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisions_key)
 
     with col_cancel:
         if st.button("Cancel All", width='stretch'):
@@ -4477,20 +4497,22 @@ def render_interrupt_approval_ui():
                     or req.get("id")
                 )
                 if task_id:
-                    st.session_state.pending_decisions[task_id] = {
-                        "type": "respond",
+                    st.session_state[decisions_key][task_id] = {
+                        "type": "reject",
                         "task_id": task_id,
                         "action": req.get("action"),
                         "args": {"message": "User cancelled all tool executions"},
                     }
             # Submit immediately
-            _submit_interrupt_decisions(thread_id, interrupt_id, action_requests)
+            _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisions_key)
 
 
-def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests):
+def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisions_key=None):
     """Helper function to submit interrupt decisions to the backend"""
+    if decisions_key is None:
+        decisions_key = f"pending_decisions_{interrupt_id}" if interrupt_id else "pending_decisions"
     conversation_id = st.session_state.get("interrupt_conversation_id")
-    decisions = list(st.session_state.pending_decisions.values())
+    decisions = list(st.session_state.get(decisions_key, {}).values())
 
     resume_payload = {
         "threadId": thread_id,
@@ -4512,8 +4534,8 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests):
                 else None
             )
 
-            # Clear current decisions
-            st.session_state.pop("pending_decisions", None)
+            # Clear decisions for this interrupt
+            st.session_state.pop(decisions_key, None)
             for idx in range(len(action_requests)):
                 st.session_state.pop(f"editing_tool_{idx}", None)
 
@@ -4665,6 +4687,31 @@ def render_chat_view():
     if conversation_id and conversation_id != "pending_new":
         if st.session_state.conversation_messages_page == 0:
             load_messages_page(1, show_spinner=True)
+
+        # Reload recovery: if no pending_interrupt is in session (e.g. after page
+        # refresh) but the latest assistant message shows a paused workflow, restore
+        # the interrupt state so the approval UI is presented again.
+        if not st.session_state.get("pending_interrupt"):
+            _msgs = st.session_state.get("messages", [])
+            for _msg in reversed(_msgs):
+                if _msg.get("role") == "assistant":
+                    _meta = get_message_metadata(_msg)
+                    if (
+                        _meta.get("paused")
+                        and _meta.get("pause_reason") == "tool_approval_required"
+                    ):
+                        _interrupt_data = _meta.get("interrupt")
+                        _thread_id = _meta.get("thread_id")
+                        if _interrupt_data and isinstance(_interrupt_data, dict):
+                            # thread_id may be stored separately in metadata
+                            if _thread_id and not _interrupt_data.get("thread_id"):
+                                _interrupt_data = {
+                                    **_interrupt_data,
+                                    "thread_id": _thread_id,
+                                }
+                            st.session_state.pending_interrupt = _interrupt_data
+                            st.session_state.interrupt_conversation_id = conversation_id
+                    break  # only check the most recent assistant message
 
     # Show conversation title
     current_conv = next(

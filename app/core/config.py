@@ -511,17 +511,9 @@ class Settings(BaseSettings):
         default=True,
         description="Toggle to enable/disable human-in-the-loop globally",
     )
-    hitl_default_allow_edit: bool = Field(
-        default=True,
-        description="Whether to allow editing tool arguments by default",
-    )
-    hitl_default_allow_respond: bool = Field(
-        default=True,
-        description="Whether to allow responding with feedback by default",
-    )
     hitl_tools_require_approval: List[str] = Field(
         default=[],
-        description="List of tool names that require human approval. Empty list means all tools require approval when HITL is enabled.",
+        description="List of tool names that require human approval. Empty list means NO tools require approval when HITL is enabled.",
     )
     hitl_approval_timeout_minutes: int = Field(
         default=30,

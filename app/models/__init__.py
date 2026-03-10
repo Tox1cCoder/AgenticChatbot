@@ -10,6 +10,8 @@ from app.models.message import Message
 from app.models.feedback import Feedback
 from app.models.document import Document
 from app.models.model_provider import ModelProvider
+from app.models.tool_approval import ToolApproval
+from app.models.hitl_interrupt import HITLInterrupt, HITLInterruptStatus
 
 __all__ = [
     "MessageRole",
@@ -22,4 +24,7 @@ __all__ = [
     "Feedback",
     "Document",
     "ModelProvider",
+    "ToolApproval",
+    "HITLInterrupt",
+    "HITLInterruptStatus",
 ]

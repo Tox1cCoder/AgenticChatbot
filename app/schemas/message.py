@@ -175,10 +175,12 @@ class InterruptResumeRequest(BaseModel):
     def _normalize_decisions_keys(cls, value):
         # Accept both camelCase and snake_case decision payloads.
         if isinstance(value, list):
-            return [
-                convert_dict_keys_to_snake_case(v) if isinstance(v, dict) else v
-                for v in value
-            ]
+            normalized = []
+            for v in value:
+                if isinstance(v, dict):
+                    v = convert_dict_keys_to_snake_case(v)
+                normalized.append(v)
+            return normalized
         return value
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)

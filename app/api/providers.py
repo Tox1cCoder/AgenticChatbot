@@ -5,7 +5,6 @@ Handles CRUD operations for user-specific AI provider configurations with encryp
 """
 
 from typing import List, Dict, Any
-from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 

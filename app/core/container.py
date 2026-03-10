@@ -14,6 +14,8 @@ from app.repositories.document import DocumentRepository
 from app.repositories.task_plan import TaskPlanRepository
 from app.repositories.model_provider import ModelProviderRepository
 from app.repositories.agent_model_config import AgentModelConfigRepository
+from app.repositories.tool_approval import ToolApprovalRepository
+from app.repositories.hitl_interrupt import HITLInterruptRepository
 
 from app.services.auth_service import AuthService
 from app.services.user_service import UserService
@@ -168,6 +170,16 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    tool_approval_repository = providers.Factory(
+        ToolApprovalRepository,
+        session_factory=db.provided.session,
+    )
+
+    hitl_interrupt_repository = providers.Factory(
+        HITLInterruptRepository,
+        session_factory=db.provided.session,
+    )
+
     # Validation utils
     user_validation_utils = providers.Factory(
         UserValidationUtils,
@@ -257,6 +269,8 @@ class Container(containers.DeclarativeContainer):
         message_validation_utils=message_validation_utils,
         ai_service=ai_service,
         model_config_service=model_config_service,
+        tool_approval_repository=tool_approval_repository,
+        hitl_interrupt_repository=hitl_interrupt_repository,
         task_plan_service=task_plan_service,
     )
 

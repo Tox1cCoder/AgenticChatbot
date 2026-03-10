@@ -281,6 +281,13 @@ class MCPManager:
                     ]
                 else:
                     filtered[key] = value
+
+            # Gemini requires every array type to have an explicit `items` field.
+            # If this schema node is an array but `items` was missing or got stripped,
+            # inject a default so the API doesn't reject with "missing field".
+            if filtered.get("type") == "array" and "items" not in filtered:
+                filtered["items"] = {"type": "string"}
+
             return filtered
         elif isinstance(schema, list):
             return [

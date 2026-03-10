@@ -1,109 +1,85 @@
 ---
 name: take100-timesheet
-description: Automates entering daily working time schedules on take100dot.com via direct HTTP API. Use this skill when the user provides their work schedule or content for the day (e.g., "Fill timesheet"). This approach uses a single API call instead of browser automation — fast, reliable, and token-efficient.
+description: Automates entering daily working time schedules on take100dot.com via direct HTTP API. Use this skill when the user provides their work schedule or content for the day (e.g., "Fill timesheet"). This approach uses direct API calls — no browser needed.
 ---
 
-# Take100 Timesheet Automation (API-based)
-
-## Overview
-This skill fills timesheets on take100dot.com by calling a Python script that uses the site's REST API directly — **no browser needed**. One command saves the entire day's entries.
+# Take100 Timesheet Automation
 
 ## Credentials
-- **Email:** `thaind@v-takeuchi.vn`  |  **Password:** `Gm123123@`
+- Email: `thaind@v-takeuchi.vn` | Password: `Gm123123@`
 
 ## Default Rules
-- **Morning warm-up** (08:00–08:05): Content = "Tập thể dục, báo cáo buổi sáng", Project = **K202201**, work_item_id = **122** (その他)
-- **All other tasks**: Project = **F131**, work_item_id = **128** (Logic Handle)
-- Default shift: C001 (08:00–17:00)
-- Lunch break: 12:00–13:00 (do NOT create entries during this time)
+- **Morning warm-up** (08:00–08:05): `"Tập thể dục, báo cáo buổi sáng"`, project=**K202201**, work_item_id=**122**
+- **Tuesday warm-up** (08:00–08:25): same content + `"Trực nhật vệ sinh"` (25 min instead of 5)
+- Default shift: **C001** (08:00–17:00) | Skip 12:00–13:00 (lunch — no entries)
+- Main tasks: project=**F131**, choose `work_item_id` based on actual work described:
+  - 125 Requirement analysis | 126 Database design | 127 UI Design | 128 Logic Handle | 129 Geological data Input and Check
 
-## Known Project & Category IDs
+## Project & Work Item IDs
+**K202201** (管理・その他): 122=その他, 121=会議参加, 120=面談, 119=活動管理, 118=法務業務, 117=総務業務, 116=経理業務  
+**F131**: 125=Requirement analysis, 126=Database design, 127=UI Design, 128=Logic Handle, 129=Geological data Input and Check
 
-### Project K202201 (管理・その他) — project_class_id=5
-| work_item_id | Category Name |
-|---|---|
-| 116 | 経理業務 |
-| 117 | 総務業務 |
-| 118 | 法務業務 |
-| 119 | 活動管理 |
-| 120 | 面談 |
-| 121 | 会議参加 |
-| 122 | その他 |
+## Workflow
 
-### Project F131 (TAKEUCHI AI) — project_class_id=6
-| work_item_id | Category Name |
-|---|---|
-| 125 | Requirement analysis |
-| 126 | Database design |
-| 127 | UI Design |
-| 128 | Logic Handle |
+### Step 1 — Check day status (late / paid leave)
+Always run this first for the target date:
+```bash
+python skills/take100/take100_api.py --action check-day --date 2026-03-06
+```
 
-## How to Use
+**Interpret the response:**
+- `"is_all_day_leave": true` → Full day off. Do NOT fill timesheet; inform the user.
+- `"is_late": true, "late_until": "HH:MM"` → Shift first entry to start at `HH:MM`. Pass `--time-in HH:MM` when saving.
+- `"is_early_leave": true, "early_from": "HH:MM"` → Last entry ends at `HH:MM`. Pass `--time-out HH:MM` when saving.
+- All `false` → Normal day, proceed as usual.
 
-### Step 1 — Parse the user's schedule into entries
-Convert the user's description into a JSON array. Each entry needs:
-- `from` / `to`: time strings like `"08:00"`, `"12:00"`
-- `project_id`: e.g. `"K202201"` or `"F131"`
-- `work_item_id`: integer ID from the tables above
-- `work_content`: description text
+### Step 2 — Build entries JSON
+Convert the user's work description into a JSON array. Each entry: `from`, `to`, `project_id`, `work_item_id`, `work_content`.
 
-**Example entries for a typical day:**
+**Normal day example:**
 ```json
 [
   {"from": "08:00", "to": "08:05", "project_id": "K202201", "work_item_id": 122, "work_content": "Tập thể dục, báo cáo buổi sáng"},
-  {"from": "08:05", "to": "12:00", "project_id": "F131", "work_item_id": 128, "work_content": "Develop chatbot AI features"},
-  {"from": "13:00", "to": "17:00", "project_id": "F131", "work_item_id": 128, "work_content": "Develop chatbot AI features"}
+  {"from": "08:05", "to": "12:00", "project_id": "F131", "work_item_id": 125, "work_content": "Task A"},
+  {"from": "13:00", "to": "17:00", "project_id": "F131", "work_item_id": 126, "work_content": "Task B"}
 ]
 ```
 
-### Step 2 — Write entries to a temp JSON file (required for Vietnamese/Unicode content)
+**If late until `HH:MM`:** shift warm-up to start at `HH:MM` (keep same duration), then adjust subsequent entries.
 
-Windows terminal mangles UTF-8 characters when passed as command-line arguments. Always write entries to a temp file first:
+### Step 3 — Write entries to temp file
+**CRITICAL — NEVER pass Vietnamese text through any shell command** (PowerShell/cmd corrupt non-ASCII before Python sees it, regardless of encoding flags).
 
-```bash
-# Write the entries JSON to a temp file with UTF-8 encoding
-Set-Content -Path "skills/take100/entries_tmp.json" -Value '[{"from":"08:00","to":"08:05","project_id":"K202201","work_item_id":122,"work_content":"Tập thể dục, báo cáo buổi sáng"},{"from":"08:05","to":"12:00","project_id":"F131","work_item_id":128,"work_content":"Develop chatbot AI features"},{"from":"13:00","to":"17:00","project_id":"F131","work_item_id":128,"work_content":"Develop chatbot AI features"}]' -Encoding utf8
+Instead, use the `create_file` tool to write the JSON **directly to disk** with the exact content:
+
+- File path: `c:\Users\ADMIN\Documents\Code Practice\Sample Chatbot\skills\take100\entries_tmp.json`
+- Content: the JSON array from Step 2, as a plain string (the tool handles encoding correctly)
+
+> **Note:** The script auto-deletes this file immediately after reading it — no manual cleanup needed.
+
+Example content to pass to `create_file`:
+```
+[{"from":"08:00","to":"08:05","project_id":"K202201","work_item_id":122,"work_content":"Tập thể dục, báo cáo buổi sáng"},{"from":"08:05","to":"12:00","project_id":"F131","work_item_id":125,"work_content":"Task A"},{"from":"13:00","to":"17:00","project_id":"F131","work_item_id":126,"work_content":"Task B"}]
 ```
 
-Or using Python to write the file (works in both PowerShell and cmd):
+### Step 4 — Save or submit
 ```bash
-python -c "import json; open('skills/take100/entries_tmp.json','w',encoding='utf-8').write(json.dumps([{'from':'08:00','to':'08:05','project_id':'K202201','work_item_id':122,'work_content':'Tập thể dục, báo cáo buổi sáng'},{'from':'08:05','to':'12:00','project_id':'F131','work_item_id':128,'work_content':'Develop chatbot AI features'},{'from':'13:00','to':'17:00','project_id':'F131','work_item_id':128,'work_content':'Develop chatbot AI features'}],ensure_ascii=False))"
-```
+# Save as draft (default — always use unless user explicitly asks to submit)
+python skills/take100/take100_api.py --action save --date 2026-03-06 --entries-file skills/take100/entries_tmp.json
 
-### Step 3 — Call the API script with `--entries-file`
+# If late: add --time-in HH:MM  |  If early leave: add --time-out HH:MM
+python skills/take100/take100_api.py --action save --date 2026-03-06 --entries-file skills/take100/entries_tmp.json --time-in 08:06
 
-**Save as draft** (recommended — lets user review before submitting):
-```bash
-python skills/take100/take100_api.py --action save --date 2026-03-03 --entries-file skills/take100/entries_tmp.json
-```
+# Submit for approval (only when user explicitly requests "submit" or "nộp")
+python skills/take100/take100_api.py --action submit --date 2026-03-06 --entries-file skills/take100/entries_tmp.json
 
-**Submit for approval** (saves AND submits — use only when user explicitly asks):
-```bash
-python skills/take100/take100_api.py --action submit --date 2026-03-03 --entries-file skills/take100/entries_tmp.json
-```
-
-**List recent applications:**
-```bash
+# List recent applications
 python skills/take100/take100_api.py --action list
 ```
 
-**Delete an application** (note: delete from the site directly — the API delete endpoint requires Bearer auth):
-```
-https://take100dot.com/wt-applications/{id}
-```
+**On save success:** `{"success": true, "action": "save", "application": {"id": 30459, "no": "100-30459", ...}}`  
+Tell user: *"Saved as draft (Application #100-30459). Review on take100dot.com and submit when ready."*
 
-### Step 3 — Report result
-The script outputs JSON. On success:
-```json
-{"success": true, "action": "save", "application": {"id": 30459, "no": "100-30459", ...}}
-```
-Tell the user: "Timesheet saved as draft (Application #{no}). Please review on take100dot.com and submit when ready."
+**On submit success:** `{"success": true, "action": "submit", ...}`  
+Tell user: *"Submitted for approval (Application #100-XXXXX)."*
 
-## Rules
-- Always include the morning warm-up entry (08:00–08:05) unless the user explicitly says otherwise.
-- Skip 12:00–13:00 (lunch break) — entries must not overlap this gap.
-- Default to `--action save` (draft). Only use `submit` when the user explicitly requests submission.
-- If the user doesn't specify detailed times, split evenly between morning (08:05–12:00) and afternoon (13:00–17:00).
-- **Always use `--entries-file`** (never `--entries` on the command line) to avoid Windows terminal mangling Vietnamese/Unicode characters.
-- Write the JSON file using Python (`open(..., encoding='utf-8')`) or `Set-Content -Encoding utf8` in PowerShell.
-- The temp file `skills/take100/entries_tmp.json` is overwritten on each use — no cleanup needed.

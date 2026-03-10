@@ -51,6 +51,7 @@ from .utils import (
     coerce_response_text,
     make_json_safe,
     extract_content_from_result,
+    apply_hitl_decisions,
 )
 from .token_instrumentation import (
     trim_history_to_budget,
@@ -64,6 +65,10 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..repositories.document import DocumentRepository
+
+# Convenience alias — the canonical implementation lives in utils.py so it can
+# be unit-tested without importing the full graph module with its heavy deps.
+_apply_decisions = apply_hitl_decisions
 
 
 class MultiAgentWorkflow:
@@ -711,47 +716,18 @@ class MultiAgentWorkflow:
             )
             return state
 
-        decisions = (
-            human_decisions if isinstance(human_decisions, list) else [human_decisions]
+        tool_calls_to_keep, rejected_feedback = _apply_decisions(
+            last_message.tool_calls, human_decisions
         )
-        decision_map: Dict[str, Any] = {}
-        for d in decisions:
-            if isinstance(d, dict):
-                task_id = d.get("task_id") or d.get("tool_call_id")
-                if task_id:
-                    decision_map[task_id] = d
-
-        tool_calls_to_keep = []
-        rejection_messages = []
-
-        for tool_call in last_message.tool_calls:
-            tool_call_id = tool_call.get("id")
-            tool_name = tool_call.get("name")
-            decision = decision_map.get(tool_call_id, {})
-            decision_type = decision.get("type", "reject")
-
-            if decision_type in ("accept", "approve"):
-                tool_calls_to_keep.append(tool_call)
-            elif decision_type == "edit":
-                modified_args = decision.get("args", tool_call.get("args", {}))
-                tool_calls_to_keep.append(
-                    {
-                        "name": tool_name,
-                        "args": modified_args,
-                        "id": tool_call_id,
-                    }
-                )
-            else:  # reject, respond, or unknown
-                feedback = decision.get("args", {}).get(
-                    "message", "Tool execution rejected by user"
-                )
-                rejection_messages.append(
-                    ToolMessage(
-                        content=feedback,
-                        tool_call_id=tool_call_id,
-                        name=tool_name,
-                    )
-                )
+        rejection_messages = [
+            ToolMessage(
+                content=rejected_feedback[tc.get("id")],
+                tool_call_id=tc.get("id"),
+                name=tc.get("name"),
+            )
+            for tc in last_message.tool_calls
+            if tc.get("id") in rejected_feedback
+        ]
 
         # Update the AI message with only approved tool calls
         if tool_calls_to_keep:
@@ -1133,41 +1109,11 @@ class MultiAgentWorkflow:
                         )
                     tool_calls_to_execute = []
                 else:
-                    decisions = (
-                        human_decisions
-                        if isinstance(human_decisions, list)
-                        else [human_decisions]
+                    tool_calls_to_execute, rejected_feedback = _apply_decisions(
+                        non_search_tool_calls, human_decisions
                     )
-                    decision_map: Dict[str, Any] = {}
-                    for d in decisions:
-                        if isinstance(d, dict):
-                            task_id = d.get("task_id") or d.get("tool_call_id")
-                            if task_id:
-                                decision_map[task_id] = d
-
-                    tool_calls_to_execute = []
-                    for tc in non_search_tool_calls:
-                        tool_call_id = tc.get("id")
-                        tool_name = tc.get("name")
-                        decision = decision_map.get(tool_call_id, {})
-                        decision_type = decision.get("type", "reject")
-
-                        if decision_type in ("accept", "approve"):
-                            tool_calls_to_execute.append(tc)
-                        elif decision_type == "edit":
-                            modified_args = decision.get("args", tc.get("args", {}))
-                            tool_calls_to_execute.append(
-                                {
-                                    "name": tool_name,
-                                    "args": modified_args,
-                                    "id": tool_call_id,
-                                }
-                            )
-                        else:
-                            feedback = decision.get("args", {}).get(
-                                "message", "Tool execution rejected by user"
-                            )
-                            non_search_outputs_by_id[tool_call_id] = feedback
+                    for tc_id, feedback in rejected_feedback.items():
+                        non_search_outputs_by_id[tc_id] = feedback
 
             if tool_calls_to_execute:
                 selected_agent_name = state.get("selected_agent")
@@ -1522,41 +1468,11 @@ class MultiAgentWorkflow:
                         )
                     approved_external_calls = []
                 else:
-                    decisions = (
-                        human_decisions
-                        if isinstance(human_decisions, list)
-                        else [human_decisions]
+                    approved_external_calls, rejected_feedback = _apply_decisions(
+                        external_tool_calls, human_decisions
                     )
-                    decision_map: Dict[str, Any] = {}
-                    for d in decisions:
-                        if isinstance(d, dict):
-                            task_id = d.get("task_id") or d.get("tool_call_id")
-                            if task_id:
-                                decision_map[task_id] = d
-
-                    approved_external_calls = []
-                    for tc in external_tool_calls:
-                        tool_call_id = tc.get("id")
-                        tool_name = tc.get("name")
-                        decision = decision_map.get(tool_call_id, {})
-                        decision_type = decision.get("type", "reject")
-
-                        if decision_type in ("accept", "approve"):
-                            approved_external_calls.append(tc)
-                        elif decision_type == "edit":
-                            modified_args = decision.get("args", tc.get("args", {}))
-                            approved_external_calls.append(
-                                {
-                                    "name": tool_name,
-                                    "args": modified_args,
-                                    "id": tool_call_id,
-                                }
-                            )
-                        else:
-                            feedback = decision.get("args", {}).get(
-                                "message", "Tool execution rejected by user"
-                            )
-                            rejected_tool_ids[tool_call_id] = feedback
+                    for tc_id, feedback in rejected_feedback.items():
+                        rejected_tool_ids[tc_id] = feedback
 
         # Emit rejection ToolMessages for rejected external calls
         for tc in external_tool_calls:
@@ -2170,7 +2086,7 @@ class MultiAgentWorkflow:
                 {
                     "task_id": tc.get("id"),
                     "tool_call_id": tc.get("id"),
-                    "type": "accept",
+                    "type": "approve",
                     "args": None,
                 }
                 for tc in messages[-1].tool_calls

@@ -10,6 +10,7 @@ import redis
 from app.repositories.message import MessageRepository
 from app.services.generation_registry import get_generation_registry, InflightEntry
 from app.repositories.tool_approval import ToolApprovalRepository
+from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
 from app.models.enums import MessageRole, TaskStatus
@@ -55,6 +56,7 @@ class MessageService(IMessageService):
         ai_service: AIService,
         model_config_service: Optional[ModelConfigService] = None,
         tool_approval_repository: Optional[ToolApprovalRepository] = None,
+        hitl_interrupt_repository: Optional[HITLInterruptRepository] = None,
         task_plan_service: Optional["ITaskPlanService"] = None,
     ):
         self.repository = message_repository
@@ -63,6 +65,7 @@ class MessageService(IMessageService):
         self.ai_service = ai_service
         self.model_config_service = model_config_service
         self.tool_approval_repository = tool_approval_repository
+        self.hitl_interrupt_repository = hitl_interrupt_repository
         self.task_plan_service = task_plan_service
         self.redis_client = self._init_redis_client()
 
@@ -230,7 +233,7 @@ class MessageService(IMessageService):
             deadline = datetime.now(timezone.utc) + timedelta(
                 minutes=settings.hitl_approval_timeout_minutes
             )
-            if "metadata" not in interrupt_response:
+            if not interrupt_response.get("metadata"):
                 interrupt_response["metadata"] = {}
             interrupt_response["metadata"]["timeout_deadline"] = deadline.isoformat()
         except Exception:
@@ -257,12 +260,14 @@ class MessageService(IMessageService):
         pending_tool_calls: Optional[Any] = None,
         thread_id: Optional[str] = None,
         next_nodes: Optional[Any] = None,
+        user_id: Optional[UUID] = None,
     ) -> MessageRead:
         """
         Persist an assistant message that represents a paused workflow awaiting HITL approval.
 
-        This makes pending approvals recoverable via normal message history APIs (DB-backed),
-        rather than only via the live SSE stream.
+        Also creates a durable HITLInterrupt lifecycle record so pending approvals
+        are recoverable via normal message history APIs (DB-backed) and survive
+        process restarts.
         """
         if isinstance(interrupt_payload, InterruptResponse):
             interrupt_dict = interrupt_payload.model_dump(mode="json")
@@ -285,11 +290,40 @@ class MessageService(IMessageService):
         if pending_tool_calls is not None:
             metadata["pending_tool_calls"] = pending_tool_calls
 
-        return self._create_bot_response_message(
+        bot_message = self._create_bot_response_message(
             conversation_id=conversation_id,
             content="Tool execution requires approval",
             metadata=metadata,
         )
+
+        # Create durable lifecycle record
+        if self.hitl_interrupt_repository and user_id:
+            interrupt_id = interrupt_dict.get("interrupt_id")
+            _thread_id = thread_id or str(conversation_id)
+            if interrupt_id:
+                try:
+                    expires_at = datetime.now(timezone.utc) + timedelta(
+                        minutes=settings.hitl_approval_timeout_minutes
+                    )
+                    action_requests = interrupt_dict.get("action_requests") or []
+                    self.hitl_interrupt_repository.create(
+                        interrupt_id=interrupt_id,
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        thread_id=_thread_id,
+                        expires_at=expires_at,
+                        action_requests_json=action_requests,
+                        assistant_message_id=bot_message.id,
+                    )
+                except Exception as exc:
+                    logging.warning(
+                        "Failed to create durable interrupt record for interrupt_id=%s: %s",
+                        interrupt_id,
+                        exc,
+                        exc_info=True,
+                    )
+
+        return bot_message
 
     async def create_message(
         self, message_create_data: MessageCreate, user_id: UUID
@@ -403,6 +437,7 @@ class MessageService(IMessageService):
                             if isinstance(interrupt_payload, InterruptResponse)
                             else None
                         ),
+                        user_id=user_id,
                     )
                 except Exception:
                     pass
@@ -607,6 +642,7 @@ class MessageService(IMessageService):
                                 thread_id=event.get("thread_id")
                                 or str(message_create_data.conversation_id),
                                 next_nodes=event.get("next"),
+                                user_id=user_id,
                             ).model_dump(mode="json"),
                         }
                         # Workflow is paused - don't create a bot message yet
@@ -801,11 +837,79 @@ class MessageService(IMessageService):
         decisions: List[InterruptDecision],
         interrupt_id: Optional[str] = None,
     ) -> MessageRead:
+        from app.core.exceptions import CustomHTTPException
+        from fastapi import status as http_status
+        from app.models.hitl_interrupt import HITLInterruptStatus
+
         self.conversation_validation_utils.validate_conversation_access(
             user_id, conversation_id
         )
 
-        if self.redis_client and interrupt_id:
+        # ── Durable lifecycle validation (first-write-wins) ──────────────────────
+        # Cache the fetched record so the audit block can reuse it without a second query.
+        _fetched_interrupt_record = None
+        if self.hitl_interrupt_repository and interrupt_id:
+            record = self.hitl_interrupt_repository.get_by_id(interrupt_id)
+            _fetched_interrupt_record = record
+            if record is None:
+                raise CustomHTTPException(
+                    status_code=http_status.HTTP_404_NOT_FOUND,
+                    detail=f"Interrupt '{interrupt_id}' not found.",
+                    error_code="INTERRUPT_NOT_FOUND",
+                )
+            if record.conversation_id != conversation_id:
+                raise CustomHTTPException(
+                    status_code=http_status.HTTP_404_NOT_FOUND,
+                    detail="Interrupt does not belong to this conversation.",
+                    error_code="INTERRUPT_NOT_FOUND",
+                )
+            if record.thread_id != thread_id:
+                raise CustomHTTPException(
+                    status_code=http_status.HTTP_409_CONFLICT,
+                    detail="Thread ID does not match the pending interrupt state.",
+                    error_code="INTERRUPT_THREAD_MISMATCH",
+                )
+            now = datetime.now(timezone.utc)
+            if record.status == HITLInterruptStatus.EXPIRED or (
+                record.status == HITLInterruptStatus.PENDING and record.expires_at <= now
+            ):
+                if record.status == HITLInterruptStatus.PENDING:
+                    try:
+                        self.hitl_interrupt_repository.mark_expired(interrupt_id)
+                    except Exception:
+                        pass
+                raise CustomHTTPException(
+                    status_code=http_status.HTTP_410_GONE,
+                    detail=(
+                        "This approval request has expired. "
+                        "Please send a new message to try again."
+                    ),
+                    error_code="INTERRUPT_EXPIRED",
+                )
+            if record.status in (
+                HITLInterruptStatus.RESOLVED,
+                HITLInterruptStatus.RESOLVING,
+            ):
+                raise CustomHTTPException(
+                    status_code=http_status.HTTP_409_CONFLICT,
+                    detail="This interrupt has already been resolved.",
+                    error_code="INTERRUPT_ALREADY_RESOLVED",
+                )
+            # Atomically claim the interrupt (first-write-wins)
+            won_race = self.hitl_interrupt_repository.try_transition_to_resolving(
+                interrupt_id=interrupt_id,
+                conversation_id=conversation_id,
+                resolved_by_user_id=user_id,
+            )
+            if not won_race:
+                raise CustomHTTPException(
+                    status_code=http_status.HTTP_409_CONFLICT,
+                    detail="This interrupt was claimed by a concurrent request.",
+                    error_code="INTERRUPT_CONFLICT",
+                )
+
+        elif self.redis_client and interrupt_id:
+            # Fallback: Redis-based expiry check (when no durable record exists)
             key = f"interrupt:{conversation_id}:{interrupt_id}"
             try:
                 stored_timestamp = self.redis_client.get(key)
@@ -817,14 +921,18 @@ class MessageService(IMessageService):
                         datetime.now(timezone.utc) - stored_time
                     ).total_seconds() / 60
                     if elapsed_minutes > settings.hitl_approval_timeout_minutes:
-                        # Clean up the expired key
                         self.redis_client.delete(key)
-                        raise TimeoutError(
-                            f"This approval request has expired ({elapsed_minutes:.0f} minutes elapsed, "
-                            f"limit is {settings.hitl_approval_timeout_minutes} minutes). "
-                            "Please send a new message to try again."
+                        raise CustomHTTPException(
+                            status_code=http_status.HTTP_410_GONE,
+                            detail=(
+                                f"This approval request has expired "
+                                f"({elapsed_minutes:.0f} min elapsed, "
+                                f"limit is {settings.hitl_approval_timeout_minutes} min). "
+                                "Please send a new message to try again."
+                            ),
+                            error_code="INTERRUPT_EXPIRED",
                         )
-            except TimeoutError:
+            except CustomHTTPException:
                 raise
             except Exception:
                 pass
@@ -833,37 +941,62 @@ class MessageService(IMessageService):
         user_id, persona = self._get_conversation_context(conversation_id, user_id)
         sanitized_persona = sanitize_persona(persona)
 
+        # ── Audit logging ────────────────────────────────────────────────────────
         if self.tool_approval_repository and user_id:
-            try:
-                for decision in decisions:
-                    # Map decision type to enum
-                    decision_type_map = {
-                        InterruptDecisionType.ACCEPT: DecisionType.ACCEPT,
-                        InterruptDecisionType.APPROVE: DecisionType.ACCEPT,
-                        InterruptDecisionType.EDIT: DecisionType.EDIT,
-                        InterruptDecisionType.REJECT: DecisionType.REJECT,
-                        InterruptDecisionType.RESPOND: DecisionType.REJECT,
-                    }
+            # Build a look-up of original args from the durable interrupt record
+            # so we record what the tool was actually called with.
+            stored_original_args: Dict[str, Any] = {}
+            if interrupt_id:
+                # Reuse the record already fetched during lifecycle validation.
+                _rec = _fetched_interrupt_record
+                try:
+                    if _rec and _rec.action_requests_json:
+                        for req in _rec.action_requests_json:
+                            if isinstance(req, dict):
+                                key = req.get("tool_call_id") or req.get("task_id")
+                                if key:
+                                    stored_original_args[key] = req.get("args") or {}
+                                action = req.get("action")
+                                if action and action not in stored_original_args:
+                                    stored_original_args[action] = req.get("args") or {}
+                except Exception:
+                    pass
 
+            decision_type_map = {
+                InterruptDecisionType.APPROVE: DecisionType.ACCEPT,
+                InterruptDecisionType.EDIT: DecisionType.EDIT,
+                InterruptDecisionType.REJECT: DecisionType.REJECT,
+            }
+            for decision in decisions:
+                try:
+                    is_edit = decision.type == InterruptDecisionType.EDIT
+                    orig_key = decision.task_id or decision.action or ""
+                    original_args = (
+                        stored_original_args.get(orig_key)
+                        or stored_original_args.get(decision.action or "")
+                        or {}
+                    )
                     approval_data = {
                         "conversation_id": conversation_id,
                         "user_id": user_id,
                         "interrupt_id": interrupt_id or "unknown",
                         "tool_name": decision.action or "unknown",
                         "tool_call_id": decision.task_id or "unknown",
-                        "original_args": decision.original_args or {},
-                        "modified_args": (
-                            decision.modified_args
-                            if decision.decision in [InterruptDecisionType.EDIT]
-                            else None
-                        ),
+                        "original_args": original_args,
+                        "modified_args": decision.args if is_edit else None,
                         "decision": decision_type_map.get(
-                            decision.decision, DecisionType.REJECT
+                            decision.type, DecisionType.REJECT
                         ),
                     }
                     self.tool_approval_repository.create(approval_data)
-            except Exception:
-                pass
+                except Exception as audit_exc:
+                    logging.warning(
+                        "Audit write failed for interrupt_id=%s decision=%s: %s",
+                        interrupt_id,
+                        decision.type,
+                        audit_exc,
+                        exc_info=True,
+                    )
 
         bot_response = await self.ai_service.resume_interrupted_execution(
             thread_id=thread_id,
@@ -871,17 +1004,27 @@ class MessageService(IMessageService):
         )
 
         self._clear_redis_interrupt(conversation_id, interrupt_id)
+
+        # Nested interrupt: the resumed graph itself hit another interrupt
         if (
             bot_response
             and bot_response.metadata
             and "interrupt" in bot_response.metadata
         ):
+            # The previous interrupt is considered resolved (we resumed it).
+            # The new interrupt will get its own lifecycle record.
+            if self.hitl_interrupt_repository and interrupt_id:
+                try:
+                    self.hitl_interrupt_repository.mark_resolved(interrupt_id)
+                except Exception:
+                    pass
+
             interrupt_payload = bot_response.metadata["interrupt"]
             if isinstance(interrupt_payload, dict):
                 interrupt_count = (
-                    interrupt_payload.get("metadata", {}).get("interrupt_count", 0) + 1
+                    (interrupt_payload.get("metadata") or {}).get("interrupt_count", 0) + 1
                 )
-                if "metadata" not in interrupt_payload:
+                if not interrupt_payload.get("metadata"):
                     interrupt_payload["metadata"] = {}
                 interrupt_payload["metadata"]["interrupt_count"] = interrupt_count
 
@@ -909,8 +1052,16 @@ class MessageService(IMessageService):
                     if isinstance(interrupt_payload, InterruptResponse)
                     else None
                 ),
+                user_id=user_id,
             )
             return persisted
+
+        # Graph completed — mark interrupt resolved
+        if self.hitl_interrupt_repository and interrupt_id:
+            try:
+                self.hitl_interrupt_repository.mark_resolved(interrupt_id)
+            except Exception:
+                pass
 
         bot_response_content = extract_response_content(
             bot_response, ERROR_RESPONSE_AFTER_RESUME

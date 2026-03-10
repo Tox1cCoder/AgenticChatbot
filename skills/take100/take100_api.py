@@ -29,10 +29,12 @@ Entry JSON format (write to a .json file with UTF-8 encoding):
 """
 
 import argparse
+import calendar
 import json
 import re
 import sys
 import urllib.parse
+from datetime import datetime
 
 import requests
 
@@ -61,35 +63,41 @@ class Take100Client:
         self._authenticated = False
 
     def login(self) -> bool:
-        """Authenticate and establish session cookies."""
-        # GET login page for CSRF token
-        r = self.session.get(f"{BASE_URL}/login", timeout=15)
-        token_match = re.search(r'name="_token" value="(.*?)"', r.text)
-        if not token_match:
-            print("ERROR: Could not find CSRF token on login page.", file=sys.stderr)
-            return False
+        """Authenticate and establish session cookies. Retries once on failure."""
+        for attempt in range(2):
+            # GET login page for a fresh CSRF token
+            r = self.session.get(f"{BASE_URL}/login", timeout=15)
+            token_match = re.search(r'name="_token" value="(.*?)"', r.text)
+            if not token_match:
+                print("ERROR: Could not find CSRF token on login page.", file=sys.stderr)
+                return False
 
-        csrf_token = token_match.group(1)
-        login_data = {
-            "_token": csrf_token,
-            "email": EMAIL,
-            "password": PASSWORD,
-            "remember": "on",
-        }
+            csrf_token = token_match.group(1)
+            login_data = {
+                "_token": csrf_token,
+                "email": EMAIL,
+                "password": PASSWORD,
+                "remember": "on",
+            }
 
-        r2 = self.session.post(
-            f"{BASE_URL}/login",
-            data=login_data,
-            timeout=15,
-            allow_redirects=True,
-        )
+            r2 = self.session.post(
+                f"{BASE_URL}/login",
+                data=login_data,
+                timeout=15,
+                allow_redirects=True,
+            )
 
-        if "/login" in r2.url:
-            print("ERROR: Login failed — still on login page.", file=sys.stderr)
-            return False
+            if "/login" not in r2.url:
+                self._authenticated = True
+                return True
 
-        self._authenticated = True
-        return True
+            if attempt == 0:
+                # Reset cookies and retry once
+                self.session.cookies.clear()
+            else:
+                print("ERROR: Login failed — still on login page.", file=sys.stderr)
+
+        return False
 
     def _get_headers(self) -> dict:
         """Build headers with XSRF token for API requests."""
@@ -103,34 +111,94 @@ class Take100Client:
             headers["X-XSRF-TOKEN"] = urllib.parse.unquote(xsrf_cookie)
         return headers
 
-    def save_timesheet(self, date: str, entries: list, message: str = "") -> dict:
+    def get_day_status(self, date: str) -> dict:
         """
-        Save a timesheet as DRAFT.
+        Check if a given date has paid leave or late/early-leave from /my-workingtimes.
 
         Args:
-            date: ISO date string, e.g. "2026-03-03"
-            entries: List of work entry dicts with keys:
-                     from, to, project_id, work_item_id, work_content
-            message: Optional message for the application
+            date: ISO date string, e.g. "2026-03-06"
 
         Returns:
-            Server response dict with application details.
+            {
+                'date': '2026-03-06',
+                'is_all_day_leave': bool,
+                'is_late': bool,
+                'is_early_leave': bool,
+                'late_until': '08:06' or None,   # actual start time if late
+                'early_from': '16:30' or None,   # actual end time if early leave
+                'leave_apps': [...]               # raw approved paid-leave apps for the date
+            }
         """
-        return self._post_timesheet(f"{BASE_URL}/wt-applications/save", date, entries, message)
+        dt = datetime.strptime(date, "%Y-%m-%d").date()
+        from_date = dt.replace(day=1).strftime("%Y-%m-%d")
+        last_day = calendar.monthrange(dt.year, dt.month)[1]
+        to_date = dt.replace(day=last_day).strftime("%Y-%m-%d")
 
-    def submit_timesheet(self, date: str, entries: list, message: str = "") -> dict:
-        """
-        Save and SUBMIT a timesheet for approval.
+        r = self.session.get(
+            f"{BASE_URL}/my-workingtimes",
+            params={"from": from_date, "to": to_date},
+            timeout=15,
+        )
 
-        Args:
-            date: ISO date string, e.g. "2026-03-03"
-            entries: List of work entry dicts
-            message: Optional message
+        other_apps_match = re.search(r"const otherApps = (\[.*?\]);", r.text, re.DOTALL)
+        if not other_apps_match:
+            return {
+                "date": date, "is_all_day_leave": False,
+                "is_late": False, "is_early_leave": False,
+                "late_until": None, "early_from": None, "leave_apps": [],
+            }
 
-        Returns:
-            Server response dict.
-        """
-        return self._post_timesheet(f"{BASE_URL}/wt-applications/submit", date, entries, message)
+        try:
+            other_apps = json.loads(other_apps_match.group(1))
+        except json.JSONDecodeError:
+            other_apps = []
+
+        # Only approved paid-leave entries covering the target date
+        day_apps = [
+            app for app in other_apps
+            if app.get("from_date", "") <= date <= app.get("to_date", app.get("from_date", ""))
+            and app.get("status") == 1
+            and app.get("application_type_name") == "paid leave"
+        ]
+
+        is_all_day_leave = any(app.get("reason_name") == "All day" for app in day_apps)
+
+        # Late: "Hour" paid leave that starts in the morning (covers shift start → actual arrival)
+        late_app = next(
+            (app for app in day_apps
+             if app.get("reason_name") == "Hour"
+             and app.get("to_time", "99:99") <= "12:00"
+             and app.get("from_time", "99:99") < app.get("to_time", "00:00")),
+            None,
+        )
+
+        # Early leave: "Hour" paid leave that starts in the afternoon
+        early_app = next(
+            (app for app in day_apps
+             if app.get("reason_name") == "Hour"
+             and app.get("from_time", "00:00") >= "13:00"),
+            None,
+        )
+
+        return {
+            "date": date,
+            "is_all_day_leave": is_all_day_leave,
+            "is_late": late_app is not None,
+            "is_early_leave": early_app is not None,
+            "late_until": late_app["to_time"] if late_app else None,
+            "early_from": early_app["from_time"] if early_app else None,
+            "leave_apps": day_apps,
+        }
+
+    def save_timesheet(self, date: str, entries: list, message: str = "",
+                       time_in: str = DEFAULT_TIME_IN, time_out: str = DEFAULT_TIME_OUT) -> dict:
+        """Save a timesheet as DRAFT."""
+        return self._post_timesheet(f"{BASE_URL}/wt-applications/save", date, entries, message, time_in, time_out)
+
+    def submit_timesheet(self, date: str, entries: list, message: str = "",
+                         time_in: str = DEFAULT_TIME_IN, time_out: str = DEFAULT_TIME_OUT) -> dict:
+        """Save and SUBMIT a timesheet for approval."""
+        return self._post_timesheet(f"{BASE_URL}/wt-applications/submit", date, entries, message, time_in, time_out)
 
     def delete_application(self, application_id: int) -> dict:
         """Delete an existing application by ID.
@@ -181,7 +249,8 @@ class Take100Client:
                 })
         return applications
 
-    def _post_timesheet(self, url: str, date: str, entries: list, message: str) -> dict:
+    def _post_timesheet(self, url: str, date: str, entries: list, message: str,
+                         time_in: str = DEFAULT_TIME_IN, time_out: str = DEFAULT_TIME_OUT) -> dict:
         """Internal method to POST timesheet data."""
         # Build the ISO date
         date_iso = f"{date}T00:00:00.000Z"
@@ -202,8 +271,8 @@ class Take100Client:
             "working_days": [
                 {
                     "date": date_iso,
-                    "time_in": DEFAULT_TIME_IN,
-                    "time_out": DEFAULT_TIME_OUT,
+                    "time_in": time_in,
+                    "time_out": time_out,
                     "break_start": None,
                     "break_end": None,
                     "shift_work_id": DEFAULT_SHIFT_WORK_ID,
@@ -221,9 +290,9 @@ def main():
     parser = argparse.ArgumentParser(description="Take100 Timesheet API Client")
     parser.add_argument(
         "--action",
-        choices=["save", "submit", "delete", "list"],
+        choices=["save", "submit", "delete", "list", "check-day"],
         required=True,
-        help="Action to perform: save (draft), submit (for approval), delete, or list",
+        help="Action to perform: save (draft), submit (for approval), delete, list, or check-day",
     )
     parser.add_argument("--date", help="Date for the timesheet (YYYY-MM-DD)")
     parser.add_argument("--entries", help="JSON array of work entries (ASCII-safe only; use --entries-file for Unicode)")
@@ -233,6 +302,8 @@ def main():
     )
     parser.add_argument("--application-id", type=int, help="Application ID (for delete)")
     parser.add_argument("--message", default="", help="Optional message")
+    parser.add_argument("--time-in", default=None, help="Override time_in, e.g. '08:06' when late (default: 08:00)")
+    parser.add_argument("--time-out", default=None, help="Override time_out, e.g. '16:30' for early leave (default: 17:00)")
 
     args = parser.parse_args()
 
@@ -244,7 +315,14 @@ def main():
         sys.exit(1)
 
     try:
-        if args.action == "list":
+        if args.action == "check-day":
+            if not args.date:
+                print(json.dumps({"success": False, "error": "--date is required for check-day"}))
+                sys.exit(1)
+            status = client.get_day_status(args.date)
+            result = {"success": True, "day_status": status}
+
+        elif args.action == "list":
             apps = client.list_applications()
             result = {"success": True, "applications": apps}
 
@@ -255,15 +333,25 @@ def main():
 
             if args.entries_file:
                 # Read entries from file — avoids Windows terminal encoding issues with Unicode
-                with open(args.entries_file, encoding="utf-8") as f:
+                # utf-8-sig strips the BOM that PowerShell's Set-Content -Encoding utf8 adds
+                import os
+                with open(args.entries_file, encoding="utf-8-sig") as f:
                     entries = json.load(f)
+                # Auto-cleanup: delete the temp file after reading so it isn't left on disk
+                try:
+                    os.remove(args.entries_file)
+                except OSError:
+                    pass
             else:
                 entries = json.loads(args.entries)
 
+            time_in = args.time_in or DEFAULT_TIME_IN
+            time_out = args.time_out or DEFAULT_TIME_OUT
+
             if args.action == "save":
-                resp = client.save_timesheet(args.date, entries, args.message)
+                resp = client.save_timesheet(args.date, entries, args.message, time_in=time_in, time_out=time_out)
             else:
-                resp = client.submit_timesheet(args.date, entries, args.message)
+                resp = client.submit_timesheet(args.date, entries, args.message, time_in=time_in, time_out=time_out)
 
             result = {"success": True, "action": args.action, "application": resp}
 

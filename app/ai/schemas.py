@@ -21,13 +21,11 @@ class MessageRole(str, Enum):
 
 
 class InterruptDecisionType(str, Enum):
-    """Type of decision for handling a tool interrupt."""
+    """Canonical decision types for handling a tool interrupt."""
 
-    ACCEPT = "accept"
     APPROVE = "approve"
-    EDIT = "edit"
-    RESPOND = "respond"
     REJECT = "reject"
+    EDIT = "edit"
 
 
 class ToolInterruptRequest(BaseModel):
@@ -61,7 +59,7 @@ class InterruptDecision(BaseModel):
     )
     args: Optional[Dict[str, Any]] = Field(
         None,
-        description="For EDIT: modified arguments. For RESPOND: feedback message",
+        description="For EDIT: modified arguments. For REJECT: optional feedback message",
     )
 
 
@@ -74,8 +72,8 @@ class InterruptResponse(BaseModel):
     )
     thread_id: str = Field(..., description="Conversation thread ID for resuming")
     conversation_id: str = Field(..., description="Conversation ID")
-    metadata: Optional[Dict[str, Any]] = Field(
-        default=None, description="Additional metadata for the interrupt"
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict, description="Additional metadata for the interrupt"
     )
 
 

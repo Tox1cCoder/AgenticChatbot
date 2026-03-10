@@ -2,7 +2,7 @@
 Shared utility functions for AI agents.
 """
 
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import json
 
 
@@ -457,3 +457,59 @@ def extract_content_from_result(result: Any) -> Any:
             return result["text"]
 
     return result
+
+
+def apply_hitl_decisions(
+    tool_calls: List[Dict[str, Any]],
+    human_decisions: Any,
+) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+    """
+    Apply HITL human decisions to a list of tool calls.
+
+    Args:
+        tool_calls: List of normalised tool-call dicts, each with an ``"id"`` key.
+        human_decisions: A single decision dict or list of decision dicts.  Each
+            decision must have ``"type"`` (approve/edit/reject) and
+            ``"task_id"`` (matching a tool-call ``"id"``).
+
+    Returns:
+        approved: tool calls to execute (with modified args for 'edit' decisions)
+        rejected_feedback: mapping of tool_call_id -> rejection reason message
+    """
+    decisions = (
+        human_decisions if isinstance(human_decisions, list) else [human_decisions]
+    )
+    decision_map: Dict[str, Any] = {}
+    for d in decisions:
+        if isinstance(d, dict):
+            task_id = d.get("task_id") or d.get("tool_call_id")
+            if task_id:
+                decision_map[task_id] = d
+
+    approved: List[Dict[str, Any]] = []
+    rejected_feedback: Dict[str, str] = {}
+    for tc in tool_calls:
+        tool_call_id = tc.get("id")
+        tool_name = tc.get("name")
+        decision = decision_map.get(tool_call_id, {})
+        decision_type = decision.get("type", "reject")
+
+        if decision_type == "approve":
+            approved.append(tc)
+        elif decision_type == "edit":
+            modified_args = decision.get("args", tc.get("args", {}))
+            approved.append(
+                {
+                    "name": tool_name,
+                    "args": modified_args,
+                    "id": tool_call_id,
+                }
+            )
+        else:  # reject / unknown
+            feedback = (decision.get("args") or {}).get(
+                "message", "Tool execution rejected by user"
+            )
+            if tool_call_id:
+                rejected_feedback[tool_call_id] = feedback
+
+    return approved, rejected_feedback
