@@ -218,7 +218,14 @@ async def execute_tool_calls(
 
         tool = tool_map.get(tool_name)
         if not tool:
-            error_msg = f"Error: Tool {tool_name} not found"
+            if settings.mcp_tool_search_enabled:
+                error_msg = (
+                    f"Error: Tool {tool_name} not found. "
+                    "Use tool_search first to discover and load the correct tool, "
+                    "then call the discovered tool by name."
+                )
+            else:
+                error_msg = f"Error: Tool {tool_name} not found"
             outputs.append(
                 {"tool_call_id": tool_id, "name": tool_name, "content": error_msg}
             )

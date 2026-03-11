@@ -52,9 +52,12 @@ class CheckpointManager:
             # Create AsyncPostgresSaver with the pool (not a dedicated connection)
             self.checkpointer = AsyncPostgresSaver(self._pool)
 
-            # Run one-time setup using a temporary pooled connection
+            # Run one-time setup using a temporary pooled connection.
+            # autocommit=True is required because LangGraph's setup() issues
+            # CREATE INDEX CONCURRENTLY, which PostgreSQL forbids inside a
+            # transaction block.
             async with self._pool.connection() as conn:
-                # Create a temporary saver instance for setup
+                await conn.set_autocommit(True)
                 temp_saver = AsyncPostgresSaver(conn)
                 await temp_saver.setup()
 

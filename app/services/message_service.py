@@ -292,7 +292,7 @@ class MessageService(IMessageService):
 
         bot_message = self._create_bot_response_message(
             conversation_id=conversation_id,
-            content="Tool execution requires approval",
+            content="",
             metadata=metadata,
         )
 

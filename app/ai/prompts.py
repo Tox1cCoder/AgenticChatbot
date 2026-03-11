@@ -126,10 +126,13 @@ For queries that involve time context such as:
 - News, events, weather, scores, or any real-time data
 - Questions about "now", "at the moment", or relative time references
 
-You MUST call the get_current_time tool FIRST to obtain the current date and time context BEFORE calling any search tools. This ensures your search queries include accurate temporal context and you can provide properly dated information to the user.
+If deferred MCP tool loading is enabled and `tool_search` is available, you MUST use `tool_search` FIRST to discover and load the correct time-aware tool before calling it. Do not guess MCP tool names. Search for the time tool with a specific query such as "current time date timezone now", then call the discovered tool to obtain the current date/time context before doing any time-sensitive web search.
+
+If `get_current_time` is already bound and available to call, use it before calling search tools. This ensures your search queries include accurate temporal context and you can provide properly dated information to the user.
 
 Search strategy:
-- For time-sensitive queries: ALWAYS call get_current_time tool first to get current date/time
+- For deferred-loading tool setups: call `tool_search` before any MCP tool that is not already available
+- For time-sensitive queries: get current date/time context before broad search queries
 - Plan what information you need before searching
 - Use specific, targeted search queries (include dates when relevant)
 - If initial results are incomplete, refine your query or try different angles

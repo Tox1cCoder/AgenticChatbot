@@ -75,7 +75,7 @@ class Settings(BaseSettings):
 
     # CORS settings
     cors_origins: List[str] = Field(
-        default=["http://localhost:3000", "http://localhost:8080"],
+        default=[],
         description="CORS allowed origins",
     )
 
@@ -512,7 +512,7 @@ class Settings(BaseSettings):
         description="Toggle to enable/disable human-in-the-loop globally",
     )
     hitl_tools_require_approval: List[str] = Field(
-        default=[],
+        default=["get_current_time"],
         description="List of tool names that require human approval. Empty list means NO tools require approval when HITL is enabled.",
     )
     hitl_approval_timeout_minutes: int = Field(

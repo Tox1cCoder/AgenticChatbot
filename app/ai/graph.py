@@ -847,7 +847,7 @@ class MultiAgentWorkflow:
             agent_id=selected_agent or "search_agent",
             message=AgentMessage(
                 role=MessageRole.ASSISTANT,
-                content="Tool execution requires approval",
+                content="",
             ),
             metadata={"interrupt": interrupt_response},
         )

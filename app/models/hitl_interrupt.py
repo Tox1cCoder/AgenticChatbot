@@ -61,7 +61,12 @@ class HITLInterrupt(Base):
 
     # Lifecycle
     status = Column(
-        SQLEnum(HITLInterruptStatus, name="hitl_interrupt_status", create_type=True),
+        SQLEnum(
+            HITLInterruptStatus,
+            name="hitl_interrupt_status",
+            create_type=False,
+            values_callable=lambda x: [e.value for e in x],
+        ),
         nullable=False,
         default=HITLInterruptStatus.PENDING,
         index=True,

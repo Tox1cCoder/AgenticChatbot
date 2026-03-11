@@ -242,6 +242,10 @@ async def tool_search(
     call them. The search will return a list of matching tools with their
     names, descriptions, and argument hints.
 
+    When deferred MCP loading is enabled, do not guess tool names first.
+    Use tool_search with a specific query to find and autoload the tool you need,
+    then call the discovered tool by name.
+
     After searching, you can call the discovered tools directly by name.
     The top results are automatically loaded and ready to use.
 
@@ -286,6 +290,10 @@ def create_tool_search_tool(allowlist: Optional[List[str]] = None):
         Use this tool to discover what tools are available before attempting to
         call them. The search will return a list of matching tools with their
         names, descriptions, and argument hints.
+
+        When deferred MCP loading is enabled, do not guess tool names first.
+        Use tool_search with a specific query to find and autoload the tool you need,
+        then call the discovered tool by name.
 
         After searching, you can call the discovered tools directly by name.
         The top results are automatically loaded and ready to use.

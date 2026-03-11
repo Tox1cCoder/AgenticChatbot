@@ -30,7 +30,6 @@ from app.database.session import get_engine
 from app.api.auth import router as auth_router
 from app.utils.exception_handler import register_exception_handlers
 from app.workers.celery_app import celery_app
-from app.ai.agents.rag_agent import RAGAgent
 
 from app.core.events import get_event_bus, DocumentEvent
 from app.services.document_event_listener import DocumentEventLogger
@@ -131,14 +130,25 @@ def create_app() -> FastAPI:
     app.container = container
 
     # Add CORS middleware
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["x-vercel-ai-ui-message-stream"],
-    )
+    _cors_origins = settings.cors_origins
+    if "*" in _cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_origin_regex=".*",
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["x-vercel-ai-ui-message-stream"],
+        )
+    else:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["x-vercel-ai-ui-message-stream"],
+        )
 
     # Register centralized exception handlers
     register_exception_handlers(app)

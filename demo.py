@@ -4823,17 +4823,22 @@ def render_chat_view():
     if not messages_to_display and conversation_id not in (None, "pending_new"):
         st.info("No messages yet. Start the conversation!", icon=":material/chat:")
 
-    # Find the last assistant message for showing suggestions
+    # Find the last assistant message for showing suggestions (skip hidden HITL markers)
     last_assistant_msg_id = None
     for msg in reversed(messages_to_display):
         sender_value = msg.get("sender")
         if sender_value not in (1, "user", "USER", "User"):
-            last_assistant_msg_id = msg.get("id")
-            break
+            if not get_message_metadata(msg).get("paused"):
+                last_assistant_msg_id = msg.get("id")
+                break
 
     for msg in messages_to_display:
         sender_value = msg.get("sender")
         is_user_message = sender_value in (1, "user", "USER", "User")
+        # HITL interrupt markers are hidden from the chat — they exist only for
+        # reload recovery and carry no user-visible content.
+        if not is_user_message and get_message_metadata(msg).get("paused"):
+            continue
         render_message_bubble(msg, is_user_message)
 
         # Show suggestion buttons for the last assistant message only
