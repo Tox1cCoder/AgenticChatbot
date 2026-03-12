@@ -2,14 +2,15 @@
 TaskPlan repository for database operations.
 """
 
-from typing import List, Optional, Any, Dict
-from uuid import UUID
 from datetime import datetime, timezone
-from sqlalchemy.orm import Session
-from sqlalchemy import select, asc, func, case
+from typing import Any
+from uuid import UUID
 
-from app.models.task_plan import TaskPlan
+from sqlalchemy import asc, case, func, select
+from sqlalchemy.orm import Session
+
 from app.models.enums import TaskStatus
+from app.models.task_plan import TaskPlan
 from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.query_strategy import DefaultQueryStrategy
 from app.schemas.task_plan import TaskPlanCreate, TaskPlanUpdate
@@ -25,7 +26,7 @@ class TaskPlanCRUDStrategy(
         DefaultCommandStrategy.__init__(self, model)
         DefaultQueryStrategy.__init__(self, model)
 
-    def get_by_id(self, db: Session, id: UUID) -> Optional[TaskPlan]:
+    def get_by_id(self, db: Session, id: UUID) -> TaskPlan | None:
         """Get a task plan by ID (TaskPlan doesn't have soft delete)."""
         statement = select(self.model).where(self.model.id == id)
         return db.execute(statement).scalar_one_or_none()
@@ -35,7 +36,7 @@ class TaskPlanCRUDStrategy(
         db: Session,
         conversation_id: UUID,
         include_completed: bool = True,
-    ) -> List[TaskPlan]:
+    ) -> list[TaskPlan]:
         """Get all tasks for a conversation, optionally filter out completed tasks.
 
         Args:
@@ -46,9 +47,7 @@ class TaskPlanCRUDStrategy(
         Returns:
             List of TaskPlan ordered by task_order ASC
         """
-        statement = select(self.model).where(
-            self.model.conversation_id == conversation_id
-        )
+        statement = select(self.model).where(self.model.conversation_id == conversation_id)
 
         if not include_completed:
             statement = statement.where(
@@ -58,9 +57,7 @@ class TaskPlanCRUDStrategy(
         statement = statement.order_by(asc(self.model.task_order))
         return list(db.execute(statement).scalars().all())
 
-    def get_active_or_next_task(
-        self, db: Session, conversation_id: UUID
-    ) -> Optional[TaskPlan]:
+    def get_active_or_next_task(self, db: Session, conversation_id: UUID) -> TaskPlan | None:
         """Get the first in-progress task, otherwise the first pending task.
 
         Args:
@@ -83,7 +80,7 @@ class TaskPlanCRUDStrategy(
         )
         return db.execute(statement).scalars().first()
 
-    def mark_completed(self, db: Session, task_id: UUID) -> Optional[TaskPlan]:
+    def mark_completed(self, db: Session, task_id: UUID) -> TaskPlan | None:
         """Update task status to completed and set completed_at timestamp.
 
         Args:
@@ -107,7 +104,7 @@ class TaskPlanCRUDStrategy(
 
     def get_by_id_and_conversation(
         self, db: Session, task_id: UUID, conversation_id: UUID
-    ) -> Optional[TaskPlan]:
+    ) -> TaskPlan | None:
         """Get task by ID with conversation ownership check.
 
         Args:
@@ -125,7 +122,7 @@ class TaskPlanCRUDStrategy(
         return db.execute(statement).scalar_one_or_none()
 
     def count_by_conversation(
-        self, db: Session, conversation_id: UUID, status: Optional[TaskStatus] = None
+        self, db: Session, conversation_id: UUID, status: TaskStatus | None = None
     ) -> int:
         """Count tasks, optionally filtered by status.
 
@@ -146,7 +143,7 @@ class TaskPlanCRUDStrategy(
 
         return db.execute(statement).scalar() or 0
 
-    def get_max_task_order(self, db: Session, conversation_id: UUID) -> Optional[int]:
+    def get_max_task_order(self, db: Session, conversation_id: UUID) -> int | None:
         """Get the highest task_order value for a conversation."""
         statement = select(func.max(self.model.task_order)).where(
             self.model.conversation_id == conversation_id
@@ -208,7 +205,7 @@ class TaskPlanRepository:
         with self.session_factory() as session:
             return self._crud_strategy.create(session, payload)
 
-    def get_by_id(self, id: UUID) -> Optional[TaskPlan]:
+    def get_by_id(self, id: UUID) -> TaskPlan | None:
         """Get task plan by ID.
 
         Args:
@@ -224,7 +221,7 @@ class TaskPlanRepository:
         self,
         conversation_id: UUID,
         include_completed: bool = True,
-    ) -> List[TaskPlan]:
+    ) -> list[TaskPlan]:
         """Get all tasks for a conversation.
 
         Args:
@@ -239,7 +236,7 @@ class TaskPlanRepository:
                 session, conversation_id, include_completed
             )
 
-    def get_active_or_next_task(self, conversation_id: UUID) -> Optional[TaskPlan]:
+    def get_active_or_next_task(self, conversation_id: UUID) -> TaskPlan | None:
         """Get the first in-progress task, otherwise the first pending task.
 
         Args:
@@ -251,7 +248,7 @@ class TaskPlanRepository:
         with self.session_factory() as session:
             return self._crud_strategy.get_active_or_next_task(session, conversation_id)
 
-    def mark_completed(self, task_id: UUID) -> Optional[TaskPlan]:
+    def mark_completed(self, task_id: UUID) -> TaskPlan | None:
         """Update task status to completed and set completed_at timestamp.
 
         Args:
@@ -263,9 +260,7 @@ class TaskPlanRepository:
         with self.session_factory() as session:
             return self._crud_strategy.mark_completed(session, task_id)
 
-    def get_by_id_and_conversation(
-        self, task_id: UUID, conversation_id: UUID
-    ) -> Optional[TaskPlan]:
+    def get_by_id_and_conversation(self, task_id: UUID, conversation_id: UUID) -> TaskPlan | None:
         """Get task by ID with conversation ownership check.
 
         Args:
@@ -276,13 +271,9 @@ class TaskPlanRepository:
             The TaskPlan if found and belongs to conversation, None otherwise
         """
         with self.session_factory() as session:
-            return self._crud_strategy.get_by_id_and_conversation(
-                session, task_id, conversation_id
-            )
+            return self._crud_strategy.get_by_id_and_conversation(session, task_id, conversation_id)
 
-    def count_by_conversation(
-        self, conversation_id: UUID, status: Optional[TaskStatus] = None
-    ) -> int:
+    def count_by_conversation(self, conversation_id: UUID, status: TaskStatus | None = None) -> int:
         """Count tasks, optionally filtered by status.
 
         Args:
@@ -293,16 +284,14 @@ class TaskPlanRepository:
             Count of matching tasks
         """
         with self.session_factory() as session:
-            return self._crud_strategy.count_by_conversation(
-                session, conversation_id, status
-            )
+            return self._crud_strategy.count_by_conversation(session, conversation_id, status)
 
-    def get_max_task_order(self, conversation_id: UUID) -> Optional[int]:
+    def get_max_task_order(self, conversation_id: UUID) -> int | None:
         """Get the highest task_order value for a conversation."""
         with self.session_factory() as session:
             return self._crud_strategy.get_max_task_order(session, conversation_id)
 
-    def update(self, id: UUID, input_schema: TaskPlanUpdate) -> Optional[TaskPlan]:
+    def update(self, id: UUID, input_schema: TaskPlanUpdate) -> TaskPlan | None:
         """Update task plan by ID.
 
         Args:
@@ -312,14 +301,14 @@ class TaskPlanRepository:
         Returns:
             Updated TaskPlan, or None if not found
         """
-        update_payload: Dict[str, Any]
+        update_payload: dict[str, Any]
         if hasattr(input_schema, "model_dump"):
             update_payload = input_schema.model_dump(exclude_unset=True)
         else:
             update_payload = dict(getattr(input_schema, "__dict__", {}))
 
         class _UpdateWrapper:
-            def __init__(self, data: Dict[str, Any]):
+            def __init__(self, data: dict[str, Any]):
                 self._data = data
 
             def model_dump(self, *args, **kwargs):
@@ -329,9 +318,7 @@ class TaskPlanRepository:
             db_obj = self._crud_strategy.get_by_id(session, id)
             if db_obj is None:
                 return None
-            return self._crud_strategy.update(
-                session, db_obj, _UpdateWrapper(update_payload)
-            )
+            return self._crud_strategy.update(session, db_obj, _UpdateWrapper(update_payload))
 
     def delete(self, id: UUID) -> bool:
         """Delete task plan by ID.

@@ -1,12 +1,12 @@
 """Human-in-the-loop configuration utilities for LangGraph agents."""
 
 import uuid
-from typing import Dict, Any, List, Optional
-
-from app.core.config import settings
-from app.ai.schemas import InterruptResponse, ToolInterruptRequest
+from typing import Any
 
 from langgraph.types import Interrupt as LangGraphInterrupt
+
+from app.ai.schemas import InterruptResponse, ToolInterruptRequest
+from app.core.config import settings
 
 
 def is_hitl_enabled() -> bool:
@@ -14,12 +14,12 @@ def is_hitl_enabled() -> bool:
     return getattr(settings, "enable_human_in_the_loop", True)
 
 
-def get_tools_requiring_approval() -> List[str]:
+def get_tools_requiring_approval() -> list[str]:
     """Get the list of tool names that require human approval."""
     return getattr(settings, "hitl_tools_require_approval", [])
 
 
-def requires_human_approval(tool_names: List[str]) -> bool:
+def requires_human_approval(tool_names: list[str]) -> bool:
     """
     Check if any of the given tool names require human approval.
 
@@ -40,9 +40,9 @@ def requires_human_approval(tool_names: List[str]) -> bool:
     return any(name in approval_list for name in tool_names if name)
 
 
-def _parse_review_configs(data: Optional[List[Dict[str, Any]]]) -> Dict[str, List[str]]:
+def _parse_review_configs(data: list[dict[str, Any]] | None) -> dict[str, list[str]]:
     """Parse review configurations into a mapping of action names to allowed decisions."""
-    review_configs: Dict[str, List[str]] = {}
+    review_configs: dict[str, list[str]] = {}
     for cfg in data or []:
         if isinstance(cfg, dict):
             action_name = cfg.get("action_name")
@@ -53,10 +53,10 @@ def _parse_review_configs(data: Optional[List[Dict[str, Any]]]) -> Dict[str, Lis
 
 
 def _build_tool_interrupt_request(
-    task: Dict[str, Any],
+    task: dict[str, Any],
     idx: int,
     default_prefix: str,
-    allowed_map: Dict[str, List[str]],
+    allowed_map: dict[str, list[str]],
 ) -> ToolInterruptRequest:
     """Build a single ToolInterruptRequest from a task dictionary."""
     # ID mapping priority: tool_call_id (primary) → id → task_id → generated ID
@@ -67,9 +67,7 @@ def _build_tool_interrupt_request(
         or f"{default_prefix}:{idx}"
     )
     tool_name = task.get("action") or task.get("tool") or task.get("name") or "unknown"
-    tool_args = (
-        task.get("args") or task.get("tool_input") or task.get("arguments") or {}
-    )
+    tool_args = task.get("args") or task.get("tool_input") or task.get("arguments") or {}
     allowed = allowed_map.get(tool_name)
 
     return ToolInterruptRequest(
@@ -83,12 +81,12 @@ def _build_tool_interrupt_request(
 
 
 def _extract_action_requests(
-    tasks: List[Dict[str, Any]],
-    allowed_map: Dict[str, List[str]],
+    tasks: list[dict[str, Any]],
+    allowed_map: dict[str, list[str]],
     default_prefix: str,
-) -> List[ToolInterruptRequest]:
+) -> list[ToolInterruptRequest]:
     """Extract ToolInterruptRequest objects from a list of tasks."""
-    action_requests: List[ToolInterruptRequest] = []
+    action_requests: list[ToolInterruptRequest] = []
     for idx, task in enumerate(tasks):
         if not isinstance(task, dict):
             continue
@@ -99,14 +97,14 @@ def _extract_action_requests(
 
 def build_interrupt_response(
     interrupt_data: Any, thread_id: str, conversation_id: str
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Build a structured InterruptResponse from raw interrupt data."""
-    action_requests: List[ToolInterruptRequest] = []
-    interrupt_id: Optional[str] = None
-    response_metadata: Dict[str, Any] = {}
+    action_requests: list[ToolInterruptRequest] = []
+    interrupt_id: str | None = None
+    response_metadata: dict[str, Any] = {}
 
     # Normalize interrupt_data to a list of payloads
-    payloads: List[Any] = []
+    payloads: list[Any] = []
     if isinstance(interrupt_data, LangGraphInterrupt):
         interrupt_id = interrupt_data.id or interrupt_id
         payloads.append(interrupt_data.value)
@@ -133,11 +131,7 @@ def build_interrupt_response(
 
         for key in ("message", "reason"):
             value = payload.get(key)
-            if (
-                key not in response_metadata
-                and isinstance(value, str)
-                and value.strip()
-            ):
+            if key not in response_metadata and isinstance(value, str) and value.strip():
                 response_metadata[key] = value.strip()
 
         default_prefix = interrupt_id or "task"
@@ -152,10 +146,7 @@ def build_interrupt_response(
 
         # Fallback support for older interrupt shapes
         tasks = (
-            payload.get("tasks")
-            or payload.get("__interrupt__")
-            or payload.get("tool_calls")
-            or []
+            payload.get("tasks") or payload.get("__interrupt__") or payload.get("tool_calls") or []
         )
         allowed_map = _parse_review_configs(payload.get("review_configs", []))
         requests = _extract_action_requests(tasks, allowed_map, default_prefix)

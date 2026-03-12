@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Any
 from uuid import UUID
 
 from app.ai.agents.planning_agent import PlanningAgent
@@ -8,7 +8,7 @@ from app.ai.schemas import AgentMessage, MessageRole
 from app.core.exceptions import ResourceNotFoundException
 from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.models.conversation import Conversation
-from app.models.enums import TaskStatus, PlanLifecycle
+from app.models.enums import PlanLifecycle, TaskStatus
 from app.models.task_plan import TaskPlan
 from app.repositories.conversation import ConversationRepository
 from app.repositories.task_plan import TaskPlanRepository
@@ -48,7 +48,7 @@ class TaskPlanService(ITaskPlanService):
     def _transition_lifecycle(
         self,
         conversation_id: UUID,
-        lifecycle: Optional[PlanLifecycle],
+        lifecycle: PlanLifecycle | None,
     ) -> None:
         """Persist an explicit plan lifecycle transition on the conversation row."""
         try:
@@ -73,10 +73,9 @@ class TaskPlanService(ITaskPlanService):
         text = str(description or "")
         return " ".join(text.split())
 
-    def _normalize_descriptions(self, descriptions: List[str]) -> List[str]:
+    def _normalize_descriptions(self, descriptions: list[str]) -> list[str]:
         normalized = [
-            self._normalize_description(description)
-            for description in descriptions or []
+            self._normalize_description(description) for description in descriptions or []
         ]
         normalized = [description for description in normalized if description]
         if not normalized:
@@ -84,9 +83,7 @@ class TaskPlanService(ITaskPlanService):
         return normalized
 
     @staticmethod
-    def _coerce_status(
-        raw_status: Any, default: TaskStatus = TaskStatus.pending
-    ) -> TaskStatus:
+    def _coerce_status(raw_status: Any, default: TaskStatus = TaskStatus.pending) -> TaskStatus:
         if isinstance(raw_status, TaskStatus):
             return raw_status
         if hasattr(raw_status, "value"):
@@ -99,8 +96,8 @@ class TaskPlanService(ITaskPlanService):
                 return default
         return default
 
-    def _normalize_todos(self, todos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        normalized: List[Dict[str, Any]] = []
+    def _normalize_todos(self, todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         active_task_seen = False
 
@@ -109,9 +106,7 @@ class TaskPlanService(ITaskPlanService):
             sortable,
             key=lambda item: (
                 int(item.get("order", item.get("task_order", len(normalized))))
-                if str(item.get("order", item.get("task_order", "")))
-                .strip("-")
-                .isdigit()
+                if str(item.get("order", item.get("task_order", ""))).strip("-").isdigit()
                 else len(normalized)
             ),
         )
@@ -149,11 +144,9 @@ class TaskPlanService(ITaskPlanService):
         return normalized
 
     def _derive_lifecycle_from_tasks(
-        self, tasks: List[TaskPlanRead | TaskPlan]
-    ) -> Optional[PlanLifecycle]:
-        statuses = [
-            self._coerce_status(getattr(task, "status", None)) for task in tasks
-        ]
+        self, tasks: list[TaskPlanRead | TaskPlan]
+    ) -> PlanLifecycle | None:
+        statuses = [self._coerce_status(getattr(task, "status", None)) for task in tasks]
         if not statuses:
             return None
 
@@ -179,13 +172,11 @@ class TaskPlanService(ITaskPlanService):
         )
 
     @staticmethod
-    def _task_to_agent_dict(task: TaskPlanRead | TaskPlan) -> Dict[str, Any]:
+    def _task_to_agent_dict(task: TaskPlanRead | TaskPlan) -> dict[str, Any]:
         return {
             "id": str(task.id),
             "description": task.description,
-            "status": task.status.value
-            if hasattr(task.status, "value")
-            else str(task.status),
+            "status": task.status.value if hasattr(task.status, "value") else str(task.status),
             "task_order": task.task_order,
             "order": task.task_order,
         }
@@ -200,8 +191,8 @@ class TaskPlanService(ITaskPlanService):
             task.completed_at = None
 
     def _append_descriptions(
-        self, conversation_id: UUID, descriptions: List[str]
-    ) -> List[TaskPlanRead]:
+        self, conversation_id: UUID, descriptions: list[str]
+    ) -> list[TaskPlanRead]:
         normalized = self._normalize_descriptions(descriptions)
         now = datetime.now(timezone.utc)
 
@@ -215,7 +206,7 @@ class TaskPlanService(ITaskPlanService):
             )
             next_order = 0 if max_task_order is None else max_task_order + 1
 
-            created_tasks: List[TaskPlan] = []
+            created_tasks: list[TaskPlan] = []
             for offset, description in enumerate(normalized):
                 task = TaskPlan(
                     conversation_id=conversation_id,
@@ -240,10 +231,10 @@ class TaskPlanService(ITaskPlanService):
     def _sync_todo_snapshot(
         self,
         conversation_id: UUID,
-        todos: List[Dict[str, Any]],
+        todos: list[dict[str, Any]],
         *,
         preserve_existing_status: bool,
-    ) -> List[TaskPlanRead]:
+    ) -> list[TaskPlanRead]:
         normalized_todos = self._normalize_todos(todos)
         now = datetime.now(timezone.utc)
 
@@ -285,9 +276,7 @@ class TaskPlanService(ITaskPlanService):
                     self._set_task_status(task, status, now=now)
                     continue
 
-                status = (
-                    TaskStatus.pending if preserve_existing_status else todo["status"]
-                )
+                status = TaskStatus.pending if preserve_existing_status else todo["status"]
                 if status == TaskStatus.in_progress:
                     if active_task_seen:
                         status = TaskStatus.pending
@@ -321,7 +310,7 @@ class TaskPlanService(ITaskPlanService):
             return [TaskPlanRead.model_validate(task) for task in stored_tasks]
 
     @staticmethod
-    def _extract_agent_todos(response: Any) -> List[Dict[str, Any]]:
+    def _extract_agent_todos(response: Any) -> list[dict[str, Any]]:
         metadata = getattr(response, "metadata", None) or {}
         todos = metadata.get("todos")
         if not isinstance(todos, list):
@@ -333,10 +322,8 @@ class TaskPlanService(ITaskPlanService):
         conversation_id: UUID,
         user_message: str,
         user_id: UUID,
-    ) -> List[TaskPlanRead]:
-        self.conversation_validation_utils.validate_conversation_access(
-            user_id, conversation_id
-        )
+    ) -> list[TaskPlanRead]:
+        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
 
         existing_tasks = self.task_plan_repository.get_by_conversation_id(
             conversation_id, include_completed=True
@@ -377,10 +364,8 @@ class TaskPlanService(ITaskPlanService):
         conversation_id: UUID,
         user_message: str,
         user_id: UUID,
-    ) -> List[TaskPlanRead]:
-        self.conversation_validation_utils.validate_conversation_access(
-            user_id, conversation_id
-        )
+    ) -> list[TaskPlanRead]:
+        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
 
         existing_tasks = self.task_plan_repository.get_by_conversation_id(
             conversation_id, include_completed=True
@@ -389,9 +374,7 @@ class TaskPlanService(ITaskPlanService):
         if not existing_tasks:
             return await self.create_task_plan(conversation_id, user_message, user_id)
 
-        existing_tasks_dict = [
-            self._task_to_agent_dict(task) for task in existing_tasks
-        ]
+        existing_tasks_dict = [self._task_to_agent_dict(task) for task in existing_tasks]
 
         agent_message = AgentMessage(
             role=MessageRole.USER,
@@ -425,14 +408,12 @@ class TaskPlanService(ITaskPlanService):
     def sync_todos_from_agent(
         self,
         conversation_id: UUID,
-        todos: List[Dict[str, Any]],
+        todos: list[dict[str, Any]],
         user_id: UUID,
         preserve_existing_status: bool = False,
-        lifecycle: Optional[PlanLifecycle] = None,
-    ) -> List[TaskPlanRead]:
-        self.conversation_validation_utils.validate_conversation_access(
-            user_id, conversation_id
-        )
+        lifecycle: PlanLifecycle | None = None,
+    ) -> list[TaskPlanRead]:
+        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
         tasks = self._sync_todo_snapshot(
             conversation_id=conversation_id,
             todos=todos,
@@ -449,22 +430,18 @@ class TaskPlanService(ITaskPlanService):
         self,
         conversation_id: UUID,
         user_id: UUID,
-        lifecycle: Optional[PlanLifecycle],
+        lifecycle: PlanLifecycle | None,
     ) -> None:
-        self.conversation_validation_utils.validate_conversation_access(
-            user_id, conversation_id
-        )
+        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
         self._transition_lifecycle(conversation_id, lifecycle)
 
     def create_task_plan_from_list(
         self,
         conversation_id: UUID,
-        task_descriptions: List[str],
+        task_descriptions: list[str],
         user_id: UUID,
-    ) -> List[TaskPlanRead]:
-        self.conversation_validation_utils.validate_conversation_access(
-            user_id, conversation_id
-        )
+    ) -> list[TaskPlanRead]:
+        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
         created_tasks = self._append_descriptions(conversation_id, task_descriptions)
         self._ensure_planning_mode_enabled(conversation_id)
         self._transition_lifecycle(conversation_id, PlanLifecycle.draft)
@@ -480,22 +457,16 @@ class TaskPlanService(ITaskPlanService):
         conversation_id: UUID,
         user_id: UUID,
         include_completed: bool = False,
-    ) -> List[TaskPlanRead]:
-        self.conversation_validation_utils.validate_conversation_access(
-            user_id, conversation_id
-        )
+    ) -> list[TaskPlanRead]:
+        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
 
         tasks = self.task_plan_repository.get_by_conversation_id(
             conversation_id, include_completed=include_completed
         )
         return [TaskPlanRead.model_validate(task) for task in tasks]
 
-    def get_active_or_next_task(
-        self, conversation_id: UUID, user_id: UUID
-    ) -> Optional[TaskPlanRead]:
-        self.conversation_validation_utils.validate_conversation_access(
-            user_id, conversation_id
-        )
+    def get_active_or_next_task(self, conversation_id: UUID, user_id: UUID) -> TaskPlanRead | None:
+        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
 
         task = self.task_plan_repository.get_active_or_next_task(conversation_id)
         if task:
@@ -576,19 +547,11 @@ class TaskPlanService(ITaskPlanService):
             self._refresh_lifecycle_from_tasks(task.conversation_id)
         return deleted
 
-    def get_planning_status(
-        self, conversation_id: UUID, user_id: UUID
-    ) -> PlanningStatusResponse:
-        self.conversation_validation_utils.validate_conversation_access(
-            user_id, conversation_id
-        )
+    def get_planning_status(self, conversation_id: UUID, user_id: UUID) -> PlanningStatusResponse:
+        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
 
-        conversation: Optional[Conversation] = self.conversation_repository.get_by_id(
-            conversation_id
-        )
-        planning_mode_enabled = (
-            conversation.planning_mode_enabled if conversation else False
-        )
+        conversation: Conversation | None = self.conversation_repository.get_by_id(conversation_id)
+        planning_mode_enabled = conversation.planning_mode_enabled if conversation else False
         plan_lifecycle_value = (
             getattr(conversation, "plan_lifecycle", None) if conversation else None
         )

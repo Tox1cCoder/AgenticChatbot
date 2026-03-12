@@ -1,7 +1,7 @@
 """Service layer for Skills operations."""
 
 import logging
-from typing import Dict, Any
+from typing import Any
 
 from app.ai.skills_registry import SkillsRegistry
 from app.core.exceptions.skills import SkillNotFoundError
@@ -15,7 +15,7 @@ class SkillsService:
     def __init__(self, registry: SkillsRegistry):
         self.registry = registry
 
-    async def list_skills(self) -> Dict[str, Any]:
+    async def list_skills(self) -> dict[str, Any]:
         """Returns all skills with enabled state and metadata."""
         all_skills = self.registry.get_all_skills()
 
@@ -37,7 +37,7 @@ class SkillsService:
             "enabled_count": enabled_count,
         }
 
-    async def get_skill(self, name: str) -> Dict[str, Any]:
+    async def get_skill(self, name: str) -> dict[str, Any]:
         """Returns full detail for one skill, raises SkillNotFoundError."""
         try:
             skill = self.registry.get_skill(name)
@@ -52,7 +52,7 @@ class SkillsService:
             "content": skill.content,
         }
 
-    async def toggle_skill(self, name: str, enabled: bool) -> Dict[str, Any]:
+    async def toggle_skill(self, name: str, enabled: bool) -> dict[str, Any]:
         """Enable or disable a skill. Returns confirmation message."""
         try:
             self.registry.toggle_skill(name, enabled)
@@ -62,11 +62,9 @@ class SkillsService:
         action = "enabled" if enabled else "disabled"
         return {"message": f"Skill '{name}' {action}"}
 
-    async def reload_skills(self) -> Dict[str, Any]:
+    async def reload_skills(self) -> dict[str, Any]:
         """Trigger a disk rescan (hot-reload after manually adding a skill)."""
         self.registry.reload()
         all_skills = self.registry.get_all_skills()
         enabled_count = sum(1 for s in all_skills if s.enabled)
-        return {
-            "message": f"Skills reloaded: {len(all_skills)} found ({enabled_count} enabled)"
-        }
+        return {"message": f"Skills reloaded: {len(all_skills)} found ({enabled_count} enabled)"}

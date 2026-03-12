@@ -1,8 +1,9 @@
-import json
 import asyncio
 import base64
+import json
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
+from collections.abc import AsyncGenerator, Callable
+from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, status
@@ -10,18 +11,18 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.dependency_injection import AppAutoInjector
-from app.interfaces.message_service_interface import IMessageService
 from app.interfaces.conversation_service_interface import IConversationService
+from app.interfaces.message_service_interface import IMessageService
 from app.models.enums import MessageRole
 from app.schemas.conversation import (
     ConversationCreate,
-    ConversationUpdate,
     ConversationRead,
+    ConversationUpdate,
 )
-from app.schemas.message import MessageCreate, InterruptResumeRequest
+from app.schemas.message import InterruptResumeRequest, MessageCreate
+from app.schemas.pagination import ConversationPaginationParams
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
-from app.schemas.pagination import ConversationPaginationParams
 
 router = APIRouter(tags=["ai-sdk"])
 
@@ -32,8 +33,8 @@ class AISDKChatRequest(BaseModel):
     - userId: optional (enables server-side memory features)
     """
 
-    messages: List[Dict[str, Any]] = Field(default_factory=list)
-    user_id: Optional[UUID] = Field(default=None, alias="userId")
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    user_id: UUID | None = Field(default=None, alias="userId")
 
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
@@ -49,14 +50,12 @@ class AISDKMessagePart(BaseModel):
     """
 
     type: str = Field(..., description="Part type: 'text', 'file', or 'reasoning'")
-    text: Optional[str] = Field(None, description="Text content (when type='text')")
-    url: Optional[str] = Field(None, description="File or data URL (when type='file')")
-    media_type: Optional[str] = Field(
+    text: str | None = Field(None, description="Text content (when type='text')")
+    url: str | None = Field(None, description="File or data URL (when type='file')")
+    media_type: str | None = Field(
         None, alias="mediaType", description="MIME type (when type='file')"
     )
-    reasoning: Optional[str] = Field(
-        None, description="Reasoning text (when type='reasoning')"
-    )
+    reasoning: str | None = Field(None, description="Reasoning text (when type='reasoning')")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -75,25 +74,22 @@ class AISDKUIMessage(BaseModel):
     id: str = Field(..., description="Unique message ID (UUID string)")
     role: str = Field(..., description="'user' or 'assistant'")
     content: str = Field(..., description="Plain-text content of the message")
-    parts: Optional[List[Dict[str, Any]]] = Field(
+    parts: list[dict[str, Any]] | None = Field(
         None,
         description=(
             "Structured message parts (text / file / reasoning) for multimodal messages. "
             "Mirrors the ``parts`` field of the AI SDK UIMessage spec."
         ),
     )
-    metadata: Optional[Dict[str, Any]] = Field(
-        None, description="AI SDK client-side metadata"
-    )
-    message_metadata: Optional[Dict[str, Any]] = Field(
+    metadata: dict[str, Any] | None = Field(None, description="AI SDK client-side metadata")
+    message_metadata: dict[str, Any] | None = Field(
         None,
         alias="messageMetadata",
         description=(
-            "Backend metadata: RAG citations, images, canvas artifacts, "
-            "suggested questions, etc."
+            "Backend metadata: RAG citations, images, canvas artifacts, suggested questions, etc."
         ),
     )
-    created_at: Optional[str] = Field(
+    created_at: str | None = Field(
         None, alias="createdAt", description="ISO-8601 creation timestamp"
     )
 
@@ -103,13 +99,13 @@ class AISDKUIMessage(BaseModel):
 class AISDKMessagesData(BaseModel):
     """Paginated AI SDK messages payload (returned by the messages listing endpoint)."""
 
-    messages: List[AISDKUIMessage] = Field(
+    messages: list[AISDKUIMessage] = Field(
         ..., description="Messages in Vercel AI SDK UIMessage format"
     )
     total: int = Field(..., description="Total number of messages in the conversation")
 
 
-def _extract_user_text(messages: List[Dict[str, Any]]) -> str:
+def _extract_user_text(messages: list[dict[str, Any]]) -> str:
     for msg in reversed(messages or []):
         role = msg.get("role")
         if role != "user":
@@ -124,7 +120,7 @@ def _extract_user_text(messages: List[Dict[str, Any]]) -> str:
         if not isinstance(parts, list) and isinstance(content, list):
             parts = content
         if isinstance(parts, list):
-            texts: List[str] = []
+            texts: list[str] = []
             for part in parts:
                 if not isinstance(part, dict):
                     continue
@@ -147,7 +143,7 @@ def _extract_user_text(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
-def _extract_data_from_candidate(value: Any) -> Optional[str]:
+def _extract_data_from_candidate(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
 
@@ -162,7 +158,7 @@ def _extract_data_from_candidate(value: Any) -> Optional[str]:
     return payload
 
 
-def _extract_user_attachments(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+def _extract_user_attachments(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
     """
     Extract image attachments from the most recent user message in AI SDK payload.
     Supports common UI payload variants:
@@ -174,7 +170,7 @@ def _extract_user_attachments(messages: List[Dict[str, Any]]) -> List[Dict[str, 
         if msg.get("role") != "user":
             continue
 
-        candidates: List[Any] = []
+        candidates: list[Any] = []
 
         # Parts-based message formats
         parts = msg.get("parts")
@@ -190,7 +186,7 @@ def _extract_user_attachments(messages: List[Dict[str, Any]]) -> List[Dict[str, 
             if isinstance(value, list):
                 candidates.extend(value)
 
-        attachments: List[Dict[str, str]] = []
+        attachments: list[dict[str, str]] = []
         seen: set[tuple[str, str]] = set()
 
         for item in candidates:
@@ -213,8 +209,8 @@ def _extract_user_attachments(messages: List[Dict[str, Any]]) -> List[Dict[str, 
             name = item.get("name") or item.get("filename") or "attachment"
             name = str(name)
 
-            raw_data: Optional[str] = None
-            data_candidates: List[Any] = [
+            raw_data: str | None = None
+            data_candidates: list[Any] = [
                 item.get("data"),
                 item.get("base64"),
                 item.get("url"),
@@ -224,9 +220,7 @@ def _extract_user_attachments(messages: List[Dict[str, Any]]) -> List[Dict[str, 
             for candidate in data_candidates:
                 if isinstance(candidate, dict):
                     candidate = (
-                        candidate.get("data")
-                        or candidate.get("base64")
-                        or candidate.get("url")
+                        candidate.get("data") or candidate.get("base64") or candidate.get("url")
                     )
                 extracted = _extract_data_from_candidate(candidate)
                 if extracted:
@@ -254,7 +248,7 @@ def _extract_user_attachments(messages: List[Dict[str, Any]]) -> List[Dict[str, 
     return []
 
 
-def _extract_mime_from_data_url(value: str) -> Optional[str]:
+def _extract_mime_from_data_url(value: str) -> str | None:
     if not isinstance(value, str):
         return None
 
@@ -267,7 +261,7 @@ def _extract_mime_from_data_url(value: str) -> Optional[str]:
     return mime if "/" in mime else None
 
 
-def _normalize_image_item_to_file_part(item: Any) -> Optional[Dict[str, str]]:
+def _normalize_image_item_to_file_part(item: Any) -> dict[str, str] | None:
     if not isinstance(item, dict):
         return None
 
@@ -280,7 +274,7 @@ def _normalize_image_item_to_file_part(item: Any) -> Optional[Dict[str, str]]:
     )
     mime = str(mime).strip() if mime else "image/png"
 
-    candidate_values: List[Any] = [
+    candidate_values: list[Any] = [
         item.get("url"),
         item.get("data"),
         item.get("base64"),
@@ -290,9 +284,7 @@ def _normalize_image_item_to_file_part(item: Any) -> Optional[Dict[str, str]]:
 
     for candidate in candidate_values:
         if isinstance(candidate, dict):
-            candidate = (
-                candidate.get("url") or candidate.get("data") or candidate.get("base64")
-            )
+            candidate = candidate.get("url") or candidate.get("data") or candidate.get("base64")
         if not isinstance(candidate, str):
             continue
 
@@ -323,8 +315,8 @@ def _normalize_image_item_to_file_part(item: Any) -> Optional[Dict[str, str]]:
 
 
 def _extract_image_file_parts_from_metadata(
-    metadata: Optional[Dict[str, Any]],
-) -> List[Dict[str, str]]:
+    metadata: dict[str, Any] | None,
+) -> list[dict[str, str]]:
     if not isinstance(metadata, dict):
         return []
 
@@ -332,7 +324,7 @@ def _extract_image_file_parts_from_metadata(
     if not isinstance(images, list):
         return []
 
-    file_parts: List[Dict[str, str]] = []
+    file_parts: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
 
     for item in images:
@@ -350,8 +342,8 @@ def _extract_image_file_parts_from_metadata(
 
 
 def _extract_image_file_parts_from_message(
-    message: Dict[str, Any],
-) -> List[Dict[str, str]]:
+    message: dict[str, Any],
+) -> list[dict[str, str]]:
     if not isinstance(message, dict):
         return []
 
@@ -365,7 +357,7 @@ def _extract_image_file_parts_from_message(
     return _extract_image_file_parts_from_metadata(metadata)
 
 
-def _attach_image_parts_to_message(message: Dict[str, Any]) -> Dict[str, Any]:
+def _attach_image_parts_to_message(message: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(message, dict):
         return message
 
@@ -383,7 +375,7 @@ def _attach_image_parts_to_message(message: Dict[str, Any]) -> Dict[str, Any]:
         return payload
 
     existing_parts = payload.get("parts")
-    parts: List[Dict[str, Any]] = (
+    parts: list[dict[str, Any]] = (
         [p for p in existing_parts if isinstance(p, dict)]
         if isinstance(existing_parts, list)
         else []
@@ -395,9 +387,7 @@ def _attach_image_parts_to_message(message: Dict[str, Any]) -> Dict[str, Any]:
             parts.append({"type": "text", "text": content})
 
     existing_urls = {
-        p.get("url")
-        for p in parts
-        if p.get("type") == "file" and isinstance(p.get("url"), str)
+        p.get("url") for p in parts if p.get("type") == "file" and isinstance(p.get("url"), str)
     }
 
     for file_part in image_parts:
@@ -417,7 +407,7 @@ def _attach_image_parts_to_message(message: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def _sse(data: Dict[str, Any]) -> str:
+def _sse(data: dict[str, Any]) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
@@ -477,9 +467,7 @@ def _coerce_json_object(value: Any) -> Any:
     # Try to parse strings as JSON if they look like JSON
     if isinstance(value, str):
         s = value.strip()
-        if (s.startswith("{") and s.endswith("}")) or (
-            s.startswith("[") and s.endswith("]")
-        ):
+        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
             try:
                 # Parse the JSON string to return the actual object
                 # This prevents double-encoding and escaped newlines
@@ -503,16 +491,14 @@ class StreamState:
         self.reasoning_started = False
         self.any_text_delta = False
         self.tool_seq = 0
-        self.pending_tool_call_ids: List[str] = []
+        self.pending_tool_call_ids: list[str] = []
 
 
 class EventHandler(ABC):
     """Base class for event handlers."""
 
     @abstractmethod
-    async def handle(
-        self, event: Dict[str, Any], state: StreamState
-    ) -> AsyncGenerator[str, None]:
+    async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
         """Handle an event and yield SSE messages."""
         pass
 
@@ -520,9 +506,7 @@ class EventHandler(ABC):
 class TokenEventHandler(EventHandler):
     """Handles token streaming events."""
 
-    async def handle(
-        self, event: Dict[str, Any], state: StreamState
-    ) -> AsyncGenerator[str, None]:
+    async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
         delta = event.get("content") or ""
         if delta:
             state.any_text_delta = True
@@ -532,9 +516,7 @@ class TokenEventHandler(EventHandler):
 class ThinkingEventHandler(EventHandler):
     """Handles thinking/reasoning events."""
 
-    async def handle(
-        self, event: Dict[str, Any], state: StreamState
-    ) -> AsyncGenerator[str, None]:
+    async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
         delta = event.get("content") or ""
         if not delta:
             return
@@ -543,17 +525,13 @@ class ThinkingEventHandler(EventHandler):
             state.reasoning_started = True
             yield _sse({"type": "reasoning-start", "id": state.reasoning_id})
 
-        yield _sse(
-            {"type": "reasoning-delta", "id": state.reasoning_id, "delta": delta}
-        )
+        yield _sse({"type": "reasoning-delta", "id": state.reasoning_id, "delta": delta})
 
 
 class AgentSelectedEventHandler(EventHandler):
     """Handles agent selection events."""
 
-    async def handle(
-        self, event: Dict[str, Any], state: StreamState
-    ) -> AsyncGenerator[str, None]:
+    async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
         agent = event.get("agent")
         yield _sse(
             {
@@ -567,9 +545,7 @@ class AgentSelectedEventHandler(EventHandler):
 class UserMessageCreatedEventHandler(EventHandler):
     """Handles user message creation events."""
 
-    async def handle(
-        self, event: Dict[str, Any], state: StreamState
-    ) -> AsyncGenerator[str, None]:
+    async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
         yield _sse(
             {
                 "type": "data-user-message",
@@ -582,25 +558,19 @@ class UserMessageCreatedEventHandler(EventHandler):
 class ToolEventHandler(EventHandler):
     """Handles tool execution events."""
 
-    async def handle(
-        self, event: Dict[str, Any], state: StreamState
-    ) -> AsyncGenerator[str, None]:
+    async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
         tool_name = event.get("name") or "unknown"
         status = event.get("status")
         tool_call_id = self._get_tool_call_id(event, status, state)
 
         if status == "start":
-            async for msg in self._handle_tool_start(
-                event, tool_call_id, tool_name, state
-            ):
+            async for msg in self._handle_tool_start(event, tool_call_id, tool_name, state):
                 yield msg
         elif status == "end":
             async for msg in self._handle_tool_end(event, tool_call_id, state):
                 yield msg
 
-    def _get_tool_call_id(
-        self, event: Dict[str, Any], status: str, state: StreamState
-    ) -> str:
+    def _get_tool_call_id(self, event: dict[str, Any], status: str, state: StreamState) -> str:
         """Get or generate tool call ID."""
         tool_call_id = event.get("tool_call_id")
         if tool_call_id:
@@ -614,7 +584,7 @@ class ToolEventHandler(EventHandler):
 
     async def _handle_tool_start(
         self,
-        event: Dict[str, Any],
+        event: dict[str, Any],
         tool_call_id: str,
         tool_name: str,
         state: StreamState,
@@ -640,7 +610,7 @@ class ToolEventHandler(EventHandler):
         )
 
     async def _handle_tool_end(
-        self, event: Dict[str, Any], tool_call_id: str, state: StreamState
+        self, event: dict[str, Any], tool_call_id: str, state: StreamState
     ) -> AsyncGenerator[str, None]:
         """Handle tool end event."""
         if tool_call_id in state.pending_tool_call_ids:
@@ -662,9 +632,7 @@ class ToolEventHandler(EventHandler):
 class InterruptEventHandler(EventHandler):
     """Handles interrupt events."""
 
-    async def handle(
-        self, event: Dict[str, Any], state: StreamState
-    ) -> AsyncGenerator[str, None]:
+    async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
         interrupt_message = event.get("message")
         if isinstance(interrupt_message, str) and interrupt_message.strip():
             yield _sse(
@@ -701,9 +669,7 @@ class InterruptEventHandler(EventHandler):
 class ErrorEventHandler(EventHandler):
     """Handles error events."""
 
-    async def handle(
-        self, event: Dict[str, Any], state: StreamState
-    ) -> AsyncGenerator[str, None]:
+    async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
         yield _sse({"type": "error", "errorText": event.get("error") or ""})
 
         if state.text_started:
@@ -728,9 +694,7 @@ class ErrorEventHandler(EventHandler):
 class CompleteEventHandler(EventHandler):
     """Handles completion events."""
 
-    async def handle(
-        self, event: Dict[str, Any], state: StreamState
-    ) -> AsyncGenerator[str, None]:
+    async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
         message = event.get("message") or {}
         if isinstance(message, dict):
             message = _attach_image_parts_to_message(message)
@@ -780,9 +744,7 @@ class CompleteEventHandler(EventHandler):
 class ContinuationEventHandler(EventHandler):
     """Handles auto-continue round marker events."""
 
-    async def handle(
-        self, event: Dict[str, Any], state: StreamState
-    ) -> AsyncGenerator[str, None]:
+    async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
         yield _sse(
             {
                 "type": "data-continuation",
@@ -799,9 +761,7 @@ class ContinuationEventHandler(EventHandler):
 class NodeCompleteEventHandler(EventHandler):
     """Handles node completion events."""
 
-    async def handle(
-        self, event: Dict[str, Any], state: StreamState
-    ) -> AsyncGenerator[str, None]:
+    async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
         yield _sse(
             {
                 "type": "data-node-complete",
@@ -830,13 +790,13 @@ class EventHandlerFactory:
     }
 
     @classmethod
-    def get_handler(cls, event_type: str) -> Optional[EventHandler]:
+    def get_handler(cls, event_type: str) -> EventHandler | None:
         """Get handler for the given event type."""
         return cls._handlers.get(event_type)
 
 
 def _build_ui_message_stream_response(
-    event_source_factory: Callable[[], AsyncGenerator[Dict[str, Any], None]],
+    event_source_factory: Callable[[], AsyncGenerator[dict[str, Any], None]],
     state: StreamState,
 ) -> StreamingResponse:
     async def event_generator():
@@ -909,12 +869,8 @@ async def create_conversation_ai_sdk(
     current_user_id: UUID,
 ) -> ApiResponse[ConversationRead]:
     """Create a new conversation for AI SDK client."""
-    result = conversation_service.create_conversation(
-        conversation_data, current_user_id
-    )
-    return ApiResponse(
-        success=True, message="Conversation created successfully", data=result
-    )
+    result = conversation_service.create_conversation(conversation_data, current_user_id)
+    return ApiResponse(success=True, message="Conversation created successfully", data=result)
 
 
 @router.get(
@@ -952,8 +908,7 @@ async def get_conversations_ai_sdk(
     response_model=ApiResponse[ConversationRead],
     summary="Get conversation (AI SDK)",
     description=(
-        "Get a conversation by ID. Functionally identical to "
-        "`GET /conversations/{conversationId}`."
+        "Get a conversation by ID. Functionally identical to `GET /conversations/{conversationId}`."
     ),
 )
 @AppAutoInjector.auto_inject()
@@ -964,9 +919,7 @@ async def get_conversation_ai_sdk(
 ) -> ApiResponse[ConversationRead]:
     """Get conversation by ID for AI SDK client."""
     result = conversation_service.get_by_id_for_user(conversation_id, current_user_id)
-    return ApiResponse(
-        success=True, message="Conversation retrieved successfully", data=result
-    )
+    return ApiResponse(success=True, message="Conversation retrieved successfully", data=result)
 
 
 @router.patch(
@@ -990,9 +943,7 @@ async def update_conversation_ai_sdk(
     result = conversation_service.update_conversation(
         conversation_id, current_user_id, conversation_data
     )
-    return ApiResponse(
-        success=True, message="Conversation updated successfully", data=result
-    )
+    return ApiResponse(success=True, message="Conversation updated successfully", data=result)
 
 
 @router.delete(
@@ -1000,8 +951,7 @@ async def update_conversation_ai_sdk(
     response_model=ApiResponse[Any],
     summary="Delete conversation (AI SDK)",
     description=(
-        "Delete a conversation. Functionally identical to "
-        "`DELETE /conversations/{conversationId}`."
+        "Delete a conversation. Functionally identical to `DELETE /conversations/{conversationId}`."
     ),
 )
 @AppAutoInjector.auto_inject()
@@ -1042,10 +992,10 @@ async def get_conversation_messages_ai_sdk(
         include_feedback=False,
     )
 
-    messages: List[AISDKUIMessage] = []
+    messages: list[AISDKUIMessage] = []
     for msg in paginated_result.items:
         role = "user" if msg.sender == 1 else "assistant"
-        message_payload: Dict[str, Any] = {
+        message_payload: dict[str, Any] = {
             "id": str(msg.id),
             "role": role,
             "content": msg.content,

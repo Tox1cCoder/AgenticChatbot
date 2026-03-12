@@ -3,10 +3,9 @@ User service interface definition
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
 from uuid import UUID
 
-from app.schemas.user import UserCreate, UserUpdate, UserRead, UserInDB
+from app.schemas.user import UserCreate, UserInDB, UserRead, UserUpdate
 
 
 class IUserService(ABC):
@@ -23,22 +22,22 @@ class IUserService(ABC):
         pass
 
     @abstractmethod
-    def get_by_email(self, email: str) -> Optional[UserRead]:
+    def get_by_email(self, email: str) -> UserRead | None:
         """Get user by email"""
         pass
 
     @abstractmethod
-    def get_by_email_with_password(self, email: str) -> Optional[UserInDB]:
+    def get_by_email_with_password(self, email: str) -> UserInDB | None:
         """Get user by email with password hash for authentication"""
         pass
 
     @abstractmethod
-    def get_by_username(self, username: str) -> Optional[UserRead]:
+    def get_by_username(self, username: str) -> UserRead | None:
         """Get user by username"""
         pass
 
     @abstractmethod
-    def get_all(self, skip: int = 0, limit: int = 100) -> List[UserRead]:
+    def get_all(self, skip: int = 0, limit: int = 100) -> list[UserRead]:
         """Get all users with pagination"""
         pass
 

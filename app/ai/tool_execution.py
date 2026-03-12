@@ -3,19 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
-from anyio import ClosedResourceError, BrokenResourceError
+from anyio import BrokenResourceError, ClosedResourceError
 
 from ..core.config import settings
 from .tool_search_tool import create_tool_search_tool
-
 from .utils import extract_content_from_result, normalize_tool_call
 
 logger = logging.getLogger(__name__)
 
 
-def extract_images_from_tool_result(result_text: str) -> List[Dict[str, str]]:
+def extract_images_from_tool_result(result_text: str) -> list[dict[str, str]]:
     if not result_text:
         return []
 
@@ -31,7 +30,7 @@ def extract_images_from_tool_result(result_text: str) -> List[Dict[str, str]]:
     if not isinstance(images, list):
         return []
 
-    extracted: List[Dict[str, str]] = []
+    extracted: list[dict[str, str]] = []
     for image in images:
         if not isinstance(image, dict):
             continue
@@ -49,15 +48,15 @@ def extract_images_from_tool_result(result_text: str) -> List[Dict[str, str]]:
 
 def build_tool_artifact(
     *,
-    tool_call_id: Optional[str],
+    tool_call_id: str | None,
     tool_name: str,
     tool_args: Any,
-    output_text: Optional[str],
-    error: Optional[str],
-    status: Optional[str] = None,
+    output_text: str | None,
+    error: str | None,
+    status: str | None = None,
     max_output_chars: int = 1000,
-) -> Dict[str, Any]:
-    artifact: Dict[str, Any] = {
+) -> dict[str, Any]:
+    artifact: dict[str, Any] = {
         "tool_call_id": tool_call_id,
         "tool": tool_name,
         "args": tool_args,
@@ -68,9 +67,7 @@ def build_tool_artifact(
 
     if output_text is not None:
         artifact["output"] = (
-            output_text[:max_output_chars]
-            if len(output_text) > max_output_chars
-            else output_text
+            output_text[:max_output_chars] if len(output_text) > max_output_chars else output_text
         )
 
     return artifact
@@ -78,11 +75,11 @@ def build_tool_artifact(
 
 def build_rejected_tool_artifacts(
     *,
-    tool_calls: List[Any],
-    rejected_feedback: Dict[str, str],
+    tool_calls: list[Any],
+    rejected_feedback: dict[str, str],
     max_output_chars: int = 1000,
-) -> List[Dict[str, Any]]:
-    artifacts: List[Dict[str, Any]] = []
+) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
 
     for raw_tool_call in tool_calls:
         tool_call = normalize_tool_call(raw_tool_call)
@@ -107,8 +104,8 @@ def build_rejected_tool_artifacts(
 
 async def ensure_agent_tool_map(
     agent: Any,
-    conversation_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    conversation_id: str | None = None,
+) -> dict[str, Any]:
     """
     Build a tool map for executing tool calls.
 
@@ -174,8 +171,8 @@ def _mark_tool_used_if_deferred(tool_name: str) -> None:
     if not settings.mcp_tool_search_enabled:
         return
 
-    from .tool_context import get_tool_context
     from .deferred_tool_state import get_deferred_tool_state
+    from .tool_context import get_tool_context
 
     ctx = get_tool_context()
     if not ctx.conversation_id:
@@ -211,14 +208,14 @@ async def invoke_tool(tool: Any, tool_args: Any) -> Any:
 
 async def execute_tool_calls(
     *,
-    tool_calls: List[Any],
-    tool_map: Dict[str, Any],
+    tool_calls: list[Any],
+    tool_map: dict[str, Any],
     capture_images: bool = True,
     artifact_max_output_chars: int = 1000,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, str]]]:
-    outputs: List[Dict[str, Any]] = []
-    artifacts: List[Dict[str, Any]] = []
-    images: List[Dict[str, str]] = []
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
+    outputs: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]] = []
+    images: list[dict[str, str]] = []
 
     for raw_tool_call in tool_calls:
         tool_call = normalize_tool_call(raw_tool_call)
@@ -257,9 +254,7 @@ async def execute_tool_calls(
                 )
             else:
                 error_msg = f"Error: Tool {tool_name} not found"
-            outputs.append(
-                {"tool_call_id": tool_id, "name": tool_name, "content": error_msg}
-            )
+            outputs.append({"tool_call_id": tool_id, "name": tool_name, "content": error_msg})
             artifacts.append(
                 build_tool_artifact(
                     tool_call_id=tool_id,
@@ -277,9 +272,7 @@ async def execute_tool_calls(
             result = extract_content_from_result(result)
             result_text = str(result)
 
-            outputs.append(
-                {"tool_call_id": tool_id, "name": tool_name, "content": result_text}
-            )
+            outputs.append({"tool_call_id": tool_id, "name": tool_name, "content": result_text})
             artifacts.append(
                 build_tool_artifact(
                     tool_call_id=tool_id,
@@ -348,9 +341,7 @@ async def execute_tool_calls(
                     f"Error: MCP session lost for tool {tool_name}. "
                     f"Reconnection failed. Please try again."
                 )
-                outputs.append(
-                    {"tool_call_id": tool_id, "name": tool_name, "content": error_msg}
-                )
+                outputs.append({"tool_call_id": tool_id, "name": tool_name, "content": error_msg})
                 artifacts.append(
                     build_tool_artifact(
                         tool_call_id=tool_id,
@@ -363,9 +354,7 @@ async def execute_tool_calls(
                 )
         except Exception as exc:
             error_msg = f"Error: {exc}"
-            outputs.append(
-                {"tool_call_id": tool_id, "name": tool_name, "content": error_msg}
-            )
+            outputs.append({"tool_call_id": tool_id, "name": tool_name, "content": error_msg})
             artifacts.append(
                 build_tool_artifact(
                     tool_call_id=tool_id,

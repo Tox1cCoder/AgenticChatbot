@@ -6,18 +6,18 @@ Create Date: 2025-11-26 10:00:00.000000
 
 """
 
-from typing import Sequence, Union
-
-from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSONB
 import uuid
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 # revision identifiers, used by Alembic.
 revision: str = "a3b4c5d6e7f8"
-down_revision: Union[str, None] = "a2b3c4d5e6f7"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "a2b3c4d5e6f7"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -71,9 +71,7 @@ def upgrade() -> None:
         sa.Column("modified_args", JSONB, nullable=True),
         sa.Column(
             "decision",
-            sa.Enum(
-                "accept", "edit", "reject", name="decision_type", create_type=False
-            ),
+            sa.Enum("accept", "edit", "reject", name="decision_type", create_type=False),
             nullable=False,
         ),
         sa.Column(
@@ -87,20 +85,14 @@ def upgrade() -> None:
             ["conversations.id"],
             name="fk_tool_approvals_conversation_id",
         ),
-        sa.ForeignKeyConstraint(
-            ["user_id"], ["users.id"], name="fk_tool_approvals_user_id"
-        ),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"], name="fk_tool_approvals_user_id"),
     )
 
     # Create indexes for efficient querying
     op.create_index("ix_tool_approvals_id", "tool_approvals", ["id"])
-    op.create_index(
-        "ix_tool_approvals_conversation_id", "tool_approvals", ["conversation_id"]
-    )
+    op.create_index("ix_tool_approvals_conversation_id", "tool_approvals", ["conversation_id"])
     op.create_index("ix_tool_approvals_user_id", "tool_approvals", ["user_id"])
-    op.create_index(
-        "ix_tool_approvals_interrupt_id", "tool_approvals", ["interrupt_id"]
-    )
+    op.create_index("ix_tool_approvals_interrupt_id", "tool_approvals", ["interrupt_id"])
     op.create_index("ix_tool_approvals_decided_at", "tool_approvals", ["decided_at"])
 
 

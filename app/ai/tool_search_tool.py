@@ -5,19 +5,19 @@ Tool Search Tool - Claude-style deferred MCP tool discovery.
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from ..core.config import settings
+from .deferred_tool_state import get_deferred_tool_state
 from .mcp_integration import get_global_mcp_manager
 from .mcp_registry import get_mcp_tools_generation
 from .mcp_tool_catalog import (
     ToolReference,
     get_tool_catalog,
 )
-from .deferred_tool_state import get_deferred_tool_state
 from .tool_context import get_tool_context
 
 logger = logging.getLogger(__name__)
@@ -26,21 +26,21 @@ logger = logging.getLogger(__name__)
 class ToolSearchInput(BaseModel):
     """Input schema for the tool_search tool."""
 
-    query: Optional[str] = Field(
+    query: str | None = Field(
         default=None,
         description=(
             "Natural language description of what you need the tool to do. "
             "Leave empty to list all available tools."
         ),
     )
-    top_k: Optional[int] = Field(
+    top_k: int | None = Field(
         default=None,
         description=(
             "Maximum number of tools to return. Defaults to 5. "
             "Use a larger value to see more options."
         ),
     )
-    server_name: Optional[str] = Field(
+    server_name: str | None = Field(
         default=None,
         description=(
             "Filter results to a specific MCP server. "
@@ -63,11 +63,11 @@ class ToolSearchResult(BaseModel):
 class ToolSearchOutput(BaseModel):
     """Output schema for the tool_search tool."""
 
-    query: Optional[str] = Field(description="The search query used")
+    query: str | None = Field(description="The search query used")
     top_k: int = Field(description="The top_k value used")
-    server_filter: Optional[str] = Field(description="Server filter applied, if any")
-    results: List[ToolSearchResult] = Field(description="List of matching tools")
-    autoloaded: List[Dict[str, str]] = Field(
+    server_filter: str | None = Field(description="Server filter applied, if any")
+    results: list[ToolSearchResult] = Field(description="List of matching tools")
+    autoloaded: list[dict[str, str]] = Field(
         description="Tools that were automatically loaded for immediate use"
     )
     generation: int = Field(description="MCP tools generation (for cache tracking)")
@@ -76,17 +76,17 @@ class ToolSearchOutput(BaseModel):
     total_available: int = Field(
         description="Total tools available (optionally filtered by server)"
     )
-    unavailable_servers: List[str] = Field(
+    unavailable_servers: list[str] = Field(
         default_factory=list, description="Servers that could not be queried (errors)"
     )
 
 
 async def _execute_tool_search(
-    query: Optional[str] = None,
-    top_k: Optional[int] = None,
-    server_name: Optional[str] = None,
-    allowlist: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    query: str | None = None,
+    top_k: int | None = None,
+    server_name: str | None = None,
+    allowlist: list[str] | None = None,
+) -> dict[str, Any]:
     """
     Core implementation of tool search logic.
 
@@ -126,7 +126,7 @@ async def _execute_tool_search(
         )
 
     # Get the MCP manager and catalog
-    unavailable_servers: List[str] = []
+    unavailable_servers: list[str] = []
     try:
         mcp_manager = await get_global_mcp_manager()
         catalog = await get_tool_catalog(mcp_manager)
@@ -163,15 +163,11 @@ async def _execute_tool_search(
     total_available = len(catalog.list_all(allowlist=allowlist))
     if server_name:
         total_available = len(
-            [
-                t
-                for t in catalog.list_all(allowlist=allowlist)
-                if t.server_name == server_name
-            ]
+            [t for t in catalog.list_all(allowlist=allowlist) if t.server_name == server_name]
         )
 
     # Determine which tools to autoload
-    autoload_candidates: List[ToolReference] = []
+    autoload_candidates: list[ToolReference] = []
     for desc in results[:autoload_top_k]:
         # Skip autoloading ambiguous tools unless server_name is specified
         if catalog.is_ambiguous(desc.tool_name) and not server_name:
@@ -185,7 +181,7 @@ async def _execute_tool_search(
         )
 
     # Autoload tools into deferred state
-    autoloaded: List[Dict[str, str]] = []
+    autoloaded: list[dict[str, str]] = []
     if autoload_candidates and conversation_id:
         state = get_deferred_tool_state()
         loaded_refs = state.autoload(
@@ -194,8 +190,7 @@ async def _execute_tool_search(
             references=autoload_candidates,
         )
         autoloaded = [
-            {"tool_name": ref.tool_name, "server_name": ref.server_name}
-            for ref in loaded_refs
+            {"tool_name": ref.tool_name, "server_name": ref.server_name} for ref in loaded_refs
         ]
 
     # Format results
@@ -231,9 +226,9 @@ async def _execute_tool_search(
 
 @tool(args_schema=ToolSearchInput)
 async def tool_search(
-    query: Optional[str] = None,
-    top_k: Optional[int] = None,
-    server_name: Optional[str] = None,
+    query: str | None = None,
+    top_k: int | None = None,
+    server_name: str | None = None,
 ) -> str:
     """
     Search for available tools to accomplish a task.
@@ -264,7 +259,7 @@ async def tool_search(
     return json.dumps(result, indent=2)
 
 
-def create_tool_search_tool(allowlist: Optional[List[str]] = None):
+def create_tool_search_tool(allowlist: list[str] | None = None):
     """
     Create a tool_search tool with a specific allowlist baked in.
 
@@ -280,9 +275,9 @@ def create_tool_search_tool(allowlist: Optional[List[str]] = None):
 
     @tool("tool_search", args_schema=ToolSearchInput)
     async def tool_search_impl(
-        query: Optional[str] = None,
-        top_k: Optional[int] = None,
-        server_name: Optional[str] = None,
+        query: str | None = None,
+        top_k: int | None = None,
+        server_name: str | None = None,
     ) -> str:
         """
         Search for available tools to accomplish a task.

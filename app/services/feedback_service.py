@@ -1,20 +1,20 @@
 from __future__ import annotations
-from typing import List, Optional
+
 from uuid import UUID
 
 from app.core.exceptions import (
-    ResourceNotFoundException,
     AuthorizationException,
+    ResourceNotFoundException,
 )
+from app.factories.feedback_factory import FeedbackFactory
+from app.interfaces.feedback_service_interface import IFeedbackService
 from app.repositories.feedback import FeedbackRepository
 from app.repositories.message import MessageRepository
 from app.repositories.user import UserRepository
-from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
-from app.factories.feedback_factory import FeedbackFactory
-from app.utils.validation.user_validation import UserValidationUtils
-from app.utils.validation.message_validation import MessageValidationUtils
+from app.schemas.feedback import FeedbackCreate, FeedbackRead, FeedbackUpdate
 from app.utils.validation.feedback_validation import FeedbackValidationUtils
-from app.interfaces.feedback_service_interface import IFeedbackService
+from app.utils.validation.message_validation import MessageValidationUtils
+from app.utils.validation.user_validation import UserValidationUtils
 
 
 class FeedbackService(IFeedbackService):
@@ -39,15 +39,11 @@ class FeedbackService(IFeedbackService):
         self.message_validation_utils = message_validation_utils
         self.feedback_validation_utils = feedback_validation_utils
 
-    def create_feedback(
-        self, feedback_create_data: FeedbackCreate, user_id: UUID
-    ) -> FeedbackRead:
+    def create_feedback(self, feedback_create_data: FeedbackCreate, user_id: UUID) -> FeedbackRead:
         """Create new feedback with validation"""
         self.user_validation_utils.validate_user_exists(user_id)
 
-        self.message_validation_utils.validate_message_exists(
-            feedback_create_data.message_id
-        )
+        self.message_validation_utils.validate_message_exists(feedback_create_data.message_id)
 
         existing_feedback_entity = self.repository.get_by_message_id(
             feedback_create_data.message_id
@@ -58,14 +54,10 @@ class FeedbackService(IFeedbackService):
             update_data = FeedbackUpdate(
                 rating=feedback_create_data.rating, comment=feedback_create_data.comment
             )
-            updated_feedback = self.repository.update(
-                existing_feedback_entity.id, update_data
-            )
+            updated_feedback = self.repository.update(existing_feedback_entity.id, update_data)
             return FeedbackRead.model_validate(updated_feedback)
 
-        feedback_entity = FeedbackFactory.create_from_schema(
-            feedback_create_data, user_id
-        )
+        feedback_entity = FeedbackFactory.create_from_schema(feedback_create_data, user_id)
         created_feedback = self.repository.create(feedback_entity)
         return FeedbackRead.model_validate(created_feedback)
 
@@ -78,7 +70,7 @@ class FeedbackService(IFeedbackService):
             )
         return FeedbackRead.model_validate(feedback_entity)
 
-    def get_by_message(self, message_id: UUID) -> Optional[FeedbackRead]:
+    def get_by_message(self, message_id: UUID) -> FeedbackRead | None:
         """Get feedback for a message (1-1 relationship per ERD)"""
         # Validate message exists
         self.message_validation_utils.validate_message_exists(message_id)
@@ -88,7 +80,7 @@ class FeedbackService(IFeedbackService):
             return FeedbackRead.model_validate(feedback_entity)
         return None
 
-    def get_by_user(self, user_id: UUID) -> List[FeedbackRead]:
+    def get_by_user(self, user_id: UUID) -> list[FeedbackRead]:
         """Get all feedback by a user (no pagination needed for user's own feedback)"""
         # Validate user exists
         self.user_validation_utils.validate_user_exists(user_id)
@@ -96,9 +88,7 @@ class FeedbackService(IFeedbackService):
         feedback_entities = self.repository.get_by_user_id(user_id)
         return [FeedbackRead.model_validate(feedback) for feedback in feedback_entities]
 
-    def get_user_feedback_for_message(
-        self, message_id: UUID, user_id: UUID
-    ) -> Optional[FeedbackRead]:
+    def get_user_feedback_for_message(self, message_id: UUID, user_id: UUID) -> FeedbackRead | None:
         """Get specific user's feedback for a message"""
         # Validate message exists
         self.message_validation_utils.validate_message_exists(message_id)
@@ -133,9 +123,7 @@ class FeedbackService(IFeedbackService):
             )
 
         # Validate user owns the feedback
-        if not self.feedback_validation_utils.validate_user_owns_feedback(
-            user_id, feedback_id
-        ):
+        if not self.feedback_validation_utils.validate_user_owns_feedback(user_id, feedback_id):
             raise AuthorizationException(
                 detail="Access denied to this feedback",
                 error_code="FEEDBACK_ACCESS_DENIED",
@@ -151,9 +139,7 @@ class FeedbackService(IFeedbackService):
                 detail="Feedback not found", error_code="FEEDBACK_NOT_FOUND"
             )
 
-        if not self.feedback_validation_utils.validate_user_owns_feedback(
-            user_id, feedback_id
-        ):
+        if not self.feedback_validation_utils.validate_user_owns_feedback(user_id, feedback_id):
             raise AuthorizationException(
                 detail="Access denied to this feedback",
                 error_code="FEEDBACK_ACCESS_DENIED",

@@ -1,15 +1,14 @@
 import logging
-from typing import Dict, List, Optional, Tuple
-from uuid import UUID
 from collections import deque
+from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from ..database.session import get_db
-from ..repositories.message import MessageCRUDStrategy
-from ..models.message import Message
-from .schemas import AgentMessage, MessageRole
 from ..core.config import settings
+from ..database.session import get_db
+from ..models.message import Message
+from ..repositories.message import MessageCRUDStrategy
+from .schemas import AgentMessage, MessageRole
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +49,8 @@ class ConversationMemory:
             logger.error(f"Failed to initialize memory: {e}")
             self._initialized = True
 
-    def _load_messages_from_db(self, db: Session) -> Tuple[List[AgentMessage], int]:
-        collected: List[AgentMessage] = []
+    def _load_messages_from_db(self, db: Session) -> tuple[list[AgentMessage], int]:
+        collected: list[AgentMessage] = []
         total_available = 0
         page = 1
         limit = self.batch_size
@@ -98,10 +97,10 @@ class ConversationMemory:
 
     def get_recent_messages(
         self,
-        limit: Optional[int] = None,
+        limit: int | None = None,
         include_system: bool = False,
         exclude_last: int = 0,
-    ) -> List[AgentMessage]:
+    ) -> list[AgentMessage]:
         """
         Get recent messages from memory.
 
@@ -126,7 +125,7 @@ class ConversationMemory:
     def clear(self):
         self._messages.clear()
 
-    def _db_to_agent_message(self, db_message: Message) -> Optional[AgentMessage]:
+    def _db_to_agent_message(self, db_message: Message) -> AgentMessage | None:
         try:
             sender_to_role = {1: MessageRole.USER, 2: MessageRole.ASSISTANT}
             role = sender_to_role.get(db_message.sender, MessageRole.ASSISTANT)
@@ -137,9 +136,7 @@ class ConversationMemory:
                 metadata={
                     "message_id": str(db_message.id),
                     "created_at": (
-                        db_message.created_at.isoformat()
-                        if db_message.created_at
-                        else None
+                        db_message.created_at.isoformat() if db_message.created_at else None
                     ),
                 },
             )
@@ -156,7 +153,7 @@ class MemoryManager:
     ):
         self.batch_size = max(1, batch_size)
         self.max_messages = max(0, max_messages)
-        self._memories: Dict[str, ConversationMemory] = {}
+        self._memories: dict[str, ConversationMemory] = {}
 
     async def get_memory(
         self, conversation_id: UUID, user_id: UUID, force_refresh: bool = False
@@ -189,7 +186,7 @@ class MemoryManager:
             del self._memories[key]
 
 
-_memory_manager: Optional[MemoryManager] = None
+_memory_manager: MemoryManager | None = None
 
 
 def get_memory_manager() -> MemoryManager:

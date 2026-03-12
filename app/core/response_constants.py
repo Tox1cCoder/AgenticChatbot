@@ -1,6 +1,6 @@
 """Centralized response messages and helper functions."""
 
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from ..ai.schemas import AgentResponse
@@ -18,7 +18,7 @@ ERROR_RESPONSE_AFTER_RESUME = "Error: No response after resuming"
 UNKNOWN_ERROR = "Unknown error"
 
 
-def _extract_metadata_message(metadata: Optional[Dict[str, Any]]) -> str:
+def _extract_metadata_message(metadata: dict[str, Any] | None) -> str:
     """Derive displayable content from message metadata when body text is empty."""
     if not isinstance(metadata, dict):
         return ""
@@ -50,7 +50,7 @@ def extract_response_content(
 ) -> str:
     """Extract content from AgentResponse with fallback."""
     if response and response.message:
-        metadata: Dict[str, Any] = {}
+        metadata: dict[str, Any] = {}
         if isinstance(getattr(response, "metadata", None), dict):
             metadata.update(response.metadata)
         if isinstance(getattr(response.message, "metadata", None), dict):
@@ -69,8 +69,8 @@ def extract_response_content(
 
 
 def normalize_message_content(
-    content: Optional[str],
-    metadata: Optional[Dict[str, Any]] = None,
+    content: str | None,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """Normalize message content without injecting placeholder text."""
     if isinstance(content, str):
@@ -87,10 +87,10 @@ def normalize_message_content(
 
 def build_bot_metadata(
     response: Optional["AgentResponse"],
-    persona: Optional[str] = None,
-) -> Dict[str, Any]:
+    persona: str | None = None,
+) -> dict[str, Any]:
     """Build standard bot response metadata from AgentResponse."""
-    metadata: Dict[str, Any] = {}
+    metadata: dict[str, Any] = {}
 
     if response and response.metadata:
         metadata = dict(response.metadata)

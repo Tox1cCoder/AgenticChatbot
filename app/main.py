@@ -1,38 +1,38 @@
-import sys
 import asyncio
-import uvicorn
 import logging
+import sys
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis import Redis
-from datetime import datetime, timezone
 
+from app.api import (
+    conversations_router,
+    feedback_router,
+    messages_router,
+    users_router,
+)
+from app.api.ai_sdk import router as ai_sdk_router
+from app.api.auth import router as auth_router
+from app.api.documents import router as documents_router
+from app.api.mcp import router as mcp_router
+from app.api.model_config import router as model_config_router
+from app.api.providers import router as providers_router
+from app.api.skills import router as skills_router
+from app.api.task_plans import router as task_plans_router
 from app.core.config import settings
 from app.core.container import (
     get_container,
     setup_auto_injection,
 )
-from app.api import (
-    users_router,
-    conversations_router,
-    messages_router,
-    feedback_router,
-)
-from app.api.documents import router as documents_router
-from app.api.mcp import router as mcp_router
-from app.api.task_plans import router as task_plans_router
-from app.api.ai_sdk import router as ai_sdk_router
-from app.api.providers import router as providers_router
-from app.api.model_config import router as model_config_router
-from app.api.skills import router as skills_router
+from app.core.events import DocumentEvent, get_event_bus
 from app.database.session import get_engine
-from app.api.auth import router as auth_router
+from app.services.document_event_listener import DocumentEventLogger
 from app.utils.exception_handler import register_exception_handlers
 from app.workers.celery_app import celery_app
-
-from app.core.events import get_event_bus, DocumentEvent
-from app.services.document_event_listener import DocumentEventLogger
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +68,7 @@ async def init_skills():
 
         registry = get_skills_registry()
         skills = registry.get_all_skills()
-        logger.info(
-            f"Loaded {len(skills)} skills ({sum(s.enabled for s in skills)} enabled)"
-        )
+        logger.info(f"Loaded {len(skills)} skills ({sum(s.enabled for s in skills)} enabled)")
     except Exception as e:
         logger.warning(f"Skills init failed (non-fatal): {e}")
 
@@ -317,9 +315,7 @@ async def health_check_all():
             "redis": redis_health,
             "qdrant": qdrant_health,
         },
-        "message": (
-            "All services healthy" if all_healthy else "One or more services unhealthy"
-        ),
+        "message": ("All services healthy" if all_healthy else "One or more services unhealthy"),
     }
 
 

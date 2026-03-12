@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import List, Optional
-
 from langchain_core.tools import tool
 
 from .schemas import TodoAction, TodoItem, WriteTodosInput
@@ -15,10 +13,10 @@ def create_write_todos_tool():
     @tool(args_schema=WriteTodosInput)
     def write_todos(
         action: TodoAction,
-        todos: Optional[List[TodoItem]] = None,
-        todo: Optional[TodoItem] = None,
-        todo_id: Optional[str] = None,
-        reason: Optional[str] = None,
+        todos: list[TodoItem] | None = None,
+        todo: TodoItem | None = None,
+        todo_id: str | None = None,
+        reason: str | None = None,
     ) -> str:
         action_value = action.value if hasattr(action, "value") else str(action)
         if action == TodoAction.SET_TODOS:

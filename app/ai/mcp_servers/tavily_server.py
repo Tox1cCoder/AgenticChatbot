@@ -1,6 +1,6 @@
+import json
 import os
 import sys
-import json
 from pathlib import Path
 
 current_dir = Path(__file__).resolve().parent
@@ -9,8 +9,8 @@ sys.path.insert(0, str(project_root))
 
 from mcp.server.fastmcp import FastMCP
 from tavily import TavilyClient
-from app.core.config import settings
 
+from app.core.config import settings
 
 mcp = FastMCP("Tavily")
 

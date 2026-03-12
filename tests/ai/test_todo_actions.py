@@ -4,15 +4,12 @@ import uuid
 
 from app.ai.todo_actions import apply_write_todos_action
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_todo(
-    description: str = "Task", status: str = "pending", order: int = 0
-) -> dict:
+def _make_todo(description: str = "Task", status: str = "pending", order: int = 0) -> dict:
     return {
         "id": str(uuid.uuid4()),
         "description": description,

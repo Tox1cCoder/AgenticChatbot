@@ -3,12 +3,15 @@ Centralized exception handler registration for FastAPI API layer.
 """
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
 from fastapi.exceptions import (
     HTTPException as FastAPIHTTPException,
+)
+from fastapi.exceptions import (
     RequestValidationError,
 )
+from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
 from app.core.exceptions import CustomHTTPException
 from app.schemas.responses.api_response import ApiResponse
 
@@ -28,9 +31,7 @@ def register_exception_handlers(app: FastAPI):
         )
 
     @app.exception_handler(FastAPIHTTPException)
-    async def fastapi_http_exception_handler(
-        request: Request, exc: FastAPIHTTPException
-    ):
+    async def fastapi_http_exception_handler(request: Request, exc: FastAPIHTTPException):
         api_response = ApiResponse(
             success=False,
             code="http_error",
@@ -64,9 +65,7 @@ def register_exception_handlers(app: FastAPI):
         )
 
     @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(
-        request: Request, exc: RequestValidationError
-    ):
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
         error_details = {}
         for error in exc.errors():
             loc = ".".join(map(str, error["loc"]))

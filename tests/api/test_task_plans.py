@@ -7,7 +7,7 @@ Tests cover:
 """
 
 import uuid
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 
 def _make_planning_status_response(lifecycle="draft"):

@@ -5,16 +5,16 @@ Handles encryption/decryption of API keys, provider validation, and model listin
 from various AI providers.
 """
 
-import logging
 import asyncio
-from typing import Optional, List, Dict, Any
+import logging
+from typing import Any
 from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from app.repositories.model_provider import ModelProviderRepository
-from app.models.model_provider import ModelProvider
 from app.core.config import settings
+from app.models.model_provider import ModelProvider
+from app.repositories.model_provider import ModelProviderRepository
 
 logger = logging.getLogger(__name__)
 
@@ -89,9 +89,7 @@ class ProviderService:
             decrypted = self.cipher.decrypt(encrypted_key.encode())
             return decrypted.decode()
         except InvalidToken:
-            logger.error(
-                "Failed to decrypt API key: Invalid encryption key or corrupted data"
-            )
+            logger.error("Failed to decrypt API key: Invalid encryption key or corrupted data")
             raise ValueError("Failed to decrypt API key: Invalid encryption")
         except Exception as e:
             logger.error(f"Failed to decrypt API key: {e}")
@@ -103,7 +101,7 @@ class ProviderService:
         provider_type: str,
         api_key: str,
         is_default: bool = False,
-        provider_metadata: Optional[Dict[str, Any]] = None,
+        provider_metadata: dict[str, Any] | None = None,
     ) -> ModelProvider:
         """
         Add or update a provider for a user.
@@ -140,14 +138,12 @@ class ProviderService:
             provider_metadata=provider_metadata,
         )
 
-        logger.info(
-            f"Added/updated {provider_type} provider for user {user_id} (id={provider.id})"
-        )
+        logger.info(f"Added/updated {provider_type} provider for user {user_id} (id={provider.id})")
         return provider
 
     def get_provider_config(
         self, user_id: UUID, provider_type: str, decrypt: bool = False
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         Get provider configuration for a user.
 
@@ -176,14 +172,12 @@ class ProviderService:
             try:
                 config["api_key"] = self._decrypt_key(provider.api_key_encrypted)
             except ValueError as e:
-                logger.error(
-                    f"Failed to decrypt API key for provider {provider.id}: {e}"
-                )
+                logger.error(f"Failed to decrypt API key for provider {provider.id}: {e}")
                 config["api_key"] = None
 
         return config
 
-    def get_decrypted_api_key(self, user_id: UUID, provider_type: str) -> Optional[str]:
+    def get_decrypted_api_key(self, user_id: UUID, provider_type: str) -> str | None:
         """
         Get decrypted API key for a provider.
 
@@ -205,7 +199,7 @@ class ProviderService:
 
     def get_all_providers(
         self, user_id: UUID, include_encrypted: bool = False
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Get all provider configurations for a user.
 
@@ -231,9 +225,7 @@ class ProviderService:
             if include_encrypted:
                 # Show only last 4 chars for verification
                 encrypted = provider.api_key_encrypted
-                config["key_preview"] = (
-                    f"...{encrypted[-4:]}" if len(encrypted) >= 4 else "***"
-                )
+                config["key_preview"] = f"...{encrypted[-4:]}" if len(encrypted) >= 4 else "***"
 
             result.append(config)
 
@@ -255,9 +247,7 @@ class ProviderService:
             logger.info(f"Deleted {provider_type} provider for user {user_id}")
         return deleted
 
-    async def validate_provider(
-        self, user_id: UUID, provider_type: str
-    ) -> Dict[str, Any]:
+    async def validate_provider(self, user_id: UUID, provider_type: str) -> dict[str, Any]:
         """
         Validate provider credentials by attempting to fetch models.
 
@@ -288,7 +278,7 @@ class ProviderService:
             logger.error(f"Provider validation failed for {provider_type}: {e}")
             return {"valid": False, "error": str(e)}
 
-    async def _fetch_openai_models(self, api_key: str) -> List[Dict[str, Any]]:
+    async def _fetch_openai_models(self, api_key: str) -> list[dict[str, Any]]:
         """
         Fetch available models from OpenAI API.
 
@@ -309,7 +299,7 @@ class ProviderService:
                 client = openai.OpenAI(api_key=api_key)
                 models_response = await asyncio.to_thread(client.models.list)
 
-            models: List[Dict[str, Any]] = []
+            models: list[dict[str, Any]] = []
             for model in getattr(models_response, "data", None) or []:
                 model_id = getattr(model, "id", None)
                 if not model_id:

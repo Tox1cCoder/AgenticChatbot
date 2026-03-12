@@ -1,5 +1,3 @@
-from typing import Optional
-
 from app.core.config import settings
 from app.utils.text_processing import estimate_tokens, truncate_text
 
@@ -271,8 +269,8 @@ Documents available + "Build a quiz from this content" -> canvas_agent"""
 
 def _select_history_for_prompt(
     conversation_history: list,
-    max_messages: Optional[int],
-    max_tokens: Optional[int],
+    max_messages: int | None,
+    max_tokens: int | None,
 ) -> list:
     if not conversation_history:
         return []
@@ -298,7 +296,7 @@ def _select_history_for_prompt(
 
 
 def build_chat_prompt(
-    user_message: str, conversation_history: list, persona: Optional[str] = None
+    user_message: str, conversation_history: list, persona: str | None = None
 ) -> str:
     """Build a chat prompt with optional persona and history."""
     parts = [CHAT_SYSTEM_PROMPT]
@@ -308,13 +306,9 @@ def build_chat_prompt(
 
     if conversation_history:
         max_tokens = (
-            settings.chat_history_max_tokens
-            if settings.chat_history_max_tokens > 0
-            else None
+            settings.chat_history_max_tokens if settings.chat_history_max_tokens > 0 else None
         )
-        selected_history = _select_history_for_prompt(
-            conversation_history, None, max_tokens
-        )
+        selected_history = _select_history_for_prompt(conversation_history, None, max_tokens)
 
         if selected_history:
             parts.append("Conversation context:")
@@ -332,9 +326,9 @@ def build_rag_prompt(
     query: str,
     retrieved_docs: list,
     conversation_history: list,
-    persona: Optional[str] = None,
+    persona: str | None = None,
     has_images: bool = False,
-    history_summary: Optional[str] = None,
+    history_summary: str | None = None,
 ) -> str:
     """Build a retrieval-augmented prompt."""
     parts = [RAG_SYSTEM_PROMPT]
@@ -441,9 +435,7 @@ def build_rag_prompt(
                         parts.append(
                             f"  - This document section contains {len(valid_captions)} image(s)"
                         )
-                        parts.append(
-                            f"  - Image descriptions: {', '.join(valid_captions)}"
-                        )
+                        parts.append(f"  - Image descriptions: {', '.join(valid_captions)}")
 
                 total_tokens += chunk_tokens
                 chunks_used += 1
@@ -455,14 +447,10 @@ def build_rag_prompt(
 
     if conversation_history:
         max_messages = (
-            settings.rag_history_max_messages
-            if settings.rag_history_max_messages > 0
-            else None
+            settings.rag_history_max_messages if settings.rag_history_max_messages > 0 else None
         )
         max_tokens = (
-            settings.rag_history_max_tokens
-            if settings.rag_history_max_tokens > 0
-            else None
+            settings.rag_history_max_tokens if settings.rag_history_max_tokens > 0 else None
         )
         selected_history = _select_history_for_prompt(
             conversation_history, max_messages, max_tokens
@@ -486,7 +474,7 @@ def build_rag_prompt(
 def build_search_prompt(
     user_message: str,
     conversation_history: list,
-    persona: Optional[str] = None,
+    persona: str | None = None,
     has_tool_results: bool = False,
 ) -> str:
     """Build a prompt for the search agent including conversation history."""
@@ -527,13 +515,9 @@ LANGUAGE: Match the user's language."""
 
     if conversation_history:
         max_tokens = (
-            settings.search_history_max_tokens
-            if settings.search_history_max_tokens > 0
-            else None
+            settings.search_history_max_tokens if settings.search_history_max_tokens > 0 else None
         )
-        selected_history = _select_history_for_prompt(
-            conversation_history, None, max_tokens
-        )
+        selected_history = _select_history_for_prompt(conversation_history, None, max_tokens)
 
         if selected_history:
             parts.append("Conversation context:")
@@ -548,7 +532,7 @@ LANGUAGE: Match the user's language."""
 
 
 def build_image_generator_prompt(
-    user_message: str, conversation_history: list, persona: Optional[str] = None
+    user_message: str, conversation_history: list, persona: str | None = None
 ) -> str:
     """Create an enriched prompt for the image generator agent."""
     parts = [IMAGE_GENERATOR_SYSTEM_PROMPT]
@@ -558,13 +542,9 @@ def build_image_generator_prompt(
 
     if conversation_history:
         max_tokens = (
-            settings.chat_history_max_tokens
-            if settings.chat_history_max_tokens > 0
-            else None
+            settings.chat_history_max_tokens if settings.chat_history_max_tokens > 0 else None
         )
-        selected_history = _select_history_for_prompt(
-            conversation_history, None, max_tokens
-        )
+        selected_history = _select_history_for_prompt(conversation_history, None, max_tokens)
 
         if selected_history:
             parts.append("\n\nRelevant prior context:")

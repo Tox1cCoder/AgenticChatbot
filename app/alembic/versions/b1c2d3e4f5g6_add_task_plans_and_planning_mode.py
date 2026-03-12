@@ -6,18 +6,18 @@ Create Date: 2025-12-02 10:00:00.000000
 
 """
 
-from typing import Sequence, Union
-
-from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSONB
 import uuid
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 # revision identifiers, used by Alembic.
 revision: str = "b1c2d3e4f5g6"
-down_revision: Union[str, Sequence[str], None] = ("a3b4c5d6e7f8", "a1b2c3d4e5f6")
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = ("a3b4c5d6e7f8", "a1b2c3d4e5f6")
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -64,12 +64,8 @@ def upgrade() -> None:
             ),
             nullable=False,
         ),
-        sa.Column(
-            "dependencies", JSONB, nullable=True, server_default=sa.text("'[]'::jsonb")
-        ),
-        sa.Column(
-            "task_metadata", JSONB, nullable=True, server_default=sa.text("'{}'::jsonb")
-        ),
+        sa.Column("dependencies", JSONB, nullable=True, server_default=sa.text("'[]'::jsonb")),
+        sa.Column("task_metadata", JSONB, nullable=True, server_default=sa.text("'{}'::jsonb")),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),

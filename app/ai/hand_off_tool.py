@@ -11,7 +11,6 @@ from typing import Literal
 
 from langchain_core.tools import tool
 
-
 # Canonical list of agents that can be delegation targets.
 DELEGATABLE_AGENTS = (
     "chat_agent",

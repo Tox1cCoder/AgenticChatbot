@@ -1,9 +1,8 @@
+from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, DefaultDict, Dict, List, Optional, Protocol
+from typing import Any, Protocol
 from uuid import UUID
-
-from collections import defaultdict
 
 
 class DocumentEvent(Enum):
@@ -16,38 +15,30 @@ class DocumentEvent(Enum):
 
 @dataclass
 class DocumentEventData:
-    document_id: Optional[UUID] = None
-    conversation_id: Optional[UUID] = None
-    user_id: Optional[UUID] = None
-    filename: Optional[str] = None
-    status: Optional[str] = None
-    error: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    document_id: UUID | None = None
+    conversation_id: UUID | None = None
+    user_id: UUID | None = None
+    filename: str | None = None
+    status: str | None = None
+    error: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class EventListener(Protocol):
-    async def handle_event(
-        self, event_type: DocumentEvent, data: DocumentEventData
-    ) -> None: ...
+    async def handle_event(self, event_type: DocumentEvent, data: DocumentEventData) -> None: ...
 
 
 class EventBus:
     """Async event bus for document lifecycle events."""
 
     def __init__(self) -> None:
-        self._listeners: DefaultDict[DocumentEvent, List[EventListener]] = defaultdict(
-            list
-        )
+        self._listeners: defaultdict[DocumentEvent, list[EventListener]] = defaultdict(list)
 
-    def register_listener(
-        self, event_type: DocumentEvent, listener: EventListener
-    ) -> None:
+    def register_listener(self, event_type: DocumentEvent, listener: EventListener) -> None:
         if listener not in self._listeners[event_type]:
             self._listeners[event_type].append(listener)
 
-    def unregister_listener(
-        self, event_type: DocumentEvent, listener: EventListener
-    ) -> None:
+    def unregister_listener(self, event_type: DocumentEvent, listener: EventListener) -> None:
         listeners = self._listeners.get(event_type, [])
         if listener in listeners:
             listeners.remove(listener)
@@ -58,7 +49,7 @@ class EventBus:
             await listener.handle_event(event_type, data)
 
 
-_event_bus: Optional[EventBus] = None
+_event_bus: EventBus | None = None
 
 
 def get_event_bus() -> EventBus:

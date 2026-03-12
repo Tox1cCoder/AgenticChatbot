@@ -2,11 +2,10 @@
 User validation utilities
 """
 
-from typing import Optional
 from uuid import UUID
 
+from app.core.exceptions import ResourceNotFoundException, ValidationException
 from app.repositories.user import UserRepository
-from app.core.exceptions import ValidationException, ResourceNotFoundException
 from app.utils.validation.base_validation import BaseValidationUtils
 
 
@@ -17,9 +16,7 @@ class UserValidationUtils(BaseValidationUtils):
         """Initialize user repository"""
         self.user_repository = UserRepository(self.session_factory)
 
-    def validate_email_availability(
-        self, email: str, exclude_user_id: Optional[UUID] = None
-    ):
+    def validate_email_availability(self, email: str, exclude_user_id: UUID | None = None):
         """
         Validate that an email is available.
 
@@ -31,9 +28,7 @@ class UserValidationUtils(BaseValidationUtils):
                 detail="Email is already registered", error_code="EMAIL_NOT_AVAILABLE"
             )
 
-    def validate_username_availability(
-        self, username: str, exclude_user_id: Optional[UUID] = None
-    ):
+    def validate_username_availability(self, username: str, exclude_user_id: UUID | None = None):
         """
         Validate that a username is available.
 
@@ -53,12 +48,10 @@ class UserValidationUtils(BaseValidationUtils):
             ResourceNotFoundException: If user is not found
         """
         if not self.user_repository.exists(user_id):
-            raise ResourceNotFoundException(
-                detail="User not found", error_code="USER_NOT_FOUND"
-            )
+            raise ResourceNotFoundException(detail="User not found", error_code="USER_NOT_FOUND")
 
     def validate_email_and_username_availability(
-        self, email: str, username: str, exclude_user_id: Optional[UUID] = None
+        self, email: str, username: str, exclude_user_id: UUID | None = None
     ):
         """
         Validate both email and username availability.

@@ -1,55 +1,53 @@
 import asyncio
 import logging
-from typing import Optional, List, Dict, Any, Set
 from abc import ABC, abstractmethod
+from typing import Any
 
 from langchain_core.messages import (
+    AIMessage,
     BaseMessage,
+    HumanMessage,
     SystemMessage,
     ToolMessage,
-    HumanMessage,
-    AIMessage,
 )
 from langchain_core.tools import BaseTool
 
+from ...core.config import settings
+from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
+from ..deferred_tool_binding import (
+    build_deferred_tool_list,
+    should_use_deferred_loading,
+)
+from ..hand_off_tool import hand_off as _hand_off_tool
+from ..mcp_integration import get_global_mcp_manager
+from ..mcp_registry import get_mcp_tools_generation
+from ..prompts import DELEGATION_SUFFIX, TOOL_CONTEXT_SUFFIX
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import TOOL_CONTEXT_SUFFIX, DELEGATION_SUFFIX
+from ..skills_registry import get_skills_generation, get_skills_registry
+from ..skills_tool import create_activate_skill_tool
+from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
 from ..utils import (
     coerce_response_text,
     extract_openai_reasoning_summary,
     extract_openai_reasoning_tokens,
 )
-from ..agent_config import create_langchain_model, create_gemini_client, AGENT_CONFIG
-from ...core.config import settings
-from ..mcp_integration import get_global_mcp_manager
-from ..mcp_registry import get_mcp_tools_generation
-from ..hand_off_tool import hand_off as _hand_off_tool
-from ..skills_registry import get_skills_registry, get_skills_generation
-from ..skills_tool import create_activate_skill_tool
-from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
-from ..deferred_tool_binding import (
-    should_use_deferred_loading,
-    build_deferred_tool_list,
-)
 
 logger = logging.getLogger(__name__)
 
 _MODEL_REQUEST_SUPPORTED_AGENT_KEYS = {"chat", "rag", "search", "planning"}
-_OPENAI_REASONING_SUMMARY_DISABLED_USERS: Set[str] = set()
+_OPENAI_REASONING_SUMMARY_DISABLED_USERS: set[str] = set()
 
 
 class BaseAgent(ABC):
     """Abstract base class for all agents. Child classes must implement: agent_type, agent_id, _get_base_system_prompt()."""
 
-    def __init__(
-        self, model_name: Optional[str] = None, agent_config_key: str = "chat"
-    ):
+    def __init__(self, model_name: str | None = None, agent_config_key: str = "chat"):
         self.agent_config_key = agent_config_key
         self.model_name = model_name or AGENT_CONFIG[agent_config_key]["model"]
         self.gemini_client = None
         self.langchain_model = None
         self.mcp_manager = None
-        self.tools: List[BaseTool] = []
+        self.tools: list[BaseTool] = []
 
         # Track tools generation to detect when refresh is needed
         self._tools_generation_seen: int = 0
@@ -88,8 +86,7 @@ class BaseAgent(ABC):
 
         # Check if we need to refresh tools
         needs_refresh = (
-            self.mcp_manager is None
-            or self._tools_generation_seen != current_generation
+            self.mcp_manager is None or self._tools_generation_seen != current_generation
         )
 
         if not needs_refresh:
@@ -126,13 +123,13 @@ class BaseAgent(ABC):
             logger.error(f"Error initializing MCP tools: {e}")
             self.tools = []
 
-    def _deduplicate_tools(self, tools: List[BaseTool]) -> List[BaseTool]:
-        unique_tools: Dict[str, BaseTool] = {}
+    def _deduplicate_tools(self, tools: list[BaseTool]) -> list[BaseTool]:
+        unique_tools: dict[str, BaseTool] = {}
         for tool in tools:
             unique_tools.setdefault(tool.name, tool)
         return list(unique_tools.values())
 
-    def _filter_tools_by_allowlist(self, tools: List[BaseTool]) -> List[BaseTool]:
+    def _filter_tools_by_allowlist(self, tools: list[BaseTool]) -> list[BaseTool]:
         """
         Filter tools based on per-agent allowlist configuration.
 
@@ -180,12 +177,12 @@ class BaseAgent(ABC):
 
         return filtered_tools
 
-    def _get_allowlist(self) -> Optional[List[str]]:
+    def _get_allowlist(self) -> list[str] | None:
         """Get the per-agent tool allowlist from settings."""
         allowlist_key = f"{self.agent_config_key}_agent_allowed_tools"
         return getattr(settings, allowlist_key, []) or []
 
-    def _get_skills_internal_tools(self) -> List[BaseTool]:
+    def _get_skills_internal_tools(self) -> list[BaseTool]:
         """Return the activate_skill tool if any skills are active."""
         try:
             registry = get_skills_registry()
@@ -197,9 +194,9 @@ class BaseAgent(ABC):
 
     def _get_tools_for_binding(
         self,
-        conversation_id: Optional[str] = None,
-        internal_tools: Optional[List[BaseTool]] = None,
-    ) -> List[BaseTool]:
+        conversation_id: str | None = None,
+        internal_tools: list[BaseTool] | None = None,
+    ) -> list[BaseTool]:
         """
         Get the tools to bind to the model for this invocation.
 
@@ -257,9 +254,7 @@ class BaseAgent(ABC):
                 return combined
             return self.tools
 
-    def _resolve_model_request(
-        self, model_request: Optional[Dict[str, Any]]
-    ) -> Optional[Dict[str, Any]]:
+    def _resolve_model_request(self, model_request: dict[str, Any] | None) -> dict[str, Any] | None:
         if self.agent_config_key not in _MODEL_REQUEST_SUPPORTED_AGENT_KEYS:
             return None
 
@@ -276,8 +271,8 @@ class BaseAgent(ABC):
     def _get_llm_with_tools(
         self,
         model: Any = None,
-        conversation_id: Optional[str] = None,
-        internal_tools: Optional[List[BaseTool]] = None,
+        conversation_id: str | None = None,
+        internal_tools: list[BaseTool] | None = None,
     ) -> Any:
         """
         Bind tools to the model for invocation.
@@ -311,7 +306,7 @@ class BaseAgent(ABC):
             tool_choice=tool_choice,
         )
 
-    def _get_openai_api_key(self, user_id: Optional[str]) -> Optional[str]:
+    def _get_openai_api_key(self, user_id: str | None) -> str | None:
         if not user_id:
             return None
 
@@ -330,9 +325,7 @@ class BaseAgent(ABC):
         except Exception:
             return None
 
-    async def _ainvoke_with_retries(
-        self, llm_with_tools: Any, messages: List[BaseMessage]
-    ) -> Any:
+    async def _ainvoke_with_retries(self, llm_with_tools: Any, messages: list[BaseMessage]) -> Any:
         attempts = getattr(settings, "provider_retry_attempts", 3) or 3
         delay = getattr(settings, "provider_retry_delay_seconds", 1.0) or 1.0
 
@@ -350,7 +343,7 @@ class BaseAgent(ABC):
         if delay < 0:
             delay = 0.0
 
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
                 return await llm_with_tools.ainvoke(messages)
@@ -373,8 +366,8 @@ class BaseAgent(ABC):
         raise last_exc or RuntimeError("Provider call failed")
 
     def _convert_history_to_langchain_messages(
-        self, conversation_history: List[Any]
-    ) -> List[BaseMessage]:
+        self, conversation_history: list[Any]
+    ) -> list[BaseMessage]:
         """
         Convert AgentMessage history to LangChain BaseMessage format.
 
@@ -399,13 +392,13 @@ class BaseAgent(ABC):
 
     async def invoke_model_with_history(
         self,
-        messages: List[BaseMessage],
-        conversation_history: List[Any],
-        persona: Optional[str],
-        conversation_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        model_request: Optional[Dict[str, Any]] = None,
-        history_summary: Optional[str] = None,
+        messages: list[BaseMessage],
+        conversation_history: list[Any],
+        persona: str | None,
+        conversation_id: str | None = None,
+        user_id: str | None = None,
+        model_request: dict[str, Any] | None = None,
+        history_summary: str | None = None,
         **system_prompt_kwargs: Any,
     ) -> AgentResponse:
         try:
@@ -421,14 +414,12 @@ class BaseAgent(ABC):
                 "temperature", 1.0
             )
             used_fallback = False
-            openai_api_key: Optional[str] = None
+            openai_api_key: str | None = None
             openai_reasoning_summary_requested = False
 
             llm = self.langchain_model
             if resolved_request and isinstance(resolved_request, dict):
-                requested_provider = (
-                    str(resolved_request.get("provider") or "").strip().lower()
-                )
+                requested_provider = str(resolved_request.get("provider") or "").strip().lower()
                 requested_model = resolved_request.get("model")
                 requested_temp = resolved_request.get("temperature")
 
@@ -448,13 +439,10 @@ class BaseAgent(ABC):
                         openai_api_key = api_key
                         include_reasoning_summary = True
                         user_key = str(user_id).strip() if user_id else ""
-                        if (
-                            user_key
-                            and user_key in _OPENAI_REASONING_SUMMARY_DISABLED_USERS
-                        ):
+                        if user_key and user_key in _OPENAI_REASONING_SUMMARY_DISABLED_USERS:
                             include_reasoning_summary = False
 
-                        openai_kwargs: Dict[str, Any] = {
+                        openai_kwargs: dict[str, Any] = {
                             "provider": "openai",
                             "model": effective_model_name,
                             "api_key": api_key,
@@ -480,9 +468,9 @@ class BaseAgent(ABC):
                         used_fallback = True
                         provider = "gemini"
                         effective_model_name = self.model_name
-                        effective_temperature = AGENT_CONFIG.get(
-                            self.agent_config_key, {}
-                        ).get("temperature", 1.0)
+                        effective_temperature = AGENT_CONFIG.get(self.agent_config_key, {}).get(
+                            "temperature", 1.0
+                        )
                         llm = create_langchain_model(
                             agent_type=self.agent_config_key,
                             model_override=effective_model_name,
@@ -496,9 +484,7 @@ class BaseAgent(ABC):
                         temperature_override=effective_temperature,
                     )
 
-            llm_with_tools = self._get_llm_with_tools(
-                llm, conversation_id=conversation_id
-            )
+            llm_with_tools = self._get_llm_with_tools(llm, conversation_id=conversation_id)
 
             # Get the tools that are actually bound (for accurate token counting)
             bound_tools = self._get_tools_for_binding(conversation_id=conversation_id)
@@ -506,10 +492,7 @@ class BaseAgent(ABC):
             has_tool_context = any(
                 isinstance(msg, ToolMessage)
                 or (hasattr(msg, "tool_calls") and msg.tool_calls)
-                or (
-                    hasattr(msg, "additional_kwargs")
-                    and msg.additional_kwargs.get("tool_calls")
-                )
+                or (hasattr(msg, "additional_kwargs") and msg.additional_kwargs.get("tool_calls"))
                 for msg in messages
             )
 
@@ -547,9 +530,7 @@ class BaseAgent(ABC):
             # This ensures it runs ONCE per request, not on every agent iteration
             if provider == "openai" and not used_fallback:
                 try:
-                    response = await self._ainvoke_with_retries(
-                        llm_with_tools, langchain_messages
-                    )
+                    response = await self._ainvoke_with_retries(llm_with_tools, langchain_messages)
                 except Exception:
                     if openai_api_key and openai_reasoning_summary_requested:
                         user_key = str(user_id).strip() if user_id else ""
@@ -579,9 +560,9 @@ class BaseAgent(ABC):
                             used_fallback = True
                             provider = "gemini"
                             effective_model_name = self.model_name
-                            effective_temperature = AGENT_CONFIG.get(
-                                self.agent_config_key, {}
-                            ).get("temperature", 1.0)
+                            effective_temperature = AGENT_CONFIG.get(self.agent_config_key, {}).get(
+                                "temperature", 1.0
+                            )
                             llm = create_langchain_model(
                                 agent_type=self.agent_config_key,
                                 model_override=effective_model_name,
@@ -596,9 +577,9 @@ class BaseAgent(ABC):
                         used_fallback = True
                         provider = "gemini"
                         effective_model_name = self.model_name
-                        effective_temperature = AGENT_CONFIG.get(
-                            self.agent_config_key, {}
-                        ).get("temperature", 1.0)
+                        effective_temperature = AGENT_CONFIG.get(self.agent_config_key, {}).get(
+                            "temperature", 1.0
+                        )
                         llm = create_langchain_model(
                             agent_type=self.agent_config_key,
                             model_override=effective_model_name,
@@ -677,9 +658,9 @@ class BaseAgent(ABC):
 
     def _build_system_prompt(
         self,
-        persona: Optional[str],
+        persona: str | None,
         has_tool_context: bool,
-        history_summary: Optional[str] = None,
+        history_summary: str | None = None,
         **_: Any,
     ) -> str:
         system_prompt = self._get_base_system_prompt()
@@ -709,9 +690,7 @@ class BaseAgent(ABC):
             system_prompt = f"{system_prompt}\n\n{TOOL_CONTEXT_SUFFIX}"
 
         if persona:
-            system_prompt = (
-                f"Custom Persona:\n{persona.strip()}\n\n---\n{system_prompt}"
-            )
+            system_prompt = f"Custom Persona:\n{persona.strip()}\n\n---\n{system_prompt}"
 
         return system_prompt
 
@@ -730,10 +709,7 @@ class BaseAgent(ABC):
         when a skill is toggled or the registry is reloaded.
         """
         current_gen = get_skills_generation()
-        if (
-            current_gen == self._skills_generation_seen
-            and self._cached_skills_suffix is not None
-        ):
+        if current_gen == self._skills_generation_seen and self._cached_skills_suffix is not None:
             return self._cached_skills_suffix
 
         try:
@@ -776,14 +752,12 @@ class BaseAgent(ABC):
         return base
 
     def _build_error_response(
-        self, message: str, conversation_id: Optional[str], error: Optional[str] = None
+        self, message: str, conversation_id: str | None, error: str | None = None
     ) -> AgentResponse:
         return AgentResponse(
             agent_type=self.agent_type,
             agent_id=self.agent_id,
-            message=AgentMessage(
-                role=MessageRole.ASSISTANT, content=f"I'm sorry, but {message}"
-            ),
+            message=AgentMessage(role=MessageRole.ASSISTANT, content=f"I'm sorry, but {message}"),
             metadata={
                 "model": self.model_name,
                 "conversation_id": conversation_id,
@@ -795,9 +769,7 @@ class BaseAgent(ABC):
     async def cleanup(self) -> None:
         self.mcp_manager = None
         self.tools = []
-        logger.debug(
-            f"{self.__class__.__name__} cleanup completed (MCP manager is shared)"
-        )
+        logger.debug(f"{self.__class__.__name__} cleanup completed (MCP manager is shared)")
 
     @property
     @abstractmethod

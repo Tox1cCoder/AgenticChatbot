@@ -1,12 +1,12 @@
 """Service layer for MCP (Model Context Protocol) operations."""
 
 import logging
-from typing import Optional, Dict, Any
+from typing import Any
 
 from app.ai.mcp_integration import MCPManager
 from app.core.exceptions.mcp import (
-    ToolNotFoundError,
     ServerConfigurationError,
+    ToolNotFoundError,
 )
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ class MCPService:
         """
         self.mcp_manager = mcp_manager
 
-    async def list_servers(self) -> Dict[str, Any]:
+    async def list_servers(self) -> dict[str, Any]:
         """
         List all configured MCP servers with status
 
@@ -61,7 +61,7 @@ class MCPService:
             "enabled_count": enabled_count,
         }
 
-    async def get_server_details(self, server_name: str) -> Dict[str, Any]:
+    async def get_server_details(self, server_name: str) -> dict[str, Any]:
         """
         Get detailed information about a specific server
 
@@ -76,7 +76,7 @@ class MCPService:
         """
         return self.mcp_manager.get_server_info(server_name)
 
-    async def add_server(self, server_config: Dict[str, Any]) -> Dict[str, str]:
+    async def add_server(self, server_config: dict[str, Any]) -> dict[str, str]:
         """
         Add a new MCP server
 
@@ -101,9 +101,7 @@ class MCPService:
         # Validate transport-specific fields
         if transport == "stdio":
             if not server_config.get("command"):
-                raise ServerConfigurationError(
-                    "Command is required for stdio transport"
-                )
+                raise ServerConfigurationError("Command is required for stdio transport")
         elif transport in ["http", "sse", "streamable_http"]:
             if not server_config.get("url"):
                 raise ServerConfigurationError("URL is required for HTTP transport")
@@ -119,7 +117,7 @@ class MCPService:
         logger.debug("Added server: %s", name)
         return {"message": f"Server '{name}' added successfully"}
 
-    async def add_server_from_url(self, url_config: Dict[str, Any]) -> Dict[str, str]:
+    async def add_server_from_url(self, url_config: dict[str, Any]) -> dict[str, str]:
         """
         Add a new MCP server from a URL
 
@@ -137,8 +135,8 @@ class MCPService:
             ServerConfigurationError: If URL parsing or validation fails
         """
         from app.utils.mcp_url_parser import (
-            parse_mcp_url,
             generate_server_name_from_url,
+            parse_mcp_url,
         )
 
         url = url_config.get("url", "").strip()
@@ -166,7 +164,7 @@ class MCPService:
                 server_config["description"] = url_config["description"]
 
             # Use the existing add_server method
-            result = await self.add_server(server_config)
+            await self.add_server(server_config)
 
             logger.info("Added server from URL: %s -> %s", url, server_name)
             return {"message": f"Server '{server_name}' added successfully from URL"}
@@ -181,7 +179,7 @@ class MCPService:
                 detail=f"Failed to parse URL: {str(e)}", error_code="URL_PARSING_ERROR"
             )
 
-    async def remove_server(self, server_name: str) -> Dict[str, str]:
+    async def remove_server(self, server_name: str) -> dict[str, str]:
         """
         Remove an MCP server
 
@@ -202,7 +200,7 @@ class MCPService:
         logger.debug("Removed server: %s", server_name)
         return {"message": f"Server '{server_name}' removed successfully"}
 
-    async def toggle_server(self, server_name: str, enabled: bool) -> Dict[str, str]:
+    async def toggle_server(self, server_name: str, enabled: bool) -> dict[str, str]:
         """
         Enable or disable an MCP server
 
@@ -230,7 +228,7 @@ class MCPService:
 
     # ===== Tool Management Methods =====
 
-    async def list_tools(self, server_name: Optional[str] = None) -> Dict[str, Any]:
+    async def list_tools(self, server_name: str | None = None) -> dict[str, Any]:
         """
         List all available tools or tools from a specific server
 
@@ -255,7 +253,7 @@ class MCPService:
             "servers_count": len(servers),
         }
 
-    async def get_tool_info(self, tool_name: str) -> Dict[str, Any]:
+    async def get_tool_info(self, tool_name: str) -> dict[str, Any]:
         """
         Get detailed information about a specific tool
 
@@ -283,9 +281,7 @@ class MCPService:
             "server_name": server_name,
         }
 
-    async def execute_tool(
-        self, tool_name: str, arguments: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """
         Execute a tool for testing purposes
 

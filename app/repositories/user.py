@@ -1,7 +1,7 @@
-from typing import Optional
 from uuid import UUID
-from sqlalchemy.orm import Session
+
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.models.user import User
 from app.repositories.command_strategy import DefaultCommandStrategy
@@ -18,28 +18,24 @@ class UserCRUDStrategy(
         DefaultCommandStrategy.__init__(self, model)
         DefaultQueryStrategy.__init__(self, model)
 
-    def get_by_email(self, db: Session, email: str) -> Optional[User]:
+    def get_by_email(self, db: Session, email: str) -> User | None:
         """Get user by email address"""
         statement = select(User).where(User.email == email)
         return db.execute(statement).scalar_one_or_none()
 
-    def get_by_username(self, db: Session, username: str) -> Optional[User]:
+    def get_by_username(self, db: Session, username: str) -> User | None:
         """Get user by username"""
         statement = select(User).where(User.username == username)
         return db.execute(statement).scalar_one_or_none()
 
-    def email_exists(
-        self, db: Session, email: str, exclude_id: Optional[UUID] = None
-    ) -> bool:
+    def email_exists(self, db: Session, email: str, exclude_id: UUID | None = None) -> bool:
         """Check if email already exists"""
         statement = select(User.id).where(User.email == email)
         if exclude_id:
             statement = statement.where(User.id != exclude_id)
         return db.execute(statement).scalar() is not None
 
-    def username_exists(
-        self, db: Session, username: str, exclude_id: Optional[UUID] = None
-    ) -> bool:
+    def username_exists(self, db: Session, username: str, exclude_id: UUID | None = None) -> bool:
         """Check if username already exists"""
         statement = select(User.id).where(User.username == username)
         if exclude_id:
@@ -55,22 +51,22 @@ class UserRepository:
         self.session_factory = session_factory
         self._crud_strategy = UserCRUDStrategy(User)
 
-    def get_by_email(self, email: str) -> Optional[User]:
+    def get_by_email(self, email: str) -> User | None:
         """Get user by email address"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_email(session, email)
 
-    def get_by_username(self, username: str) -> Optional[User]:
+    def get_by_username(self, username: str) -> User | None:
         """Get user by username"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_username(session, username)
 
-    def email_exists(self, email: str, exclude_id: Optional[UUID] = None) -> bool:
+    def email_exists(self, email: str, exclude_id: UUID | None = None) -> bool:
         """Check if email already exists"""
         with self.session_factory() as session:
             return self._crud_strategy.email_exists(session, email, exclude_id)
 
-    def username_exists(self, username: str, exclude_id: Optional[UUID] = None) -> bool:
+    def username_exists(self, username: str, exclude_id: UUID | None = None) -> bool:
         """Check if username already exists"""
         with self.session_factory() as session:
             return self._crud_strategy.username_exists(session, username, exclude_id)
@@ -80,7 +76,7 @@ class UserRepository:
         with self.session_factory() as session:
             return self._crud_strategy.create(session, input_schema)
 
-    def get_by_id(self, id: UUID) -> Optional[User]:
+    def get_by_id(self, id: UUID) -> User | None:
         """Get user by ID"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_id(session, id)
@@ -90,7 +86,7 @@ class UserRepository:
         with self.session_factory() as session:
             return self._crud_strategy.get_all(session, skip, limit)
 
-    def update(self, id: UUID, input_schema: UserUpdate) -> Optional[User]:
+    def update(self, id: UUID, input_schema: UserUpdate) -> User | None:
         """Update user by ID"""
         with self.session_factory() as session:
             db_obj = self._crud_strategy.get_by_id(session, id)

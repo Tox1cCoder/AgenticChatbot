@@ -5,8 +5,8 @@ Handles CRUD operations for storing and retrieving user-specific AI provider
 API keys and configurations.
 """
 
-from typing import Optional, List
 from uuid import UUID
+
 from sqlalchemy import and_
 
 from app.models.model_provider import ModelProvider
@@ -41,7 +41,7 @@ class ModelProviderRepository:
             session.refresh(model_provider)
             return model_provider
 
-    def get_by_id(self, provider_id: UUID) -> Optional[ModelProvider]:
+    def get_by_id(self, provider_id: UUID) -> ModelProvider | None:
         """
         Args:
             provider_id: Provider UUID
@@ -61,9 +61,7 @@ class ModelProviderRepository:
                 .first()
             )
 
-    def get_by_user_and_type(
-        self, user_id: UUID, provider_type: str
-    ) -> Optional[ModelProvider]:
+    def get_by_user_and_type(self, user_id: UUID, provider_type: str) -> ModelProvider | None:
         """
         Args:
             user_id: User UUID
@@ -85,7 +83,7 @@ class ModelProviderRepository:
                 .first()
             )
 
-    def get_all_by_user(self, user_id: UUID) -> List[ModelProvider]:
+    def get_all_by_user(self, user_id: UUID) -> list[ModelProvider]:
         """
         Args:
             user_id: User UUID
@@ -106,7 +104,7 @@ class ModelProviderRepository:
                 .all()
             )
 
-    def get_default_provider(self, user_id: UUID) -> Optional[ModelProvider]:
+    def get_default_provider(self, user_id: UUID) -> ModelProvider | None:
         """
         Args:
             user_id: User UUID
@@ -120,7 +118,7 @@ class ModelProviderRepository:
                 .filter(
                     and_(
                         ModelProvider.user_id == user_id,
-                        ModelProvider.is_default == True,
+                        ModelProvider.is_default,
                         ModelProvider.deleted_at.is_(None),
                     )
                 )
@@ -131,7 +129,7 @@ class ModelProviderRepository:
         session.query(ModelProvider).filter(
             and_(
                 ModelProvider.user_id == user_id,
-                ModelProvider.is_default == True,
+                ModelProvider.is_default,
                 ModelProvider.deleted_at.is_(None),
             )
         ).update({"is_default": False})
@@ -142,7 +140,7 @@ class ModelProviderRepository:
         provider_type: str,
         api_key_encrypted: str,
         is_default: bool = False,
-        provider_metadata: Optional[dict] = None,
+        provider_metadata: dict | None = None,
     ) -> ModelProvider:
         """
         Args:
@@ -195,10 +193,10 @@ class ModelProviderRepository:
     def update(
         self,
         provider_id: UUID,
-        api_key_encrypted: Optional[str] = None,
-        is_default: Optional[bool] = None,
-        provider_metadata: Optional[dict] = None,
-    ) -> Optional[ModelProvider]:
+        api_key_encrypted: str | None = None,
+        is_default: bool | None = None,
+        provider_metadata: dict | None = None,
+    ) -> ModelProvider | None:
         """
         Args:
             provider_id: Provider UUID

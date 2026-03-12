@@ -1,4 +1,5 @@
-from typing import Any, Dict
+from typing import Any
+
 from app.core.exceptions.mcp import ServerConfigurationError
 
 
@@ -56,7 +57,7 @@ def generate_server_name_from_url(url: str) -> str:
     return "unknown-server"
 
 
-def parse_mcp_url(url: str) -> Dict[str, Any]:
+def parse_mcp_url(url: str) -> dict[str, Any]:
     """Parse an MCP server URL and generate appropriate configuration.
 
     Args:
@@ -71,9 +72,7 @@ def parse_mcp_url(url: str) -> Dict[str, Any]:
     url = url.strip()
 
     if not url:
-        raise ServerConfigurationError(
-            detail="URL cannot be empty", error_code="INVALID_URL"
-        )
+        raise ServerConfigurationError(detail="URL cannot be empty", error_code="INVALID_URL")
 
     # Handle npx URLs
     if url.startswith("npx "):

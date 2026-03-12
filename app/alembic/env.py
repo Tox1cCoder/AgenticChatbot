@@ -1,14 +1,15 @@
 import logging.config
-from sqlalchemy import engine_from_config, pool
-from alembic import context
 import os
 import sys
+
+from alembic import context
+from sqlalchemy import engine_from_config, pool
 
 # Add the project root directory to sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from app.database.base import Base
 from app.core.config import settings
+from app.database.base import Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

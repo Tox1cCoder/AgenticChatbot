@@ -1,11 +1,10 @@
-import json
 import hashlib
-from typing import List, Optional
+import json
 from functools import lru_cache
 
 from google import genai
 
-from .agent_config import create_gemini_client, AGENT_CONFIG
+from .agent_config import AGENT_CONFIG, create_gemini_client
 
 SUGGESTION_PROMPT = """Based on this conversation exchange, generate follow-up questions the user might want to ask next.
 
@@ -32,10 +31,10 @@ Return ONLY a JSON array of strings, nothing else. Examples:
 class SuggestionGenerator:
     """Generates follow-up question suggestions using Gemini."""
 
-    def __init__(self, model_name: Optional[str] = None):
+    def __init__(self, model_name: str | None = None):
         config = AGENT_CONFIG["suggestion"]
         self.model_name = model_name or config["model"]
-        self.client: Optional[genai.Client] = None
+        self.client: genai.Client | None = None
         self._init_client()
 
     def _init_client(self) -> None:
@@ -56,9 +55,7 @@ class SuggestionGenerator:
         return hashlib.md5(content.encode()).hexdigest()
 
     @lru_cache(maxsize=100)
-    def _get_cached_suggestions(
-        self, cache_key: str, prompt: str
-    ) -> Optional[List[str]]:
+    def _get_cached_suggestions(self, cache_key: str, prompt: str) -> list[str] | None:
         """Internal cached method for LLM calls."""
         if not self.client:
             return None
@@ -99,7 +96,7 @@ class SuggestionGenerator:
         user_query: str,
         response_content: str,
         max_suggestions: int = 3,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Generate follow-up question suggestions.
 
@@ -148,7 +145,7 @@ class SuggestionGenerator:
 
 
 # Global singleton instance
-_suggestion_generator: Optional[SuggestionGenerator] = None
+_suggestion_generator: SuggestionGenerator | None = None
 
 
 def get_suggestion_generator() -> SuggestionGenerator:
@@ -162,7 +159,7 @@ def get_suggestion_generator() -> SuggestionGenerator:
 async def generate_follow_up_suggestions(
     user_query: str,
     response_content: str,
-) -> List[str]:
+) -> list[str]:
     """
     Convenience function to generate follow-up suggestions.
 

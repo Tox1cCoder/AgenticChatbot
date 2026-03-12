@@ -6,17 +6,17 @@ Create Date: 2025-09-15 16:41:05.651513
 
 """
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "4dc4ad0b1936"
-down_revision: Union[str, None] = "ca57b3ea95db"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "ca57b3ea95db"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -52,9 +52,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(op.f("ix_conversations_id"), "conversations", ["id"], unique=False)
-    op.create_index(
-        op.f("ix_conversations_owner_id"), "conversations", ["owner_id"], unique=False
-    )
+    op.create_index(op.f("ix_conversations_owner_id"), "conversations", ["owner_id"], unique=False)
 
     op.create_table(
         "messages",
@@ -118,9 +116,7 @@ def upgrade() -> None:
     )
 
     # Update feedback table to add deleted_at
-    op.add_column(
-        "feedback", sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True)
-    )
+    op.add_column("feedback", sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True))
 
     # Drop existing foreign key constraints from feedback table before dropping referenced tables
     op.drop_constraint("feedback_message_id_fkey", "feedback", type_="foreignkey")
@@ -135,9 +131,7 @@ def upgrade() -> None:
         unique=False,
     )
     op.create_index(op.f("ix_feedback_id"), "feedback", ["id"], unique=False)
-    op.create_index(
-        op.f("ix_feedback_message_id"), "feedback", ["message_id"], unique=True
-    )
+    op.create_index(op.f("ix_feedback_message_id"), "feedback", ["message_id"], unique=True)
     op.create_index(op.f("ix_feedback_user_id"), "feedback", ["user_id"], unique=False)
 
     # Now safe to drop old tables (data preserved in new tables, constraints removed)
@@ -146,9 +140,7 @@ def upgrade() -> None:
     op.drop_table("user")
 
     # Create foreign keys on feedback table to point to new plural tables
-    op.create_foreign_key(
-        "feedback_user_id_fkey", "feedback", "users", ["user_id"], ["id"]
-    )
+    op.create_foreign_key("feedback_user_id_fkey", "feedback", "users", ["user_id"], ["id"])
     op.create_foreign_key(
         "feedback_message_id_fkey", "feedback", "messages", ["message_id"], ["id"]
     )

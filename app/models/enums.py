@@ -1,5 +1,6 @@
 import enum
-from sqlalchemy import Integer, Enum, String
+
+from sqlalchemy import Enum, Integer, String
 
 
 class MessageRole(enum.IntEnum):

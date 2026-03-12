@@ -1,13 +1,14 @@
 import json
 import logging
-from typing import Optional, Dict, Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from langchain_core.messages import HumanMessage
 
-from .base_agent import BaseAgent
+from ..prompts import SEARCH_SYSTEM_PROMPT, build_search_prompt
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import build_search_prompt, SEARCH_SYSTEM_PROMPT
 from ..utils import coerce_response_text
+from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ class SearchAgent(BaseAgent):
     async def invoke_model(
         self,
         message: AgentMessage,
-        conversation_id: Optional[str] = None,
+        conversation_id: str | None = None,
     ) -> AgentResponse:
         # Initialize MCP tools if needed
         if self.mcp_manager is None:
@@ -86,15 +87,15 @@ class SearchAgent(BaseAgent):
     async def process_message(
         self,
         message: AgentMessage,
-        conversation_id: Optional[str] = None,
+        conversation_id: str | None = None,
     ) -> AgentResponse:
         return await self.invoke_model(message, conversation_id)
 
     async def stream_message(
         self,
         message: AgentMessage,
-        conversation_id: Optional[str] = None,
-    ) -> AsyncIterator[Dict[str, Any]]:
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         # Initialize MCP tools if needed
         if self.mcp_manager is None:
             await self._init_tools()
@@ -104,9 +105,7 @@ class SearchAgent(BaseAgent):
         persona = message.metadata.get("persona")
 
         # Build prompt
-        prompt = build_search_prompt(
-            message.content or "", conversation_history, persona=persona
-        )
+        prompt = build_search_prompt(message.content or "", conversation_history, persona=persona)
 
         # Use unified tool binding with deferred loading support
         llm_with_tools = self._get_llm_with_tools(conversation_id=conversation_id)
@@ -138,9 +137,7 @@ class SearchAgent(BaseAgent):
                                     continue
 
                                 # Check for thinking/reasoning markers
-                                additional_kwargs = getattr(
-                                    chunk, "additional_kwargs", {}
-                                )
+                                additional_kwargs = getattr(chunk, "additional_kwargs", {})
                                 is_thinking = additional_kwargs.get(
                                     "thought"
                                 ) or additional_kwargs.get("thinking")
@@ -172,23 +169,11 @@ class SearchAgent(BaseAgent):
                                         "args": "",
                                     }
                                 if block.get("args"):
-                                    current_tool_calls[tool_index]["args"] += block.get(
-                                        "args"
-                                    )
-                                if (
-                                    block.get("name")
-                                    and not current_tool_calls[tool_index]["name"]
-                                ):
-                                    current_tool_calls[tool_index]["name"] = block.get(
-                                        "name"
-                                    )
-                                if (
-                                    block.get("id")
-                                    and not current_tool_calls[tool_index]["id"]
-                                ):
-                                    current_tool_calls[tool_index]["id"] = block.get(
-                                        "id"
-                                    )
+                                    current_tool_calls[tool_index]["args"] += block.get("args")
+                                if block.get("name") and not current_tool_calls[tool_index]["name"]:
+                                    current_tool_calls[tool_index]["name"] = block.get("name")
+                                if block.get("id") and not current_tool_calls[tool_index]["id"]:
+                                    current_tool_calls[tool_index]["id"] = block.get("id")
 
                     elif hasattr(chunk, "content"):
                         token = coerce_response_text(chunk.content)
@@ -197,9 +182,9 @@ class SearchAgent(BaseAgent):
 
                         # Check for thinking/reasoning markers
                         additional_kwargs = getattr(chunk, "additional_kwargs", {})
-                        is_thinking = additional_kwargs.get(
-                            "thought"
-                        ) or additional_kwargs.get("thinking")
+                        is_thinking = additional_kwargs.get("thought") or additional_kwargs.get(
+                            "thinking"
+                        )
 
                         if is_thinking:
                             accumulated_thinking += token
@@ -209,18 +194,13 @@ class SearchAgent(BaseAgent):
                             yield {"type": "token", "content": token}
 
                     # Check for chunk completion
-                    if (
-                        hasattr(chunk, "chunk_position")
-                        and chunk.chunk_position == "last"
-                    ):
+                    if hasattr(chunk, "chunk_position") and chunk.chunk_position == "last":
                         # Emit accumulated tool calls
                         for tool_call in current_tool_calls.values():
                             if tool_call["name"]:
                                 try:
                                     args = (
-                                        json.loads(tool_call["args"])
-                                        if tool_call["args"]
-                                        else {}
+                                        json.loads(tool_call["args"]) if tool_call["args"] else {}
                                     )
                                 except:
                                     args = tool_call["args"]

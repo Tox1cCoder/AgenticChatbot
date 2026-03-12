@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
 
@@ -15,16 +15,14 @@ class CheckpointManager:
         """
         self.db_url = db_url
         self.settings = settings
-        self.checkpointer: Optional[AsyncPostgresSaver] = None
-        self._pool: Optional[AsyncConnectionPool] = None
+        self.checkpointer: AsyncPostgresSaver | None = None
+        self._pool: AsyncConnectionPool | None = None
         self._initialized = False
 
         if "postgresql+psycopg2://" in self.db_url:
             self.db_url = self.db_url.replace("postgresql+psycopg2://", "postgresql://")
 
-        logger.debug(
-            f"CheckpointManager initialized with schema: {settings.checkpoint_schema}"
-        )
+        logger.debug(f"CheckpointManager initialized with schema: {settings.checkpoint_schema}")
 
     async def setup(self) -> None:
         """
@@ -102,9 +100,7 @@ class CheckpointManager:
 
         for attempt, delay in enumerate(delays, 1):
             try:
-                logger.debug(
-                    f"Attempting checkpoint reconnection (attempt {attempt}/3)"
-                )
+                logger.debug(f"Attempting checkpoint reconnection (attempt {attempt}/3)")
 
                 # Close existing pool if present
                 if self._pool:
@@ -132,7 +128,7 @@ class CheckpointManager:
         logger.error("All checkpoint reconnection attempts failed")
         return False
 
-    def get_checkpointer(self) -> Optional[AsyncPostgresSaver]:
+    def get_checkpointer(self) -> AsyncPostgresSaver | None:
         """
         Get the initialized checkpointer instance.
         """
@@ -155,7 +151,7 @@ class CheckpointManager:
         except Exception as e:
             logger.error(f"Error during checkpoint manager cleanup: {e}", exc_info=True)
 
-    def get_pool_stats(self) -> Optional[dict]:
+    def get_pool_stats(self) -> dict | None:
         """
         Get statistics about the connection pool.
 

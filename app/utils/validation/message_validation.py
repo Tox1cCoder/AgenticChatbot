@@ -4,9 +4,9 @@ Message validation utilities
 
 from uuid import UUID
 
-from app.repositories.message import MessageRepository
+from app.core.exceptions import AuthorizationException, ResourceNotFoundException
 from app.repositories.conversation import ConversationRepository
-from app.core.exceptions import ResourceNotFoundException, AuthorizationException
+from app.repositories.message import MessageRepository
 from app.utils.validation.base_validation import BaseValidationUtils
 
 

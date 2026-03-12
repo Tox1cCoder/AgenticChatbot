@@ -16,10 +16,10 @@ from typing import TYPE_CHECKING, Any
 __all__ = ["UserService", "ConversationService", "MessageService", "FeedbackService"]
 
 if TYPE_CHECKING:
-    from app.services.user_service import UserService
     from app.services.conversation_service import ConversationService
-    from app.services.message_service import MessageService
     from app.services.feedback_service import FeedbackService
+    from app.services.message_service import MessageService
+    from app.services.user_service import UserService
 
 
 def __getattr__(name: str) -> Any:

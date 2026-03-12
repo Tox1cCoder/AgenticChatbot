@@ -1,12 +1,11 @@
 """JWT Service for token management and authentication utilities"""
 
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+from datetime import datetime, timedelta, timezone
 
 import jwt
 
 from app.core.config import settings
-from app.core.exceptions import TokenExpiredException, AuthenticationException
+from app.core.exceptions import AuthenticationException, TokenExpiredException
 
 
 class JwtService:
@@ -19,7 +18,7 @@ class JwtService:
         self.refresh_token_expire_days = settings.refresh_token_expire_days
 
     def _calculate_expiration_time(
-        self, delta: Optional[timedelta] = None, now: Optional[datetime] = None
+        self, delta: timedelta | None = None, now: datetime | None = None
     ) -> datetime:
         """Calculate token expiration time"""
         if now is None:
@@ -28,9 +27,7 @@ class JwtService:
             return now + delta
         return now + timedelta(minutes=self.access_token_expire_minutes)
 
-    def create_access_token(
-        self, data: dict, expires_delta: Optional[timedelta] = None
-    ) -> str:
+    def create_access_token(self, data: dict, expires_delta: timedelta | None = None) -> str:
         """Create JWT access token"""
         to_encode = data.copy()
         now = datetime.now(timezone.utc)

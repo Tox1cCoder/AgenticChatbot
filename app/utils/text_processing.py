@@ -5,9 +5,8 @@ Provides functions for token counting, sentence splitting, smart chunking,
 text truncation, and page range extraction.
 """
 
-import re
 import logging
-from typing import List, Tuple, Optional
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +25,7 @@ def estimate_tokens(text: str) -> int:
     return len(encoding.encode(text))
 
 
-def split_into_sentences(text: str) -> List[str]:
+def split_into_sentences(text: str) -> list[str]:
     """
     Split text into sentences.
     """
@@ -64,7 +63,7 @@ def truncate_text(text: str, max_chars: int, add_ellipsis: bool = True) -> str:
     return truncated
 
 
-def extract_page_range(text: str) -> Tuple[Optional[int], Optional[int]]:
+def extract_page_range(text: str) -> tuple[int | None, int | None]:
     """
     Extract page range from text containing [PAGE X] markers.
 

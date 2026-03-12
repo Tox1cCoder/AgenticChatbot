@@ -69,9 +69,7 @@ class Take100Client:
             r = self.session.get(f"{BASE_URL}/login", timeout=15)
             token_match = re.search(r'name="_token" value="(.*?)"', r.text)
             if not token_match:
-                print(
-                    "ERROR: Could not find CSRF token on login page.", file=sys.stderr
-                )
+                print("ERROR: Could not find CSRF token on login page.", file=sys.stderr)
                 return False
 
             csrf_token = token_match.group(1)
@@ -163,9 +161,7 @@ class Take100Client:
         day_apps = [
             app
             for app in other_apps
-            if app.get("from_date", "")
-            <= date
-            <= app.get("to_date", app.get("from_date", ""))
+            if app.get("from_date", "") <= date <= app.get("to_date", app.get("from_date", ""))
             and app.get("status") == 1
             and app.get("application_type_name") == "paid leave"
         ]
@@ -189,8 +185,7 @@ class Take100Client:
             (
                 app
                 for app in day_apps
-                if app.get("reason_name") == "Hour"
-                and app.get("from_time", "00:00") >= "13:00"
+                if app.get("reason_name") == "Hour" and app.get("from_time", "00:00") >= "13:00"
             ),
             None,
         )
@@ -334,9 +329,7 @@ class Take100Client:
             ],
         }
 
-        r = self.session.post(
-            url, json=payload, headers=self._get_headers(), timeout=15
-        )
+        r = self.session.post(url, json=payload, headers=self._get_headers(), timeout=15)
         r.raise_for_status()
         return r.json()
 
@@ -358,9 +351,7 @@ def main():
         "--entries-file",
         help="Path to a UTF-8 JSON file containing the entries array (recommended for Vietnamese/Unicode content)",
     )
-    parser.add_argument(
-        "--application-id", type=int, help="Application ID (for delete)"
-    )
+    parser.add_argument("--application-id", type=int, help="Application ID (for delete)")
     parser.add_argument("--message", default="", help="Optional message")
     parser.add_argument(
         "--time-in",
@@ -385,11 +376,7 @@ def main():
     try:
         if args.action == "check-day":
             if not args.date:
-                print(
-                    json.dumps(
-                        {"success": False, "error": "--date is required for check-day"}
-                    )
-                )
+                print(json.dumps({"success": False, "error": "--date is required for check-day"}))
                 sys.exit(1)
             status = client.get_day_status(args.date)
             result = {"success": True, "day_status": status}

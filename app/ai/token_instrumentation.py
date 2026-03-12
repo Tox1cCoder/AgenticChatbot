@@ -7,7 +7,7 @@ This helps identify prompt bloat and optimize token budgets.
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from langchain_core.messages import (
     BaseMessage,
@@ -34,16 +34,16 @@ class TokenBudgetBreakdown:
     total_tokens: int = 0
 
     # Actual usage from provider (when available)
-    actual_input_tokens: Optional[int] = None
-    actual_output_tokens: Optional[int] = None
+    actual_input_tokens: int | None = None
+    actual_output_tokens: int | None = None
 
     # Metadata
     history_message_count: int = 0
     tool_message_count: int = 0
     bound_tool_count: int = 0
-    bound_tool_names: List[str] = field(default_factory=list)
+    bound_tool_names: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for logging/serialization."""
         return {
             "estimated": {
@@ -81,9 +81,7 @@ def estimate_tokens(text: str) -> int:
 
 def estimate_message_tokens(message: BaseMessage) -> int:
     """Estimate tokens for a LangChain message."""
-    content = (
-        message.content if isinstance(message.content, str) else str(message.content)
-    )
+    content = message.content if isinstance(message.content, str) else str(message.content)
     tokens = estimate_tokens(content)
 
     # Add overhead for message structure
@@ -119,7 +117,7 @@ def estimate_agent_message_tokens(message: Any) -> int:
     return estimate_tokens(content) + 4  # content + role overhead
 
 
-def estimate_tool_schema_tokens(tools: List[Any]) -> int:
+def estimate_tool_schema_tokens(tools: list[Any]) -> int:
     """
     Estimate tokens for tool schemas that get sent to the model.
 
@@ -158,9 +156,9 @@ def estimate_tool_schema_tokens(tools: List[Any]) -> int:
 
 def compute_token_breakdown(
     system_prompt: str,
-    history_messages: List[BaseMessage],
-    current_turn_messages: List[BaseMessage],
-    tools: Optional[List[Any]] = None,
+    history_messages: list[BaseMessage],
+    current_turn_messages: list[BaseMessage],
+    tools: list[Any] | None = None,
 ) -> TokenBudgetBreakdown:
     """
     Compute a full token breakdown for a model request.
@@ -213,7 +211,7 @@ def compute_token_breakdown(
     return breakdown
 
 
-def extract_actual_usage(response: Any) -> Dict[str, Optional[int]]:
+def extract_actual_usage(response: Any) -> dict[str, int | None]:
     """
     Extract actual token usage from model response if available.
 
@@ -251,10 +249,10 @@ def extract_actual_usage(response: Any) -> Dict[str, Optional[int]]:
 
 
 def trim_history_to_budget(
-    history: List[Any],
+    history: list[Any],
     max_messages: int = 0,
     max_tokens: int = 0,
-) -> List[Any]:
+) -> list[Any]:
     """
     Trim conversation history to fit within configured budgets.
 

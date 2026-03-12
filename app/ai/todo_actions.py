@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from .schemas import TodoAction, TodoStatus
 
 
-def _as_dict(value: Any) -> Dict[str, Any]:
+def _as_dict(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
     if hasattr(value, "model_dump"):
@@ -32,7 +32,7 @@ def _normalize_action(action: Any) -> str:
     return str(action or "").strip().lower()
 
 
-def coerce_todo_item(raw_todo: Any, *, fallback_order: int) -> Dict[str, Any]:
+def coerce_todo_item(raw_todo: Any, *, fallback_order: int) -> dict[str, Any]:
     if hasattr(raw_todo, "model_dump"):
         todo = raw_todo.model_dump()
     elif isinstance(raw_todo, dict):
@@ -65,9 +65,7 @@ def _status_value(raw_status: Any) -> str:
     return raw_status.value if hasattr(raw_status, "value") else str(raw_status)
 
 
-def find_active_or_next_task(
-    todos: List[Dict[str, Any]], start_index: int = 0
-) -> Optional[int]:
+def find_active_or_next_task(todos: list[dict[str, Any]], start_index: int = 0) -> int | None:
     for preferred_status in (TodoStatus.IN_PROGRESS.value, TodoStatus.PENDING.value):
         for i in range(start_index, len(todos)):
             status = _status_value(todos[i].get("status", TodoStatus.PENDING.value))
@@ -78,11 +76,11 @@ def find_active_or_next_task(
 
 def apply_write_todos_action(
     *,
-    todos: List[Dict[str, Any]],
-    current_task_index: Optional[int],
+    todos: list[dict[str, Any]],
+    current_task_index: int | None,
     tool_args: Any,
     max_todos: int = 50,
-) -> Tuple[List[Dict[str, Any]], Optional[int], str, str]:
+) -> tuple[list[dict[str, Any]], int | None, str, str]:
     """
     Apply a single write_todos tool call to an in-memory todos list.
 
@@ -104,9 +102,7 @@ def apply_write_todos_action(
             )
             return todos, current_task_index, msg, action
 
-        coerced = [
-            coerce_todo_item(t, fallback_order=i) for i, t in enumerate(new_todos)
-        ]
+        coerced = [coerce_todo_item(t, fallback_order=i) for i, t in enumerate(new_todos)]
         current_task_index = find_active_or_next_task(coerced, 0)
         return (
             coerced,
@@ -195,15 +191,11 @@ def apply_write_todos_action(
         for i, todo in enumerate(todos):
             if str(todo.get("id")) == str(todo_id):
                 todos[i] = {**todo, **updated_todo}
-                if (
-                    _status_value(todos[i].get("status"))
-                    == TodoStatus.IN_PROGRESS.value
-                ):
+                if _status_value(todos[i].get("status")) == TodoStatus.IN_PROGRESS.value:
                     for j, other in enumerate(todos):
                         if (
                             j != i
-                            and _status_value(other.get("status"))
-                            == TodoStatus.IN_PROGRESS.value
+                            and _status_value(other.get("status")) == TodoStatus.IN_PROGRESS.value
                         ):
                             other["status"] = TodoStatus.PENDING.value
                     current_task_index = i
@@ -227,9 +219,7 @@ def apply_write_todos_action(
                     if i < current_task_index:
                         current_task_index -= 1
                     elif i == current_task_index:
-                        current_task_index = find_active_or_next_task(
-                            todos, max(0, i - 1)
-                        )
+                        current_task_index = find_active_or_next_task(todos, max(0, i - 1))
                 return todos, current_task_index, f"Removed todo: {todo_id}", action
         return todos, current_task_index, f"Todo with id {todo_id} not found", action
 

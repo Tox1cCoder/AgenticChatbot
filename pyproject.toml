@@ -89,3 +89,44 @@ allow-direct-references = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+# Thư mục/file muốn bỏ qua
+exclude = [
+    ".git",
+    ".ruff_cache",
+    ".venv",
+    "__pypackages__",
+    "build",
+    "dist",
+    "venv",
+]
+
+# Độ dài tối đa của một dòng (Black mặc định là 88, nhiều dự án dùng 100-120)
+line-length = 100
+
+# Phiên bản Python tối thiểu dự án hỗ trợ
+target-version = "py310"
+
+[tool.ruff.lint]
+# Bật các rule kiểm tra (Mặc định Ruff chỉ bật E và F)
+# Tham khảo: https://docs.astral.sh/ruff/rules/
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort (Sắp xếp import)
+    "UP", # pyupgrade (Gợi ý cú pháp Python mới)
+    "B",  # flake8-bugbear (Phát hiện các lỗi tiềm ẩn)
+    "SIM",# flake8-simplify (Gợi ý viết code đơn giản hơn)
+]
+
+# Bỏ qua một số rule cụ thể nếu thấy phiền
+ignore = []
+
+[tool.ruff.format]
+# Cấu hình formatter (giống Black)
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"

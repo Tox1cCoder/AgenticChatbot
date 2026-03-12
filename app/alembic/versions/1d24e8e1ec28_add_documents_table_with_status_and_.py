@@ -6,17 +6,16 @@ Create Date: 2025-09-29 09:53:34.891314
 
 """
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "1d24e8e1ec28"
-down_revision: Union[str, None] = "ef1b2c3d4e5f"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "ef1b2c3d4e5f"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -69,12 +68,8 @@ def upgrade() -> None:
     op.drop_index(op.f("ix_feedback_message_id"), table_name="feedbacks")
     op.drop_index(op.f("ix_feedback_user_id"), table_name="feedbacks")
     op.create_index(op.f("ix_feedbacks_id"), "feedbacks", ["id"], unique=False)
-    op.create_index(
-        op.f("ix_feedbacks_message_id"), "feedbacks", ["message_id"], unique=True
-    )
-    op.create_index(
-        op.f("ix_feedbacks_user_id"), "feedbacks", ["user_id"], unique=False
-    )
+    op.create_index(op.f("ix_feedbacks_message_id"), "feedbacks", ["message_id"], unique=True)
+    op.create_index(op.f("ix_feedbacks_user_id"), "feedbacks", ["user_id"], unique=False)
     # ### end Alembic commands ###
 
 
@@ -84,9 +79,7 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_feedbacks_message_id"), table_name="feedbacks")
     op.drop_index(op.f("ix_feedbacks_id"), table_name="feedbacks")
     op.create_index(op.f("ix_feedback_user_id"), "feedbacks", ["user_id"], unique=False)
-    op.create_index(
-        op.f("ix_feedback_message_id"), "feedbacks", ["message_id"], unique=True
-    )
+    op.create_index(op.f("ix_feedback_message_id"), "feedbacks", ["message_id"], unique=True)
     op.create_index(op.f("ix_feedback_id"), "feedbacks", ["id"], unique=False)
     op.drop_table("document_chunks")
     op.drop_table("documents")

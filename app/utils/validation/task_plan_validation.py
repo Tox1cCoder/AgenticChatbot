@@ -2,12 +2,11 @@
 TaskPlan validation utilities.
 """
 
-from typing import Optional
 from uuid import UUID
 
-from app.repositories.task_plan import TaskPlanRepository
-from app.repositories.conversation import ConversationRepository
 from app.core.exceptions import ResourceNotFoundException
+from app.repositories.conversation import ConversationRepository
+from app.repositories.task_plan import TaskPlanRepository
 
 
 class TaskPlanValidationUtils:
@@ -65,7 +64,7 @@ class TaskPlanValidationUtils:
             )
 
     @staticmethod
-    def _coerce_uuid(value: UUID | str | None) -> Optional[UUID]:
+    def _coerce_uuid(value: UUID | str | None) -> UUID | None:
         """Convert stored dependency identifiers into UUID objects."""
         if value is None:
             return None

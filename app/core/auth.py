@@ -1,18 +1,19 @@
 """Authentication dependencies and middleware for FastAPI"""
 
-from fastapi import Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from uuid import UUID
-import jwt
 
-from app.core.security import get_user_id_from_token, verify_refresh_token
+import jwt
+from fastapi import Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
 from app.core.exceptions import (
-    TokenExpiredException,
     AuthenticationException,
     AuthorizationException,
+    TokenExpiredException,
 )
-from app.services.jwt_service import JwtService
+from app.core.security import get_user_id_from_token, verify_refresh_token
 from app.models.user import User
+from app.services.jwt_service import JwtService
 
 security = HTTPBearer()
 
@@ -105,8 +106,8 @@ async def get_current_user(
         TokenExpiredException: If the token has expired
         AuthenticationException: If the token is invalid or user not found
     """
-    from app.interfaces.user_service_interface import IUserService
     from app.core.container import container
+    from app.interfaces.user_service_interface import IUserService
 
     token = credentials.credentials
     try:

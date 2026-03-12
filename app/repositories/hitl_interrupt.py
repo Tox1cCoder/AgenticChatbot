@@ -2,7 +2,6 @@
 
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -30,7 +29,7 @@ class HITLInterruptRepository:
         thread_id: str,
         expires_at: datetime,
         action_requests_json: list,
-        assistant_message_id: Optional[UUID] = None,
+        assistant_message_id: UUID | None = None,
     ) -> HITLInterrupt:
         """Persist a new interrupt session in PENDING state."""
         record = HITLInterrupt(
@@ -127,9 +126,7 @@ class HITLInterruptRepository:
             )
             db.commit()
 
-    def update_assistant_message_id(
-        self, interrupt_id: str, assistant_message_id: UUID
-    ) -> None:
+    def update_assistant_message_id(self, interrupt_id: str, assistant_message_id: UUID) -> None:
         """Attach the persisted assistant message ID to the interrupt record."""
         with self.session_factory() as db:
             db.execute(
@@ -146,12 +143,12 @@ class HITLInterruptRepository:
     # Read operations
     # ------------------------------------------------------------------
 
-    def get_by_id(self, interrupt_id: str) -> Optional[HITLInterrupt]:
+    def get_by_id(self, interrupt_id: str) -> HITLInterrupt | None:
         """Look up an interrupt record by its ID."""
         with self.session_factory() as db:
             return db.get(HITLInterrupt, interrupt_id)
 
-    def get_pending_by_conversation(self, conversation_id: UUID) -> List[HITLInterrupt]:
+    def get_pending_by_conversation(self, conversation_id: UUID) -> list[HITLInterrupt]:
         """Return all PENDING interrupt records for a conversation."""
         with self.session_factory() as db:
             stmt = select(HITLInterrupt).where(
@@ -160,7 +157,7 @@ class HITLInterruptRepository:
             )
             return list(db.execute(stmt).scalars().all())
 
-    def get_expired_pending(self, now: datetime) -> List[HITLInterrupt]:
+    def get_expired_pending(self, now: datetime) -> list[HITLInterrupt]:
         """Return PENDING records whose expiry time has passed."""
         with self.session_factory() as db:
             stmt = select(HITLInterrupt).where(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from .schemas import DocumentAction
 
@@ -10,8 +10,8 @@ logger = logging.getLogger(__name__)
 
 def merge_agentic_images(
     *,
-    context: Dict[str, Any],
-    new_images: List[Dict[str, Any]],
+    context: dict[str, Any],
+    new_images: list[dict[str, Any]],
     max_agentic_images: int,
 ) -> int:
     """Merge images into context['agentic_images'] with dedupe + size cap."""
@@ -19,9 +19,7 @@ def merge_agentic_images(
         return 0
 
     existing = context.get("agentic_images") or []
-    existing_ids = {
-        img.get("id") for img in existing if isinstance(img, dict) and img.get("id")
-    }
+    existing_ids = {img.get("id") for img in existing if isinstance(img, dict) and img.get("id")}
 
     added = 0
     for img in new_images:
@@ -47,11 +45,11 @@ def merge_agentic_images(
 async def execute_search_documents_action(
     *,
     rag_agent: Any,
-    conversation_id: Optional[str],
-    tool_args: Dict[str, Any],
-    context: Dict[str, Any],
+    conversation_id: str | None,
+    tool_args: dict[str, Any],
+    context: dict[str, Any],
     max_agentic_images: int,
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     """
     Execute one search_documents action.
 
@@ -88,15 +86,11 @@ async def execute_search_documents_action(
         elif action == DocumentAction.SEARCH_CHUNKS.value:
             query = tool_args.get("query")
             if query:
-                search_results = await rag_agent._search(
-                    query, conversation_id=conversation_id
-                )
+                search_results = await rag_agent._search(query, conversation_id=conversation_id)
                 if search_results:
                     attached_count = 0
                     try:
-                        images_for_chunks = await rag_agent._fetch_images_for_chunks(
-                            search_results
-                        )
+                        images_for_chunks = await rag_agent._fetch_images_for_chunks(search_results)
                         attached_count = merge_agentic_images(
                             context=context,
                             new_images=images_for_chunks,
@@ -116,9 +110,7 @@ async def execute_search_documents_action(
                         page_end = doc.get("page_end")
 
                         image_ids = doc.get("image_ids") or []
-                        image_captions = [
-                            cap for cap in (doc.get("image_captions") or []) if cap
-                        ]
+                        image_captions = [cap for cap in (doc.get("image_captions") or []) if cap]
 
                         has_tables = bool(doc.get("has_tables", False))
                         table_count = doc.get("table_count", 0) or 0

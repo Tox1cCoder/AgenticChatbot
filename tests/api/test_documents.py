@@ -13,8 +13,8 @@ Tests cover:
 import os
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
-import pytest
 
+import pytest
 
 # ---------------------------------------------------------------------------
 # Processing-task-ID persistence
@@ -104,9 +104,7 @@ class TestTaskStatusOwnership:
         if document is not None:
             validation_utils.validate_document_access(user_id, document.id)
 
-        validation_utils.validate_document_access.assert_called_once_with(
-            user_id, doc.id
-        )
+        validation_utils.validate_document_access.assert_called_once_with(user_id, doc.id)
 
     def test_unknown_task_id_skips_ownership_check(self):
         """If no document is found for the task ID, skip the ownership check."""
@@ -265,13 +263,13 @@ class TestDocumentWorkerRetries:
                 "app.workers.document_processor.get_settings",
                 return_value=settings,
             ),
+            pytest.raises(RuntimeError, match="retry requested"),
         ):
-            with pytest.raises(RuntimeError, match="retry requested"):
-                process_document_task.run.__func__(
-                    task_self,
-                    document_id,
-                    str(staged_path),
-                    "retry-doc.pdf",
-                )
+            process_document_task.run.__func__(
+                task_self,
+                document_id,
+                str(staged_path),
+                "retry-doc.pdf",
+            )
 
         assert staged_path.exists(), "Retry path must preserve the staged file"

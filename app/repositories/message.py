@@ -1,14 +1,13 @@
-from typing import List, Optional
 from uuid import UUID
+
+from sqlalchemy import asc, desc, select
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import select, asc, desc
 
 from app.models.message import Message
 from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.query_strategy import DefaultQueryStrategy
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate
-
 from app.utils.validation.pagination_validation import validate_pagination_params
 
 
@@ -51,9 +50,7 @@ class MessageCRUDStrategy(
         if hasattr(Message, order_by):
             order_column = getattr(Message, order_by)
             statement = statement.order_by(
-                asc(order_column)
-                if order_direction.lower() == "asc"
-                else desc(order_column)
+                asc(order_column) if order_direction.lower() == "asc" else desc(order_column)
             )
         else:
             # Default ordering
@@ -108,9 +105,7 @@ class MessageCRUDStrategy(
         if hasattr(Message, order_by):
             order_column = getattr(Message, order_by)
             statement = statement.order_by(
-                asc(order_column)
-                if order_direction.lower() == "asc"
-                else desc(order_column)
+                asc(order_column) if order_direction.lower() == "asc" else desc(order_column)
             )
         else:
             # Default ordering
@@ -141,7 +136,7 @@ class MessageCRUDStrategy(
         conversation_id: UUID,
         query: str,
         limit: int = 10,
-    ) -> List[Message]:
+    ) -> list[Message]:
         """
         Search messages by content in a specific conversation.
 
@@ -183,7 +178,7 @@ class MessageRepository:
         conversation_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = None,
+        order_by: str | None = None,
         order_direction: str = "asc",
         include_feedback: bool = False,
     ) -> Paginator[Message]:
@@ -202,16 +197,14 @@ class MessageRepository:
     def count_by_conversation_id(self, conversation_id: UUID) -> int:
         """Count messages by conversation ID"""
         with self.session_factory() as session:
-            return self._crud_strategy.count_by_conversation_id(
-                session, conversation_id
-            )
+            return self._crud_strategy.count_by_conversation_id(session, conversation_id)
 
     def get_by_user_id(
         self,
         user_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = None,
+        order_by: str | None = None,
         order_direction: str = "desc",
         include_feedback: bool = False,
     ) -> Paginator[Message]:
@@ -238,7 +231,7 @@ class MessageRepository:
             created_message = self._crud_strategy.create(session, input_schema)
             return created_message
 
-    def get_by_id(self, id: UUID) -> Optional[Message]:
+    def get_by_id(self, id: UUID) -> Message | None:
         """Get message by ID"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_id(session, id)
@@ -248,7 +241,7 @@ class MessageRepository:
         with self.session_factory() as session:
             return self._crud_strategy.get_all(session, page, limit)
 
-    def update(self, id: UUID, input_schema: MessageUpdate) -> Optional[Message]:
+    def update(self, id: UUID, input_schema: MessageUpdate) -> Message | None:
         """Update message by ID"""
         with self.session_factory() as session:
             db_obj = self._crud_strategy.get_by_id(session, id)
@@ -261,7 +254,7 @@ class MessageRepository:
         with self.session_factory() as session:
             return self._crud_strategy.delete(session, id)
 
-    def get_latest_by_conversation(self, conversation_id: UUID) -> Optional[Message]:
+    def get_latest_by_conversation(self, conversation_id: UUID) -> Message | None:
         """Retrieve the most recent message in a conversation."""
         with self.session_factory() as session:
             statement = (

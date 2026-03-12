@@ -1,22 +1,23 @@
-from typing import AsyncGenerator, Callable, List
-from uuid import UUID
 import asyncio
 import json
 import logging
-from fastapi import APIRouter, status, Query, Request, Response
+from collections.abc import AsyncGenerator, Callable
+from uuid import UUID
+
+from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.message_service_interface import IMessageService
 from app.schemas.message import (
+    InterruptResumeRequest,
     MessageCreate,
     MessageRead,
-    InterruptResumeRequest,
     StopGenerationRequest,
 )
+from app.schemas.pagination import MessagePaginationParams
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
-from app.schemas.pagination import MessagePaginationParams
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +53,7 @@ def _internal_event_stream_response(
                     break
 
                 try:
-                    event = await asyncio.wait_for(
-                        queue.get(), timeout=HEARTBEAT_INTERVAL_SECONDS
-                    )
+                    event = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_INTERVAL_SECONDS)
                 except asyncio.TimeoutError:
                     yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
                     continue
@@ -121,9 +120,7 @@ async def create_message(
             data=result,
         )
 
-    return ApiResponse(
-        success=True, message="Message created successfully", data=result
-    )
+    return ApiResponse(success=True, message="Message created successfully", data=result)
 
 
 @router.post("/stream", status_code=status.HTTP_200_OK)
@@ -224,9 +221,7 @@ async def get_message(
 ) -> ApiResponse[MessageRead]:
     """Get message by ID"""
     result = message_service.get_by_id(message_id, user_id)
-    return ApiResponse(
-        success=True, message="Message retrieved successfully", data=result
-    )
+    return ApiResponse(success=True, message="Message retrieved successfully", data=result)
 
 
 @router.get("/", response_model=PaginatedApiResponse[MessageRead])
@@ -235,9 +230,7 @@ async def get_user_messages(
     message_service: IMessageService,
     user_id: UUID,
     pagination: MessagePaginationParams,
-    include: List[str] = Query(
-        default=[], description="Array of includes e.g. ['feedback']"
-    ),
+    include: list[str] = Query(default=[], description="Array of includes e.g. ['feedback']"),
 ) -> PaginatedApiResponse[MessageRead]:
     """Get all messages for authenticated user with pagination"""
     include_feedback = "feedback" in include

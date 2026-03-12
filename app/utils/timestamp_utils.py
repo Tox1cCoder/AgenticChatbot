@@ -14,9 +14,7 @@ class TimestampUtils:
         return datetime.now(timezone.utc)
 
     @staticmethod
-    def get_timestamp_dict(
-        created_at: datetime = None, updated_at: datetime = None
-    ) -> dict:
+    def get_timestamp_dict(created_at: datetime = None, updated_at: datetime = None) -> dict:
         """Generate timestamp dictionary with consistent defaults"""
         now = TimestampUtils.now()
         return {

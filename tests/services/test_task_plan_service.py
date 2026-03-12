@@ -10,14 +10,11 @@ Tests cover:
 """
 
 import uuid
-from unittest.mock import MagicMock
-
-
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 from app.models.enums import PlanLifecycle, TaskStatus
 from app.schemas.task_plan import PlanningStatusResponse
-
 
 # ---------------------------------------------------------------------------
 # Helpers / factories
@@ -157,9 +154,7 @@ class TestSyncTodosLifecycle:
             user_id=uuid.uuid4(),
             lifecycle=PlanLifecycle.executing,
         )
-        svc._transition_lifecycle.assert_called_once_with(
-            conv.id, PlanLifecycle.executing
-        )
+        svc._transition_lifecycle.assert_called_once_with(conv.id, PlanLifecycle.executing)
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, String, Text, ForeignKey, DateTime, Boolean, func
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -18,9 +18,7 @@ class Conversation(Base):
     )
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
-    owner_id = Column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
-    )
+    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     title = Column(String(255), nullable=False)
     persona_prompt = Column(Text, nullable=True)
     planning_mode_enabled = Column(Boolean, default=False, nullable=False)

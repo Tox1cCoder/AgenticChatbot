@@ -1,8 +1,9 @@
+import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, DateTime, ForeignKey, Integer, Text, Index
+
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
-import uuid
 
 from app.models.base import Base
 
@@ -11,17 +12,13 @@ class DocumentImage(Base):
     __tablename__ = "document_images"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    document_id = Column(
-        UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False, index=True
-    )
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False, index=True)
     chunk_id = Column(UUID(as_uuid=True), nullable=True)
     image_path = Column(String(500), nullable=False)
     image_caption = Column(Text, nullable=True)
     page_number = Column(Integer, nullable=True)
     mime_type = Column(String(50), nullable=False)
-    created_at = Column(
-        DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc)
-    )
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
 
     # Relationships
     document = relationship("Document", back_populates="images")

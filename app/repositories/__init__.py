@@ -20,11 +20,11 @@ _MODULE_MAP = {
 }
 
 if TYPE_CHECKING:
-    from .user import UserRepository
     from .conversation import ConversationRepository
-    from .message import MessageRepository
+    from .document import DocumentChunkRepository, DocumentRepository
     from .feedback import FeedbackRepository
-    from .document import DocumentRepository, DocumentChunkRepository
+    from .message import MessageRepository
+    from .user import UserRepository
 
 
 def __getattr__(name: str) -> Any:

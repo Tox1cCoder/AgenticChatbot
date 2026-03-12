@@ -8,10 +8,9 @@ The context is set by the graph during tool execution and includes:
 """
 
 import logging
-from contextvars import ContextVar
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +26,9 @@ class ToolContext:
         agent_key: The key of the agent (e.g., "chat", "rag", "search")
     """
 
-    conversation_id: Optional[str] = None
-    user_id: Optional[str] = None
-    agent_key: Optional[str] = None
+    conversation_id: str | None = None
+    user_id: str | None = None
+    agent_key: str | None = None
 
     def __bool__(self) -> bool:
         """Return True if any context field is set."""
@@ -37,7 +36,7 @@ class ToolContext:
 
 
 # Context variable for the current tool execution context
-_tool_context: ContextVar[Optional[ToolContext]] = ContextVar(
+_tool_context: ContextVar[ToolContext | None] = ContextVar(
     "tool_context",
     default=None,
 )
@@ -83,9 +82,9 @@ def clear_tool_context() -> None:
 
 @contextmanager
 def tool_execution_context(
-    conversation_id: Optional[str] = None,
-    user_id: Optional[str] = None,
-    agent_key: Optional[str] = None,
+    conversation_id: str | None = None,
+    user_id: str | None = None,
+    agent_key: str | None = None,
 ):
     """
     Context manager that sets tool execution context for the duration of a block.

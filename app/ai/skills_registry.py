@@ -17,7 +17,6 @@ import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +42,7 @@ class SkillsRegistry:
     def __init__(self, skills_dir: str, config_path: str):
         self._skills_dir = skills_dir
         self._config_path = config_path
-        self._skills: Dict[str, SkillMeta] = {}
+        self._skills: dict[str, SkillMeta] = {}
         self._generation: int = 0
         self._lock = threading.Lock()
 
@@ -54,11 +53,11 @@ class SkillsRegistry:
     # Discovery & state
     # ------------------------------------------------------------------
 
-    def get_all_skills(self) -> List[SkillMeta]:
+    def get_all_skills(self) -> list[SkillMeta]:
         """Returns all discovered skills."""
         return list(self._skills.values())
 
-    def get_active_skills(self) -> List[SkillMeta]:
+    def get_active_skills(self) -> list[SkillMeta]:
         """Returns only enabled skills."""
         return [s for s in self._skills.values() if s.enabled]
 
@@ -118,7 +117,7 @@ class SkillsRegistry:
         """
         with self._lock:
             config = self._load_config()
-            discovered: Dict[str, SkillMeta] = {}
+            discovered: dict[str, SkillMeta] = {}
 
             skills_dir = Path(self._skills_dir)
             if not skills_dir.is_dir():
@@ -164,7 +163,7 @@ class SkillsRegistry:
         re.DOTALL,
     )
 
-    def _parse_skill(self, skill_file: Path, folder: Path) -> Optional[SkillMeta]:
+    def _parse_skill(self, skill_file: Path, folder: Path) -> SkillMeta | None:
         """Parse a SKILL.md file into a SkillMeta, or None on error."""
         try:
             raw = skill_file.read_text(encoding="utf-8")
@@ -185,9 +184,7 @@ class SkillsRegistry:
         description = self._extract_yaml_value(yaml_block, "description")
 
         if not name:
-            logger.warning(
-                "Missing 'name' in front-matter of %s — skipping", skill_file
-            )
+            logger.warning("Missing 'name' in front-matter of %s — skipping", skill_file)
             return None
 
         if not description:
@@ -202,7 +199,7 @@ class SkillsRegistry:
         )
 
     @staticmethod
-    def _extract_yaml_value(yaml_block: str, key: str) -> Optional[str]:
+    def _extract_yaml_value(yaml_block: str, key: str) -> str | None:
         """
         Extract a simple scalar or multi-line '>' value from a YAML block.
 
@@ -231,7 +228,7 @@ class SkillsRegistry:
                 return value
 
             # Folded / literal block — collect indented continuation lines
-            collected: List[str] = []
+            collected: list[str] = []
             for cont_line in lines[i + 1 :]:
                 if cont_line and not cont_line[0].isspace():
                     break  # next top-level key
@@ -253,23 +250,17 @@ class SkillsRegistry:
         try:
             return json.loads(config_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning(
-                "Failed to read skills config (%s): %s", self._config_path, exc
-            )
+            logger.warning("Failed to read skills config (%s): %s", self._config_path, exc)
             return {"skills": {}}
 
     def _save_config(self) -> None:
         """Write current skill states to skills_config.json atomically."""
         data = {
-            "skills": {
-                name: {"enabled": skill.enabled} for name, skill in self._skills.items()
-            }
+            "skills": {name: {"enabled": skill.enabled} for name, skill in self._skills.items()}
         }
         self._atomic_write(data)
 
-    def _merge_and_save_config(
-        self, config: dict, discovered: Dict[str, SkillMeta]
-    ) -> None:
+    def _merge_and_save_config(self, config: dict, discovered: dict[str, SkillMeta]) -> None:
         """Merge discovered skills into config and save."""
         skills_section = config.get("skills", {})
         changed = False
@@ -281,11 +272,7 @@ class SkillsRegistry:
 
         if changed:
             config["skills"] = skills_section
-            data = {
-                "skills": {
-                    name: {"enabled": discovered[name].enabled} for name in discovered
-                }
-            }
+            data = {"skills": {name: {"enabled": discovered[name].enabled} for name in discovered}}
             self._atomic_write(data)
 
     def _atomic_write(self, data: dict) -> None:
@@ -312,7 +299,7 @@ class SkillsRegistry:
 # Module-level singleton helpers (mirrors mcp_registry.py pattern)
 # ------------------------------------------------------------------
 
-_registry: Optional[SkillsRegistry] = None
+_registry: SkillsRegistry | None = None
 
 
 def get_skills_registry() -> SkillsRegistry:

@@ -3,65 +3,64 @@ import json
 import logging
 import time
 from collections import defaultdict
-from typing import Optional, TYPE_CHECKING, List, Dict, Any, Tuple
+from typing import TYPE_CHECKING, Any, Optional
 from uuid import UUID
 
 from cachetools import TTLCache
-
-from langgraph.graph import StateGraph, END, START
-from langgraph.errors import GraphRecursionError
-from langgraph.types import Command, interrupt
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langgraph.errors import GraphRecursionError
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 
+from ..core.config import settings
+from ..core.response_constants import NO_RESPONSE_GENERATED
+from .agents.canvas_agent import CanvasAgent
+from .agents.chat_agent import ChatAgent
+from .agents.image_generator_agent import ImageGeneratorAgent
+from .agents.planning_agent import PlanningAgent
+from .agents.rag_agent import RAGAgent
+from .agents.router import Router
+from .agents.search_agent import SearchAgent
+from .hand_off_tool import MAX_DELEGATION_DEPTH
+from .hitl_config import build_interrupt_response, requires_human_approval
+from .memory import get_memory_manager
+from .rag_tool_actions import execute_search_documents_action
 from .schemas import (
-    GraphState,
     AgentMessage,
     AgentResponse,
     AgentType,
-    MessageRole,
+    GraphState,
     InterruptDecision,
+    MessageRole,
     TodoStatus,
 )
-from .agents.router import Router
-from .agents.chat_agent import ChatAgent
-from .agents.rag_agent import RAGAgent
-from .agents.search_agent import SearchAgent
-from .agents.image_generator_agent import ImageGeneratorAgent
-from .agents.planning_agent import PlanningAgent
-from .agents.canvas_agent import CanvasAgent
 from .summarization_middleware import summarize_for_state
-from .memory import get_memory_manager
-from ..core.config import settings
-from .hitl_config import build_interrupt_response, requires_human_approval
-from .rag_tool_actions import execute_search_documents_action
-from .tool_execution import (
-    ensure_agent_tool_map,
-    execute_tool_calls,
-    invoke_tool,
-    build_tool_artifact,
-    build_rejected_tool_artifacts,
-    extract_images_from_tool_result,
-)
-from .hand_off_tool import MAX_DELEGATION_DEPTH
 from .todo_actions import apply_write_todos_action
-from .utils import (
-    normalize_tool_call,
-    coerce_response_text,
-    make_json_safe,
-    extract_content_from_result,
-    apply_hitl_decisions,
-    find_pending_tool_call_message,
-)
 from .token_instrumentation import (
-    trim_history_to_budget,
     HistoryBudgetConfig,
+    trim_history_to_budget,
     truncate_tool_result,
 )
 from .tool_context import tool_execution_context
-from ..core.response_constants import NO_RESPONSE_GENERATED
+from .tool_execution import (
+    build_rejected_tool_artifacts,
+    build_tool_artifact,
+    ensure_agent_tool_map,
+    execute_tool_calls,
+    extract_images_from_tool_result,
+    invoke_tool,
+)
+from .utils import (
+    apply_hitl_decisions,
+    coerce_response_text,
+    extract_content_from_result,
+    find_pending_tool_call_message,
+    make_json_safe,
+    normalize_tool_call,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +75,7 @@ class MultiAgentWorkflow:
         self,
         qdrant_client: QdrantClient,
         embedding_model: SentenceTransformer,
-        checkpointer: Optional[BaseCheckpointSaver] = None,
+        checkpointer: BaseCheckpointSaver | None = None,
         document_repository: Optional["DocumentRepository"] = None,
     ):
         self.qdrant_client = qdrant_client
@@ -107,11 +106,9 @@ class MultiAgentWorkflow:
         # Conversation history cache with bounded size + automatic TTL eviction.
         # Replaces the plain dict to prevent unbounded memory growth.
         self._history_cache_ttl_seconds: int = 60
-        self._history_cache: TTLCache = TTLCache(
-            maxsize=256, ttl=self._history_cache_ttl_seconds
-        )
+        self._history_cache: TTLCache = TTLCache(maxsize=256, ttl=self._history_cache_ttl_seconds)
         # Per-conversation lock to prevent duplicate DB lookups under concurrency.
-        self._history_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._history_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
         self.graph = self._build_graph()
         self._cleanup_agents = [
@@ -124,7 +121,7 @@ class MultiAgentWorkflow:
         ]
         self._initialized = False
 
-    def _get_current_turn_messages(self, messages: List) -> List:
+    def _get_current_turn_messages(self, messages: list) -> list:
         if not messages:
             return messages
 
@@ -158,10 +155,7 @@ class MultiAgentWorkflow:
             return True
 
         nested_metadata = metadata.get("metadata") or {}
-        if (
-            isinstance(nested_metadata, dict)
-            and nested_metadata.get("internal") is True
-        ):
+        if isinstance(nested_metadata, dict) and nested_metadata.get("internal") is True:
             return True
 
         # Hard-coded fallback: always suppress the summarize node regardless of tags.
@@ -172,7 +166,7 @@ class MultiAgentWorkflow:
     @staticmethod
     def _consume_stream_text_chunk(
         accumulated_content: str, text_chunk: Any
-    ) -> Tuple[str, Optional[str]]:
+    ) -> tuple[str, str | None]:
         """
         Return (new_accumulated_content, delta_to_emit) for a streaming text chunk.
 
@@ -210,10 +204,10 @@ class MultiAgentWorkflow:
 
     async def _get_conversation_history(
         self,
-        conversation_id: Optional[str],
-        user_id: Optional[str],
-        agent_key: Optional[str] = None,
-    ) -> List:
+        conversation_id: str | None,
+        user_id: str | None,
+        agent_key: str | None = None,
+    ) -> list:
         """
         Get conversation history with caching and budget trimming.
 
@@ -273,22 +267,19 @@ class MultiAgentWorkflow:
         """Invalidate cached history for a conversation (call when new messages added)."""
         self._history_cache.pop(conversation_id, None)
 
-    def _find_last_human_message_index(self, messages: List) -> Optional[int]:
+    def _find_last_human_message_index(self, messages: list) -> int | None:
         for idx in range(len(messages) - 1, -1, -1):
             if isinstance(messages[idx], HumanMessage):
                 return idx
         return None
 
-    def _has_tool_context(self, messages: List, last_human_idx: Optional[int]) -> bool:
+    def _has_tool_context(self, messages: list, last_human_idx: int | None) -> bool:
         if last_human_idx is None:
             return False
 
         return any(
             isinstance(m, (AIMessage, ToolMessage))
-            and (
-                isinstance(m, ToolMessage)
-                or (hasattr(m, "tool_calls") and m.tool_calls)
-            )
+            and (isinstance(m, ToolMessage) or (hasattr(m, "tool_calls") and m.tool_calls))
             for m in messages[last_human_idx + 1 :]
         )
 
@@ -312,9 +303,7 @@ class MultiAgentWorkflow:
             else:
                 response.metadata["images"] = tool_images
 
-    def _finalize_agent_response(
-        self, state: GraphState, response: AgentResponse
-    ) -> GraphState:
+    def _finalize_agent_response(self, state: GraphState, response: AgentResponse) -> GraphState:
         state["response"] = response
 
         ai_kwargs = {"content": response.message.content}
@@ -327,17 +316,17 @@ class MultiAgentWorkflow:
     def _build_initial_state(
         self,
         message: str,
-        conversation_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        persona: Optional[str] = None,
-        attachments: Optional[list] = None,
-        model_request: Optional[Dict[str, Any]] = None,
-        current_task: Optional[Dict[str, Any]] = None,
-        all_tasks: Optional[List[Dict[str, Any]]] = None,
+        conversation_id: str | None = None,
+        user_id: str | None = None,
+        persona: str | None = None,
+        attachments: list | None = None,
+        model_request: dict[str, Any] | None = None,
+        current_task: dict[str, Any] | None = None,
+        all_tasks: list[dict[str, Any]] | None = None,
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
-        existing_tasks: Optional[List[Dict[str, Any]]] = None,
-        plan_lifecycle: Optional[str] = None,
+        existing_tasks: list[dict[str, Any]] | None = None,
+        plan_lifecycle: str | None = None,
     ) -> GraphState:
         initial_state: GraphState = {
             "messages": [HumanMessage(content=message)],
@@ -368,7 +357,7 @@ class MultiAgentWorkflow:
         initial_state["context"]["has_existing_plan"] = has_existing_plan
         if existing_tasks:
             initial_state["context"]["existing_tasks"] = existing_tasks
-            todos: List[Dict[str, Any]] = []
+            todos: list[dict[str, Any]] = []
             for i, task in enumerate(existing_tasks):
                 if not isinstance(task, dict):
                     continue
@@ -400,7 +389,7 @@ class MultiAgentWorkflow:
 
         return initial_state
 
-    def _find_first_pending_task(self, tasks: List[Dict[str, Any]]) -> Optional[int]:
+    def _find_first_pending_task(self, tasks: list[dict[str, Any]]) -> int | None:
         """Find the first pending or in-progress task index in the task list."""
         for i, task in enumerate(tasks):
             status = task.get("status", "pending")
@@ -572,15 +561,11 @@ class MultiAgentWorkflow:
             # routing confusion when the tools node cannot execute anything.
             sanitized = AIMessage(content=pending_message.content or "")
             state["messages"] = (
-                messages[:pending_message_idx]
-                + [sanitized]
-                + messages[pending_message_idx + 1 :]
+                messages[:pending_message_idx] + [sanitized] + messages[pending_message_idx + 1 :]
             )
             return state
 
-        tool_map = await ensure_agent_tool_map(
-            agent, conversation_id=state.get("conversation_id")
-        )
+        tool_map = await ensure_agent_tool_map(agent, conversation_id=state.get("conversation_id"))
         if not tool_map:
             return state
 
@@ -654,9 +639,7 @@ class MultiAgentWorkflow:
     # ------------------------------------------------------------------
     # hand_off delegation helper
     # ------------------------------------------------------------------
-    def _apply_hand_off_if_present(
-        self, state: GraphState, tool_outputs: list
-    ) -> GraphState:
+    def _apply_hand_off_if_present(self, state: GraphState, tool_outputs: list) -> GraphState:
         """Detect a hand_off tool result and re-route to the target agent.
 
         If ``delegation_count`` exceeds ``MAX_DELEGATION_DEPTH`` the delegation
@@ -680,9 +663,7 @@ class MultiAgentWorkflow:
 
         # Validate target agent exists
         if target_agent not in self.agents:
-            logger.warning(
-                "hand_off requested unknown agent '%s'; ignoring", target_agent
-            )
+            logger.warning("hand_off requested unknown agent '%s'; ignoring", target_agent)
             return state
 
         # Circuit-breaker: cap delegation depth
@@ -725,9 +706,7 @@ class MultiAgentWorkflow:
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return state
 
-        action_requests = [
-            normalize_tool_call(tool_call) for tool_call in last_message.tool_calls
-        ]
+        action_requests = [normalize_tool_call(tool_call) for tool_call in last_message.tool_calls]
 
         # Label the stop reason before yielding to the human so callers can
         # distinguish approval-gate pauses from budget/error pauses.
@@ -744,9 +723,7 @@ class MultiAgentWorkflow:
         if not human_decisions:
             _, rejected_feedback = _apply_decisions(last_message.tool_calls, [])
         else:
-            _, rejected_feedback = _apply_decisions(
-                last_message.tool_calls, human_decisions
-            )
+            _, rejected_feedback = _apply_decisions(last_message.tool_calls, human_decisions)
 
         rejection_messages = [
             ToolMessage(
@@ -788,9 +765,7 @@ class MultiAgentWorkflow:
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return "end"
 
-        tool_names = [
-            normalize_tool_call(tc).get("name") for tc in last_message.tool_calls
-        ]
+        tool_names = [normalize_tool_call(tc).get("name") for tc in last_message.tool_calls]
         if requires_human_approval(tool_names):
             return "approval"
 
@@ -837,9 +812,9 @@ class MultiAgentWorkflow:
     def _build_interrupt_agent_response(
         self,
         state_snapshot: Any,
-        thread_id: Optional[str],
-        fallback_conversation_id: Optional[str] = None,
-    ) -> Optional[AgentResponse]:
+        thread_id: str | None,
+        fallback_conversation_id: str | None = None,
+    ) -> AgentResponse | None:
         if not state_snapshot or not thread_id:
             return None
 
@@ -852,13 +827,9 @@ class MultiAgentWorkflow:
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return None
 
-        action_requests = [
-            normalize_tool_call(tool_call) for tool_call in last_message.tool_calls
-        ]
+        action_requests = [normalize_tool_call(tool_call) for tool_call in last_message.tool_calls]
 
-        conversation_id = (
-            values.get("conversation_id") or fallback_conversation_id or ""
-        )
+        conversation_id = values.get("conversation_id") or fallback_conversation_id or ""
         interrupt_response = build_interrupt_response(
             {"action_requests": action_requests},
             thread_id,
@@ -869,9 +840,7 @@ class MultiAgentWorkflow:
 
         agent = self.agents.get(selected_agent)
         agent_type = (
-            agent.agent_type
-            if agent and hasattr(agent, "agent_type")
-            else AgentType.SEARCH
+            agent.agent_type if agent and hasattr(agent, "agent_type") else AgentType.SEARCH
         )
 
         return AgentResponse(
@@ -889,7 +858,7 @@ class MultiAgentWorkflow:
         Summarization node that runs ONCE at the start of each user request.
         """
         try:
-            conversation_id: Optional[str] = state.get("conversation_id")
+            conversation_id: str | None = state.get("conversation_id")
             # This will check thresholds and apply summarization if needed.
             # summarize_for_state is fail-closed: on any error it returns state unchanged.
             state = await summarize_for_state(state, conversation_id=conversation_id)
@@ -914,11 +883,7 @@ class MultiAgentWorkflow:
         context = state.get("context", {})
 
         last_message = messages[-1]
-        content = (
-            last_message.content
-            if hasattr(last_message, "content")
-            else str(last_message)
-        )
+        content = last_message.content if hasattr(last_message, "content") else str(last_message)
         conversation_id = state.get("conversation_id")
         has_documents = self._conversation_has_documents(conversation_id)
 
@@ -947,21 +912,16 @@ class MultiAgentWorkflow:
         state["selected_agent"] = selected_agent
         return state
 
-    def _conversation_has_documents(self, conversation_id: Optional[str]) -> bool:
+    def _conversation_has_documents(self, conversation_id: str | None) -> bool:
         if not conversation_id or not self.document_repository:
             return False
         try:
-            return (
-                self.document_repository.count_by_conversation(UUID(conversation_id))
-                > 0
-            )
+            return self.document_repository.count_by_conversation(UUID(conversation_id)) > 0
         except (ValueError, Exception):
             return False
 
-    def _build_graph_config(
-        self, thread_id: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
-        config: Dict[str, Any] = {}
+    def _build_graph_config(self, thread_id: str | None = None) -> dict[str, Any] | None:
+        config: dict[str, Any] = {}
         recursion_limit = getattr(settings, "react_agent_recursion_limit", None)
         if recursion_limit and recursion_limit > 0:
             config["recursion_limit"] = recursion_limit
@@ -991,9 +951,7 @@ class MultiAgentWorkflow:
                 messages[last_human_idx].content
                 if last_human_idx is not None
                 else (
-                    messages[-1].content
-                    if hasattr(messages[-1], "content")
-                    else str(messages[-1])
+                    messages[-1].content if hasattr(messages[-1], "content") else str(messages[-1])
                 )
             )
 
@@ -1029,11 +987,7 @@ class MultiAgentWorkflow:
             return state
 
         last_message = messages[-1]
-        content = (
-            last_message.content
-            if hasattr(last_message, "content")
-            else str(last_message)
-        )
+        content = last_message.content if hasattr(last_message, "content") else str(last_message)
 
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
@@ -1044,9 +998,7 @@ class MultiAgentWorkflow:
         context = state.get("context", {})
 
         last_human_idx = self._find_last_human_message_index(messages)
-        original_query = (
-            messages[last_human_idx].content if last_human_idx is not None else content
-        )
+        original_query = messages[last_human_idx].content if last_human_idx is not None else content
 
         tool_context = []
         if last_human_idx is not None:
@@ -1059,9 +1011,7 @@ class MultiAgentWorkflow:
             "history": conversation_history,
             "original_query": original_query,
             "tool_context": tool_context,
-            "agentic_images": context.get(
-                "agentic_images", []
-            ),  # Pass images for multimodal LLM
+            "agentic_images": context.get("agentic_images", []),  # Pass images for multimodal LLM
             "model_request": state.get("model_request"),
             "user_id": user_id,
             "history_summary": state.get("history_summary"),
@@ -1105,8 +1055,8 @@ class MultiAgentWorkflow:
         conversation_id = state.get("conversation_id")
         tool_outputs = []
         context = state.get("context", {})
-        tool_artifacts: List[Dict[str, Any]] = []
-        all_images: List[Dict[str, str]] = []
+        tool_artifacts: list[dict[str, Any]] = []
+        all_images: list[dict[str, str]] = []
         max_agentic_images = getattr(settings, "agentic_rag_max_images", 6)
 
         # Track agentic iteration count
@@ -1120,8 +1070,8 @@ class MultiAgentWorkflow:
         non_search_tool_calls = [
             tc for tc in normalized_tool_calls if tc.get("name") != "search_documents"
         ]
-        non_search_outputs_by_id: Dict[str, str] = {}
-        rejected_feedback: Dict[str, str] = {}
+        non_search_outputs_by_id: dict[str, str] = {}
+        rejected_feedback: dict[str, str] = {}
 
         if non_search_tool_calls:
             tool_calls_to_execute = list(non_search_tool_calls)
@@ -1156,11 +1106,7 @@ class MultiAgentWorkflow:
 
             if tool_calls_to_execute:
                 selected_agent_name = state.get("selected_agent")
-                agent = (
-                    self.agents.get(selected_agent_name)
-                    if selected_agent_name
-                    else None
-                )
+                agent = self.agents.get(selected_agent_name) if selected_agent_name else None
                 tool_map = (
                     await ensure_agent_tool_map(agent, conversation_id=conversation_id)
                     if agent
@@ -1180,9 +1126,7 @@ class MultiAgentWorkflow:
                     )
                 for output in outputs:
                     if output.get("tool_call_id"):
-                        non_search_outputs_by_id[output["tool_call_id"]] = output[
-                            "content"
-                        ]
+                        non_search_outputs_by_id[output["tool_call_id"]] = output["content"]
                 tool_artifacts.extend(artifacts)
                 all_images.extend(images)
 
@@ -1457,7 +1401,7 @@ class MultiAgentWorkflow:
         todos = list(state.get("todos", []))  # Make a copy
         current_task_index = state.get("current_task_index")
         tool_outputs = []
-        write_todos_actions: List[str] = []
+        write_todos_actions: list[str] = []
 
         # Track errors for circuit breaker
         context = state.get("context", {})
@@ -1467,25 +1411,19 @@ class MultiAgentWorkflow:
         user_id = state.get("user_id")
         agent_key = getattr(self.planning_agent, "agent_config_key", "planning")
 
-        tool_map = await ensure_agent_tool_map(
-            self.planning_agent, conversation_id=conversation_id
-        )
+        tool_map = await ensure_agent_tool_map(self.planning_agent, conversation_id=conversation_id)
 
         # Separate write_todos calls from external/MCP tool calls
         normalized_calls = [normalize_tool_call(tc) for tc in last_message.tool_calls]
-        external_tool_calls = [
-            tc for tc in normalized_calls if tc.get("name") != "write_todos"
-        ]
-        write_todos_calls = [
-            tc for tc in normalized_calls if tc.get("name") == "write_todos"
-        ]
+        external_tool_calls = [tc for tc in normalized_calls if tc.get("name") != "write_todos"]
+        write_todos_calls = [tc for tc in normalized_calls if tc.get("name") == "write_todos"]
 
         tool_names_all = [tc.get("name") for tc in normalized_calls]
         logger.debug(f"[Planning Tools Node] Executing tools: {tool_names_all}")
 
         # --- HITL approval gate for external (non-write_todos) tool calls ---
-        rejected_tool_ids: Dict[str, str] = {}  # tool_call_id -> rejection reason
-        rejected_feedback: Dict[str, str] = {}
+        rejected_tool_ids: dict[str, str] = {}  # tool_call_id -> rejection reason
+        rejected_feedback: dict[str, str] = {}
         approved_external_calls = list(external_tool_calls)
 
         if external_tool_calls:
@@ -1527,8 +1465,8 @@ class MultiAgentWorkflow:
                 )
 
         # --- Artifact + image tracking (BP-1) ---
-        tool_artifacts: List[Dict[str, Any]] = []
-        all_images: List[Dict[str, str]] = []
+        tool_artifacts: list[dict[str, Any]] = []
+        all_images: list[dict[str, str]] = []
 
         if rejected_feedback:
             tool_artifacts.extend(
@@ -1551,9 +1489,7 @@ class MultiAgentWorkflow:
                     if tool is not None:
                         result = await invoke_tool(tool, tool_args)
                         result = extract_content_from_result(result)
-                        result_str = (
-                            str(result) if result else "Tool executed successfully"
-                        )
+                        result_str = str(result) if result else "Tool executed successfully"
                         tool_outputs.append(
                             {
                                 "tool_call_id": tool_id,
@@ -1620,19 +1556,15 @@ class MultiAgentWorkflow:
                 tool_args = tool_call_data.get("args", {})
 
                 try:
-                    todos, current_task_index, result, action = (
-                        apply_write_todos_action(
-                            todos=todos,
-                            current_task_index=current_task_index,
-                            tool_args=tool_args,
-                            max_todos=max_todos,
-                        )
+                    todos, current_task_index, result, action = apply_write_todos_action(
+                        todos=todos,
+                        current_task_index=current_task_index,
+                        tool_args=tool_args,
+                        max_todos=max_todos,
                     )
                     write_todos_actions.append(action)
 
-                    if action == "set_todos" and result.startswith(
-                        "Error: Plan exceeds maximum"
-                    ):
+                    if action == "set_todos" and result.startswith("Error: Plan exceeds maximum"):
                         requested = len(tool_args.get("todos", []) or [])
                         logger.warning(
                             "Rejected plan with %d todos (max: %d)",
@@ -1642,9 +1574,7 @@ class MultiAgentWorkflow:
 
                 except Exception as e:
                     raw_action = tool_args.get("action")
-                    action = (
-                        raw_action.value if hasattr(raw_action, "value") else raw_action
-                    )
+                    action = raw_action.value if hasattr(raw_action, "value") else raw_action
                     result = f"Error executing {action}: {str(e)}"
                     had_error = True  # Mark error for circuit breaker
 
@@ -1715,9 +1645,7 @@ class MultiAgentWorkflow:
         # Update consecutive_errors counter for circuit breaker
         if had_error:
             context["consecutive_errors"] = context.get("consecutive_errors", 0) + 1
-            logger.warning(
-                f"Planning consecutive errors: {context['consecutive_errors']}"
-            )
+            logger.warning(f"Planning consecutive errors: {context['consecutive_errors']}")
         else:
             # Reset on successful iteration
             context["consecutive_errors"] = 0
@@ -1766,9 +1694,7 @@ class MultiAgentWorkflow:
             context["planning_budget_reached"] = True
             context["pause_reason"] = "max_iterations_reached"
             state["context"] = context
-            logger.warning(
-                f"Planning budget exceeded: {planning_call_count} >= {max_iterations}"
-            )
+            logger.warning(f"Planning budget exceeded: {planning_call_count} >= {max_iterations}")
             return "end"
 
         # Circuit breaker: check consecutive errors
@@ -1853,7 +1779,7 @@ class MultiAgentWorkflow:
             return selected_agent
         return "end"
 
-    def _get_agent_type(self, selected_agent: Optional[str]) -> AgentType:
+    def _get_agent_type(self, selected_agent: str | None) -> AgentType:
         agent_type_map = {
             "chat_agent": AgentType.CHAT,
             "rag_agent": AgentType.RAG,
@@ -1866,8 +1792,8 @@ class MultiAgentWorkflow:
 
     @staticmethod
     def _merge_unique_items(
-        existing_items: Optional[List[Any]], new_items: Optional[List[Any]]
-    ) -> List[Any]:
+        existing_items: list[Any] | None, new_items: list[Any] | None
+    ) -> list[Any]:
         merged = list(existing_items) if isinstance(existing_items, list) else []
         if not isinstance(new_items, list):
             return merged
@@ -1879,7 +1805,7 @@ class MultiAgentWorkflow:
         return merged
 
     def _attach_context_outputs(
-        self, state: Dict[str, Any], response: AgentResponse
+        self, state: dict[str, Any], response: AgentResponse
     ) -> AgentResponse:
         context = state.get("context", {}) if isinstance(state, dict) else {}
         if not isinstance(context, dict):
@@ -1903,11 +1829,11 @@ class MultiAgentWorkflow:
 
     def _recover_terminal_response(
         self,
-        state: Optional[Dict[str, Any]],
+        state: dict[str, Any] | None,
         *,
-        fallback_content: Optional[str] = None,
-        selected_agent: Optional[str] = None,
-    ) -> Optional[AgentResponse]:
+        fallback_content: str | None = None,
+        selected_agent: str | None = None,
+    ) -> AgentResponse | None:
         if not isinstance(state, dict):
             return None
 
@@ -1954,7 +1880,7 @@ class MultiAgentWorkflow:
 
     def _build_continuation_state(
         self,
-        previous_state: Dict[str, Any],
+        previous_state: dict[str, Any],
         round_num: int,
         reason: str,
     ) -> GraphState:
@@ -1964,7 +1890,7 @@ class MultiAgentWorkflow:
         counters so each round has a fresh budget, and clears "stop" flags
         that would immediately short-circuit the next round.
         """
-        state: Dict[str, Any] = dict(previous_state or {})
+        state: dict[str, Any] = dict(previous_state or {})
 
         # Reset per-round counters so the next round has fresh budget.
         state["iteration_count"] = 0
@@ -1997,10 +1923,10 @@ class MultiAgentWorkflow:
 
     async def _capture_state_for_continuation(
         self,
-        config: Optional[Dict[str, Any]],
-        thread_id: Optional[str],
-        fallback_state: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        config: dict[str, Any] | None,
+        thread_id: str | None,
+        fallback_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Capture current graph state for continuation.
 
         When using checkpointer, reads the latest checkpoint snapshot.
@@ -2013,27 +1939,25 @@ class MultiAgentWorkflow:
                 if snapshot and hasattr(snapshot, "values") and snapshot.values:
                     return dict(snapshot.values)
             except Exception as exc:
-                logger.warning(
-                    "Failed to capture checkpoint state for continuation: %s", exc
-                )
+                logger.warning("Failed to capture checkpoint state for continuation: %s", exc)
         return dict(fallback_state) if fallback_state else {}
 
     async def execute(
         self,
         message: str,
-        conversation_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        thread_id: Optional[str] = None,
-        persona: Optional[str] = None,
-        attachments: Optional[list] = None,
-        model_request: Optional[Dict[str, Any]] = None,
-        current_task: Optional[Dict[str, Any]] = None,
-        all_tasks: Optional[List[Dict[str, Any]]] = None,
+        conversation_id: str | None = None,
+        user_id: str | None = None,
+        thread_id: str | None = None,
+        persona: str | None = None,
+        attachments: list | None = None,
+        model_request: dict[str, Any] | None = None,
+        current_task: dict[str, Any] | None = None,
+        all_tasks: list[dict[str, Any]] | None = None,
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
-        existing_tasks: Optional[List[Dict[str, Any]]] = None,
-        plan_lifecycle: Optional[str] = None,
-    ) -> Optional[AgentResponse]:
+        existing_tasks: list[dict[str, Any]] | None = None,
+        plan_lifecycle: str | None = None,
+    ) -> AgentResponse | None:
 
         initial_state = self._build_initial_state(
             message=message,
@@ -2053,20 +1977,17 @@ class MultiAgentWorkflow:
         config = self._build_graph_config(thread_id)
 
         # ── Auto-Continue outer loop ──────────────────────────────────
-        max_rounds = (
-            settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
-        )
+        max_rounds = settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
         total_iterations = 0
         start_time = time.monotonic()
         current_state = initial_state
-        result: Optional[Dict[str, Any]] = None
+        result: dict[str, Any] | None = None
 
         for round_num in range(1, max_rounds + 1):
             # Safety: wall-clock timeout
             if (
                 round_num > 1
-                and time.monotonic() - start_time
-                > settings.auto_continue_timeout_seconds
+                and time.monotonic() - start_time > settings.auto_continue_timeout_seconds
             ):
                 logger.warning(
                     "Auto-continue timeout reached after %d rounds (execute)",
@@ -2075,7 +1996,7 @@ class MultiAgentWorkflow:
                 break
 
             should_continue = False
-            continue_reason: Optional[str] = None
+            continue_reason: str | None = None
 
             try:
                 result = await self.graph.ainvoke(current_state, config=config)
@@ -2094,8 +2015,7 @@ class MultiAgentWorkflow:
                 if isinstance(ctx, dict) and ctx.get("auto_continue_requested"):
                     should_continue = True
                     continue_reason = (
-                        ctx.get("auto_continue_requested", {}).get("reason")
-                        or "soft_budget"
+                        ctx.get("auto_continue_requested", {}).get("reason") or "soft_budget"
                     )
                 elif (
                     isinstance(ctx, dict)
@@ -2115,8 +2035,7 @@ class MultiAgentWorkflow:
                 fallback_state=result,
             )
             round_iterations = int(
-                (captured.get("iteration_count") or 0)
-                + (captured.get("planning_call_count") or 0)
+                (captured.get("iteration_count") or 0) + (captured.get("planning_call_count") or 0)
             )
             total_iterations += round_iterations
             if total_iterations >= settings.auto_continue_max_total_iterations:
@@ -2127,9 +2046,7 @@ class MultiAgentWorkflow:
                 break
 
             if round_num >= max_rounds:
-                logger.info(
-                    "Auto-continue max rounds (%d) reached (execute)", max_rounds
-                )
+                logger.info("Auto-continue max rounds (%d) reached (execute)", max_rounds)
                 break
 
             # Prepare state for next round
@@ -2183,9 +2100,7 @@ class MultiAgentWorkflow:
             if context.get("planning_budget_reached"):
                 agent_response.metadata["planning_budget_reached"] = True
             agent_response.metadata["planning_call_count"] = (
-                final_state.get("planning_call_count", 0)
-                if isinstance(final_state, dict)
-                else 0
+                final_state.get("planning_call_count", 0) if isinstance(final_state, dict) else 0
             )
             # Surface the machine-readable stop reason so callers can distinguish
             # budget exhaustion from errors, clarification requests, etc.
@@ -2209,9 +2124,7 @@ class MultiAgentWorkflow:
 
         return agent_response
 
-    async def resume_execution(
-        self, thread_id: str, resume_value: Any
-    ) -> Optional[AgentResponse]:
+    async def resume_execution(self, thread_id: str, resume_value: Any) -> AgentResponse | None:
         if not self.checkpointer:
             raise RuntimeError("Checkpointing must be enabled for resume_execution")
 
@@ -2223,17 +2136,15 @@ class MultiAgentWorkflow:
 
         final_snapshot = await self.graph.aget_state(config)
         final_state = (
-            final_snapshot.values
-            if final_snapshot and hasattr(final_snapshot, "values")
-            else None
+            final_snapshot.values if final_snapshot and hasattr(final_snapshot, "values") else None
         )
         return self._recover_terminal_response(final_state)
 
     async def resume(
         self,
         thread_id: str,
-        user_input: Optional[str] = None,
-    ) -> Optional[AgentResponse]:
+        user_input: str | None = None,
+    ) -> AgentResponse | None:
         if not self.checkpointer:
             raise ValueError("Checkpointing is not enabled, cannot resume.")
 
@@ -2281,7 +2192,7 @@ class MultiAgentWorkflow:
     async def resume_with_decisions_stream(
         self,
         thread_id: str,
-        decisions: List[InterruptDecision],
+        decisions: list[InterruptDecision],
     ):
         if not self.checkpointer:
             yield {
@@ -2296,9 +2207,7 @@ class MultiAgentWorkflow:
         if not state_snapshot.next or len(state_snapshot.next) == 0:
             raise ValueError("Workflow is not in interrupted state")
         if "approval" not in state_snapshot.next:
-            raise ValueError(
-                f"Unexpected interrupt state: next nodes are {state_snapshot.next}"
-            )
+            raise ValueError(f"Unexpected interrupt state: next nodes are {state_snapshot.next}")
 
         resume_data = [
             {
@@ -2324,25 +2233,20 @@ class MultiAgentWorkflow:
         suppress_tokens = selected_agent in suppressed_nodes
         _internal_content_only: bool = True
 
-        max_rounds = (
-            settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
-        )
+        max_rounds = settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
         round_num = 1
-        continue_reason: Optional[str] = "initial"
+        continue_reason: str | None = "initial"
         total_iterations = 0
         start_time = time.monotonic()
         current_state: Any = Command(resume=resume_data)
-        last_state_values: Optional[Dict[str, Any]] = None
+        last_state_values: dict[str, Any] | None = None
 
         while round_num <= max_rounds:
             if (
                 round_num > 1
-                and time.monotonic() - start_time
-                > settings.auto_continue_timeout_seconds
+                and time.monotonic() - start_time > settings.auto_continue_timeout_seconds
             ):
-                logger.warning(
-                    "Auto-continue timeout reached after %d rounds", round_num - 1
-                )
+                logger.warning("Auto-continue timeout reached after %d rounds", round_num - 1)
                 break
 
             if round_num > 1 and settings.auto_continue_emit_events:
@@ -2395,9 +2299,9 @@ class MultiAgentWorkflow:
                                             yield {"type": "token", "content": delta}
 
                                     elif block_type == "thinking":
-                                        thinking_content = block.get(
-                                            "thinking", ""
-                                        ) or block.get("text", "")
+                                        thinking_content = block.get("thinking", "") or block.get(
+                                            "text", ""
+                                        )
                                         if thinking_content:
                                             accumulated_thinking += thinking_content
                                             yield {
@@ -2406,9 +2310,9 @@ class MultiAgentWorkflow:
                                             }
 
                                     elif block_type == "reasoning":
-                                        reasoning_content = block.get(
-                                            "reasoning", ""
-                                        ) or block.get("text", "")
+                                        reasoning_content = block.get("reasoning", "") or block.get(
+                                            "text", ""
+                                        )
                                         if reasoning_content:
                                             accumulated_thinking += reasoning_content
                                             yield {
@@ -2430,26 +2334,12 @@ class MultiAgentWorkflow:
                                             }
 
                                         if tool_args:
-                                            current_tool_calls[tool_index]["args"] += (
-                                                tool_args
-                                            )
+                                            current_tool_calls[tool_index]["args"] += tool_args
 
-                                        if (
-                                            tool_name
-                                            and not current_tool_calls[tool_index][
-                                                "name"
-                                            ]
-                                        ):
-                                            current_tool_calls[tool_index]["name"] = (
-                                                tool_name
-                                            )
-                                        if (
-                                            tool_id
-                                            and not current_tool_calls[tool_index]["id"]
-                                        ):
-                                            current_tool_calls[tool_index]["id"] = (
-                                                tool_id
-                                            )
+                                        if tool_name and not current_tool_calls[tool_index]["name"]:
+                                            current_tool_calls[tool_index]["name"] = tool_name
+                                        if tool_id and not current_tool_calls[tool_index]["id"]:
+                                            current_tool_calls[tool_index]["id"] = tool_id
 
                             elif hasattr(message_chunk, "content") and isinstance(
                                 message_chunk.content, list
@@ -2459,9 +2349,9 @@ class MultiAgentWorkflow:
                                         part_type = part.get("type", "")
 
                                         if part_type == "thinking":
-                                            thinking_content = part.get(
-                                                "thinking", ""
-                                            ) or part.get("text", "")
+                                            thinking_content = part.get("thinking", "") or part.get(
+                                                "text", ""
+                                            )
                                             if thinking_content:
                                                 accumulated_thinking += thinking_content
                                                 yield {
@@ -2473,9 +2363,7 @@ class MultiAgentWorkflow:
                                                 "reasoning", ""
                                             ) or part.get("text", "")
                                             if reasoning_content:
-                                                accumulated_thinking += (
-                                                    reasoning_content
-                                                )
+                                                accumulated_thinking += reasoning_content
                                                 yield {
                                                     "type": "thinking",
                                                     "content": reasoning_content,
@@ -2507,10 +2395,8 @@ class MultiAgentWorkflow:
                                 and isinstance(message_chunk.content, str)
                             ):
                                 content = coerce_response_text(message_chunk.content)
-                                accumulated_content, delta = (
-                                    self._consume_stream_text_chunk(
-                                        accumulated_content, content
-                                    )
+                                accumulated_content, delta = self._consume_stream_text_chunk(
+                                    accumulated_content, content
                                 )
                                 if delta and not suppress_tokens:
                                     yield {"type": "token", "content": delta}
@@ -2522,10 +2408,7 @@ class MultiAgentWorkflow:
                                 for tool_call in current_tool_calls.values():
                                     if tool_call["name"]:
                                         tool_call_id = tool_call["id"]
-                                        if (
-                                            tool_call_id
-                                            and tool_call_id in emitted_tool_call_ids
-                                        ):
+                                        if tool_call_id and tool_call_id in emitted_tool_call_ids:
                                             continue
                                         if tool_call_id:
                                             emitted_tool_call_ids.add(tool_call_id)
@@ -2557,10 +2440,7 @@ class MultiAgentWorkflow:
                                 if node_name in ("planning_agent", "planning_tools"):
                                     node_info = {"node": node_name}
 
-                                    if (
-                                        node_name == "planning_agent"
-                                        and "messages" in node_state
-                                    ):
+                                    if node_name == "planning_agent" and "messages" in node_state:
                                         messages = node_state.get("messages", [])
                                         if messages:
                                             last_msg = (
@@ -2577,9 +2457,7 @@ class MultiAgentWorkflow:
                                                     {
                                                         "name": tc.get("name"),
                                                         "id": tc.get("id"),
-                                                        "args": make_json_safe(
-                                                            tc.get("args", {})
-                                                        ),
+                                                        "args": make_json_safe(tc.get("args", {})),
                                                     }
                                                     for tc in last_msg.tool_calls
                                                 ]
@@ -2588,8 +2466,8 @@ class MultiAgentWorkflow:
                                         todos = node_state.get("todos", [])
                                         if todos:
                                             node_info["todos_count"] = len(todos)
-                                            node_info["current_task_index"] = (
-                                                node_state.get("current_task_index")
+                                            node_info["current_task_index"] = node_state.get(
+                                                "current_task_index"
                                             )
 
                                     yield {"type": "node_complete", **node_info}
@@ -2598,9 +2476,7 @@ class MultiAgentWorkflow:
                                     messages = node_state["messages"]
                                     if messages:
                                         last_msg = (
-                                            messages[-1]
-                                            if isinstance(messages, list)
-                                            else messages
+                                            messages[-1] if isinstance(messages, list) else messages
                                         )
 
                                         if isinstance(last_msg, AIMessage):
@@ -2615,9 +2491,7 @@ class MultiAgentWorkflow:
                                                         and tool_call_id
                                                         not in emitted_tool_call_ids
                                                     ):
-                                                        emitted_tool_call_ids.add(
-                                                            tool_call_id
-                                                        )
+                                                        emitted_tool_call_ids.add(tool_call_id)
                                                         yield {
                                                             "type": "tool_start",
                                                             "name": tool_call.get(
@@ -2625,24 +2499,18 @@ class MultiAgentWorkflow:
                                                             ),
                                                             "tool_call_id": tool_call_id,
                                                             "args": make_json_safe(
-                                                                tool_call.get(
-                                                                    "args", {}
-                                                                )
+                                                                tool_call.get("args", {})
                                                             ),
                                                         }
 
                                         elif isinstance(last_msg, ToolMessage):
                                             yield {
                                                 "type": "tool_end",
-                                                "name": getattr(
-                                                    last_msg, "name", "unknown"
-                                                ),
+                                                "name": getattr(last_msg, "name", "unknown"),
                                                 "tool_call_id": getattr(
                                                     last_msg, "tool_call_id", None
                                                 ),
-                                                "result": make_json_safe(
-                                                    last_msg.content
-                                                ),
+                                                "result": make_json_safe(last_msg.content),
                                             }
                     else:
                         logger.debug(f"Unexpected stream chunk format: {type(chunk)}")
@@ -2668,12 +2536,9 @@ class MultiAgentWorkflow:
                 if ctx.get("auto_continue_requested"):
                     should_continue = True
                     continue_reason = (
-                        ctx.get("auto_continue_requested", {}).get("reason")
-                        or "soft_budget"
+                        ctx.get("auto_continue_requested", {}).get("reason") or "soft_budget"
                     )
-                elif (
-                    ctx.get("max_iterations_reached") and settings.auto_continue_enabled
-                ):
+                elif ctx.get("max_iterations_reached") and settings.auto_continue_enabled:
                     should_continue = True
                     continue_reason = "max_iterations_reached"
 
@@ -2686,8 +2551,7 @@ class MultiAgentWorkflow:
                 fallback_state=last_state_values,
             )
             round_iterations = int(
-                (captured.get("iteration_count") or 0)
-                + (captured.get("planning_call_count") or 0)
+                (captured.get("iteration_count") or 0) + (captured.get("planning_call_count") or 0)
             )
             total_iterations += round_iterations
             if total_iterations >= settings.auto_continue_max_total_iterations:
@@ -2730,9 +2594,7 @@ class MultiAgentWorkflow:
                         and hasattr(last_msg, "tool_calls")
                         and last_msg.tool_calls
                     ):
-                        pending_tool_calls = [
-                            normalize_tool_call(tc) for tc in last_msg.tool_calls
-                        ]
+                        pending_tool_calls = [normalize_tool_call(tc) for tc in last_msg.tool_calls]
                         interrupt_response = build_interrupt_response(
                             {"action_requests": pending_tool_calls},
                             thread_id,
@@ -2747,13 +2609,9 @@ class MultiAgentWorkflow:
                         }
                         return
 
-            final_state = (
-                snapshot.values if snapshot and hasattr(snapshot, "values") else {}
-            )
+            final_state = snapshot.values if snapshot and hasattr(snapshot, "values") else {}
             fallback_content = (
-                accumulated_content
-                if not suppress_tokens and not _internal_content_only
-                else None
+                accumulated_content if not suppress_tokens and not _internal_content_only else None
             )
             response = self._recover_terminal_response(
                 final_state,
@@ -2803,8 +2661,8 @@ class MultiAgentWorkflow:
     # ------------------------------------------------------------------
 
     async def _run_fast_path_summarization(
-        self, config: Dict[str, Any], thread_id: Optional[str]
-    ) -> Optional[str]:
+        self, config: dict[str, Any], thread_id: str | None
+    ) -> str | None:
         """Load checkpoint state and run summarization for fast-path RAG.
 
         The LangGraph pipeline (summarize node) is bypassed on the
@@ -2830,11 +2688,13 @@ class MultiAgentWorkflow:
                 return history_summary
 
             from .summarization_middleware import (
-                should_summarize,
-                get_messages_to_summarize,
-                generate_summary,
-                apply_summarization_to_state,
                 _get_config as _get_summ_config,
+            )
+            from .summarization_middleware import (
+                apply_summarization_to_state,
+                generate_summary,
+                get_messages_to_summarize,
+                should_summarize,
             )
 
             # Ignore persisted conversation_summarized flag — each
@@ -2851,9 +2711,7 @@ class MultiAgentWorkflow:
             timeout_seconds: int = settings.summarization_timeout_seconds
             try:
                 new_summary = await asyncio.wait_for(
-                    generate_summary(
-                        to_summarize, s_cfg, existing_summary=history_summary
-                    ),
+                    generate_summary(to_summarize, s_cfg, existing_summary=history_summary),
                     timeout=timeout_seconds,
                 )
             except asyncio.TimeoutError:
@@ -2870,7 +2728,7 @@ class MultiAgentWorkflow:
                 return history_summary
 
             # Only persist checkpoint updates on genuine success.
-            _tmp_state: Dict[str, Any] = {
+            _tmp_state: dict[str, Any] = {
                 "messages": cp_messages,
                 "context": cp_values.get("context", {}),
             }
@@ -2885,12 +2743,8 @@ class MultiAgentWorkflow:
                 config,
                 {
                     "history_summary": _tmp_state["history_summary"],
-                    "history_summary_updated_at": _tmp_state[
-                        "history_summary_updated_at"
-                    ],
-                    "summary_cursor_message_id": _tmp_state.get(
-                        "summary_cursor_message_id"
-                    ),
+                    "history_summary_updated_at": _tmp_state["history_summary_updated_at"],
+                    "summary_cursor_message_id": _tmp_state.get("summary_cursor_message_id"),
                     "messages": _tmp_state["messages"],
                     "context": _tmp_state["context"],
                 },
@@ -2898,18 +2752,17 @@ class MultiAgentWorkflow:
             return new_summary
         except Exception as e:
             logger.warning(
-                "Fast-path summarization/checkpoint read failed "
-                "(continuing without summary): %s",
+                "Fast-path summarization/checkpoint read failed (continuing without summary): %s",
                 e,
             )
             return None
 
     async def _persist_fast_path_turn(
         self,
-        config: Dict[str, Any],
-        thread_id: Optional[str],
+        config: dict[str, Any],
+        thread_id: str | None,
         user_message: str,
-        response: Optional[AgentResponse],
+        response: AgentResponse | None,
     ) -> None:
         """Persist user + assistant messages to checkpoint after fast-path RAG.
 
@@ -2921,9 +2774,7 @@ class MultiAgentWorkflow:
             return
 
         try:
-            reply_content = (
-                response.message.content if response and response.message else ""
-            )
+            reply_content = response.message.content if response and response.message else ""
             await self.graph.aupdate_state(
                 config,
                 {
@@ -2942,18 +2793,18 @@ class MultiAgentWorkflow:
     async def execute_stream(
         self,
         message: str,
-        conversation_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        thread_id: Optional[str] = None,
-        persona: Optional[str] = None,
-        attachments: Optional[list] = None,
-        model_request: Optional[Dict[str, Any]] = None,
-        current_task: Optional[Dict[str, Any]] = None,
-        all_tasks: Optional[List[Dict[str, Any]]] = None,
+        conversation_id: str | None = None,
+        user_id: str | None = None,
+        thread_id: str | None = None,
+        persona: str | None = None,
+        attachments: list | None = None,
+        model_request: dict[str, Any] | None = None,
+        current_task: dict[str, Any] | None = None,
+        all_tasks: list[dict[str, Any]] | None = None,
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
-        existing_tasks: Optional[List[Dict[str, Any]]] = None,
-        plan_lifecycle: Optional[str] = None,
+        existing_tasks: list[dict[str, Any]] | None = None,
+        plan_lifecycle: str | None = None,
     ):
         initial_state = self._build_initial_state(
             message=message,
@@ -2974,7 +2825,7 @@ class MultiAgentWorkflow:
 
         # Prefetch conversation history in parallel with the router LLM call.
         # By the time the agent node needs history, the cache will be warm.
-        history_prefetch: Optional[asyncio.Task] = None
+        history_prefetch: asyncio.Task | None = None
         if conversation_id and user_id:
             history_prefetch = asyncio.create_task(
                 self._get_conversation_history(conversation_id, user_id)
@@ -3001,9 +2852,7 @@ class MultiAgentWorkflow:
             if not isinstance(rag_cfg, dict):
                 rag_cfg = model_request.get("all")
             if isinstance(rag_cfg, dict):
-                rag_provider = (
-                    str(rag_cfg.get("provider") or "").strip().lower() or None
-                )
+                rag_provider = str(rag_cfg.get("provider") or "").strip().lower() or None
 
         if (
             selected_agent == "rag_agent"
@@ -3031,10 +2880,8 @@ class MultiAgentWorkflow:
             )
 
             try:
-                fast_path_response: Optional[AgentResponse] = None
-                async for event in self.rag_agent.stream_message(
-                    agent_msg, conversation_id
-                ):
+                fast_path_response: AgentResponse | None = None
+                async for event in self.rag_agent.stream_message(agent_msg, conversation_id):
                     event_type = event.get("type")
                     if event_type in ["thinking", "token", "tool_start", "tool_end"]:
                         yield event
@@ -3062,9 +2909,7 @@ class MultiAgentWorkflow:
         accumulated_content = ""
         accumulated_thinking = ""  # Track thinking content for non-RAG agents
         current_tool_calls = {}  # Track tool call chunks by index
-        emitted_tool_call_ids = (
-            set()
-        )  # Track which tool calls have had tool_start emitted
+        emitted_tool_call_ids = set()  # Track which tool calls have had tool_start emitted
 
         # For image_generator_agent the streamed LLM tokens are the internal
         # enhanced prompt — not meant for the user.  Suppress token events and
@@ -3081,26 +2926,21 @@ class MultiAgentWorkflow:
         _internal_content_only: bool = True
 
         # ── Auto-Continue outer loop ──────────────────────────────────
-        max_rounds = (
-            settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
-        )
+        max_rounds = settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
         round_num = 1
-        continue_reason: Optional[str] = "initial"
+        continue_reason: str | None = "initial"
         total_iterations = 0
         start_time = time.monotonic()
         current_state = initial_state
-        last_state_values: Optional[Dict[str, Any]] = None
+        last_state_values: dict[str, Any] | None = None
 
         while round_num <= max_rounds:
             # Safety: wall-clock timeout across all rounds
             if (
                 round_num > 1
-                and time.monotonic() - start_time
-                > settings.auto_continue_timeout_seconds
+                and time.monotonic() - start_time > settings.auto_continue_timeout_seconds
             ):
-                logger.warning(
-                    "Auto-continue timeout reached after %d rounds", round_num - 1
-                )
+                logger.warning("Auto-continue timeout reached after %d rounds", round_num - 1)
                 break
 
             # Emit continuation_start event for rounds > 1
@@ -3165,9 +3005,9 @@ class MultiAgentWorkflow:
 
                                     # Handle thinking block type
                                     elif block_type == "thinking":
-                                        thinking_content = block.get(
-                                            "thinking", ""
-                                        ) or block.get("text", "")
+                                        thinking_content = block.get("thinking", "") or block.get(
+                                            "text", ""
+                                        )
                                         if thinking_content:
                                             accumulated_thinking += thinking_content
                                             yield {
@@ -3177,9 +3017,9 @@ class MultiAgentWorkflow:
 
                                     # Handle reasoning block type (LangChain Google GenAI)
                                     elif block_type == "reasoning":
-                                        reasoning_content = block.get(
-                                            "reasoning", ""
-                                        ) or block.get("text", "")
+                                        reasoning_content = block.get("reasoning", "") or block.get(
+                                            "text", ""
+                                        )
                                         if reasoning_content:
                                             accumulated_thinking += reasoning_content
                                             yield {
@@ -3204,27 +3044,13 @@ class MultiAgentWorkflow:
 
                                         # Accumulate args
                                         if tool_args:
-                                            current_tool_calls[tool_index]["args"] += (
-                                                tool_args
-                                            )
+                                            current_tool_calls[tool_index]["args"] += tool_args
 
                                         # Update name/id if present
-                                        if (
-                                            tool_name
-                                            and not current_tool_calls[tool_index][
-                                                "name"
-                                            ]
-                                        ):
-                                            current_tool_calls[tool_index]["name"] = (
-                                                tool_name
-                                            )
-                                        if (
-                                            tool_id
-                                            and not current_tool_calls[tool_index]["id"]
-                                        ):
-                                            current_tool_calls[tool_index]["id"] = (
-                                                tool_id
-                                            )
+                                        if tool_name and not current_tool_calls[tool_index]["name"]:
+                                            current_tool_calls[tool_index]["name"] = tool_name
+                                        if tool_id and not current_tool_calls[tool_index]["id"]:
+                                            current_tool_calls[tool_index]["id"] = tool_id
 
                                 pass  # Content blocks handled
 
@@ -3238,9 +3064,9 @@ class MultiAgentWorkflow:
                                         part_type = part.get("type", "")
 
                                         if part_type == "thinking":
-                                            thinking_content = part.get(
-                                                "thinking", ""
-                                            ) or part.get("text", "")
+                                            thinking_content = part.get("thinking", "") or part.get(
+                                                "text", ""
+                                            )
                                             if thinking_content:
                                                 accumulated_thinking += thinking_content
                                                 yield {
@@ -3252,9 +3078,7 @@ class MultiAgentWorkflow:
                                                 "reasoning", ""
                                             ) or part.get("text", "")
                                             if reasoning_content:
-                                                accumulated_thinking += (
-                                                    reasoning_content
-                                                )
+                                                accumulated_thinking += reasoning_content
                                                 yield {
                                                     "type": "thinking",
                                                     "content": reasoning_content,
@@ -3287,10 +3111,8 @@ class MultiAgentWorkflow:
                                 and isinstance(message_chunk.content, str)
                             ):
                                 content = coerce_response_text(message_chunk.content)
-                                accumulated_content, delta = (
-                                    self._consume_stream_text_chunk(
-                                        accumulated_content, content
-                                    )
+                                accumulated_content, delta = self._consume_stream_text_chunk(
+                                    accumulated_content, content
                                 )
                                 if delta and not suppress_tokens:
                                     yield {"type": "token", "content": delta}
@@ -3305,10 +3127,7 @@ class MultiAgentWorkflow:
                                     if tool_call["name"]:  # Only emit if we have a name
                                         tool_call_id = tool_call["id"]
                                         # Skip if already emitted
-                                        if (
-                                            tool_call_id
-                                            and tool_call_id in emitted_tool_call_ids
-                                        ):
+                                        if tool_call_id and tool_call_id in emitted_tool_call_ids:
                                             continue
                                         if tool_call_id:
                                             emitted_tool_call_ids.add(tool_call_id)
@@ -3347,10 +3166,7 @@ class MultiAgentWorkflow:
                                     node_info = {"node": node_name}
 
                                     # For planning_agent, include tool call info
-                                    if (
-                                        node_name == "planning_agent"
-                                        and "messages" in node_state
-                                    ):
+                                    if node_name == "planning_agent" and "messages" in node_state:
                                         messages = node_state.get("messages", [])
                                         if messages:
                                             last_msg = (
@@ -3367,9 +3183,7 @@ class MultiAgentWorkflow:
                                                     {
                                                         "name": tc.get("name"),
                                                         "id": tc.get("id"),
-                                                        "args": make_json_safe(
-                                                            tc.get("args", {})
-                                                        ),
+                                                        "args": make_json_safe(tc.get("args", {})),
                                                     }
                                                     for tc in last_msg.tool_calls
                                                 ]
@@ -3379,8 +3193,8 @@ class MultiAgentWorkflow:
                                         todos = node_state.get("todos", [])
                                         if todos:
                                             node_info["todos_count"] = len(todos)
-                                            node_info["current_task_index"] = (
-                                                node_state.get("current_task_index")
+                                            node_info["current_task_index"] = node_state.get(
+                                                "current_task_index"
                                             )
 
                                     yield {"type": "node_complete", **node_info}
@@ -3389,9 +3203,7 @@ class MultiAgentWorkflow:
                                     messages = node_state["messages"]
                                     if messages:
                                         last_msg = (
-                                            messages[-1]
-                                            if isinstance(messages, list)
-                                            else messages
+                                            messages[-1] if isinstance(messages, list) else messages
                                         )
 
                                         # Handle AIMessage - extract tool_calls only
@@ -3409,9 +3221,7 @@ class MultiAgentWorkflow:
                                                         and tool_call_id
                                                         not in emitted_tool_call_ids
                                                     ):
-                                                        emitted_tool_call_ids.add(
-                                                            tool_call_id
-                                                        )
+                                                        emitted_tool_call_ids.add(tool_call_id)
                                                         yield {
                                                             "type": "tool_start",
                                                             "name": tool_call.get(
@@ -3419,9 +3229,7 @@ class MultiAgentWorkflow:
                                                             ),
                                                             "tool_call_id": tool_call_id,
                                                             "args": make_json_safe(
-                                                                tool_call.get(
-                                                                    "args", {}
-                                                                )
+                                                                tool_call.get("args", {})
                                                             ),
                                                         }
 
@@ -3429,15 +3237,11 @@ class MultiAgentWorkflow:
                                         elif isinstance(last_msg, ToolMessage):
                                             yield {
                                                 "type": "tool_end",
-                                                "name": getattr(
-                                                    last_msg, "name", "unknown"
-                                                ),
+                                                "name": getattr(last_msg, "name", "unknown"),
                                                 "tool_call_id": getattr(
                                                     last_msg, "tool_call_id", None
                                                 ),
-                                                "result": make_json_safe(
-                                                    last_msg.content
-                                                ),
+                                                "result": make_json_safe(last_msg.content),
                                             }
                     else:
                         # Single mode or legacy format - try to handle gracefully
@@ -3465,12 +3269,9 @@ class MultiAgentWorkflow:
                 if ctx.get("auto_continue_requested"):
                     should_continue = True
                     continue_reason = (
-                        ctx.get("auto_continue_requested", {}).get("reason")
-                        or "soft_budget"
+                        ctx.get("auto_continue_requested", {}).get("reason") or "soft_budget"
                     )
-                elif (
-                    ctx.get("max_iterations_reached") and settings.auto_continue_enabled
-                ):
+                elif ctx.get("max_iterations_reached") and settings.auto_continue_enabled:
                     should_continue = True
                     continue_reason = "max_iterations_reached"
 
@@ -3484,8 +3285,7 @@ class MultiAgentWorkflow:
                 fallback_state=last_state_values,
             )
             round_iterations = int(
-                (captured.get("iteration_count") or 0)
-                + (captured.get("planning_call_count") or 0)
+                (captured.get("iteration_count") or 0) + (captured.get("planning_call_count") or 0)
             )
             total_iterations += round_iterations
             if total_iterations >= settings.auto_continue_max_total_iterations:
@@ -3549,11 +3349,7 @@ class MultiAgentWorkflow:
                             }
                             return
 
-                final_state = (
-                    snapshot.values
-                    if snapshot and hasattr(snapshot, "values")
-                    else {}
-                )
+                final_state = snapshot.values if snapshot and hasattr(snapshot, "values") else {}
                 fallback_content = (
                     accumulated_content
                     if not suppress_tokens and not _internal_content_only
@@ -3579,9 +3375,7 @@ class MultiAgentWorkflow:
                         response.metadata["thinking_summary"] = accumulated_thinking
 
                     # For planning agent, include todos in metadata
-                    final_selected_agent = (
-                        final_state.get("selected_agent") or selected_agent
-                    )
+                    final_selected_agent = final_state.get("selected_agent") or selected_agent
                     if final_selected_agent == "planning_agent":
                         final_todos = final_state.get("todos", [])
                         if final_todos:
@@ -3608,9 +3402,7 @@ class MultiAgentWorkflow:
                 yield {"type": "error", "error": str(e)}
         else:
             fallback_content = (
-                accumulated_content
-                if not suppress_tokens and not _internal_content_only
-                else None
+                accumulated_content if not suppress_tokens and not _internal_content_only else None
             )
             response = self._recover_terminal_response(
                 last_state_values,
@@ -3671,7 +3463,7 @@ class MultiAgentWorkflow:
 def create_workflow(
     qdrant_client: QdrantClient,
     embedding_model: SentenceTransformer,
-    checkpointer: Optional[BaseCheckpointSaver] = None,
+    checkpointer: BaseCheckpointSaver | None = None,
     document_repository: Optional["DocumentRepository"] = None,
 ) -> MultiAgentWorkflow:
     """

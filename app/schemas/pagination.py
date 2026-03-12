@@ -1,4 +1,5 @@
 from enum import Enum
+
 from pydantic import BaseModel, Field
 
 
@@ -36,18 +37,14 @@ class PaginationParams(BaseModel):
 
     page: int = Field(default=1, ge=1, description="Page number (1-based)")
     limit: int = Field(default=10, ge=1, le=100, description="Number of items per page")
-    order_direction: OrderDirection = Field(
-        default=OrderDirection.DESC, alias="orderDirection"
-    )
+    order_direction: OrderDirection = Field(default=OrderDirection.DESC, alias="orderDirection")
     model_config = {"populate_by_name": True}
 
 
 class ConversationPaginationParams(PaginationParams):
     """Pagination parameters for conversations"""
 
-    order_by: ConversationOrderBy = Field(
-        default=ConversationOrderBy.UPDATED_AT, alias="orderBy"
-    )
+    order_by: ConversationOrderBy = Field(default=ConversationOrderBy.UPDATED_AT, alias="orderBy")
 
 
 class MessagePaginationParams(PaginationParams):

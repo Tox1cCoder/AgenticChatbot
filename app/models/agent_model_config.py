@@ -28,9 +28,7 @@ class AgentModelConfig(Base):
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
     )
 
-    user_id = Column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
-    )
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     agent_key = Column(Text, nullable=False)  # 'chat'|'rag'|'search'|'planning'
     provider_type = Column(Text, nullable=False)  # 'gemini'|'openai' (for now)
     model = Column(Text, nullable=False)
@@ -40,9 +38,7 @@ class AgentModelConfig(Base):
 
     __table_args__ = (
         Index("idx_agent_model_configs_user_id", "user_id"),
-        Index(
-            "idx_agent_model_configs_user_agent", "user_id", "agent_key", unique=True
-        ),
+        Index("idx_agent_model_configs_user_agent", "user_id", "agent_key", unique=True),
     )
 
     def __repr__(self) -> str:

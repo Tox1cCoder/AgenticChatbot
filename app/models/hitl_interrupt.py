@@ -2,8 +2,9 @@
 
 import enum
 
-from sqlalchemy import Column, String, ForeignKey, DateTime, Enum as SQLEnum, func
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import Column, DateTime, ForeignKey, String, func
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from app.models.base import Base

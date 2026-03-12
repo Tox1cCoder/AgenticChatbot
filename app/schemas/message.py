@@ -1,32 +1,33 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.ai.schemas import InterruptDecision, InterruptResponse
 from app.models.enums import MessageRole
+from app.schemas.feedback import FeedbackRead
 from app.utils.case_conversion import (
-    to_camel_case as to_camel,
     convert_dict_keys_to_snake_case,
 )
-from app.schemas.feedback import FeedbackRead
-from app.ai.schemas import InterruptResponse, InterruptDecision
+from app.utils.case_conversion import (
+    to_camel_case as to_camel,
+)
 
 
 class MessageCreate(BaseModel):
-    conversation_id: UUID = Field(
-        ..., description="Conversation ID this message belongs to"
-    )
+    conversation_id: UUID = Field(..., description="Conversation ID this message belongs to")
     content: str = Field(..., min_length=1, description="Message content")
     role: MessageRole = Field(
         default=MessageRole.user, description="Message role: user=1, assistant=2"
     )
-    attachments: Optional[List[Dict[str, str]]] = Field(
+    attachments: list[dict[str, str]] | None = Field(
         default=None,
         description="Optional image attachments with structure {name: str, mime: str, data: str (base64)}",
     )
-    model_config_field: Optional[Dict[str, Any]] = Field(
+    model_config_field: dict[str, Any] | None = Field(
         default=None,
         alias="modelConfig",
         description="""Optional per-message model configuration for provider/model selection.
@@ -49,24 +50,22 @@ class MessageCreate(BaseModel):
 
 
 class MessageUpdate(BaseModel):
-    content: Optional[str] = Field(None, min_length=1, description="Message content")
+    content: str | None = Field(None, min_length=1, description="Message content")
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class MessageRead(BaseModel):
-    model_config = ConfigDict(
-        from_attributes=True, alias_generator=to_camel, populate_by_name=True
-    )
+    model_config = ConfigDict(from_attributes=True, alias_generator=to_camel, populate_by_name=True)
 
     id: UUID
     created_at: datetime
     updated_at: datetime
-    deleted_at: Optional[datetime]
+    deleted_at: datetime | None
     conversation_id: UUID
     sender: int = Field(..., description="Message sender: 1=user, 2=assistant")
     content: str = Field(..., description="Message content")
-    message_metadata: Optional[Dict[str, Any]] = Field(
+    message_metadata: dict[str, Any] | None = Field(
         default_factory=dict,
         description="""Message metadata including persona used and RAG citations.
         
@@ -116,14 +115,14 @@ class MessageRead(BaseModel):
           }
         """,
     )
-    feedback: Optional[FeedbackRead] = Field(
+    feedback: FeedbackRead | None = Field(
         default=None, description="Feedback for this message (when requested)"
     )
-    interrupt: Optional[InterruptResponse] = Field(
+    interrupt: InterruptResponse | None = Field(
         default=None,
         description="Interrupt information when tool execution requires human approval",
     )
-    suggested_questions: Optional[List[str]] = Field(
+    suggested_questions: list[str] | None = Field(
         default=None,
         description="0-3 follow-up question suggestions for continuing the conversation",
     )
@@ -151,9 +150,7 @@ class MessageRead(BaseModel):
         if self.suggested_questions is None:
             suggestions = self.message_metadata.get("suggested_questions")
             if isinstance(suggestions, list):
-                self.suggested_questions = [
-                    s for s in suggestions if isinstance(s, str)
-                ]
+                self.suggested_questions = [s for s in suggestions if isinstance(s, str)]
 
         return self
 
@@ -162,13 +159,11 @@ class InterruptResumeRequest(BaseModel):
     """Request to resume execution after handling interrupts."""
 
     thread_id: str = Field(..., description="Thread ID from the interrupt response")
-    interrupt_id: Optional[str] = Field(
+    interrupt_id: str | None = Field(
         default=None, description="Interrupt ID returned from the HITL middleware"
     )
     conversation_id: UUID = Field(..., description="Conversation ID")
-    decisions: List[InterruptDecision] = Field(
-        ..., description="Approval/rejection/edit decisions"
-    )
+    decisions: list[InterruptDecision] = Field(..., description="Approval/rejection/edit decisions")
 
     @field_validator("decisions", mode="before")
     @classmethod
@@ -187,20 +182,16 @@ class InterruptResumeRequest(BaseModel):
 
 
 class MessageInDB(BaseModel):
-    model_config = ConfigDict(
-        from_attributes=True, alias_generator=to_camel, populate_by_name=True
-    )
+    model_config = ConfigDict(from_attributes=True, alias_generator=to_camel, populate_by_name=True)
 
     id: UUID
     created_at: datetime
     updated_at: datetime
-    deleted_at: Optional[datetime]
+    deleted_at: datetime | None
     conversation_id: UUID
-    sender: int = Field(
-        ..., description="Message sender: 1=user, 2=assistant, 3=system"
-    )
+    sender: int = Field(..., description="Message sender: 1=user, 2=assistant, 3=system")
     content: str = Field(..., description="Message content")
-    message_metadata: Optional[Dict[str, Any]] = Field(
+    message_metadata: dict[str, Any] | None = Field(
         default_factory=dict, description="Message metadata including persona used"
     )
 
@@ -220,7 +211,7 @@ class StopGenerationResponse(BaseModel):
     """Response from the stop generation endpoint."""
 
     status: str = Field(..., description="'cancelled' or 'not_inflight'")
-    message: Optional[Dict[str, Any]] = Field(
+    message: dict[str, Any] | None = Field(
         default=None,
         description="Persisted assistant message (partial or final), if available",
     )

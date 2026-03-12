@@ -10,16 +10,16 @@ Adds processing_task_id VARCHAR(255) NULL to the documents table, indexed
 for fast lookups in the ownership-verification path of GET /documents/task/{id}.
 """
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "i9j0k1l2m3n4"
-down_revision: Union[str, Sequence[str], None] = "h8i9j0k1l2m3"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = "h8i9j0k1l2m3"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:

@@ -1,7 +1,8 @@
-import streamlit as st  # type: ignore
-import requests
 import time
-from typing import Dict, Any, Optional
+from typing import Any
+
+import requests
+import streamlit as st  # type: ignore
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -33,9 +34,7 @@ def get_http_session() -> requests.Session:
 
 def _bump_api_cache_version() -> None:
     """Invalidate cached GET responses after mutations."""
-    st.session_state.api_cache_version = (
-        int(st.session_state.get("api_cache_version", 0)) + 1
-    )
+    st.session_state.api_cache_version = int(st.session_state.get("api_cache_version", 0)) + 1
 
 
 def render_upload_section():
@@ -70,9 +69,7 @@ def render_upload_section():
             ):
                 upload_result = upload_document(uploaded_file)
                 if upload_result:
-                    st.success(
-                        "File uploaded successfully!", icon=":material/check_circle:"
-                    )
+                    st.success("File uploaded successfully!", icon=":material/check_circle:")
                     # Clear cache to refresh data
                     st.cache_data.clear()
                     st.rerun()
@@ -80,7 +77,7 @@ def render_upload_section():
                     st.error("Upload failed", icon=":material/cancel:")
 
 
-def upload_document(uploaded_file) -> Optional[Dict[str, Any]]:
+def upload_document(uploaded_file) -> dict[str, Any] | None:
     """
     Upload document to the API with conversation context
 
@@ -92,9 +89,7 @@ def upload_document(uploaded_file) -> Optional[Dict[str, Any]]:
     """
     try:
         # Prepare file for upload
-        files = {
-            "file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)
-        }
+        files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
 
         # Prepare form data with conversation ID
         data = {}
@@ -149,9 +144,7 @@ def poll_document_status(document_id: str):
 
             # Check timeout
             if elapsed_time > max_wait_time:
-                status_placeholder.warning(
-                    "Processing timeout - please refresh manually"
-                )
+                status_placeholder.warning("Processing timeout - please refresh manually")
                 break
 
             # Get current status
@@ -198,7 +191,7 @@ def poll_document_status(document_id: str):
         status_placeholder.error(f"Error monitoring status: {str(e)}")
 
 
-def get_document_status(document_id: str) -> Optional[Dict[str, Any]]:
+def get_document_status(document_id: str) -> dict[str, Any] | None:
     """
     Get status of a single document
 
@@ -231,8 +224,8 @@ def get_document_status(document_id: str) -> Optional[Dict[str, Any]]:
 @st.cache_data(show_spinner=False, ttl=10, max_entries=200)
 def _cached_conversation_documents(
     conversation_id: str, auth_token: str, cache_version: int
-) -> Dict[str, Any]:
-    headers: Dict[str, str] = {}
+) -> dict[str, Any]:
+    headers: dict[str, str] = {}
     if auth_token:
         headers["Authorization"] = f"Bearer {auth_token}"
 
@@ -248,7 +241,7 @@ def _cached_conversation_documents(
     return {}
 
 
-def get_uploaded_documents() -> Dict[str, Any]:
+def get_uploaded_documents() -> dict[str, Any]:
     """Get list of uploaded documents for current conversation"""
     try:
         # Get documents for the specific conversation
@@ -278,9 +271,7 @@ def render_document_list():
     ):
         with st.expander(":material/menu_book: Conversation Documents", expanded=False):
             # Add refresh button
-            if st.button(
-                "Refresh Status", icon=":material/refresh:", key="refresh_docs"
-            ):
+            if st.button("Refresh Status", icon=":material/refresh:", key="refresh_docs"):
                 st.cache_data.clear()
                 st.rerun()
 
@@ -324,16 +315,10 @@ def render_document_list():
 
                         col1, col2, col3 = st.columns([3, 1, 1])
                         with col1:
-                            st.markdown(
-                                f"{status_info['icon']} {doc.get('filename', 'Unknown')}"
-                            )
-                            st.caption(
-                                f"Uploaded: {doc.get('upload_time', 'N/A')[:16]}"
-                            )
+                            st.markdown(f"{status_info['icon']} {doc.get('filename', 'Unknown')}")
+                            st.caption(f"Uploaded: {doc.get('upload_time', 'N/A')[:16]}")
                         with col2:
-                            st.markdown(
-                                f":{status_info['color']}[**{status_info['text']}**]"
-                            )
+                            st.markdown(f":{status_info['color']}[**{status_info['text']}**]")
                         with col3:
                             if st.button(
                                 "Delete",

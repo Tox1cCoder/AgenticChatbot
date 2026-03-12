@@ -5,7 +5,6 @@ Handles CRUD operations for storing and retrieving user-specific persistent
 per-agent provider/model selections.
 """
 
-from typing import List, Optional
 from uuid import UUID
 
 from sqlalchemy import and_
@@ -21,9 +20,7 @@ class AgentModelConfigRepository:
     def __init__(self, session_factory: callable):
         self.session_factory = session_factory
 
-    def get_by_user_and_agent_key(
-        self, user_id: UUID, agent_key: str
-    ) -> Optional[AgentModelConfig]:
+    def get_by_user_and_agent_key(self, user_id: UUID, agent_key: str) -> AgentModelConfig | None:
         with self.session_factory() as session:
             return (
                 session.query(AgentModelConfig)
@@ -36,7 +33,7 @@ class AgentModelConfigRepository:
                 .first()
             )
 
-    def get_all_by_user(self, user_id: UUID) -> List[AgentModelConfig]:
+    def get_all_by_user(self, user_id: UUID) -> list[AgentModelConfig]:
         with self.session_factory() as session:
             return (
                 session.query(AgentModelConfig)
@@ -52,7 +49,7 @@ class AgentModelConfigRepository:
         agent_key: str,
         provider_type: str,
         model: str,
-        temperature: Optional[float] = None,
+        temperature: float | None = None,
     ) -> AgentModelConfig:
         with self.session_factory() as session:
             existing = (

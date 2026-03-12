@@ -15,7 +15,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from .mcp_integration import MCPManager
@@ -42,7 +42,7 @@ class MCPRegistry:
 
     # Config file tracking
     _config_mtime: float = 0.0
-    _config_path: Optional[str] = None
+    _config_path: str | None = None
 
     # Tools generation version (incremented on reload, enable/disable, add/remove)
     _tools_generation: int = 0

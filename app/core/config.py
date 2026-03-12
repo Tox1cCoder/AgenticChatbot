@@ -1,14 +1,12 @@
 import logging
+import os
 import secrets
 from functools import lru_cache
-from typing import List
-import os
+from pathlib import Path
 
+from dotenv import load_dotenv
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
-
-from pathlib import Path
-from dotenv import load_dotenv
 
 # Load .env from the workspace root
 dotenv_path = Path(__file__).parent.parent.parent / ".env"
@@ -74,7 +72,7 @@ class Settings(BaseSettings):
     )
 
     # CORS settings
-    cors_origins: List[str] = Field(
+    cors_origins: list[str] = Field(
         default=[],
         description="CORS allowed origins",
     )
@@ -435,19 +433,19 @@ class Settings(BaseSettings):
 
     # Per-Agent Tool Allowlists
     # Empty list means bind all available tools; non-empty list restricts to specified tools/servers
-    chat_agent_allowed_tools: List[str] = Field(
+    chat_agent_allowed_tools: list[str] = Field(
         default=[],
         description="Tool names or server names that chat agent can use. Empty = all tools.",
     )
-    search_agent_allowed_tools: List[str] = Field(
+    search_agent_allowed_tools: list[str] = Field(
         default=[],
         description="Tool names or server names that search agent can use. Empty = all tools.",
     )
-    rag_agent_allowed_tools: List[str] = Field(
+    rag_agent_allowed_tools: list[str] = Field(
         default=[],
         description="Tool names or server names that RAG agent can use. Empty = all tools.",
     )
-    planning_agent_allowed_tools: List[str] = Field(
+    planning_agent_allowed_tools: list[str] = Field(
         default=[],
         description="Tool names or server names that planning agent can use. Empty = all tools.",
     )
@@ -511,7 +509,7 @@ class Settings(BaseSettings):
         default=True,
         description="Toggle to enable/disable human-in-the-loop globally",
     )
-    hitl_tools_require_approval: List[str] = Field(
+    hitl_tools_require_approval: list[str] = Field(
         default=["get_current_time"],
         description="List of tool names that require human approval. Empty list means NO tools require approval when HITL is enabled.",
     )
@@ -605,7 +603,7 @@ class Settings(BaseSettings):
         default=5,
         description="Number of top-ranked tools to automatically load/bind after tool_search (hard cap per Anthropic guidance).",
     )
-    mcp_tool_search_pinned_tools: List[str] = Field(
+    mcp_tool_search_pinned_tools: list[str] = Field(
         default=[],
         description="Tool names (or server::tool_name) that are always bound, not deferred. Recommended 3-5 high-frequency tools.",
     )
@@ -677,9 +675,7 @@ class Settings(BaseSettings):
                     "Set SECRET_KEY in .env for stable local auth sessions."
                 )
             else:
-                raise ValueError(
-                    "secret_key must be set to a strong value outside development"
-                )
+                raise ValueError("secret_key must be set to a strong value outside development")
         if self.environment != "development" and self.api_debug:
             raise ValueError("api_debug must be disabled outside development")
         if self.summarization_keep_messages >= self.summarization_trigger_messages:
@@ -721,7 +717,7 @@ def _log_startup_warnings(s: "Settings") -> None:
         )
 
 
-@lru_cache()
+@lru_cache
 def get_settings() -> Settings:
     """
     Get application settings with caching.

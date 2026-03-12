@@ -5,8 +5,9 @@ Stores encrypted API keys for different AI providers per user, enabling multi-pr
 """
 
 import uuid
-from sqlalchemy import Column, ForeignKey, Text, Index, DateTime, func, Boolean
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Text, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from app.models.base import Base
@@ -28,9 +29,7 @@ class ModelProvider(Base):
     )
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
-    user_id = Column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
-    )
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     provider_type = Column(Text, nullable=False)  # 'gemini', 'openai', 'anthropic'
     api_key_encrypted = Column(Text, nullable=False)
     is_default = Column(Boolean, default=False, nullable=False)
@@ -55,9 +54,11 @@ class ModelProvider(Base):
             "idx_model_providers_user_default",
             "user_id",
             "is_default",
-            postgresql_where=(is_default == True),
+            postgresql_where=(is_default),
         ),
     )
 
     def __repr__(self) -> str:
-        return f"<ModelProvider(id={self.id}, user_id={self.user_id}, provider={self.provider_type})>"
+        return (
+            f"<ModelProvider(id={self.id}, user_id={self.user_id}, provider={self.provider_type})>"
+        )

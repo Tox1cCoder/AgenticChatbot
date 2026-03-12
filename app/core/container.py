@@ -3,65 +3,58 @@ Dependency Injection Container.
 """
 
 from dependency_injector import containers, providers
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
 
-from app.core.config import settings
-from app.database.database import Database
-from app.repositories.user import UserRepository
-from app.repositories.conversation import ConversationRepository
-from app.repositories.message import MessageRepository
-from app.repositories.feedback import FeedbackRepository
-from app.repositories.document import DocumentRepository
-from app.repositories.task_plan import TaskPlanRepository
-from app.repositories.model_provider import ModelProviderRepository
-from app.repositories.agent_model_config import AgentModelConfigRepository
-from app.repositories.tool_approval import ToolApprovalRepository
-from app.repositories.hitl_interrupt import HITLInterruptRepository
-
-from app.services.auth_service import AuthService
-from app.services.user_service import UserService
-from app.services.conversation_service import ConversationService
-from app.services.message_service import MessageService
-from app.services.feedback_service import FeedbackService
-from app.services.ai_service import AIService
-from app.services.document_service import DocumentService
-from app.services.document_processing_service import DocumentProcessingService
-from app.services.mcp_service import MCPService
-from app.services.jwt_service import JwtService
-from app.services.task_plan_service import TaskPlanService
-from app.services.provider_service import ProviderService
-from app.services.model_config_service import ModelConfigService
-from app.services.skills_service import SkillsService
-
+from app.ai.agents.planning_agent import PlanningAgent
 from app.ai.checkpoint import CheckpointManager
 from app.ai.mcp_integration import MCPManager
 from app.ai.mcp_registry import MCPRegistry
 from app.ai.skills_registry import get_skills_registry
-from app.ai.agents.planning_agent import PlanningAgent
-from app.repositories.document_image import DocumentImageRepository
-
-from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
-from app.workers.celery_app import celery_app
-
-from app.utils.validation.user_validation import UserValidationUtils
-from app.utils.validation.conversation_validation import ConversationValidationUtils
-from app.utils.validation.feedback_validation import FeedbackValidationUtils
-from app.utils.validation.message_validation import MessageValidationUtils
-from app.utils.validation.document_validation import DocumentValidationUtils
-from app.utils.validation.task_plan_validation import TaskPlanValidationUtils
-
+from app.core.config import settings
 from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
-
-
+from app.database.database import Database
 from app.interfaces import (
-    IUserService,
-    IConversationService,
-    IMessageService,
-    IFeedbackService,
     IAuthService,
+    IConversationService,
     IDocumentService,
+    IFeedbackService,
+    IMessageService,
+    IUserService,
 )
 from app.interfaces.task_plan_service_interface import ITaskPlanService
+from app.repositories.agent_model_config import AgentModelConfigRepository
+from app.repositories.conversation import ConversationRepository
+from app.repositories.document import DocumentRepository
+from app.repositories.document_image import DocumentImageRepository
+from app.repositories.feedback import FeedbackRepository
+from app.repositories.hitl_interrupt import HITLInterruptRepository
+from app.repositories.message import MessageRepository
+from app.repositories.model_provider import ModelProviderRepository
+from app.repositories.task_plan import TaskPlanRepository
+from app.repositories.tool_approval import ToolApprovalRepository
+from app.repositories.user import UserRepository
+from app.services.ai_service import AIService
+from app.services.auth_service import AuthService
+from app.services.conversation_service import ConversationService
+from app.services.document_processing_service import DocumentProcessingService
+from app.services.document_service import DocumentService
+from app.services.feedback_service import FeedbackService
+from app.services.jwt_service import JwtService
+from app.services.mcp_service import MCPService
+from app.services.message_service import MessageService
+from app.services.model_config_service import ModelConfigService
+from app.services.provider_service import ProviderService
+from app.services.skills_service import SkillsService
+from app.services.task_plan_service import TaskPlanService
+from app.services.user_service import UserService
+from app.utils.validation.conversation_validation import ConversationValidationUtils
+from app.utils.validation.document_validation import DocumentValidationUtils
+from app.utils.validation.feedback_validation import FeedbackValidationUtils
+from app.utils.validation.message_validation import MessageValidationUtils
+from app.utils.validation.task_plan_validation import TaskPlanValidationUtils
+from app.utils.validation.user_validation import UserValidationUtils
+from app.workers.celery_app import celery_app
 
 
 class Container(containers.DeclarativeContainer):

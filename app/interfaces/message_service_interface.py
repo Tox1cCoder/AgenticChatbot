@@ -3,12 +3,13 @@ Message service interface definition
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from collections.abc import AsyncGenerator
+from typing import Any
 from uuid import UUID
 
 from app.ai.schemas import InterruptDecision
 from app.repositories.utils.pagination import Paginator
-from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
+from app.schemas.message import MessageCreate, MessageRead, MessageUpdate
 
 
 class IMessageService(ABC):
@@ -26,8 +27,8 @@ class IMessageService(ABC):
         self,
         message_create_data: MessageCreate,
         user_id: UUID,
-        bot_message_id: Optional[UUID] = None,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+        bot_message_id: UUID | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Create a new message and stream the assistant response"""
         pass
 
@@ -43,7 +44,7 @@ class IMessageService(ABC):
         user_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = None,
+        order_by: str | None = None,
         order_direction: str = "asc",
         include_feedback: bool = False,
     ) -> Paginator[MessageRead]:
@@ -56,7 +57,7 @@ class IMessageService(ABC):
         user_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = None,
+        order_by: str | None = None,
         order_direction: str = "desc",
         include_feedback: bool = False,
     ) -> Paginator[MessageRead]:
@@ -77,7 +78,7 @@ class IMessageService(ABC):
 
     @abstractmethod
     async def resume_workflow(
-        self, conversation_id: UUID, user_id: UUID, user_input: Optional[str] = None
+        self, conversation_id: UUID, user_id: UUID, user_input: str | None = None
     ) -> MessageRead:
         """Resume a paused workflow and return the bot's response message"""
         pass
@@ -88,10 +89,10 @@ class IMessageService(ABC):
         thread_id: str,
         conversation_id: UUID,
         user_id: UUID,
-        decisions: List[InterruptDecision],
-        interrupt_id: Optional[str] = None,
-        bot_message_id: Optional[UUID] = None,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+        decisions: list[InterruptDecision],
+        interrupt_id: str | None = None,
+        bot_message_id: UUID | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Resume an interrupted workflow and stream the assistant response"""
         pass
 

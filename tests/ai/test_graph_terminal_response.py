@@ -79,7 +79,9 @@ class TestTerminalResponseRecovery:
 
         workflow._route_node = _route_node
 
-        events = [event async for event in workflow.execute_stream(message="Hi", thread_id="thread-1")]
+        events = [
+            event async for event in workflow.execute_stream(message="Hi", thread_id="thread-1")
+        ]
 
         assert [event["type"] for event in events] == ["agent_selected", "complete"]
         assert events[0]["agent"] == "chat_agent"

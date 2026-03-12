@@ -3,6 +3,7 @@ Authentication service interface definition
 """
 
 from abc import ABC, abstractmethod
+
 from app.schemas.responses.token_response import LoginRequest
 
 

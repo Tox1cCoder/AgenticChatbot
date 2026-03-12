@@ -1,8 +1,9 @@
-from typing import Dict, List, Optional, Any, Annotated, TypedDict, NotRequired
 from enum import Enum
-from pydantic import BaseModel, Field
-from langgraph.graph.message import add_messages
+from typing import Annotated, Any, NotRequired, TypedDict
+
 from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
+from pydantic import BaseModel, Field
 
 
 class AgentType(str, Enum):
@@ -32,17 +33,11 @@ class ToolInterruptRequest(BaseModel):
     """Request details for a tool awaiting human approval."""
 
     action: str = Field(..., description="Tool name")
-    args: Dict[str, Any] = Field(..., description="Tool arguments")
-    description: Optional[str] = Field(
-        None, description="Description of what the tool will do"
-    )
-    task_id: Optional[str] = Field(
-        None, description="Task identifier from interrupt mechanism"
-    )
-    tool_call_id: Optional[str] = Field(
-        None, description="Tool call identifier for resume mapping"
-    )
-    allowed_decisions: Optional[List[str]] = Field(
+    args: dict[str, Any] = Field(..., description="Tool arguments")
+    description: str | None = Field(None, description="Description of what the tool will do")
+    task_id: str | None = Field(None, description="Task identifier from interrupt mechanism")
+    tool_call_id: str | None = Field(None, description="Tool call identifier for resume mapping")
+    allowed_decisions: list[str] | None = Field(
         None, description="Which decision types are permitted for this tool"
     )
 
@@ -51,13 +46,9 @@ class InterruptDecision(BaseModel):
     """Decision for handling a tool interrupt."""
 
     type: InterruptDecisionType = Field(..., description="Type of decision")
-    task_id: Optional[str] = Field(
-        None, description="Task ID to apply this decision to"
-    )
-    action: Optional[str] = Field(
-        None, description="Name of the tool/action this decision applies to"
-    )
-    args: Optional[Dict[str, Any]] = Field(
+    task_id: str | None = Field(None, description="Task ID to apply this decision to")
+    action: str | None = Field(None, description="Name of the tool/action this decision applies to")
+    args: dict[str, Any] | None = Field(
         None,
         description="For EDIT: modified arguments. For REJECT: optional feedback message",
     )
@@ -67,12 +58,12 @@ class InterruptResponse(BaseModel):
     """Response containing interrupt information for human approval."""
 
     interrupt_id: str = Field(..., description="Unique identifier for this interrupt")
-    action_requests: List[ToolInterruptRequest] = Field(
+    action_requests: list[ToolInterruptRequest] = Field(
         ..., description="List of tools awaiting approval"
     )
     thread_id: str = Field(..., description="Conversation thread ID for resuming")
     conversation_id: str = Field(..., description="Conversation ID")
-    metadata: Dict[str, Any] = Field(
+    metadata: dict[str, Any] = Field(
         default_factory=dict, description="Additional metadata for the interrupt"
     )
 
@@ -80,12 +71,12 @@ class InterruptResponse(BaseModel):
 class AgentMessage(BaseModel):
     role: MessageRole
     content: str
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    attachments: Optional[List[Dict[str, str]]] = Field(
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    attachments: list[dict[str, str]] | None = Field(
         default=None,
         description="Optional image attachments with structure {name: str, mime: str, data: str (base64)}",
     )
-    tool_calls: Optional[List[Dict[str, Any]]] = Field(
+    tool_calls: list[dict[str, Any]] | None = Field(
         default=None,
         description="Optional list of tool calls to be executed",
     )
@@ -94,7 +85,7 @@ class AgentMessage(BaseModel):
 class AgentConfig(BaseModel):
     model: str
     temperature: float
-    max_tokens: Optional[int] = None
+    max_tokens: int | None = None
     top_p: float = 1.0
     frequency_penalty: float = 0.0
 
@@ -103,50 +94,50 @@ class AgentResponse(BaseModel):
     agent_type: AgentType
     agent_id: str
     message: AgentMessage
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    tool_artifacts: Optional[List[Dict[str, Any]]] = Field(
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    tool_artifacts: list[dict[str, Any]] | None = Field(
         default=None,
         description="Optional list of artifacts produced while executing tools",
     )
-    error: Optional[str] = None
-    suggested_questions: Optional[List[str]] = Field(
+    error: str | None = None
+    suggested_questions: list[str] | None = Field(
         default=None,
         description="0-3 follow-up question suggestions for continuing the conversation",
     )
 
 
 class GraphState(TypedDict):
-    messages: Annotated[List[BaseMessage], add_messages]
-    conversation_id: NotRequired[Optional[str]]
-    user_id: NotRequired[Optional[str]]
-    selected_agent: NotRequired[Optional[str]]
-    response: NotRequired[Optional[AgentResponse]]
-    context: NotRequired[Dict[str, Any]]
-    persona: NotRequired[Optional[str]]
-    iteration_count: NotRequired[Optional[int]]
-    pending_tool_calls: NotRequired[Optional[List[Any]]]
+    messages: Annotated[list[BaseMessage], add_messages]
+    conversation_id: NotRequired[str | None]
+    user_id: NotRequired[str | None]
+    selected_agent: NotRequired[str | None]
+    response: NotRequired[AgentResponse | None]
+    context: NotRequired[dict[str, Any]]
+    persona: NotRequired[str | None]
+    iteration_count: NotRequired[int | None]
+    pending_tool_calls: NotRequired[list[Any] | None]
     # Multi-provider model configuration
-    model_request: NotRequired[Optional[Dict[str, Any]]]
+    model_request: NotRequired[dict[str, Any] | None]
     # Task planning context fields
-    task_plan_id: NotRequired[Optional[str]]
-    current_task: NotRequired[Optional[Dict[str, Any]]]
-    all_tasks: NotRequired[Optional[List[Dict[str, Any]]]]
-    planning_mode_enabled: NotRequired[Optional[bool]]
-    has_existing_plan: NotRequired[Optional[bool]]
+    task_plan_id: NotRequired[str | None]
+    current_task: NotRequired[dict[str, Any] | None]
+    all_tasks: NotRequired[list[dict[str, Any]] | None]
+    planning_mode_enabled: NotRequired[bool | None]
+    has_existing_plan: NotRequired[bool | None]
     # Dynamic todo tracking (for write_todos tool)
-    todos: NotRequired[Optional[List[Dict[str, Any]]]]
-    current_task_index: NotRequired[Optional[int]]
-    planning_call_count: NotRequired[Optional[int]]
+    todos: NotRequired[list[dict[str, Any]] | None]
+    current_task_index: NotRequired[int | None]
+    planning_call_count: NotRequired[int | None]
     # Planning phase: "planning" = create/edit only, "executing" = work through tasks
-    planning_phase: NotRequired[Optional[str]]
+    planning_phase: NotRequired[str | None]
     # Persisted plan lifecycle (draft/ready/executing/paused/completed); None = no plan yet
-    plan_lifecycle: NotRequired[Optional[str]]
+    plan_lifecycle: NotRequired[str | None]
     # Inter-agent delegation depth counter (reset each user turn)
-    delegation_count: NotRequired[Optional[int]]
+    delegation_count: NotRequired[int | None]
     # Rolling conversation summary memory (checkpoint-backed)
-    history_summary: NotRequired[Optional[str]]
-    history_summary_updated_at: NotRequired[Optional[str]]
-    summary_cursor_message_id: NotRequired[Optional[str]]
+    history_summary: NotRequired[str | None]
+    history_summary_updated_at: NotRequired[str | None]
+    summary_cursor_message_id: NotRequired[str | None]
 
 
 # === Todo Management Schemas for write_todos tool ===
@@ -177,9 +168,7 @@ class TodoItem(BaseModel):
 
     id: str = Field(..., description="Unique identifier for the todo")
     description: str = Field(..., description="What needs to be done")
-    status: TodoStatus = Field(
-        default=TodoStatus.PENDING, description="Current status of the todo"
-    )
+    status: TodoStatus = Field(default=TodoStatus.PENDING, description="Current status of the todo")
     order: int = Field(..., description="Order/position in the todo list (0-indexed)")
 
 
@@ -187,17 +176,15 @@ class WriteTodosInput(BaseModel):
     """Input schema for the write_todos tool."""
 
     action: TodoAction = Field(..., description="The action to perform")
-    todos: Optional[List[TodoItem]] = Field(
+    todos: list[TodoItem] | None = Field(
         None, description="For SET_TODOS: the complete list of todos to set"
     )
-    todo: Optional[TodoItem] = Field(
-        None, description="For ADD_TODO, UPDATE_TODO: the todo item"
-    )
-    todo_id: Optional[str] = Field(
+    todo: TodoItem | None = Field(None, description="For ADD_TODO, UPDATE_TODO: the todo item")
+    todo_id: str | None = Field(
         None,
         description="For COMPLETE_TODO, REMOVE_TODO, START_TODO: the ID of the todo to modify",
     )
-    reason: Optional[str] = Field(
+    reason: str | None = Field(
         None,
         description="Optional reason for the action (e.g., why skipping/completing)",
     )
@@ -221,15 +208,9 @@ class SearchDocumentsInput(BaseModel):
     """Input schema for the search_documents tool."""
 
     action: DocumentAction = Field(..., description="The action to perform")
-    document_id: Optional[str] = Field(
+    document_id: str | None = Field(
         None, description="For READ_DOCUMENT, GREP_DOCUMENT: target document ID"
     )
-    query: Optional[str] = Field(
-        None, description="For SEARCH_CHUNKS: semantic search query"
-    )
-    pattern: Optional[str] = Field(
-        None, description="For GREP_DOCUMENT: regex pattern to search"
-    )
-    reason: Optional[str] = Field(
-        None, description="Reasoning for the action (displayed to user)"
-    )
+    query: str | None = Field(None, description="For SEARCH_CHUNKS: semantic search query")
+    pattern: str | None = Field(None, description="For GREP_DOCUMENT: regex pattern to search")
+    reason: str | None = Field(None, description="Reasoning for the action (displayed to user)")

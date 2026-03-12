@@ -6,17 +6,17 @@ Create Date: 2025-11-06 10:00:00.000000
 
 """
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "a2b3c4d5e6f7"
-down_revision: Union[str, None] = "f5c3900b4134"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "f5c3900b4134"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -43,9 +43,7 @@ def upgrade() -> None:
         ["document_id"],
         unique=False,
     )
-    op.create_index(
-        "idx_document_images_chunk_id", "document_images", ["chunk_id"], unique=False
-    )
+    op.create_index("idx_document_images_chunk_id", "document_images", ["chunk_id"], unique=False)
     # ### end Alembic commands ###
 
 

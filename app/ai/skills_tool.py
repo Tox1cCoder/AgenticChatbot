@@ -75,10 +75,6 @@ def create_activate_skill_tool():
             )
 
         # Return the full Markdown body
-        return (
-            f"── Skill: {skill.name} ──\n\n"
-            f"{skill.content}\n\n"
-            f"── End Skill: {skill.name} ──"
-        )
+        return f"── Skill: {skill.name} ──\n\n{skill.content}\n\n── End Skill: {skill.name} ──"
 
     return activate_skill

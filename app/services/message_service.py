@@ -1,46 +1,47 @@
 from __future__ import annotations
+
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Tuple, Any, Dict, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
+
 import redis
 
-
-from app.repositories.message import MessageRepository
-from app.services.generation_registry import get_generation_registry
-from app.repositories.tool_approval import ToolApprovalRepository
-from app.repositories.hitl_interrupt import HITLInterruptRepository
-from app.repositories.utils.pagination import Paginator
-from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
-from app.models.enums import MessageRole, PlanLifecycle
-from app.models.tool_approval import DecisionType
-from app.factories.message_factory import MessageFactory
-from app.utils.validation.conversation_validation import ConversationValidationUtils
-from app.utils.validation.message_validation import MessageValidationUtils
-from app.utils.validation.pagination_validation import validate_pagination_params
-from app.interfaces.message_service_interface import IMessageService
-from app.services.ai_service import AIService
-from app.services.model_config_service import ModelConfigService
 from app.ai.schemas import (
     AgentResponse,
     InterruptDecision,
-    InterruptResponse,
     InterruptDecisionType,
+    InterruptResponse,
 )
-from app.utils.text_processing import sanitize_persona, fix_markdown_code_blocks
+from app.ai.suggestion_generator import generate_follow_up_suggestions
 from app.core.config import settings
 from app.core.exceptions import PauseReason
-from app.ai.suggestion_generator import generate_follow_up_suggestions
 from app.core.response_constants import (
-    extract_response_content,
-    build_bot_metadata,
-    normalize_message_content,
-    NO_RESPONSE_GENERATED,
     ERROR_NO_RESPONSE,
     ERROR_RESPONSE_AFTER_RESUME,
+    NO_RESPONSE_GENERATED,
     UNKNOWN_ERROR,
+    build_bot_metadata,
+    extract_response_content,
+    normalize_message_content,
 )
+from app.factories.message_factory import MessageFactory
+from app.interfaces.message_service_interface import IMessageService
+from app.models.enums import MessageRole, PlanLifecycle
+from app.models.tool_approval import DecisionType
+from app.repositories.hitl_interrupt import HITLInterruptRepository
+from app.repositories.message import MessageRepository
+from app.repositories.tool_approval import ToolApprovalRepository
+from app.repositories.utils.pagination import Paginator
+from app.schemas.message import MessageCreate, MessageRead, MessageUpdate
+from app.services.ai_service import AIService
+from app.services.generation_registry import get_generation_registry
+from app.services.model_config_service import ModelConfigService
+from app.utils.text_processing import fix_markdown_code_blocks, sanitize_persona
+from app.utils.validation.conversation_validation import ConversationValidationUtils
+from app.utils.validation.message_validation import MessageValidationUtils
+from app.utils.validation.pagination_validation import validate_pagination_params
 
 if TYPE_CHECKING:
     from app.interfaces.task_plan_service_interface import ITaskPlanService
@@ -53,10 +54,10 @@ class MessageService(IMessageService):
         conversation_validation_utils: ConversationValidationUtils,
         message_validation_utils: MessageValidationUtils,
         ai_service: AIService,
-        model_config_service: Optional[ModelConfigService] = None,
-        tool_approval_repository: Optional[ToolApprovalRepository] = None,
-        hitl_interrupt_repository: Optional[HITLInterruptRepository] = None,
-        task_plan_service: Optional["ITaskPlanService"] = None,
+        model_config_service: ModelConfigService | None = None,
+        tool_approval_repository: ToolApprovalRepository | None = None,
+        hitl_interrupt_repository: HITLInterruptRepository | None = None,
+        task_plan_service: ITaskPlanService | None = None,
     ):
         self.repository = message_repository
         self.conversation_validation_utils = conversation_validation_utils
@@ -68,16 +69,12 @@ class MessageService(IMessageService):
         self.task_plan_service = task_plan_service
         self.redis_client = self._init_redis_client()
 
-    def _resolve_persistent_model_request(
-        self, user_id: Optional[UUID]
-    ) -> Optional[Dict[str, Any]]:
+    def _resolve_persistent_model_request(self, user_id: UUID | None) -> dict[str, Any] | None:
         if not self.model_config_service or not user_id:
             return None
 
         try:
-            model_request = self.model_config_service.get_effective_model_request(
-                user_id
-            )
+            model_request = self.model_config_service.get_effective_model_request(user_id)
         except Exception as exc:
             logging.warning(
                 "Failed to load persistent model config for user %s: %s",
@@ -96,13 +93,11 @@ class MessageService(IMessageService):
         return redis.from_url(redis_url)
 
     def _get_conversation_context(
-        self, conversation_id: UUID, user_id: Optional[UUID] = None
-    ) -> Tuple[Optional[UUID], Optional[str]]:
+        self, conversation_id: UUID, user_id: UUID | None = None
+    ) -> tuple[UUID | None, str | None]:
         """Get user_id and persona from conversation."""
-        conversation = (
-            self.conversation_validation_utils.conversation_repository.get_by_id(
-                conversation_id
-            )
+        conversation = self.conversation_validation_utils.conversation_repository.get_by_id(
+            conversation_id
         )
         resolved_user_id = user_id or (conversation.owner_id if conversation else None)
         persona = conversation.persona_prompt if conversation else None
@@ -112,7 +107,7 @@ class MessageService(IMessageService):
         self,
         conversation_id: UUID,
         content: str,
-        metadata: Dict[str, Any],
+        metadata: dict[str, Any],
         message_id: UUID | None = None,
     ) -> MessageRead:
         """Create and persist a bot response message."""
@@ -132,8 +127,8 @@ class MessageService(IMessageService):
 
     @staticmethod
     def _coerce_plan_lifecycle(
-        raw_lifecycle: Optional[str | PlanLifecycle],
-    ) -> Optional[PlanLifecycle]:
+        raw_lifecycle: str | PlanLifecycle | None,
+    ) -> PlanLifecycle | None:
         if isinstance(raw_lifecycle, PlanLifecycle):
             return raw_lifecycle
         if isinstance(raw_lifecycle, str):
@@ -145,8 +140,8 @@ class MessageService(IMessageService):
 
     @staticmethod
     def _infer_lifecycle_from_todos(
-        todos: Optional[List[Dict[str, Any]]],
-    ) -> Optional[PlanLifecycle]:
+        todos: list[dict[str, Any]] | None,
+    ) -> PlanLifecycle | None:
         if not isinstance(todos, list) or not todos:
             return None
 
@@ -165,9 +160,7 @@ class MessageService(IMessageService):
         if all(status in {"completed", "skipped"} for status in statuses):
             return PlanLifecycle.completed
 
-        if any(
-            status in {"in_progress", "completed", "skipped"} for status in statuses
-        ):
+        if any(status in {"in_progress", "completed", "skipped"} for status in statuses):
             return PlanLifecycle.executing
 
         return PlanLifecycle.draft
@@ -175,9 +168,9 @@ class MessageService(IMessageService):
     def _infer_plan_lifecycle(
         self,
         *,
-        response: Optional[AgentResponse],
-        current_lifecycle: Optional[str | PlanLifecycle],
-    ) -> Optional[PlanLifecycle]:
+        response: AgentResponse | None,
+        current_lifecycle: str | PlanLifecycle | None,
+    ) -> PlanLifecycle | None:
         if not response or not isinstance(getattr(response, "metadata", None), dict):
             return None
 
@@ -203,8 +196,8 @@ class MessageService(IMessageService):
     def _set_plan_lifecycle(
         self,
         conversation_id: UUID,
-        user_id: Optional[UUID],
-        lifecycle: Optional[PlanLifecycle],
+        user_id: UUID | None,
+        lifecycle: PlanLifecycle | None,
     ) -> None:
         if not self.task_plan_service or user_id is None or lifecycle is None:
             return
@@ -227,9 +220,9 @@ class MessageService(IMessageService):
         self,
         *,
         conversation_id: UUID,
-        user_id: Optional[UUID],
-        bot_response: Optional[AgentResponse],
-        current_lifecycle: Optional[str | PlanLifecycle],
+        user_id: UUID | None,
+        bot_response: AgentResponse | None,
+        current_lifecycle: str | PlanLifecycle | None,
     ) -> bool:
         lifecycle = self._infer_plan_lifecycle(
             response=bot_response,
@@ -251,7 +244,7 @@ class MessageService(IMessageService):
         return False
 
     async def _generate_and_add_suggestions(
-        self, user_query: str, response_content: str, metadata: Dict[str, Any]
+        self, user_query: str, response_content: str, metadata: dict[str, Any]
     ) -> None:
         """Generate follow-up suggestions and add to metadata."""
         try:
@@ -268,10 +261,8 @@ class MessageService(IMessageService):
         """Check if this is the first user message in the conversation."""
         try:
             # Check if conversation has a default title (needs generation)
-            conversation = (
-                self.conversation_validation_utils.conversation_repository.get_by_id(
-                    conversation_id
-                )
+            conversation = self.conversation_validation_utils.conversation_repository.get_by_id(
+                conversation_id
             )
             if not conversation:
                 return False
@@ -285,7 +276,7 @@ class MessageService(IMessageService):
         self,
         conversation_id: UUID,
         user_message: str,
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         Generate and update conversation title asynchronously.
 
@@ -309,8 +300,8 @@ class MessageService(IMessageService):
     def _handle_redis_interrupt_storage(
         self,
         conversation_id: UUID,
-        interrupt_id: Optional[str],
-        interrupt_response: Dict[str, Any],
+        interrupt_id: str | None,
+        interrupt_response: dict[str, Any],
     ) -> None:
         """Store interrupt information in Redis with timeout."""
         if not self.redis_client or not interrupt_response or not interrupt_id:
@@ -319,9 +310,7 @@ class MessageService(IMessageService):
         key = f"interrupt:{conversation_id}:{interrupt_id}"
         timeout_seconds = settings.hitl_approval_timeout_minutes * 60
         try:
-            self.redis_client.setex(
-                key, timeout_seconds, datetime.now(timezone.utc).isoformat()
-            )
+            self.redis_client.setex(key, timeout_seconds, datetime.now(timezone.utc).isoformat())
             deadline = datetime.now(timezone.utc) + timedelta(
                 minutes=settings.hitl_approval_timeout_minutes
             )
@@ -331,9 +320,7 @@ class MessageService(IMessageService):
         except Exception:
             pass
 
-    def _clear_redis_interrupt(
-        self, conversation_id: UUID, interrupt_id: Optional[str]
-    ) -> None:
+    def _clear_redis_interrupt(self, conversation_id: UUID, interrupt_id: str | None) -> None:
         """Clear interrupt information from Redis."""
         if not self.redis_client or not interrupt_id:
             return
@@ -348,11 +335,11 @@ class MessageService(IMessageService):
         self,
         conversation_id: UUID,
         interrupt_payload: Any,
-        sanitized_persona: Optional[str] = None,
-        pending_tool_calls: Optional[Any] = None,
-        thread_id: Optional[str] = None,
-        next_nodes: Optional[Any] = None,
-        user_id: Optional[UUID] = None,
+        sanitized_persona: str | None = None,
+        pending_tool_calls: Any | None = None,
+        thread_id: str | None = None,
+        next_nodes: Any | None = None,
+        user_id: UUID | None = None,
         message_id: UUID | None = None,
     ) -> MessageRead:
         """
@@ -369,7 +356,7 @@ class MessageService(IMessageService):
         else:
             interrupt_dict = {"raw": str(interrupt_payload)}
 
-        metadata: Dict[str, Any] = {
+        metadata: dict[str, Any] = {
             "interrupt": interrupt_dict,
             "paused": True,
             "pause_reason": "tool_approval_required",
@@ -434,18 +421,14 @@ class MessageService(IMessageService):
 
         if message_create_data.role == MessageRole.user:
             # Load conversation once — reused for context and planning mode
-            conversation = (
-                self.conversation_validation_utils.conversation_repository.get_by_id(
-                    message_create_data.conversation_id
-                )
+            conversation = self.conversation_validation_utils.conversation_repository.get_by_id(
+                message_create_data.conversation_id
             )
             user_id = user_id or (conversation.owner_id if conversation else None)
             persona = conversation.persona_prompt if conversation else None
             sanitized_persona = sanitize_persona(persona)
 
-            planning_mode_enabled = (
-                conversation.planning_mode_enabled if conversation else False
-            )
+            planning_mode_enabled = conversation.planning_mode_enabled if conversation else False
             _lifecycle = getattr(conversation, "plan_lifecycle", None)
             plan_lifecycle_value = (
                 _lifecycle.value
@@ -508,9 +491,7 @@ class MessageService(IMessageService):
             if interrupt_payload:
                 user_message_read = MessageRead.model_validate(created_message)
                 if isinstance(interrupt_payload, dict):
-                    interrupt_payload = InterruptResponse.model_validate(
-                        interrupt_payload
-                    )
+                    interrupt_payload = InterruptResponse.model_validate(interrupt_payload)
                 user_message_read.interrupt = interrupt_payload
 
                 # Persist an assistant "approval required" message so clients can
@@ -524,9 +505,7 @@ class MessageService(IMessageService):
                         pending_tool_calls=(
                             [
                                 r.model_dump(mode="json")
-                                for r in getattr(
-                                    interrupt_payload, "action_requests", []
-                                )
+                                for r in getattr(interrupt_payload, "action_requests", [])
                             ]
                             if isinstance(interrupt_payload, InterruptResponse)
                             else None
@@ -582,19 +561,15 @@ class MessageService(IMessageService):
         # Yield user message creation event
         yield {
             "type": "user_message_created",
-            "message": MessageRead.model_validate(created_message).model_dump(
-                mode="json"
-            ),
+            "message": MessageRead.model_validate(created_message).model_dump(mode="json"),
         }
 
         # Start async title generation only if this is a user message and the first one
         title_task = None
         if message_create_data.role == MessageRole.user:
             # Load conversation once — reused for title check, context, and planning mode
-            conversation = (
-                self.conversation_validation_utils.conversation_repository.get_by_id(
-                    message_create_data.conversation_id
-                )
+            conversation = self.conversation_validation_utils.conversation_repository.get_by_id(
+                message_create_data.conversation_id
             )
             default_titles = {"New Conversation", "Untitled", ""}
             needs_title = conversation is not None and (
@@ -618,16 +593,10 @@ class MessageService(IMessageService):
             persona = conversation.persona_prompt if conversation else None
             sanitized_persona = sanitize_persona(persona)
 
-            planning_mode_enabled = (
-                conversation.planning_mode_enabled if conversation else False
-            )
+            planning_mode_enabled = conversation.planning_mode_enabled if conversation else False
             _lc = getattr(conversation, "plan_lifecycle", None)
             plan_lifecycle_value = (
-                _lc.value
-                if hasattr(_lc, "value")
-                else str(_lc)
-                if _lc is not None
-                else None
+                _lc.value if hasattr(_lc, "value") else str(_lc) if _lc is not None else None
             )
 
             # Use shared helper to prepare planning context (stream path)
@@ -722,9 +691,7 @@ class MessageService(IMessageService):
                         # Yield interrupt event - workflow paused for human approval
                         interrupt_response = event.get("interrupt")
                         interrupt_id = (
-                            interrupt_response.get("interrupt_id")
-                            if interrupt_response
-                            else None
+                            interrupt_response.get("interrupt_id") if interrupt_response else None
                         )
                         self._handle_redis_interrupt_storage(
                             message_create_data.conversation_id,
@@ -918,15 +885,14 @@ class MessageService(IMessageService):
         thread_id: str,
         conversation_id: UUID,
         user_id: UUID,
-        interrupt_id: Optional[str],
+        interrupt_id: str | None,
     ) -> Any:
-        from app.core.exceptions import CustomHTTPException
         from fastapi import status as http_status
+
+        from app.core.exceptions import CustomHTTPException
         from app.models.hitl_interrupt import HITLInterruptStatus
 
-        self.conversation_validation_utils.validate_conversation_access(
-            user_id, conversation_id
-        )
+        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
 
         fetched_interrupt_record = None
         if self.hitl_interrupt_repository and interrupt_id:
@@ -952,8 +918,7 @@ class MessageService(IMessageService):
                 )
             now = datetime.now(timezone.utc)
             if record.status == HITLInterruptStatus.EXPIRED or (
-                record.status == HITLInterruptStatus.PENDING
-                and record.expires_at <= now
+                record.status == HITLInterruptStatus.PENDING and record.expires_at <= now
             ):
                 if record.status == HITLInterruptStatus.PENDING:
                     try:
@@ -963,8 +928,7 @@ class MessageService(IMessageService):
                 raise CustomHTTPException(
                     status_code=http_status.HTTP_410_GONE,
                     detail=(
-                        "This approval request has expired. "
-                        "Please send a new message to try again."
+                        "This approval request has expired. Please send a new message to try again."
                     ),
                     error_code="INTERRUPT_EXPIRED",
                 )
@@ -995,9 +959,7 @@ class MessageService(IMessageService):
             try:
                 stored_timestamp = self.redis_client.get(key)
                 if stored_timestamp:
-                    stored_time = datetime.fromisoformat(
-                        stored_timestamp.decode("utf-8")
-                    )
+                    stored_time = datetime.fromisoformat(stored_timestamp.decode("utf-8"))
                     elapsed_minutes = (
                         datetime.now(timezone.utc) - stored_time
                     ).total_seconds() / 60
@@ -1024,21 +986,18 @@ class MessageService(IMessageService):
         self,
         *,
         conversation_id: UUID,
-        user_id: Optional[UUID],
-        decisions: List[InterruptDecision],
-        interrupt_id: Optional[str],
+        user_id: UUID | None,
+        decisions: list[InterruptDecision],
+        interrupt_id: str | None,
         fetched_interrupt_record: Any = None,
     ) -> None:
         if not self.tool_approval_repository or not user_id:
             return
 
-        stored_original_args: Dict[str, Any] = {}
+        stored_original_args: dict[str, Any] = {}
         if interrupt_id:
             try:
-                if (
-                    fetched_interrupt_record
-                    and fetched_interrupt_record.action_requests_json
-                ):
+                if fetched_interrupt_record and fetched_interrupt_record.action_requests_json:
                     for req in fetched_interrupt_record.action_requests_json:
                         if isinstance(req, dict):
                             key = req.get("tool_call_id") or req.get("task_id")
@@ -1072,9 +1031,7 @@ class MessageService(IMessageService):
                     "tool_call_id": decision.task_id or "unknown",
                     "original_args": original_args,
                     "modified_args": decision.args if is_edit else None,
-                    "decision": decision_type_map.get(
-                        decision.type, DecisionType.REJECT
-                    ),
+                    "decision": decision_type_map.get(decision.type, DecisionType.REJECT),
                 }
                 self.tool_approval_repository.create(approval_data)
             except Exception as audit_exc:
@@ -1108,8 +1065,8 @@ class MessageService(IMessageService):
         thread_id: str,
         conversation_id: UUID,
         user_id: UUID,
-        decisions: List[InterruptDecision],
-        interrupt_id: Optional[str] = None,
+        decisions: list[InterruptDecision],
+        interrupt_id: str | None = None,
         bot_message_id: UUID | None = None,
     ):
         fetched_interrupt_record = self._validate_and_claim_interrupt_resume(
@@ -1161,10 +1118,7 @@ class MessageService(IMessageService):
                         "result": event.get("result"),
                     }
 
-                elif event_type == "continuation_start":
-                    yield event
-
-                elif event_type == "node_complete":
+                elif event_type == "continuation_start" or event_type == "node_complete":
                     yield event
 
                 elif event_type == "interrupt":
@@ -1235,9 +1189,7 @@ class MessageService(IMessageService):
                     bot_response_content = extract_response_content(
                         bot_response, ERROR_RESPONSE_AFTER_RESUME
                     )
-                    bot_response_content = fix_markdown_code_blocks(
-                        bot_response_content
-                    )
+                    bot_response_content = fix_markdown_code_blocks(bot_response_content)
 
                     bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
                     if self._sync_response_plan_state(
@@ -1346,9 +1298,7 @@ class MessageService(IMessageService):
           - ``status``: ``"cancelled"`` | ``"not_inflight"``
           - ``message``: optional MessageRead dict (the persisted partial/final message)
         """
-        self.conversation_validation_utils.validate_conversation_access(
-            user_id, conversation_id
-        )
+        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
 
         registry = get_generation_registry()
         entry = registry.get(user_message_id)
@@ -1391,16 +1341,14 @@ class MessageService(IMessageService):
         user_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = None,
+        order_by: str | None = None,
         order_direction: str = "asc",
         include_feedback: bool = False,
     ) -> Paginator[MessageRead]:
         # Validate pagination parameters
         validate_pagination_params(page, limit)
 
-        self.conversation_validation_utils.validate_conversation_access(
-            user_id, conversation_id
-        )
+        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
         paginated_messages = self.repository.get_by_conversation_id(
             conversation_id,
             page=page,
@@ -1419,16 +1367,14 @@ class MessageService(IMessageService):
             message_reads.append(MessageRead.model_validate(msg))
 
         # Return new Paginator with converted items
-        return Paginator.create(
-            message_reads, paginated_messages.meta.total, page, limit
-        )
+        return Paginator.create(message_reads, paginated_messages.meta.total, page, limit)
 
     def get_user_messages(
         self,
         user_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = None,
+        order_by: str | None = None,
         order_direction: str = "desc",
         include_feedback: bool = False,
     ) -> Paginator[MessageRead]:
@@ -1453,9 +1399,7 @@ class MessageService(IMessageService):
             message_reads.append(MessageRead.model_validate(msg))
 
         # Return new Paginator with converted items
-        return Paginator.create(
-            message_reads, paginated_messages.meta.total, page, limit
-        )
+        return Paginator.create(message_reads, paginated_messages.meta.total, page, limit)
 
     def update_message(
         self,
@@ -1476,11 +1420,9 @@ class MessageService(IMessageService):
         self,
         conversation_id: UUID,
         user_id: UUID,
-        user_input: Optional[str] = None,
+        user_input: str | None = None,
     ) -> MessageRead:
-        self.conversation_validation_utils.validate_conversation_access(
-            user_id, conversation_id
-        )
+        self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
 
         bot_response = await self.ai_service.resume_workflow(
             conversation_id=conversation_id,
@@ -1488,9 +1430,7 @@ class MessageService(IMessageService):
             user_input=user_input,
         )
 
-        bot_response_content = extract_response_content(
-            bot_response, NO_RESPONSE_GENERATED
-        )
+        bot_response_content = extract_response_content(bot_response, NO_RESPONSE_GENERATED)
 
         bot_metadata = build_bot_metadata(bot_response)
         if self._sync_response_plan_state(
@@ -1508,16 +1448,14 @@ class MessageService(IMessageService):
         )
 
     @staticmethod
-    def _build_task_context_dict(task: Optional[Any]) -> Optional[Dict[str, Any]]:
+    def _build_task_context_dict(task: Any | None) -> dict[str, Any] | None:
         if not task:
             return None
         return {
             "id": str(task.id),
             "description": task.description,
             "order": getattr(task, "task_order", getattr(task, "order", 0)),
-            "status": (
-                task.status.value if hasattr(task.status, "value") else str(task.status)
-            ),
+            "status": (task.status.value if hasattr(task.status, "value") else str(task.status)),
         }
 
     async def _prepare_planning_context(
@@ -1526,8 +1464,8 @@ class MessageService(IMessageService):
         user_id: UUID,
         message_content: str,
         planning_mode_enabled: bool,
-        plan_lifecycle: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        plan_lifecycle: str | None = None,
+    ) -> dict[str, Any]:
         """
         Prepare task planning context for message creation.
 
@@ -1570,9 +1508,7 @@ class MessageService(IMessageService):
                 result["planning_mode_enabled"] = True
 
             # Get current task for execution context
-            current_task = self.task_plan_service.get_active_or_next_task(
-                conversation_id, user_id
-            )
+            current_task = self.task_plan_service.get_active_or_next_task(conversation_id, user_id)
             result["current_task_context"] = self._build_task_context_dict(current_task)
 
             # Convert existing tasks to dict for planning agent
@@ -1582,9 +1518,7 @@ class MessageService(IMessageService):
                         "id": str(task.id),
                         "description": task.description,
                         "status": (
-                            task.status.value
-                            if hasattr(task.status, "value")
-                            else str(task.status)
+                            task.status.value if hasattr(task.status, "value") else str(task.status)
                         ),
                         "task_order": task.task_order,
                     }
@@ -1605,20 +1539,20 @@ class MessageService(IMessageService):
         *,
         message_content: str,
         conversation_id: UUID,
-        user_id: Optional[UUID],
-        sanitized_persona: Optional[str],
+        user_id: UUID | None,
+        sanitized_persona: str | None,
         planning_mode_enabled: bool,
         has_existing_plan: bool,
-        current_task_context: Optional[Dict[str, Any]],
-        existing_tasks_dict: Optional[List[Dict[str, Any]]],
-        attachments: Optional[list],
-        model_request: Optional[Dict[str, Any]] = None,
-        persona: Optional[str] = None,
-        plan_lifecycle: Optional[str] = None,
-    ) -> Tuple[
-        Optional[str],
-        Dict[str, Any],
-        Optional[Dict[str, Any]],
+        current_task_context: dict[str, Any] | None,
+        existing_tasks_dict: list[dict[str, Any]] | None,
+        attachments: list | None,
+        model_request: dict[str, Any] | None = None,
+        persona: str | None = None,
+        plan_lifecycle: str | None = None,
+    ) -> tuple[
+        str | None,
+        dict[str, Any],
+        dict[str, Any] | None,
     ]:
         """
         Execute planning workflow with graph-driven ReAct loop.
@@ -1626,8 +1560,8 @@ class MessageService(IMessageService):
         The graph now handles iteration internally via the planning_tools node.
         This function makes a single call and syncs todo state afterward.
         """
-        bot_response: Optional[AgentResponse] = None
-        bot_metadata: Dict[str, Any] = {}
+        bot_response: AgentResponse | None = None
+        bot_metadata: dict[str, Any] = {}
         has_plan = has_existing_plan
 
         # Single call to AI service - graph handles ReAct loop internally
@@ -1647,11 +1581,7 @@ class MessageService(IMessageService):
         )
 
         # Handle interrupts (HITL)
-        if (
-            bot_response
-            and bot_response.metadata
-            and "interrupt" in bot_response.metadata
-        ):
+        if bot_response and bot_response.metadata and "interrupt" in bot_response.metadata:
             self._set_plan_lifecycle(
                 conversation_id,
                 user_id,
@@ -1687,9 +1617,7 @@ class MessageService(IMessageService):
         # Refresh task data for next_task info
         if planning_mode_enabled and self.task_plan_service and user_id:
             try:
-                next_task = self.task_plan_service.get_active_or_next_task(
-                    conversation_id, user_id
-                )
+                next_task = self.task_plan_service.get_active_or_next_task(conversation_id, user_id)
                 if next_task:
                     bot_metadata["next_task"] = {
                         "id": str(next_task.id),
@@ -1706,9 +1634,9 @@ class MessageService(IMessageService):
     def _sync_todos_to_database(
         self,
         conversation_id: UUID,
-        user_id: Optional[UUID],
-        todos: List[Dict[str, Any]],
-        lifecycle: Optional[PlanLifecycle] = None,
+        user_id: UUID | None,
+        todos: list[dict[str, Any]],
+        lifecycle: PlanLifecycle | None = None,
     ) -> None:
         if not self.task_plan_service or user_id is None or todos is None:
             return

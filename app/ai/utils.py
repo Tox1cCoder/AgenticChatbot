@@ -2,8 +2,9 @@
 Shared utility functions for AI agents.
 """
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
 import json
+from collections.abc import Sequence
+from typing import Any
 
 from langchain_core.messages import AIMessage
 
@@ -68,7 +69,7 @@ def coerce_response_text(content: Any) -> str:
         return str(content) if content is not None else ""
 
 
-def extract_openai_reasoning_summary(content: Any) -> Optional[str]:
+def extract_openai_reasoning_summary(content: Any) -> str | None:
     """
     Extract OpenAI reasoning *summary* text from LangChain content blocks.
 
@@ -81,7 +82,7 @@ def extract_openai_reasoning_summary(content: Any) -> Optional[str]:
     if not content:
         return None
 
-    blocks: List[Any]
+    blocks: list[Any]
     if isinstance(content, list):
         blocks = content
     elif isinstance(content, dict):
@@ -89,7 +90,7 @@ def extract_openai_reasoning_summary(content: Any) -> Optional[str]:
     else:
         return None
 
-    parts: List[str] = []
+    parts: list[str] = []
     for block in blocks:
         if not isinstance(block, dict):
             continue
@@ -130,17 +131,17 @@ def _get_nested(data: Any, path: Sequence[str]) -> Any:
     return current
 
 
-def extract_openai_reasoning_tokens(message: Any) -> Optional[int]:
+def extract_openai_reasoning_tokens(message: Any) -> int | None:
     """
     Best-effort extraction of OpenAI reasoning token count from LangChain metadata.
     """
-    candidates: List[Dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
     for attr in ("usage_metadata", "response_metadata", "additional_kwargs"):
         meta = getattr(message, attr, None)
         if isinstance(meta, dict):
             candidates.append(meta)
 
-    paths: List[Sequence[str]] = [
+    paths: list[Sequence[str]] = [
         ("usage", "output_tokens_details", "reasoning_tokens"),
         ("usage", "completion_tokens_details", "reasoning_tokens"),
         ("token_usage", "completion_tokens_details", "reasoning_tokens"),
@@ -212,7 +213,7 @@ def make_json_safe(value: Any) -> Any:
     return str(value)
 
 
-def normalize_tool_call(tool_call: Any) -> Dict[str, Any]:
+def normalize_tool_call(tool_call: Any) -> dict[str, Any]:
     """
     Normalize tool call data to a consistent dictionary format.
 
@@ -232,26 +233,17 @@ def normalize_tool_call(tool_call: Any) -> Dict[str, Any]:
     if isinstance(tool_call, dict):
         # Extract name from various possible keys
         name = (
-            tool_call.get("name")
-            or tool_call.get("action")
-            or tool_call.get("tool")
-            or "unknown"
+            tool_call.get("name") or tool_call.get("action") or tool_call.get("tool") or "unknown"
         )
 
         # Extract args from various possible keys
         args = (
-            tool_call.get("args")
-            or tool_call.get("tool_input")
-            or tool_call.get("arguments")
-            or {}
+            tool_call.get("args") or tool_call.get("tool_input") or tool_call.get("arguments") or {}
         )
 
         # Extract ID from various possible keys
         tool_id = (
-            tool_call.get("id")
-            or tool_call.get("tool_call_id")
-            or tool_call.get("task_id")
-            or ""
+            tool_call.get("id") or tool_call.get("tool_call_id") or tool_call.get("task_id") or ""
         )
     else:
         # Handle object with attributes
@@ -286,7 +278,7 @@ def normalize_tool_call(tool_call: Any) -> Dict[str, Any]:
 
 def find_pending_tool_call_message(
     messages: Sequence[Any],
-) -> Optional[Tuple[int, AIMessage]]:
+) -> tuple[int, AIMessage] | None:
     """
     Find the most recent AIMessage that still has pending tool calls.
 
@@ -305,7 +297,7 @@ def find_pending_tool_call_message(
     return None
 
 
-def extract_rejection_reason(decision: Any) -> Optional[str]:
+def extract_rejection_reason(decision: Any) -> str | None:
     """Extract a free-form rejection reason from a HITL decision payload."""
     if not isinstance(decision, dict):
         return None
@@ -335,7 +327,7 @@ def extract_rejection_reason(decision: Any) -> Optional[str]:
 
 def build_rejection_tool_message(
     tool_call: Any,
-    decision: Optional[Dict[str, Any]] = None,
+    decision: dict[str, Any] | None = None,
     *,
     source: str,
 ) -> str:
@@ -343,7 +335,7 @@ def build_rejection_tool_message(
     Serialize rejection context so the agent can inspect the real decision data.
     """
     normalized_tool_call = normalize_tool_call(tool_call)
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "status": "rejected",
         "source": source,
         "tool_name": normalized_tool_call.get("name"),
@@ -371,7 +363,7 @@ def build_rejection_tool_message(
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def extract_agent_execution_info(agent_response: Dict[str, Any]) -> Dict[str, Any]:
+def extract_agent_execution_info(agent_response: dict[str, Any]) -> dict[str, Any]:
     """
     Extract execution information from agent executor response.
 
@@ -436,9 +428,7 @@ def extract_agent_execution_info(agent_response: Dict[str, Any]) -> Dict[str, An
                         {
                             "tool": tool_name,
                             "args": make_json_safe(tool_call.get("args", {})),
-                            "output": (
-                                format_tool_result(tool_result) if tool_result else None
-                            ),
+                            "output": (format_tool_result(tool_result) if tool_result else None),
                         }
                     )
 
@@ -447,9 +437,7 @@ def extract_agent_execution_info(agent_response: Dict[str, Any]) -> Dict[str, An
     return result
 
 
-def get_error_recovery_hint(
-    error: Exception, tool_name: str, tool_args: Dict[str, Any]
-) -> str:
+def get_error_recovery_hint(error: Exception, tool_name: str, tool_args: dict[str, Any]) -> str:
     """
     Analyze an exception and provide a recovery hint for the LLM.
 
@@ -468,7 +456,9 @@ def get_error_recovery_hint(
     if "missing" in error_msg and (
         "argument" in error_msg or "parameter" in error_msg or "required" in error_msg
     ):
-        return "Missing required argument: check the tool's schema and provide all required parameters"
+        return (
+            "Missing required argument: check the tool's schema and provide all required parameters"
+        )
 
     # Type errors
     if isinstance(error, TypeError):
@@ -490,22 +480,14 @@ def get_error_recovery_hint(
 
     # Connection/Network errors
     if "connection" in error_msg or "network" in error_msg or "timeout" in error_msg:
-        return (
-            "Network issue: retry the operation or use an alternative tool if available"
-        )
+        return "Network issue: retry the operation or use an alternative tool if available"
 
     # Permission/Auth errors
-    if (
-        "permission" in error_msg
-        or "unauthorized" in error_msg
-        or "forbidden" in error_msg
-    ):
+    if "permission" in error_msg or "unauthorized" in error_msg or "forbidden" in error_msg:
         return "Permission denied: this tool may require additional credentials or access rights"
 
     # Not found errors
-    if "not found" in error_msg or isinstance(
-        error, (FileNotFoundError, AttributeError)
-    ):
+    if "not found" in error_msg or isinstance(error, (FileNotFoundError, AttributeError)):
         return "Resource not found: verify the resource exists or try alternative search terms"
 
     # Generic fallback
@@ -549,9 +531,9 @@ def extract_content_from_result(result: Any) -> Any:
 
 
 def apply_hitl_decisions(
-    tool_calls: List[Dict[str, Any]],
+    tool_calls: list[dict[str, Any]],
     human_decisions: Any,
-) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """
     Apply HITL human decisions to a list of tool calls.
 
@@ -565,18 +547,16 @@ def apply_hitl_decisions(
         approved: tool calls to execute (with modified args for 'edit' decisions)
         rejected_feedback: mapping of tool_call_id -> rejection reason message
     """
-    decisions = (
-        human_decisions if isinstance(human_decisions, list) else [human_decisions]
-    )
-    decision_map: Dict[str, Any] = {}
+    decisions = human_decisions if isinstance(human_decisions, list) else [human_decisions]
+    decision_map: dict[str, Any] = {}
     for d in decisions:
         if isinstance(d, dict):
             task_id = d.get("task_id") or d.get("tool_call_id")
             if task_id:
                 decision_map[task_id] = d
 
-    approved: List[Dict[str, Any]] = []
-    rejected_feedback: Dict[str, str] = {}
+    approved: list[dict[str, Any]] = []
+    rejected_feedback: dict[str, str] = {}
     for tc in tool_calls:
         tool_call_id = tc.get("id")
         tool_name = tc.get("name")

@@ -4,15 +4,16 @@ API endpoints for AI provider management.
 Handles CRUD operations for user-specific AI provider configurations with encrypted API key storage.
 """
 
-from typing import List, Dict, Any
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from app.core.dependency_injection import AppAutoInjector
-from app.services.provider_service import ProviderService
-from app.schemas.responses import ApiResponse
 from app.core.auth import get_current_user
+from app.core.dependency_injection import AppAutoInjector
 from app.models.user import User
+from app.schemas.responses import ApiResponse
+from app.services.provider_service import ProviderService
 
 router = APIRouter(prefix="/providers", tags=["providers"])
 
@@ -29,10 +30,8 @@ class ProviderAddRequest(BaseModel):
     api_key: str = Field(
         ..., min_length=1, description="API key for the provider (will be encrypted)"
     )
-    is_default: bool = Field(
-        default=False, description="Set as default provider for this user"
-    )
-    provider_metadata: Dict[str, Any] = Field(
+    is_default: bool = Field(default=False, description="Set as default provider for this user")
+    provider_metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="Optional provider-specific metadata (e.g., organization ID)",
     )
@@ -45,7 +44,7 @@ class ProviderResponse(BaseModel):
     provider_type: str
     is_default: bool
     created_at: str
-    provider_metadata: Dict[str, Any]
+    provider_metadata: dict[str, Any]
     key_preview: str = Field(
         default="***", description="Last 4 characters of encrypted key for verification"
     )
@@ -55,7 +54,7 @@ class ProviderValidationResponse(BaseModel):
     """Provider validation result."""
 
     valid: bool
-    models: List[Dict[str, Any]] = Field(default_factory=list)
+    models: list[dict[str, Any]] = Field(default_factory=list)
     message: str = Field(default="")
     error: str = Field(default="")
 
@@ -116,12 +115,12 @@ async def add_provider(
         )
 
 
-@router.get("", response_model=ApiResponse[List[ProviderResponse]])
+@router.get("", response_model=ApiResponse[list[ProviderResponse]])
 @AppAutoInjector.auto_inject()
 async def list_providers(
     provider_service: ProviderService,
     current_user: User = Depends(get_current_user),
-) -> ApiResponse[List[ProviderResponse]]:
+) -> ApiResponse[list[ProviderResponse]]:
     """
     List all provider configurations for the current user.
 
@@ -205,13 +204,13 @@ async def get_provider(
         )
 
 
-@router.delete("/{provider_type}", response_model=ApiResponse[Dict[str, str]])
+@router.delete("/{provider_type}", response_model=ApiResponse[dict[str, str]])
 @AppAutoInjector.auto_inject()
 async def delete_provider(
     provider_type: str,
     provider_service: ProviderService,
     current_user: User = Depends(get_current_user),
-) -> ApiResponse[Dict[str, str]]:
+) -> ApiResponse[dict[str, str]]:
     """
     Delete a provider configuration.
 
@@ -243,9 +242,7 @@ async def delete_provider(
         )
 
 
-@router.post(
-    "/{provider_type}/validate", response_model=ApiResponse[ProviderValidationResponse]
-)
+@router.post("/{provider_type}/validate", response_model=ApiResponse[ProviderValidationResponse])
 @AppAutoInjector.auto_inject()
 async def validate_provider(
     provider_type: str,
@@ -273,11 +270,7 @@ async def validate_provider(
 
         return ApiResponse(
             success=result.get("valid", False),
-            message=(
-                "Provider validated"
-                if result.get("valid")
-                else "Provider validation failed"
-            ),
+            message=("Provider validated" if result.get("valid") else "Provider validation failed"),
             data=response_data,
         )
     except Exception as e:
@@ -287,13 +280,13 @@ async def validate_provider(
         )
 
 
-@router.get("/{provider_type}/models", response_model=ApiResponse[List[Dict[str, Any]]])
+@router.get("/{provider_type}/models", response_model=ApiResponse[list[dict[str, Any]]])
 @AppAutoInjector.auto_inject()
 async def list_provider_models(
     provider_type: str,
     provider_service: ProviderService,
     current_user: User = Depends(get_current_user),
-) -> ApiResponse[List[Dict[str, Any]]]:
+) -> ApiResponse[list[dict[str, Any]]]:
     """
     List available models from a provider.
 

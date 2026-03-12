@@ -1,15 +1,14 @@
-import logging
 import base64
-from typing import Optional, List
+import logging
 
 from google.genai import types
 from langchain_core.messages import HumanMessage
 
-from .base_agent import BaseAgent
 from ..agent_config import build_gemini_generate_config
+from ..prompts import CHAT_SYSTEM_PROMPT, build_chat_prompt
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import build_chat_prompt, CHAT_SYSTEM_PROMPT
 from ..utils import coerce_response_text
+from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
@@ -32,20 +31,16 @@ class ChatAgent(BaseAgent):
     async def process_message(
         self,
         message: AgentMessage,
-        conversation_id: Optional[str] = None,
+        conversation_id: str | None = None,
     ) -> AgentResponse:
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
         message_content = message.content or ""
 
-        prompt = build_chat_prompt(
-            message_content, conversation_history, persona=persona
-        )
+        prompt = build_chat_prompt(message_content, conversation_history, persona=persona)
 
         attachments = (
-            message.attachments
-            if hasattr(message, "attachments") and message.attachments
-            else None
+            message.attachments if hasattr(message, "attachments") and message.attachments else None
         )
 
         try:
@@ -95,9 +90,7 @@ class ChatAgent(BaseAgent):
                         },
                     )
         except Exception as exc:
-            logger.error(
-                "Error while processing message in ChatAgent: %s", exc, exc_info=True
-            )
+            logger.error("Error while processing message in ChatAgent: %s", exc, exc_info=True)
             return self._build_error_response(
                 message="I encountered an error processing your request.",
                 conversation_id=conversation_id,
@@ -107,7 +100,7 @@ class ChatAgent(BaseAgent):
     async def invoke_model(
         self,
         message: AgentMessage,
-        conversation_id: Optional[str] = None,
+        conversation_id: str | None = None,
     ) -> AgentResponse:
         # Initialize MCP tools if needed
         if self.mcp_manager is None:
@@ -174,7 +167,7 @@ class ChatAgent(BaseAgent):
         except Exception as exc:
             raise RuntimeError(f"Gemini API error: {exc}") from exc
 
-    async def _generate_with_vision(self, prompt: str, attachments: List[dict]) -> str:
+    async def _generate_with_vision(self, prompt: str, attachments: list[dict]) -> str:
         """Generate response with vision support using multimodal content"""
         parts = []
 
@@ -198,9 +191,7 @@ class ChatAgent(BaseAgent):
                 mime_type = attachment.get("mime", "image/jpeg")
 
                 # Create image part from bytes
-                parts.append(
-                    types.Part.from_bytes(data=image_data, mime_type=mime_type)
-                )
+                parts.append(types.Part.from_bytes(data=image_data, mime_type=mime_type))
             except Exception as img_err:
                 logger.error(f"Failed to process image attachment: {img_err}")
 

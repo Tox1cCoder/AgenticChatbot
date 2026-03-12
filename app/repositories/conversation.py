@@ -1,8 +1,7 @@
-from typing import List, Optional
 from uuid import UUID
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import select, asc, desc, func
 
+from sqlalchemy import asc, desc, func, select
+from sqlalchemy.orm import Session, joinedload
 
 from app.models.conversation import Conversation
 from app.models.enums import PlanLifecycle
@@ -11,7 +10,6 @@ from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.query_strategy import DefaultQueryStrategy
 from app.repositories.utils.pagination import Paginator
 from app.schemas.conversation import ConversationCreate, ConversationUpdate
-
 from app.utils.validation.pagination_validation import validate_pagination_params
 
 
@@ -49,9 +47,7 @@ class ConversationCRUDStrategy(
         if hasattr(Conversation, order_by):
             order_column = getattr(Conversation, order_by)
             statement = statement.order_by(
-                asc(order_column)
-                if order_direction.lower() == "asc"
-                else desc(order_column)
+                asc(order_column) if order_direction.lower() == "asc" else desc(order_column)
             )
         else:
             # Default ordering
@@ -69,16 +65,12 @@ class ConversationCRUDStrategy(
         )
         return len(list(db.execute(statement).scalars().all()))
 
-    def get_with_messages(
-        self, db: Session, conversation_id: UUID
-    ) -> Optional[Conversation]:
+    def get_with_messages(self, db: Session, conversation_id: UUID) -> Conversation | None:
         """Get conversation with its messages"""
         statement = (
             select(Conversation)
             .options(joinedload(Conversation.messages))
-            .where(
-                Conversation.id == conversation_id, Conversation.deleted_at.is_(None)
-            )
+            .where(Conversation.id == conversation_id, Conversation.deleted_at.is_(None))
         )
         return db.execute(statement).unique().scalar_one_or_none()
 
@@ -91,7 +83,7 @@ class ConversationCRUDStrategy(
         order_direction: str = "desc",
         page: int = 1,
         limit: int = 10,
-    ) -> List[Conversation]:
+    ) -> list[Conversation]:
         """Get conversations with limited recent messages and total message count"""
         # Get paginated conversations for the user
         statement = select(Conversation).where(
@@ -102,9 +94,7 @@ class ConversationCRUDStrategy(
         if hasattr(Conversation, order_by):
             order_column = getattr(Conversation, order_by)
             statement = statement.order_by(
-                asc(order_column)
-                if order_direction.lower() == "asc"
-                else desc(order_column)
+                asc(order_column) if order_direction.lower() == "asc" else desc(order_column)
             )
         else:
             # Default ordering
@@ -138,16 +128,6 @@ class ConversationCRUDStrategy(
             # Create detached copies of messages for the conversation
             messages_for_attribute = []
             for msg in recent_messages_reversed:
-                msg_data = {
-                    "id": msg.id,
-                    "created_at": msg.created_at,
-                    "updated_at": msg.updated_at,
-                    "deleted_at": msg.deleted_at,
-                    "conversation_id": msg.conversation_id,
-                    "sender": msg.sender,
-                    "content": msg.content,
-                    "feedback": msg.feedback,
-                }
                 messages_for_attribute.append(msg)
 
             # Expunge conversation from session first
@@ -159,9 +139,7 @@ class ConversationCRUDStrategy(
 
         return conversations
 
-    def user_owns_conversation(
-        self, db: Session, owner_id: UUID, conversation_id: UUID
-    ) -> bool:
+    def user_owns_conversation(self, db: Session, owner_id: UUID, conversation_id: UUID) -> bool:
         """Check if user owns the conversation"""
         statement = select(Conversation.id).where(
             Conversation.id == conversation_id,
@@ -186,7 +164,7 @@ class ConversationRepository:
         limit: int = 10,
         order_by: str = "updated_at",
         order_direction: str = "desc",
-        include: List[str] = None,
+        include: list[str] = None,
         latest_messages: int = 3,
     ) -> Paginator[Conversation]:
         """Get conversations by owner ID with optional includes"""
@@ -218,7 +196,7 @@ class ConversationRepository:
         with self.session_factory() as session:
             return self._crud_strategy.count_by_owner_id(session, owner_id)
 
-    def get_with_messages(self, conversation_id: UUID) -> Optional[Conversation]:
+    def get_with_messages(self, conversation_id: UUID) -> Conversation | None:
         """Get conversation with its messages"""
         with self.session_factory() as session:
             return self._crud_strategy.get_with_messages(session, conversation_id)
@@ -226,16 +204,14 @@ class ConversationRepository:
     def user_owns_conversation(self, owner_id: UUID, conversation_id: UUID) -> bool:
         """Check if user owns the conversation"""
         with self.session_factory() as session:
-            return self._crud_strategy.user_owns_conversation(
-                session, owner_id, conversation_id
-            )
+            return self._crud_strategy.user_owns_conversation(session, owner_id, conversation_id)
 
     def create(self, input_schema: ConversationCreate) -> Conversation:
         """Create a new conversation"""
         with self.session_factory() as session:
             return self._crud_strategy.create(session, input_schema)
 
-    def get_by_id(self, id: UUID) -> Optional[Conversation]:
+    def get_by_id(self, id: UUID) -> Conversation | None:
         """Get conversation by ID"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_id(session, id)
@@ -245,9 +221,7 @@ class ConversationRepository:
         with self.session_factory() as session:
             return self._crud_strategy.get_all(session, page, limit)
 
-    def update(
-        self, id: UUID, input_schema: ConversationUpdate
-    ) -> Optional[Conversation]:
+    def update(self, id: UUID, input_schema: ConversationUpdate) -> Conversation | None:
         """Update conversation by ID"""
         with self.session_factory() as session:
             db_obj = self._crud_strategy.get_by_id(session, id)
@@ -255,9 +229,7 @@ class ConversationRepository:
                 return None
             return self._crud_strategy.update(session, db_obj, input_schema)
 
-    def set_plan_lifecycle(
-        self, id: UUID, lifecycle: Optional[PlanLifecycle]
-    ) -> Optional[Conversation]:
+    def set_plan_lifecycle(self, id: UUID, lifecycle: PlanLifecycle | None) -> Conversation | None:
         """Persist the internal plan lifecycle state."""
         with self.session_factory() as session:
             db_obj = self._crud_strategy.get_by_id(session, id)

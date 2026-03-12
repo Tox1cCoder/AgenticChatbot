@@ -3,6 +3,7 @@ Skills-related exception classes.
 """
 
 from fastapi import status
+
 from .http import CustomHTTPException
 
 

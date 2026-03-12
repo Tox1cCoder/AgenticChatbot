@@ -1,10 +1,10 @@
-from typing import List
 from uuid import UUID
+
 from fastapi import APIRouter, status
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.feedback_service_interface import IFeedbackService
-from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
+from app.schemas.feedback import FeedbackCreate, FeedbackRead, FeedbackUpdate
 from app.schemas.responses import ApiResponse
 
 router = APIRouter(prefix="/messages", tags=["feedbacks"])
@@ -25,9 +25,7 @@ async def create_feedback(
     """Create a new feedback for a message or update existing feedback"""
     feedback_data.message_id = message_id
     result = feedback_service.create_feedback(feedback_data, user_id)
-    return ApiResponse(
-        success=True, message="Feedback created successfully", data=result
-    )
+    return ApiResponse(success=True, message="Feedback created successfully", data=result)
 
 
 @router.get("/{message_id}/feedbacks/stats", response_model=ApiResponse[dict])
@@ -59,12 +57,12 @@ async def get_user_feedback_for_message(
     )
 
 
-@router.get("/{message_id}/feedbacks", response_model=ApiResponse[List[FeedbackRead]])
+@router.get("/{message_id}/feedbacks", response_model=ApiResponse[list[FeedbackRead]])
 @AppAutoInjector.auto_inject()
 async def get_message_feedbacks(
     message_id: UUID,
     feedback_service: IFeedbackService,
-) -> ApiResponse[List[FeedbackRead]]:
+) -> ApiResponse[list[FeedbackRead]]:
     """Get all feedbacks for a message"""
     result = feedback_service.get_by_message(message_id)
     feedback_list = [result] if result else []
@@ -75,9 +73,7 @@ async def get_message_feedbacks(
     )
 
 
-@router.put(
-    "/{message_id}/feedbacks/{feedback_id}", response_model=ApiResponse[FeedbackRead]
-)
+@router.put("/{message_id}/feedbacks/{feedback_id}", response_model=ApiResponse[FeedbackRead])
 @AppAutoInjector.auto_inject()
 async def update_feedback(
     message_id: UUID,

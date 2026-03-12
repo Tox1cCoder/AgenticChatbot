@@ -3,12 +3,12 @@ Command strategy pattern interfaces for repository write operations.
 """
 
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar, Union
-from uuid import UUID
 from datetime import datetime, timezone
+from typing import Generic, TypeVar
+from uuid import UUID
 
-from sqlalchemy.orm import Session
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 ModelType = TypeVar("ModelType")
 CreateSchemaType = TypeVar("CreateSchemaType")
@@ -24,21 +24,17 @@ class CommandStrategy(ABC, Generic[ModelType, CreateSchemaType, UpdateSchemaType
         pass
 
     @abstractmethod
-    def update(
-        self, db: Session, db_obj: ModelType, input_schema: UpdateSchemaType
-    ) -> ModelType:
+    def update(self, db: Session, db_obj: ModelType, input_schema: UpdateSchemaType) -> ModelType:
         """Update an existing record"""
         pass
 
     @abstractmethod
-    def delete(self, db: Session, id: Union[int, UUID]) -> bool:
+    def delete(self, db: Session, id: int | UUID) -> bool:
         """Delete a record by ID"""
         pass
 
 
-class DefaultCommandStrategy(
-    CommandStrategy[ModelType, CreateSchemaType, UpdateSchemaType]
-):
+class DefaultCommandStrategy(CommandStrategy[ModelType, CreateSchemaType, UpdateSchemaType]):
     """Default implementation of command operations strategy"""
 
     def __init__(self, model: type[ModelType]):
@@ -61,9 +57,7 @@ class DefaultCommandStrategy(
         db.expunge(db_obj)
         return db_obj
 
-    def update(
-        self, db: Session, db_obj: ModelType, input_schema: UpdateSchemaType
-    ) -> ModelType:
+    def update(self, db: Session, db_obj: ModelType, input_schema: UpdateSchemaType) -> ModelType:
         """Update an existing record"""
         obj_data = (
             input_schema.model_dump(exclude_unset=True)
@@ -83,11 +77,9 @@ class DefaultCommandStrategy(
         db.refresh(db_obj)
         return db_obj
 
-    def delete(self, db: Session, id: Union[int, UUID]) -> bool:
+    def delete(self, db: Session, id: int | UUID) -> bool:
         """Soft delete a record by ID"""
-        statement = select(self.model).where(
-            self.model.id == id, self.model.deleted_at.is_(None)
-        )
+        statement = select(self.model).where(self.model.id == id, self.model.deleted_at.is_(None))
         db_obj = db.execute(statement).scalar_one_or_none()
 
         if db_obj:

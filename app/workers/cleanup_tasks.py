@@ -1,14 +1,14 @@
-import logging
 import asyncio
+import logging
 from datetime import datetime, timezone
-import redis
 
+import redis
 from celery.schedules import crontab
 
-from app.core.container import get_container
-from app.core.config import settings
-from app.workers.celery_app import celery_app
 from app.ai.agents.rag_agent import RAGAgent
+from app.core.config import settings
+from app.core.container import get_container
+from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -114,9 +114,7 @@ def cleanup_abandoned_interrupts():
             hitl_repo = container.hitl_interrupt_repository()
             expired_records = hitl_repo.get_expired_pending(now)
             expired_threads.extend(
-                record.thread_id
-                for record in expired_records
-                if getattr(record, "thread_id", None)
+                record.thread_id for record in expired_records if getattr(record, "thread_id", None)
             )
             for record in expired_records:
                 try:
@@ -125,9 +123,7 @@ def cleanup_abandoned_interrupts():
                 except Exception:
                     pass
         except Exception as db_exc:
-            logger.warning(
-                "DB interrupt expiry check failed: %s", db_exc, exc_info=True
-            )
+            logger.warning("DB interrupt expiry check failed: %s", db_exc, exc_info=True)
 
         # ── Redis cleanup (supplementary) ────────────────────────────────────────
         redis_url = getattr(settings, "redis_url", "") or ""
@@ -145,9 +141,7 @@ def cleanup_abandoned_interrupts():
                     if not stored_timestamp:
                         continue
 
-                    stored_time = datetime.fromisoformat(
-                        stored_timestamp.decode("utf-8")
-                    )
+                    stored_time = datetime.fromisoformat(stored_timestamp.decode("utf-8"))
                     # Ensure comparison is between two tz-aware datetimes
                     if stored_time.tzinfo is None:
                         stored_time = stored_time.replace(tzinfo=timezone.utc)

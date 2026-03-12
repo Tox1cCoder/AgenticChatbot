@@ -1,20 +1,21 @@
 """Model for tracking task plans in conversations with planning mode."""
 
 import uuid
+
 from sqlalchemy import (
     Column,
-    Text,
-    Integer,
-    ForeignKey,
     DateTime,
+    ForeignKey,
+    Integer,
+    Text,
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from app.models.base import Base
-from app.models.enums import TaskStatusType, TaskStatus
+from app.models.enums import TaskStatus, TaskStatusType
 
 
 class TaskPlan(Base):
@@ -47,9 +48,7 @@ class TaskPlan(Base):
     description = Column(Text, nullable=False)
     status = Column(TaskStatusType, nullable=False, default=TaskStatus.pending)
 
-    task_metadata = Column(
-        JSONB, nullable=True, default=None, server_default="'{}'::jsonb"
-    )
+    task_metadata = Column(JSONB, nullable=True, default=None, server_default="'{}'::jsonb")
     created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False

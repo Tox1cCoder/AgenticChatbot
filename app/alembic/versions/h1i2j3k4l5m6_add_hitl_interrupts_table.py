@@ -6,17 +6,18 @@ Create Date: 2026-03-09 00:00:00.000000
 
 """
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSONB, ENUM as PG_ENUM
+from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 # revision identifiers, used by Alembic.
 revision: str = "h1i2j3k4l5m6"
-down_revision: Union[str, None] = "f6a7b8c9d0e1"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "f6a7b8c9d0e1"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -131,9 +132,7 @@ def downgrade() -> None:
     op.drop_index("ix_hitl_interrupts_status_expires_at", table_name="hitl_interrupts")
     op.drop_index("ix_hitl_interrupts_expires_at", table_name="hitl_interrupts")
     op.drop_index("ix_hitl_interrupts_status", table_name="hitl_interrupts")
-    op.drop_index(
-        "ix_hitl_interrupts_assistant_message_id", table_name="hitl_interrupts"
-    )
+    op.drop_index("ix_hitl_interrupts_assistant_message_id", table_name="hitl_interrupts")
     op.drop_index("ix_hitl_interrupts_thread_id", table_name="hitl_interrupts")
     op.drop_index("ix_hitl_interrupts_user_id", table_name="hitl_interrupts")
     op.drop_index("ix_hitl_interrupts_conversation_id", table_name="hitl_interrupts")

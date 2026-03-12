@@ -8,7 +8,7 @@ This module provides:
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from google import genai
 from google.genai import types
@@ -57,9 +57,7 @@ AGENT_CONFIG = {
         "temperature": 1.0,
     },
     "summarization": {
-        "model": (
-            getattr(settings, "summarization_model", None) or "gemini-3-flash-preview"
-        ),
+        "model": (getattr(settings, "summarization_model", None) or "gemini-3-flash-preview"),
         "temperature": 1.0,
     },
 }
@@ -89,13 +87,11 @@ def create_gemini_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-def _build_thinking_config(model_name: str) -> Optional[types.ThinkingConfig]:
+def _build_thinking_config(model_name: str) -> types.ThinkingConfig | None:
     if not settings.enable_thinking:
         return None
 
-    thinking_kwargs: Dict[str, Any] = {
-        "include_thoughts": settings.include_thoughts_in_response
-    }
+    thinking_kwargs: dict[str, Any] = {"include_thoughts": settings.include_thoughts_in_response}
 
     if "2.5" in model_name or "flash-latest" in model_name.lower():
         thinking_budget = settings.thinking_budget
@@ -111,9 +107,9 @@ def _build_thinking_config(model_name: str) -> Optional[types.ThinkingConfig]:
 def build_gemini_generate_config(
     model_name: str,
     include_thinking: bool = True,
-    enable_code_execution: Optional[bool] = None,
+    enable_code_execution: bool | None = None,
     **extra_config: Any,
-) -> Optional[types.GenerateContentConfig]:
+) -> types.GenerateContentConfig | None:
     """
     Build a shared Gemini GenerateContentConfig used by direct SDK calls.
 
@@ -122,7 +118,7 @@ def build_gemini_generate_config(
     - Gemini code execution tool for Agentic Vision (if enabled)
     - Optional extra config fields
     """
-    config_kwargs: Dict[str, Any] = {}
+    config_kwargs: dict[str, Any] = {}
 
     if include_thinking:
         thinking_config = _build_thinking_config(model_name)
@@ -151,8 +147,8 @@ def build_gemini_generate_config(
 
 def create_langchain_model(
     agent_type: str,
-    model_override: Optional[str] = None,
-    temperature_override: Optional[float] = None,
+    model_override: str | None = None,
+    temperature_override: float | None = None,
     include_thinking: bool = True,
 ) -> ChatGoogleGenerativeAI:
     """
@@ -177,9 +173,7 @@ def create_langchain_model(
 
     model_name = model_override or config["model"]
     temperature = (
-        temperature_override
-        if temperature_override is not None
-        else config["temperature"]
+        temperature_override if temperature_override is not None else config["temperature"]
     )
 
     model_kwargs = {

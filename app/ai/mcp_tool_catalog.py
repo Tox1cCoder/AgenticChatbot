@@ -17,7 +17,7 @@ import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 from .mcp_registry import get_mcp_tools_generation
 
@@ -31,10 +31,10 @@ class ToolDescriptor:
     tool_name: str
     server_name: str
     description: str
-    arg_names: List[str]
-    required_arg_names: List[str]
+    arg_names: list[str]
+    required_arg_names: list[str]
     schema_fingerprint: str
-    args_schema: Dict[str, Any] = field(default_factory=dict)
+    args_schema: dict[str, Any] = field(default_factory=dict)
 
     @property
     def display_name(self) -> str:
@@ -55,7 +55,7 @@ class ToolDescriptor:
                 hints.append(arg)
         return f"({', '.join(hints)})"
 
-    def to_search_result(self) -> Dict[str, Any]:
+    def to_search_result(self) -> dict[str, Any]:
         """Convert to a search result dict for tool_search output."""
         return {
             "tool_name": self.tool_name,
@@ -75,7 +75,7 @@ class ToolReference:
     server_name: str
 
 
-def compute_schema_fingerprint(args_schema: Dict[str, Any], description: str) -> str:
+def compute_schema_fingerprint(args_schema: dict[str, Any], description: str) -> str:
     """
     Compute a stable hash of a tool's schema for cache invalidation.
 
@@ -89,7 +89,7 @@ def compute_schema_fingerprint(args_schema: Dict[str, Any], description: str) ->
     return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]
 
 
-def extract_arg_info(args_schema: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+def extract_arg_info(args_schema: dict[str, Any]) -> tuple[list[str], list[str]]:
     """
     Extract argument names and required argument names from a JSON schema.
 
@@ -105,7 +105,7 @@ def extract_arg_info(args_schema: Dict[str, Any]) -> Tuple[List[str], List[str]]
     return all_args, required_args
 
 
-def tokenize(text: str) -> List[str]:
+def tokenize(text: str) -> list[str]:
     """
     Tokenize text for search matching.
 
@@ -133,13 +133,13 @@ class McpToolCatalog:
         """
         self._mcp_manager = mcp_manager
         self._cached_generation: int = -1
-        self._tools: List[ToolDescriptor] = []
-        self._tools_by_name: Dict[str, List[ToolDescriptor]] = {}
-        self._tools_by_server: Dict[str, List[ToolDescriptor]] = {}
-        self._colliding_names: Set[str] = set()
+        self._tools: list[ToolDescriptor] = []
+        self._tools_by_name: dict[str, list[ToolDescriptor]] = {}
+        self._tools_by_server: dict[str, list[ToolDescriptor]] = {}
+        self._colliding_names: set[str] = set()
 
         # Inverted index for search: token -> set of tool indices
-        self._token_index: Dict[str, Set[int]] = {}
+        self._token_index: dict[str, set[int]] = {}
 
         # Document frequency for BM25-style scoring
         self._doc_freq: Counter = Counter()
@@ -260,7 +260,7 @@ class McpToolCatalog:
             self._token_index[token].add(idx)
             self._doc_freq[token] += 1
 
-    def get_colliding_names(self) -> Set[str]:
+    def get_colliding_names(self) -> set[str]:
         """Return tool names that are exposed by multiple servers."""
         return self._colliding_names.copy()
 
@@ -268,18 +268,18 @@ class McpToolCatalog:
         """Check if a tool name is ambiguous (exposed by multiple servers)."""
         return tool_name in self._colliding_names
 
-    def get_servers_for_tool(self, tool_name: str) -> List[str]:
+    def get_servers_for_tool(self, tool_name: str) -> list[str]:
         """Return all server names that expose a given tool name."""
         descriptors = self._tools_by_name.get(tool_name, [])
         return list({d.server_name for d in descriptors})
 
     def search(
         self,
-        query: Optional[str] = None,
+        query: str | None = None,
         top_k: int = 5,
-        server_name: Optional[str] = None,
-        allowlist: Optional[List[str]] = None,
-    ) -> List[ToolDescriptor]:
+        server_name: str | None = None,
+        allowlist: list[str] | None = None,
+    ) -> list[ToolDescriptor]:
         """
         Search for tools matching a query.
 
@@ -323,8 +323,8 @@ class McpToolCatalog:
     def _rank_candidates(
         self,
         query: str,
-        candidates: List[ToolDescriptor],
-    ) -> List[Tuple[ToolDescriptor, float]]:
+        candidates: list[ToolDescriptor],
+    ) -> list[tuple[ToolDescriptor, float]]:
         """
         Rank candidates by relevance to query.
 
@@ -336,7 +336,7 @@ class McpToolCatalog:
         query_lower = query.lower().strip()
         query_tokens = set(tokenize(query))
 
-        scored: List[Tuple[ToolDescriptor, float]] = []
+        scored: list[tuple[ToolDescriptor, float]] = []
 
         for tool in candidates:
             score = 0.0
@@ -354,9 +354,7 @@ class McpToolCatalog:
 
             # Token overlap scoring (simple TF approach)
             tool_tokens = set(
-                tokenize(
-                    f"{tool.tool_name} {tool.description} {' '.join(tool.arg_names)}"
-                )
+                tokenize(f"{tool.tool_name} {tool.description} {' '.join(tool.arg_names)}")
             )
 
             overlap = query_tokens & tool_tokens
@@ -380,9 +378,9 @@ class McpToolCatalog:
 
     def filter_by_allowlist(
         self,
-        tools: List[ToolDescriptor],
-        allowlist: List[str],
-    ) -> List[ToolDescriptor]:
+        tools: list[ToolDescriptor],
+        allowlist: list[str],
+    ) -> list[ToolDescriptor]:
         """
         Filter tools by an allowlist.
 
@@ -395,17 +393,13 @@ class McpToolCatalog:
 
         allowlist_set = set(allowlist)
 
-        return [
-            t
-            for t in tools
-            if t.tool_name in allowlist_set or t.server_name in allowlist_set
-        ]
+        return [t for t in tools if t.tool_name in allowlist_set or t.server_name in allowlist_set]
 
     def get_tool(
         self,
         tool_name: str,
-        server_name: Optional[str] = None,
-    ) -> Optional[ToolDescriptor]:
+        server_name: str | None = None,
+    ) -> ToolDescriptor | None:
         """
         Get a specific tool by name, optionally scoped to a server.
 
@@ -430,7 +424,7 @@ class McpToolCatalog:
         # Return first match (may be ambiguous)
         return descriptors[0]
 
-    def list_all(self, allowlist: Optional[List[str]] = None) -> List[ToolDescriptor]:
+    def list_all(self, allowlist: list[str] | None = None) -> list[ToolDescriptor]:
         """
         List all tools in the catalog.
 
@@ -456,7 +450,7 @@ class McpToolCatalog:
 
 
 # Module-level singleton for the catalog
-_catalog_instance: Optional[McpToolCatalog] = None
+_catalog_instance: McpToolCatalog | None = None
 
 
 async def get_tool_catalog(mcp_manager: Any) -> McpToolCatalog:

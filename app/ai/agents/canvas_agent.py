@@ -24,12 +24,14 @@ canvas_artifact shape (stored in AgentResponse.metadata["canvas_artifact"]):
 
 import logging
 import re
-from typing import Optional, List, Dict, Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
-from langchain_core.messages import BaseMessage, HumanMessage as LCHumanMessage
+from langchain_core.messages import BaseMessage
+from langchain_core.messages import HumanMessage as LCHumanMessage
 
-from .base_agent import BaseAgent
 from ..schemas import AgentMessage, AgentResponse, AgentType
+from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
@@ -56,16 +58,16 @@ dependencies unless loaded via a public CDN.
 - For React components, use the React/ReactDOM UMD CDN scripts and render into \
 `<div id="root">`.
 - For SVG-only artifacts (icons, logos, static illustrations) output a fenced \
-`\`\`\`svg` block instead of `\`\`\`html`.
+`\\`\\`\\`svg` block instead of `\\`\\`\\`html`.
 - Make the artifact visually polished: comfortable fonts, sensible colours, \
 responsive layout (flexbox / grid where appropriate).
 - All JavaScript must be contained inside a `<script>` tag at the bottom of `<body>`.
 
 ## CODE BLOCK FORMAT
-\`\`\`html
+\\`\\`\\`html
 <!DOCTYPE html>
 ... complete document ...
-\`\`\`
+\\`\\`\\`
 
 ## EDITING / UPDATING
 If the conversation history already contains a canvas artifact, you are editing it.
@@ -92,7 +94,7 @@ _CODE_FENCE_RE = re.compile(
 _TITLE_RE = re.compile(r"<title>(?P<t>[^<]{1,120})</title>", re.IGNORECASE)
 
 
-def _extract_artifact(text: str) -> Optional[Dict[str, Any]]:
+def _extract_artifact(text: str) -> dict[str, Any] | None:
     """
     Pull the first fenced code block from the LLM output and classify it.
 
@@ -133,7 +135,7 @@ def _strip_code_block(text: str) -> str:
     return _CODE_FENCE_RE.sub("", text).strip()
 
 
-def _extract_previous_artifact(conversation_history: List[Any]) -> Optional[str]:
+def _extract_previous_artifact(conversation_history: list[Any]) -> str | None:
     """
     Walk conversation history in reverse to find the most recent canvas artifact.
     Returns the raw HTML/code string so the agent can use it for iterative edits.
@@ -178,13 +180,13 @@ class CanvasAgent(BaseAgent):
 
     async def invoke_model_with_history(
         self,
-        messages: List[BaseMessage],
-        conversation_history: List[Any],
-        persona: Optional[str],
-        conversation_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        model_request: Optional[Dict[str, Any]] = None,
-        history_summary: Optional[str] = None,
+        messages: list[BaseMessage],
+        conversation_history: list[Any],
+        persona: str | None,
+        conversation_id: str | None = None,
+        user_id: str | None = None,
+        model_request: dict[str, Any] | None = None,
+        history_summary: str | None = None,
         **system_prompt_kwargs: Any,
     ) -> AgentResponse:
         # Let the base class handle LLM invocation (tool calls, provider switching, …).
@@ -226,8 +228,7 @@ class CanvasAgent(BaseAgent):
             # The LLM didn't produce a fenced code block — return as-is so the user
             # sees the response and can ask again.
             logger.warning(
-                "CanvasAgent: no fenced code block found in LLM output "
-                "(conversation_id=%s)",
+                "CanvasAgent: no fenced code block found in LLM output (conversation_id=%s)",
                 conversation_id,
             )
 
@@ -240,7 +241,7 @@ class CanvasAgent(BaseAgent):
     async def process_message(
         self,
         message: AgentMessage,
-        conversation_id: Optional[str] = None,
+        conversation_id: str | None = None,
     ) -> AgentResponse:
         return await self.invoke_model_with_history(
             messages=[LCHumanMessage(content=message.content or "")],
@@ -252,8 +253,8 @@ class CanvasAgent(BaseAgent):
     async def stream_message(
         self,
         message: AgentMessage,
-        conversation_id: Optional[str] = None,
-    ) -> AsyncIterator[Dict[str, Any]]:
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         result = await self.process_message(message, conversation_id)
         if result.error:
             yield {"type": "error", "error": result.error}

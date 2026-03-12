@@ -18,15 +18,15 @@ Steps (downgrade):
   2. Recreate the old non-unique index.
 """
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "h8i9j0k1l2m3"
-down_revision: Union[str, Sequence[str], None] = "g7h8i9j0k1l2"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = "g7h8i9j0k1l2"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 _DEDUP_SQL = """
 WITH ranked AS (

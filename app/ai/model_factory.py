@@ -10,7 +10,7 @@ tool binding and configuration.
 """
 
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
@@ -35,8 +35,8 @@ class ModelFactory:
         model: str,
         api_key: str,
         temperature: float = 1.0,
-        thinking_config: Optional[Dict[str, Any]] = None,
-        timeout: Optional[int] = None,
+        thinking_config: dict[str, Any] | None = None,
+        timeout: int | None = None,
         **kwargs,
     ) -> BaseChatModel:
         """
@@ -64,9 +64,7 @@ class ModelFactory:
                 model, api_key, temperature, thinking_config, **kwargs
             )
         elif provider == "openai":
-            return ModelFactory._create_openai_model(
-                model, api_key, temperature, timeout, **kwargs
-            )
+            return ModelFactory._create_openai_model(model, api_key, temperature, timeout, **kwargs)
         else:
             raise ValueError(
                 f"Unsupported provider: {provider}. Supported providers: gemini, openai"
@@ -77,7 +75,7 @@ class ModelFactory:
         model: str,
         api_key: str,
         temperature: float,
-        thinking_config: Optional[Dict[str, Any]] = None,
+        thinking_config: dict[str, Any] | None = None,
         **kwargs,
     ) -> ChatGoogleGenerativeAI:
         """
@@ -126,7 +124,7 @@ class ModelFactory:
         model: str,
         api_key: str,
         temperature: float,
-        timeout: Optional[int] = None,
+        timeout: int | None = None,
         **kwargs,
     ) -> ChatOpenAI:
         """
@@ -176,7 +174,7 @@ class ModelFactory:
 
     @staticmethod
     def bind_tools_to_model(
-        model: BaseChatModel, tools: List[BaseTool], tool_choice: str = "auto"
+        model: BaseChatModel, tools: list[BaseTool], tool_choice: str = "auto"
     ) -> BaseChatModel:
         """
         Bind tools to a model instance in a provider-agnostic way.
@@ -206,9 +204,7 @@ class ModelFactory:
 
         # Normalize tool_choice to uppercase for consistency
         tool_choice_normalized = (
-            tool_choice.upper()
-            if tool_choice.lower() in ["auto", "any", "none"]
-            else tool_choice
+            tool_choice.upper() if tool_choice.lower() in ["auto", "any", "none"] else tool_choice
         )
 
         logger.debug(
@@ -227,9 +223,7 @@ class ModelFactory:
                 # Gemini function_calling_config mode for standard choices.
                 return model.bind_tools(
                     tools,
-                    tool_config={
-                        "function_calling_config": {"mode": tool_choice_normalized}
-                    },
+                    tool_config={"function_calling_config": {"mode": tool_choice_normalized}},
                 )
 
             # For specific tool names/lists, use native tool_choice forwarding.

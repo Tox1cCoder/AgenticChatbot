@@ -1,13 +1,13 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
 
-from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph.message import RemoveMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.graph.message import RemoveMessage
 
 from ..core.config import settings
 from .agent_config import get_api_key
@@ -80,7 +80,7 @@ def _get_config() -> SummarizationConfig:
     )
 
 
-def _estimate_tokens(messages: List[BaseMessage]) -> int:
+def _estimate_tokens(messages: list[BaseMessage]) -> int:
     """
     Estimate token count for a list of messages.
     Uses a simple heuristic: ~4 characters per token for English text.
@@ -93,8 +93,8 @@ def _estimate_tokens(messages: List[BaseMessage]) -> int:
 
 
 def should_summarize(
-    messages: List[BaseMessage],
-    config: Optional[SummarizationConfig] = None,
+    messages: list[BaseMessage],
+    config: SummarizationConfig | None = None,
     already_summarized: bool = False,
 ) -> bool:
     """
@@ -139,7 +139,7 @@ def should_summarize(
     return False
 
 
-def _format_messages_for_summary(messages: List[BaseMessage]) -> str:
+def _format_messages_for_summary(messages: list[BaseMessage]) -> str:
     """Format messages into a string for the summarization prompt."""
     formatted_parts = []
 
@@ -149,9 +149,7 @@ def _format_messages_for_summary(messages: List[BaseMessage]) -> str:
 
         # Handle tool calls in AI messages
         if hasattr(msg, "tool_calls") and msg.tool_calls:
-            tool_info = ", ".join(
-                f"{tc.get('name', 'unknown')}" for tc in msg.tool_calls
-            )
+            tool_info = ", ".join(f"{tc.get('name', 'unknown')}" for tc in msg.tool_calls)
             content = f"{content} [Called tools: {tool_info}]"
 
         # Truncate very long messages
@@ -165,7 +163,7 @@ def _format_messages_for_summary(messages: List[BaseMessage]) -> str:
 
 def _get_summarization_model(config: SummarizationConfig) -> ChatGoogleGenerativeAI:
     """Create a LangChain model for summarization."""
-    kwargs: Dict[str, Any] = dict(
+    kwargs: dict[str, Any] = dict(
         model=config.model,
         google_api_key=get_api_key(),
         temperature=config.temperature,
@@ -176,9 +174,9 @@ def _get_summarization_model(config: SummarizationConfig) -> ChatGoogleGenerativ
 
 
 def get_messages_to_summarize(
-    messages: List[BaseMessage],
-    config: Optional[SummarizationConfig] = None,
-) -> List[BaseMessage]:
+    messages: list[BaseMessage],
+    config: SummarizationConfig | None = None,
+) -> list[BaseMessage]:
     """Return the oldest non-system messages eligible for summarization."""
     if config is None:
         config = _get_config()
@@ -191,9 +189,9 @@ def get_messages_to_summarize(
 
 
 async def generate_summary(
-    messages_to_summarize: List[BaseMessage],
-    config: Optional[SummarizationConfig] = None,
-    existing_summary: Optional[str] = None,
+    messages_to_summarize: list[BaseMessage],
+    config: SummarizationConfig | None = None,
+    existing_summary: str | None = None,
 ) -> str:
     """Generate a summary of the given messages, optionally merging with an existing summary.
 
@@ -248,12 +246,12 @@ async def generate_summary(
 
 
 def apply_summarization_to_state(
-    state: Dict[str, Any],
+    state: dict[str, Any],
     summary: str,
-    messages_to_remove: List[BaseMessage],
-    config: Optional[SummarizationConfig] = None,
-    conversation_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    messages_to_remove: list[BaseMessage],
+    config: SummarizationConfig | None = None,
+    conversation_id: str | None = None,
+) -> dict[str, Any]:
     """
     Apply summarization results to graph state using explicit RemoveMessage
     entries so the ``add_messages`` reducer correctly deletes covered messages
@@ -269,7 +267,7 @@ def apply_summarization_to_state(
 
     # Build RemoveMessage entries for every message that was summarized.
     # The add_messages reducer will delete messages with these IDs.
-    removals: List[RemoveMessage] = []
+    removals: list[RemoveMessage] = []
     for msg in messages_to_remove:
         msg_id = getattr(msg, "id", None)
         if msg_id:
@@ -305,10 +303,10 @@ def apply_summarization_to_state(
 
 
 async def summarize_for_state(
-    state: Dict[str, Any],
-    config: Optional[SummarizationConfig] = None,
-    conversation_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    state: dict[str, Any],
+    config: SummarizationConfig | None = None,
+    conversation_id: str | None = None,
+) -> dict[str, Any]:
     """
     Main entry point for graph-level summarization.
 
@@ -355,9 +353,7 @@ async def summarize_for_state(
 
     try:
         summary = await asyncio.wait_for(
-            generate_summary(
-                messages_to_summarize, config, existing_summary=existing_summary
-            ),
+            generate_summary(messages_to_summarize, config, existing_summary=existing_summary),
             timeout=timeout_seconds,
         )
     except asyncio.TimeoutError:

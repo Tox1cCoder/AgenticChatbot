@@ -6,7 +6,6 @@ import logging
 import time
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Dict, List, Optional, Tuple
 
 from ..core.config import settings
 from .mcp_registry import get_mcp_tools_generation
@@ -67,7 +66,7 @@ class ConversationToolSet:
 
     # Loaded tools keyed by tool_name
     # Only one server per tool_name at a time (replacement semantics)
-    loaded: Dict[str, LoadedTool] = field(default_factory=dict)
+    loaded: dict[str, LoadedTool] = field(default_factory=dict)
 
     # When this set was created
     created_at: float = field(default_factory=time.time)
@@ -78,7 +77,7 @@ class ConversationToolSet:
         server_name: str,
         generation: int,
         max_tools: int,
-    ) -> Optional[LoadedTool]:
+    ) -> LoadedTool | None:
         """
         Add or replace a tool in the loaded set.
 
@@ -132,7 +131,7 @@ class ConversationToolSet:
         self.loaded[tool_name] = loaded_tool
         return loaded_tool
 
-    def get(self, tool_name: str) -> Optional[LoadedTool]:
+    def get(self, tool_name: str) -> LoadedTool | None:
         """
         Get a loaded tool by name, updating its LRU timestamp.
 
@@ -147,7 +146,7 @@ class ConversationToolSet:
             tool.touch()
         return tool
 
-    def remove(self, tool_name: str) -> Optional[LoadedTool]:
+    def remove(self, tool_name: str) -> LoadedTool | None:
         """
         Remove a tool from the loaded set.
 
@@ -159,7 +158,7 @@ class ConversationToolSet:
         """
         return self.loaded.pop(tool_name, None)
 
-    def _evict_lru(self) -> Optional[LoadedTool]:
+    def _evict_lru(self) -> LoadedTool | None:
         """Evict and return the least recently used tool."""
         if not self.loaded:
             return None
@@ -193,7 +192,7 @@ class ConversationToolSet:
 
         return len(to_remove)
 
-    def list_tools(self) -> List[ToolReference]:
+    def list_tools(self) -> list[ToolReference]:
         """Return list of all loaded tool references."""
         return [tool.to_reference() for tool in self.loaded.values()]
 
@@ -213,24 +212,24 @@ class DeferredToolState:
 
     def __init__(self):
         # Map from (conversation_id, agent_key) -> ConversationToolSet
-        self._conversation_tools: Dict[Tuple[str, str], ConversationToolSet] = {}
+        self._conversation_tools: dict[tuple[str, str], ConversationToolSet] = {}
         self._lock = Lock()
 
     def _get_key(
         self,
-        conversation_id: Optional[str],
-        agent_key: Optional[str],
-    ) -> Tuple[str, str]:
+        conversation_id: str | None,
+        agent_key: str | None,
+    ) -> tuple[str, str]:
         """Generate a lookup key from conversation_id and agent_key."""
         return (conversation_id or "", agent_key or "default")
 
     def autoload(
         self,
-        conversation_id: Optional[str],
-        agent_key: Optional[str],
-        references: List[ToolReference],
-        max_tools: Optional[int] = None,
-    ) -> List[ToolReference]:
+        conversation_id: str | None,
+        agent_key: str | None,
+        references: list[ToolReference],
+        max_tools: int | None = None,
+    ) -> list[ToolReference]:
         """
         Load tools for a conversation, respecting capacity limits.
 
@@ -250,7 +249,7 @@ class DeferredToolState:
 
         generation = get_mcp_tools_generation()
         key = self._get_key(conversation_id, agent_key)
-        loaded: List[ToolReference] = []
+        loaded: list[ToolReference] = []
 
         with self._lock:
             if key not in self._conversation_tools:
@@ -277,9 +276,9 @@ class DeferredToolState:
 
     def get_loaded(
         self,
-        conversation_id: Optional[str],
-        agent_key: Optional[str],
-    ) -> List[ToolReference]:
+        conversation_id: str | None,
+        agent_key: str | None,
+    ) -> list[ToolReference]:
         """
         Get all loaded tools for a conversation.
 
@@ -309,8 +308,8 @@ class DeferredToolState:
 
     def is_loaded(
         self,
-        conversation_id: Optional[str],
-        agent_key: Optional[str],
+        conversation_id: str | None,
+        agent_key: str | None,
         tool_name: str,
     ) -> bool:
         """
@@ -334,8 +333,8 @@ class DeferredToolState:
 
     def mark_tool_used(
         self,
-        conversation_id: Optional[str],
-        agent_key: Optional[str],
+        conversation_id: str | None,
+        agent_key: str | None,
         tool_name: str,
     ) -> bool:
         """
@@ -363,10 +362,10 @@ class DeferredToolState:
 
     def get_server_for_loaded_tool(
         self,
-        conversation_id: Optional[str],
-        agent_key: Optional[str],
+        conversation_id: str | None,
+        agent_key: str | None,
         tool_name: str,
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         Get the server name for a loaded tool.
 
@@ -389,8 +388,8 @@ class DeferredToolState:
 
     def clear_conversation(
         self,
-        conversation_id: Optional[str],
-        agent_key: Optional[str] = None,
+        conversation_id: str | None,
+        agent_key: str | None = None,
     ) -> int:
         """
         Clear loaded tools for a conversation.
@@ -414,9 +413,7 @@ class DeferredToolState:
             else:
                 # Clear all agents for conversation
                 conv_id = conversation_id or ""
-                keys_to_remove = [
-                    k for k in self._conversation_tools if k[0] == conv_id
-                ]
+                keys_to_remove = [k for k in self._conversation_tools if k[0] == conv_id]
                 for key in keys_to_remove:
                     del self._conversation_tools[key]
                 cleared = len(keys_to_remove)
@@ -443,7 +440,7 @@ class DeferredToolState:
             self._conversation_tools.clear()
         return count
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> dict:
         """
         Get statistics about the deferred tool state.
 
@@ -459,7 +456,7 @@ class DeferredToolState:
 
 
 # Module-level singleton
-_state_instance: Optional[DeferredToolState] = None
+_state_instance: DeferredToolState | None = None
 
 
 def get_deferred_tool_state() -> DeferredToolState:

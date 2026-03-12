@@ -2,27 +2,28 @@
 Task Plans API endpoints.
 """
 
-from typing import Any, List
+from typing import Any
 from uuid import UUID
+
 from fastapi import APIRouter, status
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.task_plan_service_interface import ITaskPlanService
+from app.schemas.responses import ApiResponse
 from app.schemas.task_plan import (
-    TaskPlanRead,
-    TaskPlanUpdate,
+    PlanningStatusResponse,
     TaskPlanGenerateRequest,
     TaskPlanManualCreateRequest,
-    PlanningStatusResponse,
+    TaskPlanRead,
+    TaskPlanUpdate,
 )
-from app.schemas.responses import ApiResponse
 
 router = APIRouter(tags=["task-plans"])
 
 
 @router.post(
     "/conversations/{conversation_id}/task-plans",
-    response_model=ApiResponse[List[TaskPlanRead]],
+    response_model=ApiResponse[list[TaskPlanRead]],
     status_code=status.HTTP_201_CREATED,
 )
 @AppAutoInjector.auto_inject()
@@ -31,7 +32,7 @@ async def create_task_plan(
     request_data: TaskPlanGenerateRequest,
     task_plan_service: ITaskPlanService,
     user_id: UUID,
-) -> ApiResponse[List[TaskPlanRead]]:
+) -> ApiResponse[list[TaskPlanRead]]:
     """
     Create a task plan from a user's request using the planning agent.
     The planning agent will analyze the request and generate a structured plan
@@ -51,7 +52,7 @@ async def create_task_plan(
 
 @router.post(
     "/conversations/{conversation_id}/task-plans/manual",
-    response_model=ApiResponse[List[TaskPlanRead]],
+    response_model=ApiResponse[list[TaskPlanRead]],
     status_code=status.HTTP_201_CREATED,
 )
 @AppAutoInjector.auto_inject()
@@ -60,7 +61,7 @@ async def create_task_plan_manual(
     request_data: TaskPlanManualCreateRequest,
     task_plan_service: ITaskPlanService,
     user_id: UUID,
-) -> ApiResponse[List[TaskPlanRead]]:
+) -> ApiResponse[list[TaskPlanRead]]:
     """
     Create task plan items from a manual list of task descriptions.
     If a plan already exists, new tasks are appended after the current last task.
@@ -79,7 +80,7 @@ async def create_task_plan_manual(
 
 @router.get(
     "/conversations/{conversation_id}/task-plans",
-    response_model=ApiResponse[List[TaskPlanRead]],
+    response_model=ApiResponse[list[TaskPlanRead]],
 )
 @AppAutoInjector.auto_inject()
 async def get_conversation_task_plans(
@@ -87,7 +88,7 @@ async def get_conversation_task_plans(
     task_plan_service: ITaskPlanService,
     user_id: UUID,
     include_completed: bool = False,
-) -> ApiResponse[List[TaskPlanRead]]:
+) -> ApiResponse[list[TaskPlanRead]]:
     """
     Get all task plans for a conversation.
     By default, completed and skipped tasks are excluded.

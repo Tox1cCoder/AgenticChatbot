@@ -1,19 +1,19 @@
 from __future__ import annotations
-from typing import List
+
 from uuid import UUID
 
+from app.factories.conversation_factory import ConversationFactory
+from app.interfaces.conversation_service_interface import IConversationService
 from app.repositories.conversation import ConversationRepository
 from app.repositories.utils.pagination import Paginator
 from app.schemas.conversation import (
     ConversationCreate,
-    ConversationUpdate,
     ConversationRead,
+    ConversationUpdate,
 )
-from app.factories.conversation_factory import ConversationFactory
-from app.utils.validation.user_validation import UserValidationUtils
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 from app.utils.validation.pagination_validation import validate_pagination_params
-from app.interfaces.conversation_service_interface import IConversationService
+from app.utils.validation.user_validation import UserValidationUtils
 
 
 class ConversationService(IConversationService):
@@ -30,7 +30,7 @@ class ConversationService(IConversationService):
         self.conversation_validation_utils = conversation_validation_utils
 
     def _convert_to_read_schema(
-        self, conversation_entity, include: List[str] = None
+        self, conversation_entity, include: list[str] = None
     ) -> ConversationRead:
         if include is None:
             include = []
@@ -43,9 +43,7 @@ class ConversationService(IConversationService):
             "owner_id": conversation_entity.owner_id,
             "title": conversation_entity.title,
             "persona_prompt": conversation_entity.persona_prompt,
-            "planning_mode_enabled": getattr(
-                conversation_entity, "planning_mode_enabled", False
-            ),
+            "planning_mode_enabled": getattr(conversation_entity, "planning_mode_enabled", False),
             "plan_lifecycle": getattr(conversation_entity, "plan_lifecycle", None),
         }
 
@@ -62,8 +60,7 @@ class ConversationService(IConversationService):
                     from app.schemas.message import MessageRead
 
                     conv_dict["messages"] = [
-                        MessageRead.model_validate(message)
-                        for message in list(messages)
+                        MessageRead.model_validate(message) for message in list(messages)
                     ]
                 else:
                     conv_dict["messages"] = None
@@ -89,12 +86,8 @@ class ConversationService(IConversationService):
         conversation_entity = self.repository.get_by_id(conversation_id)
         return self._convert_to_read_schema(conversation_entity, include=[])
 
-    def get_by_id_for_user(
-        self, conversation_id: UUID, owner_id: UUID
-    ) -> ConversationRead:
-        self.conversation_validation_utils.validate_conversation_access(
-            owner_id, conversation_id
-        )
+    def get_by_id_for_user(self, conversation_id: UUID, owner_id: UUID) -> ConversationRead:
+        self.conversation_validation_utils.validate_conversation_access(owner_id, conversation_id)
         conversation_entity = self.repository.get_by_id(conversation_id)
         return self._convert_to_read_schema(conversation_entity, include=[])
 
@@ -105,7 +98,7 @@ class ConversationService(IConversationService):
         limit: int = 10,
         order_by: str = "updated_at",
         order_direction: str = "desc",
-        include: List[str] = None,
+        include: list[str] = None,
         latest_messages: int = 3,
     ) -> Paginator[ConversationRead]:
         """Get user conversations with optional includes"""
@@ -118,16 +111,12 @@ class ConversationService(IConversationService):
         # Validate order_by field
         valid_order_fields = ["created_at", "updated_at"]
         if order_by not in valid_order_fields:
-            raise ValueError(
-                f"Invalid order_by field. Must be one of: {valid_order_fields}"
-            )
+            raise ValueError(f"Invalid order_by field. Must be one of: {valid_order_fields}")
 
         # Validate order_direction
         valid_directions = ["asc", "desc"]
         if order_direction.lower() not in valid_directions:
-            raise ValueError(
-                f"Invalid order_direction. Must be one of: {valid_directions}"
-            )
+            raise ValueError(f"Invalid order_direction. Must be one of: {valid_directions}")
 
         self.user_validation_utils.validate_user_exists(owner_id)
         paginated_conversations = self.repository.get_by_owner_id(
@@ -146,16 +135,12 @@ class ConversationService(IConversationService):
         ]
 
         # Return new Paginator with converted items
-        return Paginator.create(
-            conversation_reads, paginated_conversations.meta.total, page, limit
-        )
+        return Paginator.create(conversation_reads, paginated_conversations.meta.total, page, limit)
 
     def get_conversation_with_messages(
         self, conversation_id: UUID, owner_id: UUID
     ) -> ConversationRead:
-        self.conversation_validation_utils.validate_conversation_access(
-            owner_id, conversation_id
-        )
+        self.conversation_validation_utils.validate_conversation_access(owner_id, conversation_id)
         conversation_entity = self.repository.get_with_messages(conversation_id)
         return self._convert_to_read_schema(conversation_entity, include=["messages"])
 
@@ -165,9 +150,7 @@ class ConversationService(IConversationService):
         owner_id: UUID,
         conversation_update_data: ConversationUpdate,
     ) -> ConversationRead:
-        self.conversation_validation_utils.validate_conversation_access(
-            owner_id, conversation_id
-        )
+        self.conversation_validation_utils.validate_conversation_access(owner_id, conversation_id)
         conversation_entity = self.repository.get_by_id(conversation_id)
         updated_conversation = self.repository.update(
             conversation_entity.id, conversation_update_data
@@ -175,7 +158,5 @@ class ConversationService(IConversationService):
         return self._convert_to_read_schema(updated_conversation, include=[])
 
     def delete_conversation(self, conversation_id: UUID, owner_id: UUID) -> bool:
-        self.conversation_validation_utils.validate_conversation_access(
-            owner_id, conversation_id
-        )
+        self.conversation_validation_utils.validate_conversation_access(owner_id, conversation_id)
         return self.repository.delete(conversation_id)

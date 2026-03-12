@@ -1,20 +1,19 @@
-from typing import Optional
-from fastapi import APIRouter, status, Query
+from fastapi import APIRouter, Query, status
 
 from app.core.dependency_injection import AppAutoInjector
-from app.services.mcp_service import MCPService
 from app.schemas.mcp import (
+    MCPOperationResponse,
     MCPServerConfig,
-    MCPServerURLConfig,
     MCPServerInfo,
     MCPServerListResponse,
-    MCPToolInfo,
-    MCPToolListResponse,
+    MCPServerURLConfig,
     MCPToolExecuteRequest,
     MCPToolExecuteResponse,
-    MCPOperationResponse,
+    MCPToolInfo,
+    MCPToolListResponse,
 )
 from app.schemas.responses import ApiResponse
+from app.services.mcp_service import MCPService
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
@@ -113,14 +112,12 @@ async def toggle_server(
 @AppAutoInjector.auto_inject()
 async def list_tools(
     mcp_service: MCPService,
-    server_name: Optional[str] = Query(None, description="Filter by server name"),
+    server_name: str | None = Query(None, description="Filter by server name"),
 ) -> ApiResponse[MCPToolListResponse]:
     """List all available MCP tools"""
     result = await mcp_service.list_tools(server_name)
     response_data = MCPToolListResponse(**result)
-    return ApiResponse(
-        success=True, message="MCP tools retrieved successfully", data=response_data
-    )
+    return ApiResponse(success=True, message="MCP tools retrieved successfully", data=response_data)
 
 
 @router.get("/tools/{tool_name}")

@@ -11,20 +11,18 @@ agents bind:
 This follows the Claude-style pattern for reducing tool schema token bloat.
 """
 
-from typing import List, Optional, Set
-
 from langchain_core.tools import BaseTool
 
 from ..core.config import settings
-from .mcp_integration import MCPManager
 from .deferred_tool_state import get_deferred_tool_state
+from .mcp_integration import MCPManager
 from .tool_search_tool import create_tool_search_tool
 
 
 def get_pinned_tools(
     mcp_manager: MCPManager,
-    all_tools: List[BaseTool],
-) -> List[BaseTool]:
+    all_tools: list[BaseTool],
+) -> list[BaseTool]:
     """
     Get the pinned MCP tools that should always be bound.
 
@@ -46,7 +44,7 @@ def get_pinned_tools(
     if not pinned_specs:
         return []
 
-    pinned_tools: List[BaseTool] = []
+    pinned_tools: list[BaseTool] = []
 
     for spec in pinned_specs[:max_pinned]:  # Enforce max
         if "::" in spec:
@@ -72,8 +70,8 @@ def get_deferred_tools_for_binding(
     conversation_id: str,
     agent_key: str,
     mcp_manager: MCPManager,
-    all_tools: List[BaseTool],
-) -> List[BaseTool]:
+    all_tools: list[BaseTool],
+) -> list[BaseTool]:
     """
     Get the currently loaded deferred tools for a conversation.
 
@@ -96,7 +94,7 @@ def get_deferred_tools_for_binding(
     if not loaded_tools:
         return []
 
-    deferred_tools: List[BaseTool] = []
+    deferred_tools: list[BaseTool] = []
 
     for loaded in loaded_tools:
         # Use MCP manager's get_tool_by_name with server_name to handle collisions correctly
@@ -125,13 +123,13 @@ def get_deferred_tools_for_binding(
 
 
 def build_deferred_tool_list(
-    conversation_id: Optional[str],
+    conversation_id: str | None,
     agent_key: str,
-    mcp_manager: Optional[MCPManager],
-    all_mcp_tools: List[BaseTool],
-    internal_tools: Optional[List[BaseTool]] = None,
-    allowlist: Optional[List[str]] = None,
-) -> List[BaseTool]:
+    mcp_manager: MCPManager | None,
+    all_mcp_tools: list[BaseTool],
+    internal_tools: list[BaseTool] | None = None,
+    allowlist: list[str] | None = None,
+) -> list[BaseTool]:
     """
     Build the complete tool list for an agent with deferred loading enabled.
 
@@ -152,8 +150,8 @@ def build_deferred_tool_list(
     Returns:
         List of BaseTool objects to bind to the model
     """
-    result_tools: List[BaseTool] = []
-    seen_names: Set[str] = set()
+    result_tools: list[BaseTool] = []
+    seen_names: set[str] = set()
 
     # 1. Add internal tools first
     if internal_tools:

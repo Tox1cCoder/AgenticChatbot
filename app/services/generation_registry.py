@@ -12,7 +12,6 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 from uuid import UUID
 
 from cachetools import TTLCache
@@ -33,7 +32,7 @@ class InflightEntry:
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     partial_text: str = ""
     partial_thinking: str = ""
-    selected_agent: Optional[str] = None
+    selected_agent: str | None = None
     started_at: float = field(default_factory=time.monotonic)
     last_event_at: float = field(default_factory=time.monotonic)
 
@@ -101,11 +100,11 @@ class GenerationRegistry:
         logger.debug("Registered in-flight generation for user_message_id=%s", key)
         return entry
 
-    def get(self, user_message_id: UUID) -> Optional[InflightEntry]:
+    def get(self, user_message_id: UUID) -> InflightEntry | None:
         """Look up an in-flight entry (returns ``None`` if expired/missing)."""
         return self._store.get(str(user_message_id))
 
-    def remove(self, user_message_id: UUID) -> Optional[InflightEntry]:
+    def remove(self, user_message_id: UUID) -> InflightEntry | None:
         """Remove and return an entry (idempotent)."""
         key = str(user_message_id)
         entry = self._store.pop(key, None)
@@ -113,14 +112,12 @@ class GenerationRegistry:
             logger.debug("Removed in-flight entry for user_message_id=%s", key)
         return entry
 
-    def cancel(self, user_message_id: UUID) -> Optional[InflightEntry]:
+    def cancel(self, user_message_id: UUID) -> InflightEntry | None:
         """Signal cancellation for a given user_message_id. Returns the entry or None."""
         entry = self.get(user_message_id)
         if entry is not None:
             entry.request_cancel()
-            logger.info(
-                "Cancellation requested for user_message_id=%s", user_message_id
-            )
+            logger.info("Cancellation requested for user_message_id=%s", user_message_id)
         return entry
 
     def __len__(self) -> int:
@@ -134,7 +131,7 @@ class GenerationRegistry:
 # Module-level singleton
 # ---------------------------------------------------------------------------
 
-_registry: Optional[GenerationRegistry] = None
+_registry: GenerationRegistry | None = None
 
 
 def get_generation_registry() -> GenerationRegistry:

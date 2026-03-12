@@ -2,33 +2,33 @@ import asyncio
 import io
 import json
 import logging
-import os
-import time
-import uuid
-import subprocess
-import shutil
-import re
 import mimetypes
+import os
+import re
+import shutil
+import subprocess
+import time
 import unicodedata
-from pathlib import Path
+import uuid
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from pathlib import Path
+from typing import Any
 from uuid import UUID
 
-from PIL import Image
 from google import genai
-from google.genai import types, errors as genai_errors
-from app.repositories.document_image import DocumentImageRepository
-from app.schemas.document_image import DocumentImageCreate
-
-from langchain_community.document_loaders import TextLoader, Docx2txtLoader
+from google.genai import errors as genai_errors
+from google.genai import types
+from langchain_community.document_loaders import Docx2txtLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from PIL import Image
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 from sentence_transformers import SentenceTransformer
 
 from app.core.config import Settings
-from app.core.events import get_event_bus, DocumentEvent, DocumentEventData
+from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
+from app.repositories.document_image import DocumentImageRepository
+from app.schemas.document_image import DocumentImageCreate
 
 logger = logging.getLogger(__name__)
 
@@ -74,13 +74,9 @@ class DocumentProcessingService:
 
         try:
             collections = self.qdrant_client.get_collections()
-            exists = any(
-                c.name == self.collection_name for c in collections.collections
-            )
+            exists = any(c.name == self.collection_name for c in collections.collections)
         except Exception as e:
-            logger.warning(
-                f"Could not connect to Qdrant: {e}. Collection check skipped."
-            )
+            logger.warning(f"Could not connect to Qdrant: {e}. Collection check skipped.")
             return
 
         if not exists:
@@ -100,9 +96,7 @@ class DocumentProcessingService:
                     f"expected {self.embedding_dimension}"
                 )
 
-    async def validate_upload_file(
-        self, filename: str, file_size: int
-    ) -> Dict[str, Any]:
+    async def validate_upload_file(self, filename: str, file_size: int) -> dict[str, Any]:
         max_size_bytes = self.settings.max_file_size_mb * 1024 * 1024
         if file_size > max_size_bytes:
             raise ValueError(
@@ -127,9 +121,7 @@ class DocumentProcessingService:
             )
         return file_extension
 
-    async def stage_upload_file(
-        self, upload_file: Any, filename: str
-    ) -> Dict[str, Any]:
+    async def stage_upload_file(self, upload_file: Any, filename: str) -> dict[str, Any]:
         """Stream an upload to temp storage without holding the full payload in memory."""
         self._validate_file_extension(filename)
 
@@ -178,7 +170,7 @@ class DocumentProcessingService:
         temp_file_path: str,
         filename: str,
         file_size: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         validation = await self.validate_upload_file(filename, file_size)
         staged_path = Path(temp_file_path)
         if not staged_path.is_file():
@@ -257,10 +249,10 @@ class DocumentProcessingService:
         else:
             return "5-10 minutes"
 
-    async def get_processing_status(self, task_id: str) -> Dict[str, Any]:
+    async def get_processing_status(self, task_id: str) -> dict[str, Any]:
         try:
             task_result = self.celery_app.AsyncResult(task_id)
-            response: Dict[str, Any] = {
+            response: dict[str, Any] = {
                 "task_id": task_id,
                 "status": task_result.status,
             }
@@ -296,8 +288,8 @@ class DocumentProcessingService:
         file_path: str,
         filename: str,
         document_id: str,
-        conversation_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        conversation_id: str | None = None,
+    ) -> dict[str, Any]:
         start_time = time.time()
 
         chunks_with_metadata = []
@@ -352,8 +344,8 @@ class DocumentProcessingService:
         }
 
     async def _process_pdf_with_mineru(
-        self, file_path: str, document_id: str, original_filename: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        self, file_path: str, document_id: str, original_filename: str | None = None
+    ) -> list[dict[str, Any]]:
         try:
             temp_dir = Path(self.settings.temp_storage_path)
             output_dir = temp_dir / f"mineru_output_{document_id}"
@@ -379,14 +371,10 @@ class DocumentProcessingService:
             )
 
             filename_without_ext = Path(file_path).stem
-            filename_aliases = self._build_filename_aliases(
-                filename_without_ext, original_filename
-            )
-            base_output_dir = self._resolve_mineru_output_dir(
-                output_dir, filename_aliases
-            )
+            filename_aliases = self._build_filename_aliases(filename_without_ext, original_filename)
+            base_output_dir = self._resolve_mineru_output_dir(output_dir, filename_aliases)
 
-            search_roots: List[Path] = []
+            search_roots: list[Path] = []
             if base_output_dir is not None and base_output_dir.exists():
                 search_roots.append(base_output_dir)
             else:
@@ -402,9 +390,7 @@ class DocumentProcessingService:
             images_dir = markdown_file.parent / "images"
 
             # Try to find content_list.json for structured metadata
-            content_list_path = (
-                markdown_file.parent / f"{markdown_file.stem}_content_list.json"
-            )
+            content_list_path = markdown_file.parent / f"{markdown_file.stem}_content_list.json"
             content_blocks = None
 
             if content_list_path.exists():
@@ -428,7 +414,7 @@ class DocumentProcessingService:
                     original_filename or filename_without_ext,
                 )
 
-            images_by_path: Dict[str, int] = {}
+            images_by_path: dict[str, int] = {}
 
             if content_blocks:
                 for block in content_blocks:
@@ -442,7 +428,7 @@ class DocumentProcessingService:
                         images_by_path[img_path] = page_idx
 
             images_data = []
-            page_to_images: Dict[int, List[Dict[str, Any]]] = {}
+            page_to_images: dict[int, list[dict[str, Any]]] = {}
 
             if images_dir.exists():
                 for img_file in images_dir.iterdir():
@@ -463,9 +449,7 @@ class DocumentProcessingService:
                                 mime_type = "image/png"
                             elif suffix == ".gif":
                                 mime_type = "image/gif"
-                        mime_type = (
-                            mime_type or f"image/{img_file.suffix.lstrip('.').lower()}"
-                        )
+                        mime_type = mime_type or f"image/{img_file.suffix.lstrip('.').lower()}"
 
                         image_entry = {
                             "path": str(img_file),
@@ -475,9 +459,7 @@ class DocumentProcessingService:
                         images_data.append(image_entry)
 
                         if page_number is not None:
-                            page_to_images.setdefault(page_number, []).append(
-                                image_entry
-                            )
+                            page_to_images.setdefault(page_number, []).append(image_entry)
 
             if content_blocks:
                 chunks_with_metadata = self._create_chunks_with_page_metadata(
@@ -486,7 +468,7 @@ class DocumentProcessingService:
                     max_chunk_size=self.settings.document_chunk_size,
                 )
             else:
-                with open(markdown_file, "r", encoding="utf-8") as f:
+                with open(markdown_file, encoding="utf-8") as f:
                     markdown_content = f.read()
 
                 documents = [
@@ -498,9 +480,7 @@ class DocumentProcessingService:
                 ]
                 chunks = self._create_chunks(documents)
 
-                unpaged_images = [
-                    img for img in images_data if img["page_number"] is None
-                ]
+                unpaged_images = [img for img in images_data if img["page_number"] is None]
 
                 chunks_with_metadata = []
                 for chunk in chunks:
@@ -527,26 +507,20 @@ class DocumentProcessingService:
                 self.settings.mineru_timeout,
                 file_path,
             )
-            raise RuntimeError(
-                f"MinerU timed out after {self.settings.mineru_timeout}s"
-            ) from exc
+            raise RuntimeError(f"MinerU timed out after {self.settings.mineru_timeout}s") from exc
         except subprocess.CalledProcessError as exc:
             logger.error("MinerU failed while processing %s: %s", file_path, exc.stderr)
             raise RuntimeError(f"MinerU failed with error: {exc.stderr}") from exc
         except Exception as exc:
-            logger.error(
-                "Unexpected MinerU error while processing %s: %s", file_path, exc
-            )
-            raise RuntimeError(
-                f"Unexpected error in MinerU processing: {str(exc)}"
-            ) from exc
+            logger.error("Unexpected MinerU error while processing %s: %s", file_path, exc)
+            raise RuntimeError(f"Unexpected error in MinerU processing: {str(exc)}") from exc
 
     def _create_chunks(
         self,
-        documents: List,
+        documents: list,
         max_chunk_size: int = None,
         overlap: int = None,
-    ) -> List[str]:
+    ) -> list[str]:
         # Use configured parameters if not specified
         if max_chunk_size is None:
             max_chunk_size = self.settings.document_chunk_size
@@ -563,7 +537,7 @@ class DocumentProcessingService:
         split_docs = text_splitter.split_documents(documents)
         return [doc.page_content for doc in split_docs]
 
-    def _parse_content_list_json(self, content_list_path: Path) -> List[Dict[str, Any]]:
+    def _parse_content_list_json(self, content_list_path: Path) -> list[dict[str, Any]]:
         """
         Parse MinerU's content_list.json to extract structured content with metadata.
 
@@ -574,17 +548,17 @@ class DocumentProcessingService:
         - type: text, table, image, equation
         - text_level: Heading level (0=body, 1=h1, 2=h2, etc.)
         """
-        with open(content_list_path, "r", encoding="utf-8") as f:
+        with open(content_list_path, encoding="utf-8") as f:
             content_list = json.load(f)
 
         return content_list
 
     def _create_chunks_with_page_metadata(
         self,
-        content_blocks: List[Dict[str, Any]],
-        page_to_images: Dict[int, List[Dict[str, Any]]],
+        content_blocks: list[dict[str, Any]],
+        page_to_images: dict[int, list[dict[str, Any]]],
         max_chunk_size: int = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Create chunks from content_list.json blocks while preserving page metadata.
 
@@ -597,12 +571,12 @@ class DocumentProcessingService:
         if max_chunk_size is None:
             max_chunk_size = self.settings.document_chunk_size
 
-        chunks_with_metadata: List[Dict[str, Any]] = []
+        chunks_with_metadata: list[dict[str, Any]] = []
         current_chunk_text = ""
-        current_page_start: Optional[int] = None
-        current_page_end: Optional[int] = None
-        current_images: List[Dict[str, Any]] = []
-        current_tables: List[Dict[str, Any]] = []
+        current_page_start: int | None = None
+        current_page_end: int | None = None
+        current_images: list[dict[str, Any]] = []
+        current_tables: list[dict[str, Any]] = []
         pages_in_current_chunk: set = set()
 
         def _finalize_chunk():
@@ -673,9 +647,7 @@ class DocumentProcessingService:
                 if captions:
                     text = "[Table: " + " ".join(captions) + "]"
                 elif footnotes:
-                    text = "[Table] " + " ".join(
-                        str(note) for note in footnotes if note
-                    )
+                    text = "[Table] " + " ".join(str(note) for note in footnotes if note)
                 else:
                     text = "[Table]"
             elif block_type == "image":
@@ -694,9 +666,7 @@ class DocumentProcessingService:
                 if captions:
                     text = "[Image: " + " ".join(captions) + "]"
                 elif footnotes:
-                    text = "[Image] " + " ".join(
-                        str(note) for note in footnotes if note
-                    )
+                    text = "[Image] " + " ".join(str(note) for note in footnotes if note)
                 else:
                     text = "[Image]"
             elif block_type == "equation":
@@ -749,11 +719,11 @@ class DocumentProcessingService:
         return normalized.replace("-", "")
 
     def _build_filename_aliases(
-        self, sanitized_stem: str, original_filename: Optional[str] = None
-    ) -> List[str]:
-        aliases: List[str] = []
+        self, sanitized_stem: str, original_filename: str | None = None
+    ) -> list[str]:
+        aliases: list[str] = []
 
-        def _add_alias(value: Optional[str]) -> None:
+        def _add_alias(value: str | None) -> None:
             if value is None:
                 return
             candidate = value.strip()
@@ -786,12 +756,12 @@ class DocumentProcessingService:
         return aliases
 
     def _resolve_mineru_output_dir(
-        self, output_dir: Path, filename_candidates: List[str]
-    ) -> Optional[Path]:
+        self, output_dir: Path, filename_candidates: list[str]
+    ) -> Path | None:
         if not output_dir.exists():
             return None
 
-        ordered_candidates: List[str] = []
+        ordered_candidates: list[str] = []
         for candidate in filename_candidates or []:
             if candidate and candidate not in ordered_candidates:
                 ordered_candidates.append(candidate)
@@ -826,7 +796,7 @@ class DocumentProcessingService:
             )
         )
 
-        normalized_matches: List[Path] = []
+        normalized_matches: list[Path] = []
 
         child_dirs = [child for child in output_dir.iterdir() if child.is_dir()]
 
@@ -834,7 +804,7 @@ class DocumentProcessingService:
             normalized_child = self._normalize_filename_token(child.name)
             collapsed_child = self._collapse_filename_token(child.name)
 
-            def _matches_target(token: Optional[str], token_set: set[str]) -> bool:
+            def _matches_target(token: str | None, token_set: set[str]) -> bool:
                 if not token or not token_set:
                     return False
                 if token in token_set:
@@ -847,9 +817,9 @@ class DocumentProcessingService:
                     for target in token_set
                 )
 
-            if _matches_target(
-                normalized_child, normalized_target_set
-            ) or _matches_target(collapsed_child, collapsed_target_set):
+            if _matches_target(normalized_child, normalized_target_set) or _matches_target(
+                collapsed_child, collapsed_target_set
+            ):
                 normalized_matches.append(child)
 
         if normalized_matches:
@@ -871,9 +841,9 @@ class DocumentProcessingService:
         return None
 
     def _resolve_markdown_file(
-        self, search_roots: List[Path], filename_candidates: List[str]
+        self, search_roots: list[Path], filename_candidates: list[str]
     ) -> Path:
-        ordered_candidates: List[str] = []
+        ordered_candidates: list[str] = []
         for candidate in filename_candidates or []:
             if candidate and candidate not in ordered_candidates:
                 ordered_candidates.append(candidate)
@@ -894,7 +864,7 @@ class DocumentProcessingService:
 
         markdown_suffixes = {".md", ".markdown", ".mdx"}
 
-        def _search_in_root(root: Path) -> Optional[Path]:
+        def _search_in_root(root: Path) -> Path | None:
             if root is None or not root.exists():
                 return None
 
@@ -911,16 +881,13 @@ class DocumentProcessingService:
                     path
                     for path in root.rglob("*")
                     if path.is_file()
-                    and (
-                        path.suffix.lower() in markdown_suffixes
-                        or _is_markdown_file(path)
-                    )
+                    and (path.suffix.lower() in markdown_suffixes or _is_markdown_file(path))
                 ),
                 key=lambda p: (len(p.parts), p.stat().st_mtime),
             )
 
-            normalized_map: Dict[str, Path] = {}
-            collapsed_map: Dict[str, Path] = {}
+            normalized_map: dict[str, Path] = {}
+            collapsed_map: dict[str, Path] = {}
             for path in all_markdown:
                 normalized_name = self._normalize_filename_token(path.stem)
                 if normalized_name and normalized_name not in normalized_map:
@@ -973,7 +940,7 @@ class DocumentProcessingService:
 
             return None
 
-        unique_roots: List[Path] = []
+        unique_roots: list[Path] = []
         for root in search_roots or []:
             if root and root not in unique_roots and root.exists():
                 unique_roots.append(root)
@@ -983,11 +950,9 @@ class DocumentProcessingService:
             unique_roots.append(default_output_root)
 
         if not unique_roots:
-            raise RuntimeError(
-                f"MinerU output missing markdown file for {ordered_candidates[0]}"
-            )
+            raise RuntimeError(f"MinerU output missing markdown file for {ordered_candidates[0]}")
 
-        searched_roots: List[Path] = []
+        searched_roots: list[Path] = []
         for root in unique_roots:
             searched_roots.append(root)
             result = _search_in_root(root)
@@ -1000,25 +965,21 @@ class DocumentProcessingService:
                     )
                 return result
 
-        raise RuntimeError(
-            f"MinerU output missing markdown file for {ordered_candidates[0]}"
-        )
+        raise RuntimeError(f"MinerU output missing markdown file for {ordered_candidates[0]}")
 
     async def _store_chunks(
         self,
-        chunks_with_metadata: List[Dict[str, Any]],
+        chunks_with_metadata: list[dict[str, Any]],
         filename: str,
         document_id: str,
-        conversation_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        conversation_id: str | None = None,
+    ) -> dict[str, Any]:
         points = []
         chunk_id_mapping = {}
 
         for i, chunk_data in enumerate(chunks_with_metadata):
             chunk_text = (
-                chunk_data.get("text", chunk_data)
-                if isinstance(chunk_data, dict)
-                else chunk_data
+                chunk_data.get("text", chunk_data) if isinstance(chunk_data, dict) else chunk_data
             )
 
             embedding = self.embedding_model.encode(chunk_text).tolist()
@@ -1033,18 +994,13 @@ class DocumentProcessingService:
                 "conversation_id": conversation_id,
                 "chunk_index": i,
                 "timestamp": datetime.now().isoformat(),
-                "file_type": (
-                    filename.split(".")[-1] if "." in filename else "unknown"
-                ),
+                "file_type": (filename.split(".")[-1] if "." in filename else "unknown"),
             }
 
             if isinstance(chunk_data, dict):
                 if "has_images" in chunk_data:
                     payload["has_images"] = bool(chunk_data.get("has_images", False))
-                if (
-                    "image_count" in chunk_data
-                    and chunk_data["image_count"] is not None
-                ):
+                if "image_count" in chunk_data and chunk_data["image_count"] is not None:
                     payload["image_count"] = int(chunk_data["image_count"])
                 if chunk_data.get("image_prompts"):
                     payload["image_prompts"] = chunk_data["image_prompts"]
@@ -1052,10 +1008,7 @@ class DocumentProcessingService:
                 # Add table metadata
                 if "has_tables" in chunk_data:
                     payload["has_tables"] = bool(chunk_data.get("has_tables", False))
-                if (
-                    "table_count" in chunk_data
-                    and chunk_data["table_count"] is not None
-                ):
+                if "table_count" in chunk_data and chunk_data["table_count"] is not None:
                     payload["table_count"] = int(chunk_data["table_count"])
 
                 # Add page metadata for citations
@@ -1082,9 +1035,7 @@ class DocumentProcessingService:
 
         for i in range(0, total_points, batch_size):
             batch = points[i : i + batch_size]
-            self.qdrant_client.upsert(
-                collection_name=self.collection_name, points=batch
-            )
+            self.qdrant_client.upsert(collection_name=self.collection_name, points=batch)
 
         return {
             "chunks_stored": total_points,
@@ -1093,10 +1044,10 @@ class DocumentProcessingService:
 
     async def _store_images(
         self,
-        images_data: List[Dict[str, Any]],
+        images_data: list[dict[str, Any]],
         document_id: str,
-        chunk_id_mapping: Dict[int, str],
-        chunks_with_metadata: List[Dict[str, Any]] = None,
+        chunk_id_mapping: dict[int, str],
+        chunks_with_metadata: list[dict[str, Any]] = None,
     ) -> int:
         stored_count = 0
 
@@ -1138,11 +1089,7 @@ class DocumentProcessingService:
                 chunk_id = None
                 page_number = img_data.get("page_number")
 
-                if (
-                    page_number is not None
-                    and chunk_id_mapping
-                    and chunks_with_metadata
-                ):
+                if page_number is not None and chunk_id_mapping and chunks_with_metadata:
                     for chunk_idx, chunk_data in enumerate(chunks_with_metadata):
                         page_start = chunk_data.get("page_start")
                         page_end = chunk_data.get("page_end")
@@ -1183,14 +1130,12 @@ class DocumentProcessingService:
 
     async def _generate_image_caption_with_retry(
         self, image_bytes: bytes, image_name: str
-    ) -> Optional[str]:
+    ) -> str | None:
         if not self.gemini_client:
             return None
 
-        max_attempts = max(
-            1, getattr(self.settings, "image_caption_max_retry_attempts", 1)
-        )
-        last_error: Optional[Exception] = None
+        max_attempts = max(1, getattr(self.settings, "image_caption_max_retry_attempts", 1))
+        last_error: Exception | None = None
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -1214,9 +1159,7 @@ class DocumentProcessingService:
                     for entry in detail_entries or []:
                         if not isinstance(entry, dict):
                             continue
-                        retry_value = entry.get("retryDelay") or entry.get(
-                            "retry_delay"
-                        )
+                        retry_value = entry.get("retryDelay") or entry.get("retry_delay")
                         if retry_value is None:
                             continue
 
@@ -1224,9 +1167,7 @@ class DocumentProcessingService:
                         if isinstance(retry_value, (int, float)):
                             parsed_value = float(retry_value)
                         elif isinstance(retry_value, str):
-                            match = re.match(
-                                r"([\d\.]+)\s*([a-zA-Z]*)", retry_value.strip()
-                            )
+                            match = re.match(r"([\d\.]+)\s*([a-zA-Z]*)", retry_value.strip())
                             if match:
                                 amount_str, unit = match.groups()
                                 try:
@@ -1272,9 +1213,7 @@ class DocumentProcessingService:
                     if delay_hint is None:
                         message = getattr(e, "message", "")
                         if isinstance(message, str):
-                            match = re.search(
-                                r"retry in\s+([\d\.]+)s", message, re.IGNORECASE
-                            )
+                            match = re.search(r"retry in\s+([\d\.]+)s", message, re.IGNORECASE)
                             if match:
                                 try:
                                     delay_hint = float(match.group(1))
@@ -1285,9 +1224,7 @@ class DocumentProcessingService:
                         delay = max(delay_hint, 0.5)
                     else:
                         base_delay = max(
-                            getattr(
-                                self.settings, "image_caption_retry_delay_seconds", 5.0
-                            ),
+                            getattr(self.settings, "image_caption_retry_delay_seconds", 5.0),
                             0.5,
                         )
                         delay = base_delay * attempt
@@ -1317,15 +1254,13 @@ class DocumentProcessingService:
             )
         return None
 
-    def _request_image_caption(
-        self, image_bytes: bytes, image_name: str
-    ) -> Optional[str]:
+    def _request_image_caption(self, image_bytes: bytes, image_name: str) -> str | None:
         prompt_parts = [
             types.Part.from_text(text="Describe this image concisely in one sentence."),
             types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
         ]
 
-        model_name = getattr(self.settings, "image_caption_model")
+        model_name = self.settings.image_caption_model
         response = self.gemini_client.models.generate_content(
             model=model_name,
             contents=prompt_parts,
@@ -1339,9 +1274,7 @@ class DocumentProcessingService:
 
     async def _update_chunks_with_images(self, document_id: str) -> None:
         try:
-            images = self.document_image_repository.get_by_document_id(
-                UUID(document_id)
-            )
+            images = self.document_image_repository.get_by_document_id(UUID(document_id))
 
             if not images:
                 return
@@ -1376,7 +1309,7 @@ class DocumentProcessingService:
                 f"Failed to update chunks with image metadata for document {document_id}: {e}"
             )
 
-    async def cleanup_temp_files(self, older_than_hours: int = 24) -> Dict[str, Any]:
+    async def cleanup_temp_files(self, older_than_hours: int = 24) -> dict[str, Any]:
         try:
             temp_dir = os.path.join(os.getcwd(), self.settings.temp_storage_path)
             if not os.path.exists(temp_dir):
@@ -1384,9 +1317,7 @@ class DocumentProcessingService:
 
             removed_count = 0
             removed_folders = 0
-            cutoff_time = datetime.now(timezone.utc).timestamp() - (
-                older_than_hours * 3600
-            )
+            cutoff_time = datetime.now(timezone.utc).timestamp() - (older_than_hours * 3600)
 
             for filename in os.listdir(temp_dir):
                 if filename.startswith("."):
@@ -1402,9 +1333,7 @@ class DocumentProcessingService:
                             os.unlink(file_path)
                             removed_count += 1
                         except Exception as e:
-                            logger.warning(
-                                f"Failed to remove temp file {filename}: {str(e)}"
-                            )
+                            logger.warning(f"Failed to remove temp file {filename}: {str(e)}")
 
                 # Handle MinerU output folders
                 elif os.path.isdir(file_path) and filename.startswith("mineru_output_"):
@@ -1414,9 +1343,7 @@ class DocumentProcessingService:
                             shutil.rmtree(file_path)
                             removed_folders += 1
                         except Exception as e:
-                            logger.warning(
-                                f"Failed to remove MinerU folder {filename}: {str(e)}"
-                            )
+                            logger.warning(f"Failed to remove MinerU folder {filename}: {str(e)}")
 
             # Cleanup old document image folders
             images_dir = Path(self.settings.document_images_storage_path)

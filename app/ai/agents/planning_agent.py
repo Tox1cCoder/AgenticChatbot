@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Iterable
 from textwrap import dedent
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
@@ -27,7 +28,7 @@ from .base_agent import BaseAgent
 class PlanningAgent(BaseAgent):
     """Planning agent that manages task plans using ReAct-style tool-calling."""
 
-    def __init__(self, model_name: Optional[str] = None):
+    def __init__(self, model_name: str | None = None):
         """Initialize Planning Agent with 'planning' config key."""
         super().__init__(model_name=model_name, agent_config_key="planning")
 
@@ -45,8 +46,8 @@ class PlanningAgent(BaseAgent):
     def _get_llm_with_tools(
         self,
         model: Any = None,
-        conversation_id: Optional[str] = None,
-        internal_tools: Optional[List[BaseTool]] = None,
+        conversation_id: str | None = None,
+        internal_tools: list[BaseTool] | None = None,
     ) -> Any:
         """
         Override to ensure write_todos is always included as an internal tool.
@@ -71,9 +72,9 @@ class PlanningAgent(BaseAgent):
 
     def _get_tools_for_binding(
         self,
-        conversation_id: Optional[str] = None,
-        internal_tools: Optional[List[BaseTool]] = None,
-    ) -> List[BaseTool]:
+        conversation_id: str | None = None,
+        internal_tools: list[BaseTool] | None = None,
+    ) -> list[BaseTool]:
         """
         Ensure write_todos is always present in both binding and execution maps.
         """
@@ -102,11 +103,11 @@ class PlanningAgent(BaseAgent):
 
     def _build_system_prompt(
         self,
-        persona: Optional[str] = None,
+        persona: str | None = None,
         has_tool_context: bool = False,
-        todos: Optional[List[Dict[str, Any]]] = None,
-        current_task_index: Optional[int] = None,
-        planning_phase: Optional[str] = None,
+        todos: list[dict[str, Any]] | None = None,
+        current_task_index: int | None = None,
+        planning_phase: str | None = None,
         should_describe_plan: bool = False,
         **kwargs: Any,
     ) -> str:
@@ -164,15 +165,13 @@ class PlanningAgent(BaseAgent):
         return prompt
 
     def _format_todos_context(
-        self, todos: List[Dict[str, Any]], current_task_index: Optional[int] = None
+        self, todos: list[dict[str, Any]], current_task_index: int | None = None
     ) -> str:
         if not todos:
             return ""
 
         lines = ["CURRENT TASK PLAN:"]
-        lines.append(
-            "(Use the ID shown in brackets when calling start_todo/complete_todo)"
-        )
+        lines.append("(Use the ID shown in brackets when calling start_todo/complete_todo)")
         lines.append("")
 
         for i, todo in enumerate(todos):
@@ -199,17 +198,14 @@ class PlanningAgent(BaseAgent):
         completed = sum(
             1
             for t in todos
-            if (
-                getattr(t.get("status"), "value", t.get("status"))
-                == TodoStatus.COMPLETED.value
-            )
+            if (getattr(t.get("status"), "value", t.get("status")) == TodoStatus.COMPLETED.value)
         )
         lines.append(f"\nProgress: {completed}/{len(todos)} tasks completed")
 
         return "\n".join(lines)
 
     async def generate_plan(
-        self, message: AgentMessage, conversation_id: Optional[str] = None
+        self, message: AgentMessage, conversation_id: str | None = None
     ) -> AgentResponse:
         """Generate a canonical todo payload for persistence."""
         return await self._generate_or_modify_plan(
@@ -222,8 +218,8 @@ class PlanningAgent(BaseAgent):
     async def modify_plan(
         self,
         message: AgentMessage,
-        existing_tasks: List[Dict[str, Any]],
-        conversation_id: Optional[str] = None,
+        existing_tasks: list[dict[str, Any]],
+        conversation_id: str | None = None,
     ) -> AgentResponse:
         """Modify an existing canonical todo payload for persistence."""
         return await self._generate_or_modify_plan(
@@ -237,8 +233,8 @@ class PlanningAgent(BaseAgent):
         self,
         *,
         message: AgentMessage,
-        existing_tasks: Optional[List[Dict[str, Any]]],
-        conversation_id: Optional[str],
+        existing_tasks: list[dict[str, Any]] | None,
+        conversation_id: str | None,
         plan_modified: bool,
     ) -> AgentResponse:
         if not self.langchain_model:
@@ -251,8 +247,8 @@ class PlanningAgent(BaseAgent):
         conversation_history = message.metadata.get("history", [])
 
         # Convert existing tasks into todo-like dicts for prompt context.
-        todos: List[Dict[str, Any]] = []
-        current_task_index: Optional[int] = None
+        todos: list[dict[str, Any]] = []
+        current_task_index: int | None = None
         if existing_tasks:
             for i, task in enumerate(existing_tasks):
                 todos.append(
@@ -300,9 +296,7 @@ class PlanningAgent(BaseAgent):
         raw_response = await llm.ainvoke(langchain_messages)
 
         tool_calls = getattr(raw_response, "tool_calls", None) or []
-        updated_todos = self._apply_write_todos_calls(
-            base_todos=todos, tool_calls=tool_calls
-        )
+        updated_todos = self._apply_write_todos_calls(base_todos=todos, tool_calls=tool_calls)
 
         if not updated_todos:
             fallback_text = coerce_response_text(getattr(raw_response, "content", ""))
@@ -326,9 +320,7 @@ class PlanningAgent(BaseAgent):
         # Quality gate: reject plans that contain under-specified task descriptions.
         quality_issues = self._validate_task_descriptions(canonical_todos)
         if quality_issues:
-            problem_lines = "; ".join(
-                f"task {i + 1}: {reason}" for i, reason in quality_issues
-            )
+            problem_lines = "; ".join(f"task {i + 1}: {reason}" for i, reason in quality_issues)
             return self._build_error_response(
                 f"Generated plan contains under-specified tasks ({problem_lines}). "
                 "Please provide a more detailed request so each task can be "
@@ -344,7 +336,7 @@ class PlanningAgent(BaseAgent):
             plan_modified=plan_modified,
         )
 
-        metadata: Dict[str, Any] = {
+        metadata: dict[str, Any] = {
             "model": self.model_name,
             "conversation_id": conversation_id,
             "task_count": len(canonical_todos),
@@ -364,8 +356,8 @@ class PlanningAgent(BaseAgent):
         )
 
     def _apply_write_todos_calls(
-        self, *, base_todos: List[Dict[str, Any]], tool_calls: Iterable[Any]
-    ) -> List[Dict[str, Any]]:
+        self, *, base_todos: list[dict[str, Any]], tool_calls: Iterable[Any]
+    ) -> list[dict[str, Any]]:
         max_todos = getattr(settings, "max_todos_per_plan", 50)
         todos = list(base_todos)
 
@@ -389,8 +381,8 @@ class PlanningAgent(BaseAgent):
 
         return todos
 
-    def _canonicalize_todos(self, todos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        def sort_key(item: Dict[str, Any]) -> int:
+    def _canonicalize_todos(self, todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        def sort_key(item: dict[str, Any]) -> int:
             order = item.get("order")
             try:
                 return int(order)
@@ -401,7 +393,7 @@ class PlanningAgent(BaseAgent):
 
         seen_ids: set[str] = set()
         active_task_seen = False
-        canonical: List[Dict[str, Any]] = []
+        canonical: list[dict[str, Any]] = []
         for item in ordered:
             desc = str(item.get("description", "")).strip()
             if not desc:
@@ -412,9 +404,7 @@ class PlanningAgent(BaseAgent):
             seen_ids.add(todo_id)
 
             raw_status = item.get("status", TodoStatus.PENDING.value)
-            status = (
-                raw_status.value if hasattr(raw_status, "value") else str(raw_status)
-            )
+            status = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
             if status not in {
                 TodoStatus.PENDING.value,
                 TodoStatus.IN_PROGRESS.value,
@@ -458,30 +448,26 @@ class PlanningAgent(BaseAgent):
         re.IGNORECASE,
     )
 
-    def _validate_task_descriptions(
-        self, todos: List[Dict[str, Any]]
-    ) -> List[Tuple[int, str]]:
+    def _validate_task_descriptions(self, todos: list[dict[str, Any]]) -> list[tuple[int, str]]:
         """Return (0-based index, reason) for every invalid task description.
 
         A description is considered invalid if it is shorter than
         ``_MIN_DESC_LEN`` characters or contains no recognisable action verb.
         """
-        issues: List[Tuple[int, str]] = []
+        issues: list[tuple[int, str]] = []
         for i, todo in enumerate(todos):
             desc = str(todo.get("description", "")).strip()
             if len(desc) < self._MIN_DESC_LEN:
-                issues.append(
-                    (i, f"too short ({len(desc)} chars, min {self._MIN_DESC_LEN})")
-                )
+                issues.append((i, f"too short ({len(desc)} chars, min {self._MIN_DESC_LEN})"))
             elif not self._ACTION_VERB_RE.search(desc):
                 issues.append((i, "no recognisable action verb found"))
         return issues
 
     def _format_plan_summary(
         self,
-        todos: List[Dict[str, Any]],
+        todos: list[dict[str, Any]],
         *,
-        overall_goal: Optional[str],
+        overall_goal: str | None,
         plan_modified: bool,
     ) -> str:
         if not todos:

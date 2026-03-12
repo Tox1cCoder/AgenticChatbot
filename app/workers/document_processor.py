@@ -1,22 +1,22 @@
-import os
-import logging
 import asyncio
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any
+import logging
+import os
+import shutil
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from celery import Task
-import shutil
-from pathlib import Path
 
 from app.core.config import get_settings
 from app.core.container import get_container
+from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.database.session import SessionLocal
 from app.models.document import Document
 from app.repositories.document import DocumentRepository
-from app.schemas.document import DocumentUpdate, DocumentStatus
+from app.schemas.document import DocumentStatus, DocumentUpdate
 from app.workers.celery_app import celery_app
-from app.core.events import get_event_bus, DocumentEvent, DocumentEventData
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class CallbackTask(Task):
 )
 def process_document_task(
     self, document_id: str, temp_file_path: str, filename: str
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Process a previously staged document file.
 
     Args:
@@ -125,9 +125,7 @@ def process_document_task(
             f"Error processing document {document_id} ('{filename}'): {exc}",
             exc_info=True,
         )
-        logger.error(
-            f"Document {document_id} processing failed: {str(exc)}", exc_info=True
-        )
+        logger.error(f"Document {document_id} processing failed: {str(exc)}", exc_info=True)
 
         try:
             update_data = DocumentUpdate(status=DocumentStatus.FAILED.value)
@@ -190,9 +188,7 @@ def process_document_task(
 
         try:
             settings_ = get_settings()
-            mineru_output_path = (
-                Path(settings_.temp_storage_path) / f"mineru_output_{document_id}"
-            )
+            mineru_output_path = Path(settings_.temp_storage_path) / f"mineru_output_{document_id}"
             if mineru_output_path.exists():
                 shutil.rmtree(mineru_output_path)
         except Exception:
@@ -207,7 +203,7 @@ def process_document_task(
 
 
 @celery_app.task(name="app.workers.document_processor.cleanup_failed_documents")
-def cleanup_failed_documents() -> Dict[str, Any]:
+def cleanup_failed_documents() -> dict[str, Any]:
     db = SessionLocal()
     document_repo = DocumentRepository(SessionLocal)
 

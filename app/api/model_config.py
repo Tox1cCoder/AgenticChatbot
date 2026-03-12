@@ -8,7 +8,7 @@ Allows users to store provider/model/temperature selection for:
 - planning
 """
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, RootModel
@@ -23,22 +23,22 @@ router = APIRouter(prefix="/model-config", tags=["model-config"])
 
 
 class AgentModelConfigPatch(BaseModel):
-    provider: Optional[str] = Field(
+    provider: str | None = Field(
         default=None,
         description="Provider to use for this agent",
         pattern="^(gemini|openai)$",
     )
-    model: Optional[str] = Field(
+    model: str | None = Field(
         default=None,
         description="Model identifier (provider-specific)",
     )
-    temperature: Optional[float] = Field(
+    temperature: float | None = Field(
         default=None,
         description="Sampling temperature",
     )
 
 
-class ModelConfigUpdateRequest(RootModel[Dict[str, AgentModelConfigPatch]]):
+class ModelConfigUpdateRequest(RootModel[dict[str, AgentModelConfigPatch]]):
     """
     Request body is a partial mapping of agent_key -> config patch.
 
@@ -49,12 +49,12 @@ class ModelConfigUpdateRequest(RootModel[Dict[str, AgentModelConfigPatch]]):
     """
 
 
-@router.get("", response_model=ApiResponse[Dict[str, Dict[str, Any]]])
+@router.get("", response_model=ApiResponse[dict[str, dict[str, Any]]])
 @AppAutoInjector.auto_inject()
 async def get_model_config(
     model_config_service: ModelConfigService,
     current_user: User = Depends(get_current_user),
-) -> ApiResponse[Dict[str, Dict[str, Any]]]:
+) -> ApiResponse[dict[str, dict[str, Any]]]:
     try:
         config = model_config_service.get_effective_model_config(current_user.id)
         return ApiResponse(
@@ -69,13 +69,13 @@ async def get_model_config(
         )
 
 
-@router.patch("", response_model=ApiResponse[Dict[str, Dict[str, Any]]])
+@router.patch("", response_model=ApiResponse[dict[str, dict[str, Any]]])
 @AppAutoInjector.auto_inject()
 async def patch_model_config(
     request: ModelConfigUpdateRequest,
     model_config_service: ModelConfigService,
     current_user: User = Depends(get_current_user),
-) -> ApiResponse[Dict[str, Dict[str, Any]]]:
+) -> ApiResponse[dict[str, dict[str, Any]]]:
     try:
         updates = {
             agent_key: patch.model_dump(exclude_none=True)
@@ -99,12 +99,12 @@ async def patch_model_config(
         )
 
 
-@router.post("/reset", response_model=ApiResponse[Dict[str, Dict[str, Any]]])
+@router.post("/reset", response_model=ApiResponse[dict[str, dict[str, Any]]])
 @AppAutoInjector.auto_inject()
 async def reset_model_config(
     model_config_service: ModelConfigService,
     current_user: User = Depends(get_current_user),
-) -> ApiResponse[Dict[str, Dict[str, Any]]]:
+) -> ApiResponse[dict[str, dict[str, Any]]]:
     try:
         model_config_service.reset_configs(current_user.id)
         config = model_config_service.get_effective_model_config(current_user.id)

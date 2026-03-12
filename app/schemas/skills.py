@@ -1,7 +1,6 @@
 """Pydantic schemas for the Skills system."""
 
 from pydantic import BaseModel, ConfigDict
-from typing import List
 
 from app.utils.case_conversion import to_camel_case as to_camel
 
@@ -26,7 +25,7 @@ class SkillDetail(SkillInfo):
 class SkillListResponse(BaseModel):
     """Response for listing all skills."""
 
-    skills: List[SkillInfo]
+    skills: list[SkillInfo]
     total_count: int
     enabled_count: int
 

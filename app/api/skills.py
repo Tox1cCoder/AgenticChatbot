@@ -3,13 +3,13 @@
 from fastapi import APIRouter, Query
 
 from app.core.dependency_injection import AppAutoInjector
-from app.services.skills_service import SkillsService
+from app.schemas.responses import ApiResponse
 from app.schemas.skills import (
     SkillDetail,
     SkillListResponse,
     SkillOperationResponse,
 )
-from app.schemas.responses import ApiResponse
+from app.services.skills_service import SkillsService
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 

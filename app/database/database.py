@@ -1,11 +1,12 @@
 """Database module for dependency-injector integration."""
 
-from contextlib import contextmanager
-from typing import Iterator
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from sqlalchemy import create_engine, orm
 from sqlalchemy.orm import Session
+
 from app.database.base import Base
 
 logger = logging.getLogger(__name__)

@@ -1,15 +1,17 @@
 import base64
 import logging
-from typing import Optional, List, Dict, Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
-from langchain_core.messages import BaseMessage, HumanMessage as LCHumanMessage
 from google.genai import types
+from langchain_core.messages import BaseMessage
+from langchain_core.messages import HumanMessage as LCHumanMessage
 
-from .base_agent import BaseAgent
-from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..agent_config import create_langchain_model, create_gemini_client, AGENT_CONFIG
 from ...core.config import settings
+from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
+from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..utils import coerce_response_text
+from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ class ImageGeneratorAgent(BaseAgent):
     async def invoke_model(
         self,
         message: AgentMessage,
-        conversation_id: Optional[str] = None,
+        conversation_id: str | None = None,
     ) -> AgentResponse:
         if not self.enabled:
             return self._build_error_response(
@@ -71,14 +73,10 @@ class ImageGeneratorAgent(BaseAgent):
             enhanced_prompt = message_content
 
             # Generate the image directly
-            images, narrative = await self._generate_images(
-                enhanced_prompt, message_content
-            )
+            images, narrative = await self._generate_images(enhanced_prompt, message_content)
 
             # Generate a natural user-facing response instead of showing the enhanced prompt
-            user_facing = narrative or await self._generate_user_facing_response(
-                message_content
-            )
+            user_facing = narrative or await self._generate_user_facing_response(message_content)
 
             response_metadata = {
                 "model": self.model_name,
@@ -127,14 +125,10 @@ class ImageGeneratorAgent(BaseAgent):
             enhanced_prompt = coerce_response_text(response.content)
 
             # Now generate the image
-            images, narrative = await self._generate_images(
-                enhanced_prompt, message_content
-            )
+            images, narrative = await self._generate_images(enhanced_prompt, message_content)
 
             # Generate a natural user-facing response instead of showing the enhanced prompt
-            user_facing = narrative or await self._generate_user_facing_response(
-                message_content
-            )
+            user_facing = narrative or await self._generate_user_facing_response(message_content)
 
             response_metadata = {
                 "model": self.model_name,
@@ -154,9 +148,7 @@ class ImageGeneratorAgent(BaseAgent):
 
         except Exception as e:
             logger.error(f"Error in image generator agent: {e}", exc_info=True)
-            return self._build_error_response(
-                message=str(e), conversation_id=conversation_id
-            )
+            return self._build_error_response(message=str(e), conversation_id=conversation_id)
 
     def _get_system_prompt(self) -> str:
         return """You are an expert image generation prompt engineer.
@@ -168,13 +160,13 @@ Do not output anything else, just the prompt."""
 
     async def invoke_model_with_history(
         self,
-        messages: List[BaseMessage],
-        conversation_history: List[Any],
-        persona: Optional[str],
-        conversation_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        model_request: Optional[Dict[str, Any]] = None,
-        history_summary: Optional[str] = None,
+        messages: list[BaseMessage],
+        conversation_history: list[Any],
+        persona: str | None,
+        conversation_id: str | None = None,
+        user_id: str | None = None,
+        model_request: dict[str, Any] | None = None,
+        history_summary: str | None = None,
         **system_prompt_kwargs: Any,
     ) -> AgentResponse:
         """Override to add image generation after LLM prompt-engineering step.
@@ -212,19 +204,13 @@ Do not output anything else, just the prompt."""
         # Derive the original user request from the current turn messages.
         original_prompt = enhanced_prompt
         for msg in reversed(messages):
-            if (
-                hasattr(msg, "content")
-                and isinstance(msg.content, str)
-                and msg.content.strip()
-            ):
+            if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content.strip():
                 if isinstance(msg, LCHumanMessage):
                     original_prompt = msg.content.strip()
                     break
 
         try:
-            images, narrative = await self._generate_images(
-                enhanced_prompt, original_prompt
-            )
+            images, narrative = await self._generate_images(enhanced_prompt, original_prompt)
         except Exception as e:
             logger.error("Image generation failed: %s", e, exc_info=True)
             return response
@@ -238,24 +224,22 @@ Do not output anything else, just the prompt."""
         if narrative:
             response.message.content = narrative
         elif images:
-            response.message.content = await self._generate_user_facing_response(
-                original_prompt
-            )
+            response.message.content = await self._generate_user_facing_response(original_prompt)
 
         return response
 
     async def process_message(
         self,
         message: AgentMessage,
-        conversation_id: Optional[str] = None,
+        conversation_id: str | None = None,
     ) -> AgentResponse:
         return await self.invoke_model(message, conversation_id)
 
     async def stream_message(
         self,
         message: AgentMessage,
-        conversation_id: Optional[str] = None,
-    ) -> AsyncIterator[Dict[str, Any]]:
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         result = await self.invoke_model(message, conversation_id)
 
         if result.error:
@@ -290,7 +274,7 @@ Do not output anything else, just the prompt."""
 
     async def _generate_images(
         self, prepared_prompt: str, original_prompt: str
-    ) -> tuple[List[dict], str]:
+    ) -> tuple[list[dict], str]:
         if not self.gemini_client:
             return [], ""
 
@@ -311,8 +295,8 @@ Do not output anything else, just the prompt."""
 
         generate_config = types.GenerateContentConfig(**config_kwargs)
 
-        images: List[dict] = []
-        narrative_parts: List[str] = []
+        images: list[dict] = []
+        narrative_parts: list[str] = []
 
         response = self.gemini_client.models.generate_content(
             model=self.model_name,
@@ -356,7 +340,7 @@ Do not output anything else, just the prompt."""
         return images, narrative.strip()
 
     @staticmethod
-    def _encode_image(raw_data) -> Optional[str]:
+    def _encode_image(raw_data) -> str | None:
         if raw_data is None:
             return None
 

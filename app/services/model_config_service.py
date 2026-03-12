@@ -8,7 +8,8 @@ Provides:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional
+from collections.abc import Mapping
+from typing import Any
 from uuid import UUID
 
 from app.ai.agent_config import AGENT_CONFIG
@@ -18,7 +19,7 @@ SUPPORTED_AGENT_KEYS = ("chat", "rag", "search", "planning")
 SUPPORTED_PROVIDERS = ("gemini", "openai")
 
 
-def _normalize_agent_key(value: Any) -> Optional[str]:
+def _normalize_agent_key(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     key = value.strip().lower()
@@ -32,7 +33,7 @@ def _normalize_provider(value: Any) -> str:
     return provider if provider in SUPPORTED_PROVIDERS else "gemini"
 
 
-def _default_agent_config(agent_key: str) -> Dict[str, Any]:
+def _default_agent_config(agent_key: str) -> dict[str, Any]:
     agent_cfg = AGENT_CONFIG.get(agent_key, {})
     return {
         "provider": "gemini",
@@ -45,15 +46,14 @@ class ModelConfigService:
     def __init__(self, repository: AgentModelConfigRepository):
         self.repository = repository
 
-    def get_effective_model_config(self, user_id: UUID) -> Dict[str, Dict[str, Any]]:
+    def get_effective_model_config(self, user_id: UUID) -> dict[str, dict[str, Any]]:
         """
         Return effective per-agent configs (defaults + persisted overrides).
 
         This is intended for UI use.
         """
-        effective: Dict[str, Dict[str, Any]] = {
-            agent_key: _default_agent_config(agent_key)
-            for agent_key in SUPPORTED_AGENT_KEYS
+        effective: dict[str, dict[str, Any]] = {
+            agent_key: _default_agent_config(agent_key) for agent_key in SUPPORTED_AGENT_KEYS
         }
 
         for row in self.repository.get_all_by_user(user_id):
@@ -73,14 +73,14 @@ class ModelConfigService:
 
         return effective
 
-    def get_effective_model_request(self, user_id: UUID) -> Dict[str, Dict[str, Any]]:
+    def get_effective_model_request(self, user_id: UUID) -> dict[str, dict[str, Any]]:
         """
         Return model_request overrides only (no defaults).
 
         This avoids forcing per-request model re-creation when no overrides exist.
         Intended for runtime use when no per-message modelConfig is provided.
         """
-        model_request: Dict[str, Dict[str, Any]] = {}
+        model_request: dict[str, dict[str, Any]] = {}
         for row in self.repository.get_all_by_user(user_id):
             agent_key = _normalize_agent_key(getattr(row, "agent_key", None))
             if not agent_key:
@@ -90,7 +90,7 @@ class ModelConfigService:
             model = getattr(row, "model", None)
             temperature = getattr(row, "temperature", None)
 
-            cfg: Dict[str, Any] = {"provider": provider_type}
+            cfg: dict[str, Any] = {"provider": provider_type}
             if isinstance(model, str) and model.strip():
                 cfg["model"] = model.strip()
             if isinstance(temperature, (int, float)):
@@ -102,7 +102,7 @@ class ModelConfigService:
 
     def patch_configs(
         self, user_id: UUID, updates: Mapping[str, Mapping[str, Any]]
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
         """
         Upsert one or more per-agent configs.
 
@@ -127,16 +127,12 @@ class ModelConfigService:
             model = str(model_value).strip() if isinstance(model_value, str) else ""
             if not model:
                 default_model = _default_agent_config(agent_key).get("model")
-                model = (
-                    str(default_model).strip() if isinstance(default_model, str) else ""
-                )
+                model = str(default_model).strip() if isinstance(default_model, str) else ""
 
             if provider == "openai" and not model:
-                raise ValueError(
-                    f"OpenAI provider requires a model for agent {agent_key}"
-                )
+                raise ValueError(f"OpenAI provider requires a model for agent {agent_key}")
 
-            temperature: Optional[float] = None
+            temperature: float | None = None
             if isinstance(temp_value, (int, float)):
                 temperature = float(temp_value)
 

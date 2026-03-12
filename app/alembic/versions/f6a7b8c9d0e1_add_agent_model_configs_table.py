@@ -6,18 +6,18 @@ Create Date: 2026-01-20 13:50:00.000000
 
 """
 
-from typing import Sequence, Union
-
-from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID
 import uuid
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects.postgresql import UUID
 
 # revision identifiers, used by Alembic.
 revision = "f6a7b8c9d0e1"
 down_revision = "e5f6g7h8i9j0"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -60,9 +60,7 @@ def upgrade() -> None:
         ),
     )
 
-    op.create_index(
-        "idx_agent_model_configs_user_id", "agent_model_configs", ["user_id"]
-    )
+    op.create_index("idx_agent_model_configs_user_id", "agent_model_configs", ["user_id"])
     op.create_index(
         "idx_agent_model_configs_user_agent",
         "agent_model_configs",
@@ -72,8 +70,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "idx_agent_model_configs_user_agent", table_name="agent_model_configs"
-    )
+    op.drop_index("idx_agent_model_configs_user_agent", table_name="agent_model_configs")
     op.drop_index("idx_agent_model_configs_user_id", table_name="agent_model_configs")
     op.drop_table("agent_model_configs")

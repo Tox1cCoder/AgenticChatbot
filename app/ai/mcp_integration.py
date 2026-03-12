@@ -3,23 +3,24 @@ import json
 import logging
 import os
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from anyio import ClosedResourceError, BrokenResourceError
+from anyio import BrokenResourceError, ClosedResourceError
+from langchain_core.tools import BaseTool
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
+from pydantic import BaseModel as PydanticBaseModel
 
 from app.core.config import settings
 from app.core.exceptions.mcp import (
+    ServerConfigurationError,
     ServerNotFoundError,
     ToolNotFoundError,
-    ServerConfigurationError,
 )
-from .utils import get_error_recovery_hint
 
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_mcp_adapters.tools import load_mcp_tools
-from langchain_core.tools import BaseTool
-from pydantic import BaseModel as PydanticBaseModel
+from .utils import get_error_recovery_hint
 
 if TYPE_CHECKING:
     pass
@@ -34,7 +35,7 @@ class MCPManager:
 
     DEFAULT_SERVERS = {"calculator", "tavily", "time"}
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: str | None = None):
         """
         Initialize MCP Manager
 
@@ -42,20 +43,20 @@ class MCPManager:
             config_path: Path to MCP configuration JSON file
         """
         self.config_path = config_path or self._get_default_config_path()
-        self.config: Dict[str, Any] = {}
-        self.client: Optional[MultiServerMCPClient] = None
-        self._tools: List[BaseTool] = []
-        self._session_contexts: Dict[str, Any] = {}  # Store context managers
-        self._server_tools: Dict[str, List[BaseTool]] = {}
-        self._tool_index: Dict[str, List[BaseTool]] = {}
-        self._tool_server_map: Dict[int, str] = {}
+        self.config: dict[str, Any] = {}
+        self.client: MultiServerMCPClient | None = None
+        self._tools: list[BaseTool] = []
+        self._session_contexts: dict[str, Any] = {}  # Store context managers
+        self._server_tools: dict[str, list[BaseTool]] = {}
+        self._tool_index: dict[str, list[BaseTool]] = {}
+        self._tool_server_map: dict[int, str] = {}
 
     def _get_default_config_path(self) -> str:
         return str(Path(__file__).parent / "mcp_config.json")
 
-    def _load_config(self) -> Dict[str, Any]:
+    def _load_config(self) -> dict[str, Any]:
         try:
-            with open(self.config_path, "r") as f:
+            with open(self.config_path) as f:
                 config = json.load(f)
                 return config
         except FileNotFoundError:
@@ -72,7 +73,7 @@ class MCPManager:
         if not isinstance(mcp_servers, dict):
             self.config["mcp_servers"] = {}
 
-    def _build_server_config(self) -> Dict[str, Dict[str, Any]]:
+    def _build_server_config(self) -> dict[str, dict[str, Any]]:
         mcp_servers = self.config.get("mcp_servers", {})
         server_config = {}
 
@@ -119,7 +120,7 @@ class MCPManager:
 
         return server_config
 
-    def _get_enabled_server_names(self) -> List[str]:
+    def _get_enabled_server_names(self) -> list[str]:
         """Return names of all enabled servers from configuration."""
         self._ensure_config_loaded()
         servers = self.config.get("mcp_servers", {})
@@ -148,14 +149,12 @@ class MCPManager:
         await self.initialize()
         return bool(self.client)
 
-    async def get_tools(self) -> List[BaseTool]:
+    async def get_tools(self) -> list[BaseTool]:
         if not await self._ensure_client_ready():
             return []
 
         enabled_servers = self._get_enabled_server_names()
-        missing_servers = [
-            name for name in enabled_servers if name not in self._server_tools
-        ]
+        missing_servers = [name for name in enabled_servers if name not in self._server_tools]
 
         for server_name in missing_servers:
             try:
@@ -173,7 +172,7 @@ class MCPManager:
         if not missing_servers and self._tools:
             return self._tools
 
-        combined_tools: List[BaseTool] = []
+        combined_tools: list[BaseTool] = []
         for server_name in enabled_servers:
             server_tools = self._server_tools.get(server_name, [])
             combined_tools.extend(server_tools)
@@ -181,7 +180,7 @@ class MCPManager:
         self._tools = combined_tools
         return self._tools
 
-    async def get_server_tools(self, server_name: str) -> List[BaseTool]:
+    async def get_server_tools(self, server_name: str) -> list[BaseTool]:
         if not await self._ensure_client_ready():
             return []
 
@@ -275,9 +274,7 @@ class MCPManager:
                         filtered[key] = filtered_value
                 elif isinstance(value, list):
                     filtered[key] = [
-                        self._filter_schema_recursively(item)
-                        for item in value
-                        if item is not None
+                        self._filter_schema_recursively(item) for item in value if item is not None
                     ]
                 else:
                     filtered[key] = value
@@ -290,17 +287,13 @@ class MCPManager:
 
             return filtered
         elif isinstance(schema, list):
-            return [
-                self._filter_schema_recursively(item)
-                for item in schema
-                if item is not None
-            ]
+            return [self._filter_schema_recursively(item) for item in schema if item is not None]
         else:
             return schema
 
     def _remove_non_string_enums(self, schema: Any) -> Any:
         if isinstance(schema, dict):
-            cleaned: Dict[str, Any] = {}
+            cleaned: dict[str, Any] = {}
             for key, value in schema.items():
                 if key == "enum" and isinstance(value, list):
                     if any(not isinstance(item, str) for item in value):
@@ -311,14 +304,12 @@ class MCPManager:
             return [self._remove_non_string_enums(item) for item in schema]
         return schema
 
-    def _clean_tool_schemas(self, tools: List[BaseTool]) -> List[BaseTool]:
+    def _clean_tool_schemas(self, tools: list[BaseTool]) -> list[BaseTool]:
 
         cleaned_tools = []
         for tool in tools:
             # Check if tool has an args_schema
-            tool_had_no_schema = (
-                not hasattr(tool, "args_schema") or tool.args_schema is None
-            )
+            tool_had_no_schema = not hasattr(tool, "args_schema") or tool.args_schema is None
             if tool_had_no_schema:
                 # Add empty properties schema for tools without args_schema
                 # Only set to dict for tools that originally had None
@@ -343,9 +334,7 @@ class MCPManager:
                 cleaned_tools.append(tool)
                 continue
 
-            if isinstance(args_schema, type) and issubclass(
-                args_schema, PydanticBaseModel
-            ):
+            if isinstance(args_schema, type) and issubclass(args_schema, PydanticBaseModel):
                 # Get the original schema
                 original_schema_method = args_schema.model_json_schema
 
@@ -371,7 +360,7 @@ class MCPManager:
 
         return cleaned_tools
 
-    def _serialize_args_schema(self, schema: Any) -> Dict[str, Any]:
+    def _serialize_args_schema(self, schema: Any) -> dict[str, Any]:
         """Normalize a tool args schema into a serializable dictionary."""
         if not schema:
             return {}
@@ -381,10 +370,11 @@ class MCPManager:
         if isinstance(schema, dict):
             result_schema = schema
         elif PydanticBaseModel is not None:
-            if isinstance(schema, type) and issubclass(schema, PydanticBaseModel):
-                if hasattr(schema, "model_json_schema"):
-                    result_schema = schema.model_json_schema()
-            elif isinstance(schema, PydanticBaseModel):
+            if (
+                isinstance(schema, type)
+                and issubclass(schema, PydanticBaseModel)
+                or isinstance(schema, PydanticBaseModel)
+            ):
                 if hasattr(schema, "model_json_schema"):
                     result_schema = schema.model_json_schema()
 
@@ -404,21 +394,20 @@ class MCPManager:
                     except Exception:
                         continue
 
-        unsupported_keys = {"$schema", "additionalProperties"}
         if result_schema and isinstance(result_schema, dict):
             result_schema = self._filter_schema_recursively(result_schema)
 
         return result_schema
 
-    def get_tool_args_schema(self, tool: BaseTool) -> Dict[str, Any]:
+    def get_tool_args_schema(self, tool: BaseTool) -> dict[str, Any]:
         """Public helper to expose argument schema for a tool."""
         return self._serialize_args_schema(getattr(tool, "args_schema", None))
 
-    def get_server_for_tool(self, tool: BaseTool) -> Optional[str]:
+    def get_server_for_tool(self, tool: BaseTool) -> str | None:
         """Return the server name that provided the given tool, if known."""
         return self._tool_server_map.get(id(tool))
 
-    async def get_servers_for_tool_name(self, tool_name: str) -> List[str]:
+    async def get_servers_for_tool_name(self, tool_name: str) -> list[str]:
         """Return all server names that expose a tool with the given name."""
         await self.get_tools()
         servers = []
@@ -449,7 +438,7 @@ class MCPManager:
             self.client = None
             logger.debug("MCP client cleaned up")
 
-    def add_server(self, server_name: str, server_config: Dict[str, Any]) -> None:
+    def add_server(self, server_name: str, server_config: dict[str, Any]) -> None:
         self._ensure_config_loaded()
 
         if "mcp_servers" not in self.config:
@@ -530,9 +519,7 @@ class MCPManager:
                 logger.debug(f"Closed session for server: {server_name}")
             except RuntimeError as e:
                 if "different task" in str(e) or "already running" in str(e):
-                    logger.warning(
-                        f"Cannot close session for {server_name} from different task"
-                    )
+                    logger.warning(f"Cannot close session for {server_name} from different task")
                 else:
                     logger.warning(f"Error closing session for {server_name}: {e}")
             except Exception as e:
@@ -579,7 +566,7 @@ class MCPManager:
         # Notify registry of configuration change
         self._notify_registry_change()
 
-    async def get_all_tools_info(self) -> List[Dict[str, Any]]:
+    async def get_all_tools_info(self) -> list[dict[str, Any]]:
         """
         Get information about all available tools
 
@@ -587,13 +574,11 @@ class MCPManager:
             List of dicts with tool metadata (name, description, args_schema, server_name)
         """
         await self.get_tools()
-        tools_info: List[Dict[str, Any]] = []
+        tools_info: list[dict[str, Any]] = []
 
         for server_name, tools in self._server_tools.items():
             for tool in tools:
-                args_schema = self._serialize_args_schema(
-                    getattr(tool, "args_schema", None)
-                )
+                args_schema = self._serialize_args_schema(getattr(tool, "args_schema", None))
                 tools_info.append(
                     {
                         "name": tool.name,
@@ -610,7 +595,7 @@ class MCPManager:
         """Check if an error indicates a dead/closed MCP session."""
         return isinstance(error, (ClosedResourceError, BrokenResourceError))
 
-    async def reconnect_server(self, server_name: str) -> List[BaseTool]:
+    async def reconnect_server(self, server_name: str) -> list[BaseTool]:
         """
         Close and re-establish the session for *server_name*, returning fresh tools.
 
@@ -647,7 +632,7 @@ class MCPManager:
         fresh_tools = await self.get_server_tools(server_name)
 
         # Rebuild the combined tools list
-        combined: List[BaseTool] = []
+        combined: list[BaseTool] = []
         for sn in self._get_enabled_server_names():
             combined.extend(self._server_tools.get(sn, []))
         self._tools = combined
@@ -659,7 +644,7 @@ class MCPManager:
         )
         return fresh_tools
 
-    async def reconnect_and_get_tool(self, tool_name: str) -> Optional[BaseTool]:
+    async def reconnect_and_get_tool(self, tool_name: str) -> BaseTool | None:
         """
         Reconnect whichever server owns *tool_name* and return a fresh tool.
 
@@ -667,7 +652,7 @@ class MCPManager:
         longer appears after reconnect.
         """
         # Determine which server provided this tool
-        server_name: Optional[str] = None
+        server_name: str | None = None
         for sname, tools in self._server_tools.items():
             if any(t.name == tool_name for t in tools):
                 server_name = sname
@@ -688,8 +673,8 @@ class MCPManager:
         return self._tool_index.get(tool_name, [None])[0]
 
     async def get_tool_by_name(
-        self, tool_name: str, server_name: Optional[str] = None
-    ) -> Optional[BaseTool]:
+        self, tool_name: str, server_name: str | None = None
+    ) -> BaseTool | None:
         """
         Get a specific tool by name
 
@@ -711,9 +696,7 @@ class MCPManager:
         candidates = self._tool_index.get(tool_name, [])
         return candidates[0] if candidates else None
 
-    async def execute_tool(
-        self, tool_name: str, arguments: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """
         Execute a tool for testing purposes
 
@@ -752,8 +735,7 @@ class MCPManager:
         except (ClosedResourceError, BrokenResourceError) as session_err:
             # MCP session died – try to reconnect once and retry
             logger.warning(
-                "Session error executing tool '%s' on server '%s': %s. "
-                "Attempting reconnect…",
+                "Session error executing tool '%s' on server '%s': %s. Attempting reconnect…",
                 tool_name,
                 server_name,
                 session_err,
@@ -853,7 +835,7 @@ class MCPManager:
         else:
             return "unknown_error"
 
-    def get_servers_status(self) -> Dict[str, Dict[str, Any]]:
+    def get_servers_status(self) -> dict[str, dict[str, Any]]:
         """
         Get status of all configured servers
 
@@ -877,7 +859,7 @@ class MCPManager:
 
         return status
 
-    def get_server_info(self, server_name: str) -> Dict[str, Any]:
+    def get_server_info(self, server_name: str) -> dict[str, Any]:
         """
         Get detailed information about a specific server
 

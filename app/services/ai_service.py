@@ -1,28 +1,29 @@
 import asyncio
-from typing import Optional, List, Dict, Any
+from typing import Any
 from uuid import UUID
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
+
 from ..ai.graph import create_workflow
+from ..ai.prompts import TITLE_GENERATION_PROMPT
 from ..ai.schemas import (
     AgentMessage,
     AgentResponse,
     AgentType,
-    MessageRole,
     InterruptDecision,
+    MessageRole,
 )
-from langgraph.checkpoint.base import BaseCheckpointSaver
-from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
-from ..repositories.conversation import ConversationRepository
-from ..repositories.document import DocumentRepository
-from ..utils.text_processing import sanitize_persona
 from ..ai.utils import make_json_safe
 from ..core.response_constants import (
     ERROR_NO_RESPONSE,
     ERROR_NO_RESPONSE_RESUME,
     UNKNOWN_ERROR,
 )
-from ..ai.prompts import TITLE_GENERATION_PROMPT
+from ..repositories.conversation import ConversationRepository
+from ..repositories.document import DocumentRepository
+from ..utils.text_processing import sanitize_persona
 
 
 class AIService:
@@ -31,8 +32,8 @@ class AIService:
         qdrant_client: QdrantClient,
         embedding_model: SentenceTransformer,
         conversation_repository: ConversationRepository,
-        document_repository: Optional[DocumentRepository] = None,
-        checkpointer: Optional[BaseCheckpointSaver] = None,
+        document_repository: DocumentRepository | None = None,
+        checkpointer: BaseCheckpointSaver | None = None,
     ):
         self.checkpointer = checkpointer
         self.conversation_repository = conversation_repository
@@ -44,7 +45,7 @@ class AIService:
             document_repository=document_repository,
         )
 
-    def _load_persona(self, conversation_id: UUID) -> Optional[str]:
+    def _load_persona(self, conversation_id: UUID) -> str | None:
         """Load persona from conversation"""
         try:
             conversation = self.conversation_repository.get_by_id(conversation_id)
@@ -66,20 +67,18 @@ class AIService:
         conversation_id: UUID,
         user_id: UUID,
         message: str,
-        attachments: Optional[list] = None,
-        current_task: Optional[Dict[str, Any]] = None,
-        all_tasks: Optional[List[Dict[str, Any]]] = None,
+        attachments: list | None = None,
+        current_task: dict[str, Any] | None = None,
+        all_tasks: list[dict[str, Any]] | None = None,
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
-        existing_tasks: Optional[List[Dict[str, Any]]] = None,
-        model_request: Optional[Dict[str, Any]] = None,
-        persona: Optional[str] = None,
-        plan_lifecycle: Optional[str] = None,
+        existing_tasks: list[dict[str, Any]] | None = None,
+        model_request: dict[str, Any] | None = None,
+        persona: str | None = None,
+        plan_lifecycle: str | None = None,
     ) -> AgentResponse:
 
-        thread_id = (
-            str(conversation_id) if conversation_id and self.checkpointer else None
-        )
+        thread_id = str(conversation_id) if conversation_id and self.checkpointer else None
 
         if persona is None:
             persona = self._load_persona(conversation_id)
@@ -111,17 +110,17 @@ class AIService:
     async def generate_bot_response(
         self,
         user_message: str,
-        conversation_id: Optional[UUID] = None,
-        user_id: Optional[UUID] = None,
-        attachments: Optional[list] = None,
-        current_task: Optional[Dict[str, Any]] = None,
-        all_tasks: Optional[List[Dict[str, Any]]] = None,
+        conversation_id: UUID | None = None,
+        user_id: UUID | None = None,
+        attachments: list | None = None,
+        current_task: dict[str, Any] | None = None,
+        all_tasks: list[dict[str, Any]] | None = None,
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
-        existing_tasks: Optional[List[Dict[str, Any]]] = None,
-        model_request: Optional[Dict[str, Any]] = None,
-        persona: Optional[str] = None,
-        plan_lifecycle: Optional[str] = None,
+        existing_tasks: list[dict[str, Any]] | None = None,
+        model_request: dict[str, Any] | None = None,
+        persona: str | None = None,
+        plan_lifecycle: str | None = None,
     ) -> AgentResponse:
 
         if conversation_id is None or user_id is None:
@@ -162,11 +161,9 @@ class AIService:
         self,
         conversation_id: UUID,
         user_id: UUID,
-        user_input: Optional[str] = None,
+        user_input: str | None = None,
     ) -> AgentResponse:
-        thread_id = (
-            str(conversation_id) if conversation_id and self.checkpointer else None
-        )
+        thread_id = str(conversation_id) if conversation_id and self.checkpointer else None
 
         if not thread_id:
             return self._build_error_response(
@@ -236,10 +233,7 @@ class AIService:
                 error_msg = event.get("error", UNKNOWN_ERROR)
                 yield {"type": "error", "error": error_msg}
 
-            elif event_type == "continuation_start":
-                yield event
-
-            elif event_type == "node_complete":
+            elif event_type == "continuation_start" or event_type == "node_complete":
                 yield event
 
             elif event_type == "interrupt":
@@ -248,9 +242,9 @@ class AIService:
                 if isinstance(interrupt_payload, dict):
                     interrupt_metadata = interrupt_payload.get("metadata")
                     if isinstance(interrupt_metadata, dict):
-                        message_value = interrupt_metadata.get(
-                            "message"
-                        ) or interrupt_metadata.get("reason")
+                        message_value = interrupt_metadata.get("message") or interrupt_metadata.get(
+                            "reason"
+                        )
                         if isinstance(message_value, str) and message_value.strip():
                             interrupt_message = message_value.strip()
                 yield {
@@ -271,21 +265,19 @@ class AIService:
     async def generate_bot_response_stream(
         self,
         user_message: str,
-        conversation_id: Optional[UUID] = None,
-        user_id: Optional[UUID] = None,
-        attachments: Optional[list] = None,
-        current_task: Optional[Dict[str, Any]] = None,
-        all_tasks: Optional[List[Dict[str, Any]]] = None,
+        conversation_id: UUID | None = None,
+        user_id: UUID | None = None,
+        attachments: list | None = None,
+        current_task: dict[str, Any] | None = None,
+        all_tasks: list[dict[str, Any]] | None = None,
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
-        existing_tasks: Optional[List[Dict[str, Any]]] = None,
-        model_request: Optional[Dict[str, Any]] = None,
-        persona: Optional[str] = None,
-        plan_lifecycle: Optional[str] = None,
+        existing_tasks: list[dict[str, Any]] | None = None,
+        model_request: dict[str, Any] | None = None,
+        persona: str | None = None,
+        plan_lifecycle: str | None = None,
     ):
-        thread_id = (
-            str(conversation_id) if conversation_id and self.checkpointer else None
-        )
+        thread_id = str(conversation_id) if conversation_id and self.checkpointer else None
 
         if persona is None and conversation_id:
             persona = self._load_persona(conversation_id)
@@ -313,7 +305,7 @@ class AIService:
     async def resume_interrupted_execution_stream(
         self,
         thread_id: str,
-        decisions: List[InterruptDecision],
+        decisions: list[InterruptDecision],
     ):
         if not self.checkpointer:
             yield {"type": "error", "error": "Cannot resume: Checkpointing not enabled"}
@@ -330,12 +322,10 @@ class AIService:
     def get_bot_response_sync(
         self,
         user_message: str,
-        conversation_id: Optional[UUID] = None,
-        user_id: Optional[UUID] = None,
+        conversation_id: UUID | None = None,
+        user_id: UUID | None = None,
     ) -> AgentResponse:
-        return asyncio.run(
-            self.generate_bot_response(user_message, conversation_id, user_id)
-        )
+        return asyncio.run(self.generate_bot_response(user_message, conversation_id, user_id))
 
     async def generate_conversation_title(self, user_message: str) -> str:
         """

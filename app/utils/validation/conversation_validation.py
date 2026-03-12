@@ -4,8 +4,8 @@ Conversation validation utilities
 
 from uuid import UUID
 
+from app.core.exceptions import AuthorizationException, ResourceNotFoundException
 from app.repositories.conversation import ConversationRepository
-from app.core.exceptions import ResourceNotFoundException, AuthorizationException
 
 
 class ConversationValidationUtils:
@@ -25,9 +25,7 @@ class ConversationValidationUtils:
 
     def validate_user_owns_conversation(self, user_id: UUID, conversation_id: UUID):
         """Validate that a user owns a specific conversation"""
-        if not self.conversation_repository.user_owns_conversation(
-            user_id, conversation_id
-        ):
+        if not self.conversation_repository.user_owns_conversation(user_id, conversation_id):
             raise AuthorizationException(
                 detail="Access denied to this conversation",
                 error_code="CONVERSATION_ACCESS_DENIED",

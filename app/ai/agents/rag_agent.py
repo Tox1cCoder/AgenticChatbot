@@ -1,48 +1,48 @@
+import asyncio
+import base64
 import json
 import logging
-import re
-import base64
-import asyncio
 import queue
+import re
 import threading
-from typing import Optional, List, Dict, Any, AsyncIterator
-from uuid import UUID
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
+from uuid import UUID
 
 from google.genai import types
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.tools import BaseTool
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
-    Filter,
     FieldCondition,
-    MatchValue,
+    Filter,
     FilterSelector,
+    MatchValue,
 )
-from sentence_transformers import SentenceTransformer, CrossEncoder
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from langchain_core.tools import BaseTool
-from langchain.agents import create_agent
+from sentence_transformers import CrossEncoder, SentenceTransformer
 
-from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..prompts import build_rag_prompt, AGENTIC_RAG_SYSTEM_PROMPT
+from ...core.config import Settings, settings
+from ...database.session import SessionLocal
+from ...repositories.document_image import DocumentImageRepository
 from ..agent_config import (
-    create_langchain_model,
-    build_gemini_generate_config,
     AGENT_CONFIG,
+    build_gemini_generate_config,
+    create_langchain_model,
 )
-from ..rag_tools import create_search_documents_tool
 from ..mcp_integration import get_global_mcp_manager
 from ..mcp_registry import get_mcp_tools_generation
 from ..model_factory import ModelFactory
-from ...core.config import settings, Settings
-from .base_agent import BaseAgent
-
+from ..prompts import AGENTIC_RAG_SYSTEM_PROMPT, build_rag_prompt
+from ..rag_tools import create_search_documents_tool
+from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..utils import (
     coerce_response_text,
     extract_agent_execution_info,
     get_error_recovery_hint,
 )
-from ...repositories.document_image import DocumentImageRepository
-from ...database.session import SessionLocal
+from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +131,7 @@ class RAGAgent(BaseAgent):
     async def _init_tools(self):
         current_generation = get_mcp_tools_generation()
         needs_refresh = (
-            self.mcp_manager is None
-            or self._tools_generation_seen != current_generation
+            self.mcp_manager is None or self._tools_generation_seen != current_generation
         )
 
         if not needs_refresh:
@@ -183,9 +182,7 @@ class RAGAgent(BaseAgent):
                     len(active_servers),
                 )
             else:
-                logger.warning(
-                    "No MCP tools available for RAGAgent; running without tools"
-                )
+                logger.warning("No MCP tools available for RAGAgent; running without tools")
         else:
             # MCP failed but we should still have search_documents for agentic mode
             if self.tools:
@@ -194,13 +191,9 @@ class RAGAgent(BaseAgent):
                     len(self.tools),
                 )
 
-    def _create_agent_executor(self, tools: List[BaseTool], system_prompt: str):
+    def _create_agent_executor(self, tools: list[BaseTool], system_prompt: str):
 
-        tool_choice = (
-            settings.tool_choice_mode
-            if hasattr(settings, "tool_choice_mode")
-            else "auto"
-        )
+        tool_choice = settings.tool_choice_mode if hasattr(settings, "tool_choice_mode") else "auto"
 
         # Configure model with tool binding
         llm_with_tools = ModelFactory.bind_tools_to_model(
@@ -209,16 +202,14 @@ class RAGAgent(BaseAgent):
             tool_choice=tool_choice,
         )
 
-        agent = create_agent(
-            model=llm_with_tools, tools=tools, system_prompt=system_prompt
-        )
+        agent = create_agent(model=llm_with_tools, tools=tools, system_prompt=system_prompt)
 
         return agent
 
     async def process_message(
         self,
         message: AgentMessage,
-        conversation_id: Optional[str] = None,
+        conversation_id: str | None = None,
     ) -> AgentResponse:
 
         query = message.content or ""
@@ -294,9 +285,9 @@ class RAGAgent(BaseAgent):
         has_tool_binding = bool(tools_for_binding and self.langchain_model)
 
         response_text: str = ""
-        tools_used: List[str] = []
-        tool_artifacts: List[Dict[str, Any]] = []
-        error_message: Optional[str] = None
+        tools_used: list[str] = []
+        tool_artifacts: list[dict[str, Any]] = []
+        error_message: str | None = None
 
         resolved_request = self._resolve_model_request(model_request)
         provider = "gemini"
@@ -305,12 +296,9 @@ class RAGAgent(BaseAgent):
             (resolved_request or {}).get("temperature"),
             AGENT_CONFIG.get("rag", {}).get("temperature", 1.0),
         )
-        used_fallback = False
 
         if resolved_request and isinstance(resolved_request, dict):
-            requested_provider = (
-                str(resolved_request.get("provider") or "").strip().lower()
-            )
+            requested_provider = str(resolved_request.get("provider") or "").strip().lower()
             requested_model = resolved_request.get("model")
             if requested_provider in {"openai", "gemini"}:
                 provider = requested_provider
@@ -325,12 +313,10 @@ class RAGAgent(BaseAgent):
             if provider == "openai":
                 api_key = self._get_openai_api_key(request_user_id)
                 if not api_key:
-                    used_fallback = True
                     provider = "gemini"
                     effective_model_name = self.model_name
 
                 if provider == "openai" and images:
-                    used_fallback = True
                     provider = "gemini"
                     effective_model_name = self.model_name
 
@@ -345,11 +331,8 @@ class RAGAgent(BaseAgent):
                     )
                     try:
                         response = await self._ainvoke_with_retries(llm, prompt)
-                        response_text = coerce_response_text(
-                            getattr(response, "content", "")
-                        )
+                        response_text = coerce_response_text(getattr(response, "content", ""))
                     except Exception:
-                        used_fallback = True
                         provider = "gemini"
                         effective_model_name = self.model_name
                         response_text = await self._generate(prompt)
@@ -373,9 +356,7 @@ class RAGAgent(BaseAgent):
                     multimodal_prompt = self._augment_prompt_with_tool_context(
                         prompt, tool_response_text, tool_artifacts
                     )
-                    response_text = await self._generate_with_vision(
-                        multimodal_prompt, images
-                    )
+                    response_text = await self._generate_with_vision(multimodal_prompt, images)
                 elif images:
                     response_text = await self._generate_with_vision(prompt, images)
                 elif has_tool_binding:
@@ -407,9 +388,7 @@ class RAGAgent(BaseAgent):
 
         response_text = coerce_response_text(response_text)
 
-        response_message = AgentMessage(
-            role=MessageRole.ASSISTANT, content=response_text
-        )
+        response_message = AgentMessage(role=MessageRole.ASSISTANT, content=response_text)
 
         # Build grouped citations structure (documents_cited)
         documents_cited = []
@@ -417,11 +396,7 @@ class RAGAgent(BaseAgent):
             # Calculate aggregate stats for this document
             chunks = doc_info["chunks"]
             total_chunks = len(chunks)
-            avg_score = (
-                sum(c["score"] for c in chunks) / total_chunks
-                if total_chunks > 0
-                else 0.0
-            )
+            avg_score = sum(c["score"] for c in chunks) / total_chunks if total_chunks > 0 else 0.0
 
             document_entry = {
                 "document_id": doc_info["document_id"],
@@ -460,9 +435,7 @@ class RAGAgent(BaseAgent):
                 citations = verified_citations
                 citation_verification_enabled = True
                 citation_coverage = (
-                    (len(citations) / len(all_citations) * 100)
-                    if all_citations
-                    else 0.0
+                    (len(citations) / len(all_citations) * 100) if all_citations else 0.0
                 )
 
         # Calculate retrieval statistics
@@ -515,9 +488,7 @@ class RAGAgent(BaseAgent):
             metadata["tool_artifacts"] = tool_artifacts
             if not error_message:
                 error_entries = [
-                    artifact.get("error")
-                    for artifact in tool_artifacts
-                    if artifact.get("error")
+                    artifact.get("error") for artifact in tool_artifacts if artifact.get("error")
                 ]
                 if error_entries:
                     error_message = error_entries[0]
@@ -543,8 +514,8 @@ class RAGAgent(BaseAgent):
     async def stream_message(
         self,
         message: AgentMessage,
-        conversation_id: Optional[str] = None,
-    ) -> AsyncIterator[Dict[str, Any]]:
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         query = message.content or ""
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
@@ -613,9 +584,9 @@ class RAGAgent(BaseAgent):
 
         accumulated_content = ""
         accumulated_thinking = ""  # Accumulate thinking content for metadata
-        tools_used: List[str] = []
-        tool_artifacts: List[Dict[str, Any]] = []
-        error_message: Optional[str] = None
+        tools_used: list[str] = []
+        tool_artifacts: list[dict[str, Any]] = []
+        error_message: str | None = None
 
         try:
             if images and has_tool_binding:
@@ -633,9 +604,7 @@ class RAGAgent(BaseAgent):
                 multimodal_prompt = self._augment_prompt_with_tool_context(
                     prompt, tool_response_text, tool_artifacts
                 )
-                response_text = await self._generate_with_vision(
-                    multimodal_prompt, images
-                )
+                response_text = await self._generate_with_vision(multimodal_prompt, images)
                 # Yield as single token
                 yield {"type": "token", "content": response_text}
                 accumulated_content = response_text
@@ -686,20 +655,14 @@ class RAGAgent(BaseAgent):
 
         accumulated_content = coerce_response_text(accumulated_content)
 
-        response_message = AgentMessage(
-            role=MessageRole.ASSISTANT, content=accumulated_content
-        )
+        response_message = AgentMessage(role=MessageRole.ASSISTANT, content=accumulated_content)
 
         # Build grouped citations structure (documents_cited)
         documents_cited = []
         for doc_key, doc_info in doc_grouping.items():
             chunks = doc_info["chunks"]
             total_chunks = len(chunks)
-            avg_score = (
-                sum(c["score"] for c in chunks) / total_chunks
-                if total_chunks > 0
-                else 0.0
-            )
+            avg_score = sum(c["score"] for c in chunks) / total_chunks if total_chunks > 0 else 0.0
 
             document_entry = {
                 "document_id": doc_info["document_id"],
@@ -736,9 +699,7 @@ class RAGAgent(BaseAgent):
                 citations = verified_citations
                 citation_verification_enabled = True
                 citation_coverage = (
-                    (len(citations) / len(all_citations) * 100)
-                    if all_citations
-                    else 0.0
+                    (len(citations) / len(all_citations) * 100) if all_citations else 0.0
                 )
 
         avg_score = (
@@ -788,9 +749,7 @@ class RAGAgent(BaseAgent):
             metadata["tool_artifacts"] = tool_artifacts
             if not error_message:
                 error_entries = [
-                    artifact.get("error")
-                    for artifact in tool_artifacts
-                    if artifact.get("error")
+                    artifact.get("error") for artifact in tool_artifacts if artifact.get("error")
                 ]
                 if error_entries:
                     error_message = error_entries[0]
@@ -818,9 +777,9 @@ class RAGAgent(BaseAgent):
     async def _generate_with_tools_stream(
         self,
         prompt: str,
-        conversation_id: Optional[str] = None,
-        tools_to_bind: Optional[List[BaseTool]] = None,
-    ) -> AsyncIterator[Dict[str, Any]]:
+        conversation_id: str | None = None,
+        tools_to_bind: list[BaseTool] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         """
         Generate streaming response with tool calling support.
         Yields token chunks and tool execution events.
@@ -857,9 +816,9 @@ class RAGAgent(BaseAgent):
                         continue
 
                     additional_kwargs = getattr(chunk, "additional_kwargs", {})
-                    is_thinking = additional_kwargs.get(
-                        "thought"
-                    ) or additional_kwargs.get("thinking")
+                    is_thinking = additional_kwargs.get("thought") or additional_kwargs.get(
+                        "thinking"
+                    )
 
                     if is_thinking:
                         yield {"type": "thinking", "content": token}
@@ -920,10 +879,10 @@ class RAGAgent(BaseAgent):
     def _verify_citations(
         self,
         response_text: str,
-        retrieved_docs: List[Dict[str, Any]],
-        all_citations: List[Dict[str, Any]],
-        doc_grouping: Dict[str, Any],
-    ) -> Optional[List[Dict[str, Any]]]:
+        retrieved_docs: list[dict[str, Any]],
+        all_citations: list[dict[str, Any]],
+        doc_grouping: dict[str, Any],
+    ) -> list[dict[str, Any]] | None:
         try:
             citation_patterns = [
                 r"\[Document\s+(\d+)\]",  # [Document 1]
@@ -1017,9 +976,7 @@ class RAGAgent(BaseAgent):
 
             while True:
                 try:
-                    item = await loop.run_in_executor(
-                        None, lambda: chunk_queue.get(timeout=60)
-                    )
+                    item = await loop.run_in_executor(None, lambda: chunk_queue.get(timeout=60))
                 except Exception as e:
                     raise RuntimeError(f"Timeout waiting for Gemini stream: {e}")
 
@@ -1061,9 +1018,9 @@ class RAGAgent(BaseAgent):
         self,
         prompt: str,
         streaming_callback=None,
-        conversation_id: Optional[str] = None,
-        tools_to_bind: Optional[List[BaseTool]] = None,
-    ) -> tuple[str, List[str], List[Dict[str, Any]]]:
+        conversation_id: str | None = None,
+        tools_to_bind: list[BaseTool] | None = None,
+    ) -> tuple[str, list[str], list[dict[str, Any]]]:
         try:
             tools = tools_to_bind
             if tools is None:
@@ -1097,16 +1054,14 @@ class RAGAgent(BaseAgent):
         self,
         base_prompt: str,
         tool_response_text: str,
-        tool_artifacts: List[Dict[str, Any]],
+        tool_artifacts: list[dict[str, Any]],
     ) -> str:
-        sections: List[str] = [base_prompt.rstrip()]
+        sections: list[str] = [base_prompt.rstrip()]
 
-        context_chunks: List[str] = []
+        context_chunks: list[str] = []
 
         if tool_response_text:
-            context_chunks.append(
-                "Tool-assisted analysis:\n" + tool_response_text.strip()
-            )
+            context_chunks.append("Tool-assisted analysis:\n" + tool_response_text.strip())
 
         if tool_artifacts:
             try:
@@ -1128,8 +1083,8 @@ class RAGAgent(BaseAgent):
         return "\n\n".join(sections)
 
     async def _search(
-        self, query: str, top_k: int = None, conversation_id: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        self, query: str, top_k: int = None, conversation_id: str | None = None
+    ) -> list[dict[str, Any]]:
         # Use configured top_k if not specified
         if top_k is None:
             top_k = self.top_k
@@ -1141,9 +1096,7 @@ class RAGAgent(BaseAgent):
         if conversation_id:
             search_filter = Filter(
                 must=[
-                    FieldCondition(
-                        key="conversation_id", match=MatchValue(value=conversation_id)
-                    )
+                    FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id))
                 ]
             )
 
@@ -1182,8 +1135,8 @@ class RAGAgent(BaseAgent):
         return results
 
     async def _rerank_results(
-        self, query: str, results: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+        self, query: str, results: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         if not self.reranker or not results:
             return results
 
@@ -1206,8 +1159,8 @@ class RAGAgent(BaseAgent):
         return results
 
     async def _fetch_images_for_chunks(
-        self, retrieved_docs: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
+        self, retrieved_docs: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         images = []
         seen_image_ids = set()
 
@@ -1268,13 +1221,9 @@ class RAGAgent(BaseAgent):
             "high": types.MediaResolution.MEDIA_RESOLUTION_HIGH,
         }
         config_value = self.settings.media_resolution
-        return resolution_map.get(
-            config_value, types.MediaResolution.MEDIA_RESOLUTION_HIGH
-        )
+        return resolution_map.get(config_value, types.MediaResolution.MEDIA_RESOLUTION_HIGH)
 
-    async def _generate_with_vision(
-        self, prompt: str, images: List[Dict[str, Any]]
-    ) -> str:
+    async def _generate_with_vision(self, prompt: str, images: list[dict[str, Any]]) -> str:
         try:
             parts = []
             media_resolution = self._get_media_resolution()
@@ -1337,9 +1286,7 @@ class RAGAgent(BaseAgent):
                                 answer_parts.append(part.text)
 
                 # Store thinking in class attribute for later retrieval
-                self._last_thinking_summary = (
-                    "\n".join(thinking_parts) if thinking_parts else None
-                )
+                self._last_thinking_summary = "\n".join(thinking_parts) if thinking_parts else None
                 return (
                     "".join(answer_parts)
                     if answer_parts
@@ -1359,23 +1306,17 @@ class RAGAgent(BaseAgent):
     def get_status(self) -> dict:
         try:
             collections = self.qdrant_client.get_collections()
-            collection_exists = any(
-                c.name == self.collection_name for c in collections.collections
-            )
+            collection_exists = any(c.name == self.collection_name for c in collections.collections)
 
             collection_info = None
             if collection_exists:
-                collection_info = self.qdrant_client.get_collection(
-                    self.collection_name
-                )
+                collection_info = self.qdrant_client.get_collection(self.collection_name)
 
             return {
                 "status": "healthy",
                 "collection_exists": collection_exists,
                 "collection_name": self.collection_name,
-                "vectors_count": (
-                    collection_info.vectors_count if collection_info else 0
-                ),
+                "vectors_count": (collection_info.vectors_count if collection_info else 0),
                 "embedding_model": self.embedding_model,
                 "embedding_dimension": self.embedding_dimension,
             }
@@ -1416,11 +1357,7 @@ class RAGAgent(BaseAgent):
 
             # Delete vectors from Qdrant
             delete_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key="document_id", match=MatchValue(value=document_id)
-                    )
-                ]
+                must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))]
             )
 
             result = self.qdrant_client.delete(
@@ -1436,14 +1373,12 @@ class RAGAgent(BaseAgent):
                 "operation_result": str(result),
             }
         except Exception as e:
-            logger.error(
-                f"Error deleting vectors for document {document_id}: {e}", exc_info=True
-            )
+            logger.error(f"Error deleting vectors for document {document_id}: {e}", exc_info=True)
             return {"success": False, "document_id": document_id, "error": str(e)}
 
     # === Agentic RAG Content Retrieval Methods ===
 
-    async def get_document_full_content(self, document_id: str) -> Optional[str]:
+    async def get_document_full_content(self, document_id: str) -> str | None:
         try:
             all_results = []
             offset = None
@@ -1453,9 +1388,7 @@ class RAGAgent(BaseAgent):
                     collection_name=self.collection_name,
                     scroll_filter=Filter(
                         must=[
-                            FieldCondition(
-                                key="document_id", match=MatchValue(value=document_id)
-                            )
+                            FieldCondition(key="document_id", match=MatchValue(value=document_id))
                         ]
                     ),
                     limit=1000,
@@ -1470,9 +1403,7 @@ class RAGAgent(BaseAgent):
             if not all_results:
                 return None
 
-            sorted_results = sorted(
-                all_results, key=lambda r: r.payload.get("chunk_index", 0)
-            )
+            sorted_results = sorted(all_results, key=lambda r: r.payload.get("chunk_index", 0))
 
             content = "\n\n".join(r.payload.get("content", "") for r in sorted_results)
 
@@ -1486,8 +1417,8 @@ class RAGAgent(BaseAgent):
             return None
 
     async def get_document_preview(
-        self, document_id: str, max_chars: Optional[int] = None
-    ) -> Optional[str]:
+        self, document_id: str, max_chars: int | None = None
+    ) -> str | None:
         """
         Get a preview of a document (first N characters).
         Used for agentic SCAN_ALL action.
@@ -1501,14 +1432,14 @@ class RAGAgent(BaseAgent):
 
         if len(content) > max_chars:
             preview = content[:max_chars]
-            preview += f"\n\n[PREVIEW - Total: {len(content):,} chars. Use READ_DOCUMENT for full content]"
+            preview += (
+                f"\n\n[PREVIEW - Total: {len(content):,} chars. Use READ_DOCUMENT for full content]"
+            )
             return preview
 
         return content
 
-    async def list_conversation_documents(
-        self, conversation_id: str
-    ) -> List[Dict[str, Any]]:
+    async def list_conversation_documents(self, conversation_id: str) -> list[dict[str, Any]]:
         try:
             all_results = []
             offset = None
@@ -1533,7 +1464,7 @@ class RAGAgent(BaseAgent):
                 if offset is None:
                     break
 
-            doc_map: Dict[str, Dict[str, Any]] = {}
+            doc_map: dict[str, dict[str, Any]] = {}
             for point in all_results:
                 doc_id = point.payload.get("document_id")
                 if not doc_id:
@@ -1556,7 +1487,7 @@ class RAGAgent(BaseAgent):
             )
             return []
 
-    async def grep_document(self, document_id: str, pattern: str) -> Optional[str]:
+    async def grep_document(self, document_id: str, pattern: str) -> str | None:
         """
         Search for regex pattern in a document's content.
         Used for agentic GREP_DOCUMENT action.
@@ -1625,7 +1556,7 @@ class RAGAgent(BaseAgent):
 
         return "\n".join(output)
 
-    async def get_document_images(self, document_id: str) -> List[Dict[str, Any]]:
+    async def get_document_images(self, document_id: str) -> list[dict[str, Any]]:
         images = []
         image_repo = DocumentImageRepository(SessionLocal)
         db_images = image_repo.get_by_document_id(UUID(document_id))
@@ -1656,7 +1587,7 @@ class RAGAgent(BaseAgent):
     async def _process_message_agentic(
         self,
         message: AgentMessage,
-        conversation_id: Optional[str] = None,
+        conversation_id: str | None = None,
     ) -> AgentResponse:
         """
         Process message using agentic document exploration.
@@ -1713,9 +1644,7 @@ class RAGAgent(BaseAgent):
 
         llm = self.langchain_model
         if resolved_request and isinstance(resolved_request, dict):
-            requested_provider = (
-                str(resolved_request.get("provider") or "").strip().lower()
-            )
+            requested_provider = str(resolved_request.get("provider") or "").strip().lower()
             requested_model = resolved_request.get("model")
             if requested_provider in {"openai", "gemini"}:
                 provider = requested_provider
@@ -1773,9 +1702,7 @@ class RAGAgent(BaseAgent):
         for hist_msg in conversation_history:
             if hasattr(hist_msg, "role") and hasattr(hist_msg, "content"):
                 role_value = (
-                    hist_msg.role.value
-                    if hasattr(hist_msg.role, "value")
-                    else hist_msg.role
+                    hist_msg.role.value if hasattr(hist_msg.role, "value") else hist_msg.role
                 )
                 if role_value == "user":
                     messages.append(HumanMessage(content=hist_msg.content))
@@ -1827,9 +1754,7 @@ class RAGAgent(BaseAgent):
         try:
             if provider == "openai" and not used_fallback:
                 try:
-                    response = await self._ainvoke_with_retries(
-                        llm_with_tools, messages
-                    )
+                    response = await self._ainvoke_with_retries(llm_with_tools, messages)
                 except Exception:
                     used_fallback = True
                     provider = "gemini"

@@ -8,6 +8,7 @@ Tests cover:
 
 import uuid
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 
@@ -171,8 +172,5 @@ class TestPlanLifecycleSync:
 
         assert synced is True
         svc._sync_todos_to_database.assert_called_once()
-        assert (
-            svc._sync_todos_to_database.call_args.kwargs["lifecycle"]
-            == PlanLifecycle.executing
-        )
+        assert svc._sync_todos_to_database.call_args.kwargs["lifecycle"] == PlanLifecycle.executing
         svc._set_plan_lifecycle.assert_not_called()
