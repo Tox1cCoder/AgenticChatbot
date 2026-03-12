@@ -53,6 +53,7 @@ from .utils import (
     make_json_safe,
     extract_content_from_result,
     apply_hitl_decisions,
+    find_pending_tool_call_message,
 )
 from .token_instrumentation import (
     trim_history_to_budget,
@@ -522,9 +523,27 @@ class MultiAgentWorkflow:
 
     async def _tool_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
-        last_message = messages[-1]
+        pending_tool_message = find_pending_tool_call_message(messages)
+        if not pending_tool_message:
+            return state
 
-        if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+        pending_message_idx, pending_message = pending_tool_message
+
+        # Skip tool calls that already have a ToolMessage (e.g. HITL rejections).
+        # This keeps the AIMessage tool_calls intact (needed for a valid LLM message
+        # sequence) while avoiding re-execution of calls that were already resolved.
+        already_resolved_ids = {
+            msg.tool_call_id
+            for msg in messages[pending_message_idx + 1 :]
+            if isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", None)
+        }
+        tool_calls_pending = [
+            tc for tc in pending_message.tool_calls
+            if normalize_tool_call(tc).get("id") not in already_resolved_ids
+        ]
+        if not tool_calls_pending:
+            # All tool calls for this AI message are already resolved (all rejected).
+            # Return early so _route_tool_output can send the agent back to re-respond.
             return state
 
         selected_agent_name = state.get("selected_agent")
@@ -534,11 +553,14 @@ class MultiAgentWorkflow:
                 "Skipping tool execution: selected_agent '%s' not in agent registry",
                 selected_agent_name,
             )
-            # Strip tool_calls from the last AIMessage to prevent downstream
-            # routing confusion (the tools node didn't execute anything).
-            if messages and isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
-                sanitized = AIMessage(content=messages[-1].content or "")
-                state["messages"] = messages[:-1] + [sanitized]
+            # Strip tool_calls from the pending AIMessage to prevent downstream
+            # routing confusion when the tools node cannot execute anything.
+            sanitized = AIMessage(content=pending_message.content or "")
+            state["messages"] = (
+                messages[:pending_message_idx]
+                + [sanitized]
+                + messages[pending_message_idx + 1 :]
+            )
             return state
 
         tool_map = await ensure_agent_tool_map(
@@ -555,7 +577,7 @@ class MultiAgentWorkflow:
         # Execute tools with context set for deferred tool loading support
         with tool_execution_context(conversation_id, user_id, agent_key):
             tool_outputs, tool_artifacts, all_images = await execute_tool_calls(
-                tool_calls=last_message.tool_calls,
+                tool_calls=tool_calls_pending,
                 tool_map=tool_map,
                 capture_images=True,
             )
@@ -695,16 +717,15 @@ class MultiAgentWorkflow:
         human_decisions = interrupt(
             {
                 "action_requests": action_requests,
-                "message": "Tool execution requires human approval",
             }
         )
 
         if not human_decisions:
-            tool_calls_to_keep, rejected_feedback = _apply_decisions(
+            _, rejected_feedback = _apply_decisions(
                 last_message.tool_calls, []
             )
         else:
-            tool_calls_to_keep, rejected_feedback = _apply_decisions(
+            _, rejected_feedback = _apply_decisions(
                 last_message.tool_calls, human_decisions
             )
 
@@ -730,21 +751,12 @@ class MultiAgentWorkflow:
             context["tool_artifacts"] = existing_artifacts
             state["context"] = context
 
-        # Update the AI message with only approved tool calls
-        if tool_calls_to_keep:
-            new_ai_message = AIMessage(
-                content=last_message.content,
-                tool_calls=tool_calls_to_keep,
-            )
-            # Replace the last message with updated tool calls, add any rejection messages
-            state["messages"] = messages[:-1] + [new_ai_message] + rejection_messages
-        else:
-            # All tools rejected, remove tool calls from AI message and add rejection messages
-            state["messages"] = (
-                messages[:-1]
-                + [AIMessage(content=last_message.content)]
-                + rejection_messages
-            )
+        # Always keep the original AIMessage with ALL tool_calls intact.
+        # Rejection ToolMessages must reference tool_call_ids present in the preceding
+        # AIMessage — stripping tool_calls would orphan them and cause the LLM to
+        # ignore the rejections (leading to hallucinated answers).
+        # The tools node filters out tool_calls that already have ToolMessages.
+        state["messages"] = messages[:-1] + [last_message] + rejection_messages
 
         return state
 
@@ -1100,7 +1112,6 @@ class MultiAgentWorkflow:
                 human_decisions = interrupt(
                     {
                         "action_requests": non_search_tool_calls,
-                        "message": "Tool execution requires human approval",
                     }
                 )
 
@@ -1466,7 +1477,6 @@ class MultiAgentWorkflow:
                 human_decisions = interrupt(
                     {
                         "action_requests": external_tool_calls,
-                        "message": "Planning tool execution requires human approval",
                     }
                 )
 

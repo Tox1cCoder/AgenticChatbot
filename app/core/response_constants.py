@@ -14,9 +14,6 @@ ERROR_NO_RESPONSE = "Error: No response generated"
 ERROR_NO_RESPONSE_RESUME = "Error: No response generated after resume"
 ERROR_RESPONSE_AFTER_RESUME = "Error: No response after resuming"
 
-# === Tool/Approval Messages ===
-WORKFLOW_PAUSED_MESSAGE = "Workflow paused - awaiting approval for tool execution"
-
 # === General Errors ===
 UNKNOWN_ERROR = "Unknown error"
 

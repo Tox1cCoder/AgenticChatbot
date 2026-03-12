@@ -6,12 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 
-from app.schemas.task_plan import (
-    TaskPlanCreate,
-    TaskPlanUpdate,
-    TaskPlanRead,
-    PlanningStatusResponse,
-)
+from app.schemas.task_plan import TaskPlanUpdate, TaskPlanRead, PlanningStatusResponse
 
 
 class ITaskPlanService(ABC):
@@ -37,20 +32,20 @@ class ITaskPlanService(ABC):
         pass
 
     @abstractmethod
-    def sync_plan_from_agent(
+    def sync_todos_from_agent(
         self,
         conversation_id: UUID,
-        plan_payload: Dict[str, Any],
+        todos: List[Dict[str, Any]],
         user_id: UUID,
-        replace_existing: bool = True,
+        preserve_existing_status: bool = False,
     ) -> List[TaskPlanRead]:
-        """Persist plan data produced by the planning agent.
+        """Persist todo data produced by the planning agent.
 
         Args:
             conversation_id: The conversation to update
-            plan_payload: Planning agent response metadata containing plan/tasks
+            todos: Planning agent todo payload
             user_id: The user requesting the sync (for ownership validation)
-            replace_existing: Whether to replace current tasks
+            preserve_existing_status: Whether matched existing task statuses should win
 
         Returns:
             List of TaskPlanRead schemas for the stored tasks
@@ -64,7 +59,7 @@ class ITaskPlanService(ABC):
         task_descriptions: List[str],
         user_id: UUID,
     ) -> List[TaskPlanRead]:
-        """Create task plan from manual list of descriptions.
+        """Create or append task plan items from a manual list of descriptions.
 
         Args:
             conversation_id: The conversation to create tasks for
@@ -112,17 +107,17 @@ class ITaskPlanService(ABC):
         pass
 
     @abstractmethod
-    def get_next_task(
+    def get_active_or_next_task(
         self, conversation_id: UUID, user_id: UUID
     ) -> Optional[TaskPlanRead]:
-        """Get next pending task.
+        """Get the active task, otherwise the next pending task.
 
         Args:
-            conversation_id: The conversation to get next task for
+            conversation_id: The conversation to get the active/next task for
             user_id: The user making the request
 
         Returns:
-            TaskPlanRead schema or None if no pending tasks
+            TaskPlanRead schema or None if no active or pending tasks
         """
         pass
 
@@ -151,6 +146,19 @@ class ITaskPlanService(ABC):
 
         Args:
             task_id: The task ID to mark as completed
+            user_id: The user making the request
+
+        Returns:
+            Updated TaskPlanRead schema
+        """
+        pass
+
+    @abstractmethod
+    def mark_task_in_progress(self, task_id: UUID, user_id: UUID) -> TaskPlanRead:
+        """Mark task as in progress.
+
+        Args:
+            task_id: The task ID to mark as in progress
             user_id: The user making the request
 
         Returns:

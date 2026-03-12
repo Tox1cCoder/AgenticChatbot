@@ -13,7 +13,7 @@ from app.repositories.tool_approval import ToolApprovalRepository
 from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
-from app.models.enums import MessageRole, TaskStatus
+from app.models.enums import MessageRole
 from app.models.tool_approval import DecisionType
 from app.factories.message_factory import MessageFactory
 from app.utils.validation.conversation_validation import ConversationValidationUtils
@@ -22,7 +22,6 @@ from app.utils.validation.pagination_validation import validate_pagination_param
 from app.interfaces.message_service_interface import IMessageService
 from app.services.ai_service import AIService
 from app.services.model_config_service import ModelConfigService
-from app.schemas.task_plan import TaskPlanCreate, TaskPlanUpdate
 from app.ai.schemas import (
     AgentResponse,
     InterruptDecision,
@@ -139,36 +138,6 @@ class MessageService(IMessageService):
             )
             if suggestions:
                 metadata["suggested_questions"] = suggestions
-        except Exception:
-            pass
-
-    def _handle_task_completion(
-        self,
-        conversation_id: UUID,
-        user_id: UUID,
-        current_task: Any,
-        plan_saved: bool,
-        metadata: Dict[str, Any],
-    ) -> None:
-        """Mark current task as completed and add next task to metadata."""
-        if not self.task_plan_service or not current_task or not user_id or plan_saved:
-            return
-
-        try:
-            # Re-fetch task to verify status is still pending before marking complete
-            fresh_task = self.task_plan_service.get_by_id(current_task.id, user_id)
-            if fresh_task and fresh_task.status == TaskStatus.pending:
-                self.task_plan_service.mark_task_completed(current_task.id, user_id)
-                # Get next task for metadata
-                next_task = self.task_plan_service.get_next_task(
-                    conversation_id, user_id
-                )
-                if next_task:
-                    metadata["next_task"] = {
-                        "id": str(next_task.id),
-                        "description": next_task.description,
-                        "order": next_task.task_order,
-                    }
         except Exception:
             pass
 
@@ -364,7 +333,6 @@ class MessageService(IMessageService):
             )
             planning_mode_enabled = planning_ctx["planning_mode_enabled"]
             has_existing_plan = planning_ctx["has_existing_plan"]
-            current_task = planning_ctx["current_task"]
             current_task_context = planning_ctx["current_task_context"]
             existing_tasks_dict = planning_ctx["existing_tasks_dict"]
 
@@ -385,17 +353,9 @@ class MessageService(IMessageService):
                 else self._resolve_persistent_model_request(user_id)
             )
 
-            auto_execute_plan = (
-                planning_mode_enabled
-                and has_existing_plan
-                and current_task_context is not None
-            )
-
             (
                 bot_response_content,
                 bot_metadata,
-                bot_response,
-                execution_count,
                 interrupt_payload,
             ) = await self._run_plan_execution_loop(
                 message_content=message_create_data.content,
@@ -404,11 +364,9 @@ class MessageService(IMessageService):
                 sanitized_persona=sanitized_persona,
                 planning_mode_enabled=planning_mode_enabled,
                 has_existing_plan=has_existing_plan,
-                current_task=current_task,
                 current_task_context=current_task_context,
                 existing_tasks_dict=existing_tasks_dict,
                 attachments=attachments,
-                auto_execute_plan=auto_execute_plan,
                 model_request=model_request,
                 persona=sanitized_persona,
             )
@@ -538,7 +496,6 @@ class MessageService(IMessageService):
             )
             planning_mode_enabled = planning_ctx["planning_mode_enabled"]
             has_existing_plan = planning_ctx["has_existing_plan"]
-            current_task = planning_ctx["current_task"]
             current_task_context = planning_ctx["current_task_context"]
             existing_tasks_dict = planning_ctx["existing_tasks_dict"]
 
@@ -711,15 +668,6 @@ class MessageService(IMessageService):
                 bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
                 bot_metadata["reply_to_user_message_id"] = str(user_message_id)
 
-                plan_saved, has_existing_plan = self._sync_plan_from_response_metadata(
-                    conversation_id=message_create_data.conversation_id,
-                    user_id=user_id,
-                    bot_response=bot_response,
-                    has_existing_plan=has_existing_plan,
-                )
-                if plan_saved:
-                    bot_metadata["plan_saved"] = True
-
                 # Sync todos from graph state if present (for planning agent)
                 if (
                     bot_response
@@ -732,17 +680,6 @@ class MessageService(IMessageService):
                         todos=bot_response.metadata["todos"],
                     )
                     bot_metadata["todos_synced"] = True
-
-                # Mark current task as completed if planning mode is active
-                # Skip if plan was just replaced (old task IDs are invalid)
-                if planning_mode_enabled:
-                    self._handle_task_completion(
-                        message_create_data.conversation_id,
-                        user_id,
-                        current_task,
-                        plan_saved,
-                        bot_metadata,
-                    )
 
                 # Generate follow-up question suggestions
                 await self._generate_and_add_suggestions(
@@ -1009,15 +946,6 @@ class MessageService(IMessageService):
                 interrupt_payload["metadata"] = {}
             interrupt_payload["metadata"]["interrupt_count"] = interrupt_count
 
-            if interrupt_count > 1:
-                interrupt_payload["metadata"][
-                    "message"
-                ] = f"The assistant needs approval for additional tools (request {interrupt_count})"
-            else:
-                interrupt_payload["metadata"][
-                    "message"
-                ] = "The assistant wants to use tools that require approval"
-
             MAX_INTERRUPT_DEPTH = 5
             if interrupt_count > MAX_INTERRUPT_DEPTH:
                 pass
@@ -1156,6 +1084,18 @@ class MessageService(IMessageService):
                     bot_response_content = fix_markdown_code_blocks(bot_response_content)
 
                     bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
+                    if (
+                        bot_response
+                        and bot_response.metadata
+                        and bot_response.metadata.get("todos")
+                        and self.task_plan_service
+                    ):
+                        self._sync_todos_to_database(
+                            conversation_id=conversation_id,
+                            user_id=user_id,
+                            todos=bot_response.metadata["todos"],
+                        )
+                        bot_metadata["todos_synced"] = True
                     bot_message = self._create_bot_response_message(
                         conversation_id=conversation_id,
                         content=bot_response_content,
@@ -1409,40 +1349,6 @@ class MessageService(IMessageService):
             metadata=bot_metadata,
         )
 
-    def _sync_plan_from_response_metadata(
-        self,
-        conversation_id: UUID,
-        user_id: Optional[UUID],
-        bot_response: Optional[AgentResponse],
-        has_existing_plan: bool,
-    ) -> Tuple[bool, bool]:
-        if (
-            not self.task_plan_service
-            or not bot_response
-            or not bot_response.metadata
-            or not user_id
-        ):
-            return False, has_existing_plan
-
-        plan_payload = bot_response.metadata.get("plan")
-        if not plan_payload:
-            return False, has_existing_plan
-
-        plan_modified = bool(bot_response.metadata.get("plan_modified"))
-        if has_existing_plan and not plan_modified:
-            return False, has_existing_plan
-
-        try:
-            self.task_plan_service.sync_plan_from_agent(
-                conversation_id=conversation_id,
-                plan_payload=plan_payload,
-                user_id=user_id,
-                replace_existing=True,
-            )
-            return True, True
-        except Exception:
-            return False, has_existing_plan
-
     @staticmethod
     def _build_task_context_dict(task: Optional[Any]) -> Optional[Dict[str, Any]]:
         if not task:
@@ -1469,14 +1375,12 @@ class MessageService(IMessageService):
         Returns a dict with keys:
         - planning_mode_enabled: bool
         - has_existing_plan: bool
-        - current_task: Optional[task entity]
         - current_task_context: Optional[dict]
         - existing_tasks_dict: Optional[List[dict]]
         """
         result = {
             "planning_mode_enabled": planning_mode_enabled,
             "has_existing_plan": False,
-            "current_task": None,
             "current_task_context": None,
             "existing_tasks_dict": None,
         }
@@ -1505,12 +1409,10 @@ class MessageService(IMessageService):
                 result["planning_mode_enabled"] = True
 
             # Get current task for execution context
-            result["current_task"] = self.task_plan_service.get_next_task(
+            current_task = self.task_plan_service.get_active_or_next_task(
                 conversation_id, user_id
             )
-            result["current_task_context"] = self._build_task_context_dict(
-                result["current_task"]
-            )
+            result["current_task_context"] = self._build_task_context_dict(current_task)
 
             # Convert existing tasks to dict for planning agent
             if existing_tasks:
@@ -1527,8 +1429,13 @@ class MessageService(IMessageService):
                     }
                     for task in existing_tasks
                 ]
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.warning(
+                "Failed to prepare planning context for conversation %s: %s",
+                conversation_id,
+                type(exc).__name__,
+                exc_info=True,
+            )
 
         return result
 
@@ -1541,18 +1448,14 @@ class MessageService(IMessageService):
         sanitized_persona: Optional[str],
         planning_mode_enabled: bool,
         has_existing_plan: bool,
-        current_task: Optional[Any],
         current_task_context: Optional[Dict[str, Any]],
         existing_tasks_dict: Optional[List[Dict[str, Any]]],
         attachments: Optional[list],
-        auto_execute_plan: bool,
         model_request: Optional[Dict[str, Any]] = None,
         persona: Optional[str] = None,
     ) -> Tuple[
         Optional[str],
         Dict[str, Any],
-        Optional[AgentResponse],
-        int,
         Optional[Dict[str, Any]],
     ]:
         """
@@ -1589,24 +1492,12 @@ class MessageService(IMessageService):
             return (
                 None,
                 {},
-                bot_response,
-                0,  # execution_count not relevant with graph-driven execution
                 bot_response.metadata["interrupt"],
             )
 
         bot_response_content = extract_response_content(bot_response)
 
         bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
-
-        # Sync plan from response metadata (legacy and new format)
-        plan_saved, has_plan = self._sync_plan_from_response_metadata(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            bot_response=bot_response,
-            has_existing_plan=has_plan,
-        )
-        if plan_saved:
-            bot_metadata["plan_saved"] = True
 
         # Sync todos from graph state if present
         if bot_response and bot_response.metadata.get("todos"):
@@ -1628,7 +1519,7 @@ class MessageService(IMessageService):
         # Refresh task data for next_task info
         if planning_mode_enabled and self.task_plan_service and user_id:
             try:
-                next_task = self.task_plan_service.get_next_task(
+                next_task = self.task_plan_service.get_active_or_next_task(
                     conversation_id, user_id
                 )
                 if next_task:
@@ -1642,7 +1533,7 @@ class MessageService(IMessageService):
 
         bot_response_content = fix_markdown_code_blocks(bot_response_content)
 
-        return bot_response_content, bot_metadata, bot_response, 1, None
+        return bot_response_content, bot_metadata, None
 
     def _sync_todos_to_database(
         self,
@@ -1650,95 +1541,20 @@ class MessageService(IMessageService):
         user_id: Optional[UUID],
         todos: List[Dict[str, Any]],
     ) -> None:
-        if not self.task_plan_service or not todos or not user_id:
+        if not self.task_plan_service or user_id is None or todos is None:
             return
 
-        existing_tasks = self.task_plan_service.get_conversation_tasks(
-            conversation_id, user_id, include_completed=True
-        )
-
-        # No existing tasks - create new plan from todos
-        if not existing_tasks:
-            plan_payload = {
-                "tasks": [
-                    {
-                        "description": todo.get("description", ""),
-                    }
-                    for todo in todos
-                ]
-            }
-            self.task_plan_service.sync_plan_from_agent(
+        try:
+            self.task_plan_service.sync_todos_from_agent(
                 conversation_id=conversation_id,
                 user_id=user_id,
-                plan_payload=plan_payload,
+                todos=todos,
+                preserve_existing_status=False,
             )
-            return
-
-        # Build lookup maps for existing tasks
-        task_by_id = {str(task.id): task for task in existing_tasks}
-        existing_task_ids = set(task_by_id.keys())
-
-        # Track which todos are new vs updates
-        todo_ids_in_response = set()
-
-        for i, todo in enumerate(todos):
-            todo_id = str(todo.get("id", ""))
-            todo_status = todo.get("status", "pending")
-            todo_description = todo.get("description", "")
-
-            todo_ids_in_response.add(todo_id)
-
-            # Try to find matching existing task
-            task = task_by_id.get(todo_id)
-
-            if task:
-                # Update existing task
-                task_status_str = (
-                    task.status.value
-                    if hasattr(task.status, "value")
-                    else str(task.status)
-                )
-                needs_update = False
-                update_data = {}
-
-                # Check if description changed
-                if todo_description and todo_description != task.description:
-                    update_data["description"] = todo_description
-                    needs_update = True
-
-                # Check if status changed
-                if (
-                    todo_status in ("completed", "COMPLETED")
-                    and task_status_str != "completed"
-                ):
-                    self.task_plan_service.mark_task_completed(task.id, user_id)
-                elif (
-                    todo_status in ("in_progress", "IN_PROGRESS")
-                    and task_status_str == "pending"
-                ):
-                    if hasattr(self.task_plan_service, "mark_task_in_progress"):
-                        self.task_plan_service.mark_task_in_progress(task.id, user_id)
-
-                # Apply description update if needed
-                if needs_update and update_data:
-                    self.task_plan_service.update_task(
-                        task.id, user_id, TaskPlanUpdate(**update_data)
-                    )
-            else:
-                # This is a new task - add it
-                self.task_plan_service.task_plan_repository.create(
-                    TaskPlanCreate(
-                        conversation_id=conversation_id,
-                        description=todo_description,
-                        task_order=i,
-                    )
-                )
-
-        # Handle removed tasks - delete tasks that are in DB but not in todos
-        if todo_ids_in_response and all(
-            todo_id not in ("", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
-            for todo_id in todo_ids_in_response
-        ):
-            for task_id in existing_task_ids:
-                if task_id not in todo_ids_in_response:
-                    self.task_plan_service.delete_task(UUID(task_id), user_id)
+        except Exception as exc:
+            logging.warning(
+                "Failed to sync todos for conversation %s: %s",
+                conversation_id,
+                type(exc).__name__,
+                exc_info=True,
+            )

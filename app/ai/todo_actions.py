@@ -61,14 +61,18 @@ def coerce_todo_item(raw_todo: Any, *, fallback_order: int) -> Dict[str, Any]:
     return todo
 
 
-def find_next_ready_task(
+def _status_value(raw_status: Any) -> str:
+    return raw_status.value if hasattr(raw_status, "value") else str(raw_status)
+
+
+def find_active_or_next_task(
     todos: List[Dict[str, Any]], start_index: int = 0
 ) -> Optional[int]:
-    for i in range(start_index, len(todos)):
-        raw_status = todos[i].get("status", TodoStatus.PENDING.value)
-        status = raw_status.value if hasattr(raw_status, "value") else raw_status
-        if status == TodoStatus.PENDING.value:
-            return i
+    for preferred_status in (TodoStatus.IN_PROGRESS.value, TodoStatus.PENDING.value):
+        for i in range(start_index, len(todos)):
+            status = _status_value(todos[i].get("status", TodoStatus.PENDING.value))
+            if status == preferred_status:
+                return i
     return None
 
 
@@ -101,7 +105,7 @@ def apply_write_todos_action(
             return todos, current_task_index, msg, action
 
         coerced = [coerce_todo_item(t, fallback_order=i) for i, t in enumerate(new_todos)]
-        current_task_index = 0 if coerced else None
+        current_task_index = find_active_or_next_task(coerced, 0)
         return coerced, current_task_index, f"Set {len(coerced)} todos in the plan.", action
 
     if action == TodoAction.ADD_TODO.value:
@@ -130,7 +134,7 @@ def apply_write_todos_action(
                 todo["status"] = TodoStatus.COMPLETED.value
                 result = f"Completed todo: {todo.get('description', todo_id)}"
                 if current_task_index is not None and i == current_task_index:
-                    current_task_index = find_next_ready_task(todos, i)
+                    current_task_index = find_active_or_next_task(todos, i)
                 return todos, current_task_index, result, action
         return todos, current_task_index, f"Todo with id {todo_id} not found", action
 
@@ -138,6 +142,10 @@ def apply_write_todos_action(
         todo_id = args.get("todo_id")
         if not todo_id:
             return todos, current_task_index, "Error: todo_id required for START_TODO", action
+
+        for todo in todos:
+            if _status_value(todo.get("status")) == TodoStatus.IN_PROGRESS.value:
+                todo["status"] = TodoStatus.PENDING.value
 
         for i, todo in enumerate(todos):
             if str(todo.get("id")) == str(todo_id):
@@ -160,6 +168,11 @@ def apply_write_todos_action(
         for i, todo in enumerate(todos):
             if str(todo.get("id")) == str(todo_id):
                 todos[i] = {**todo, **updated_todo}
+                if _status_value(todos[i].get("status")) == TodoStatus.IN_PROGRESS.value:
+                    for j, other in enumerate(todos):
+                        if j != i and _status_value(other.get("status")) == TodoStatus.IN_PROGRESS.value:
+                            other["status"] = TodoStatus.PENDING.value
+                    current_task_index = i
                 return todos, current_task_index, f"Updated todo: {todo_id}", action
         return todos, current_task_index, f"Todo with id {todo_id} not found", action
 
@@ -175,9 +188,10 @@ def apply_write_todos_action(
                     if i < current_task_index:
                         current_task_index -= 1
                     elif i == current_task_index:
-                        current_task_index = find_next_ready_task(todos, max(0, i - 1))
+                        current_task_index = find_active_or_next_task(
+                            todos, max(0, i - 1)
+                        )
                 return todos, current_task_index, f"Removed todo: {todo_id}", action
         return todos, current_task_index, f"Todo with id {todo_id} not found", action
 
     return todos, current_task_index, f"Unknown action: {action}", action
-

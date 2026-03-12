@@ -203,6 +203,8 @@ You have already called some tools in this turn. Their results are in the messag
 - If results are SUFFICIENT: synthesize a response WITHOUT calling more tools
 - If results are INCOMPLETE: you may call additional tools to fill gaps
 - AVOID re-calling the exact same tool with the same arguments - you already have that result
+- If a tool result contains `"status": "rejected"`, a human reviewer denied that tool call.
+  DO NOT guess, estimate, or fabricate the information the tool would have returned.
 
 Focus on providing a complete answer using available information."""
 
@@ -247,7 +249,8 @@ Canvas clarification:
 
 Planning clarification:
 - Route TO planning_agent: "create a plan", "add task", "remove task", "modify plan", "show tasks"
-- Route TO chat_agent: "start the plan", "work on task 1", "implement step 2" (execution, not planning updates)
+- Route TO planning_agent: "start the plan", "work on task 1", "implement step 2" when planning mode is active or a plan already exists
+- Route TO chat_agent: "implement step 2" when there is no plan and the user is asking for general help rather than plan execution
 
 Examples:
 Hello -> chat_agent

@@ -663,13 +663,15 @@ class InterruptEventHandler(EventHandler):
     async def handle(
         self, event: Dict[str, Any], state: StreamState
     ) -> AsyncGenerator[str, None]:
-        yield _sse(
-            {
-                "type": "text-delta",
-                "id": state.text_id,
-                "delta": "Tool execution requires approval.",
-            }
-        )
+        interrupt_message = event.get("message")
+        if isinstance(interrupt_message, str) and interrupt_message.strip():
+            yield _sse(
+                {
+                    "type": "text-delta",
+                    "id": state.text_id,
+                    "delta": interrupt_message.strip(),
+                }
+            )
 
         if state.text_started:
             yield _sse({"type": "text-end", "id": state.text_id})

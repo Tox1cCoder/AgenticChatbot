@@ -180,14 +180,33 @@ class DocumentProcessingService:
     async def get_processing_status(self, task_id: str) -> Dict[str, Any]:
         try:
             task_result = self.celery_app.AsyncResult(task_id)
-
-            return {
+            response: Dict[str, Any] = {
                 "task_id": task_id,
                 "status": task_result.status,
-                "result": task_result.result if task_result.ready() else None,
-                "info": task_result.info if hasattr(task_result, "info") else None,
-                "traceback": task_result.traceback if task_result.failed() else None,
             }
+
+            if task_result.ready():
+                result = task_result.result
+                if isinstance(result, dict):
+                    if "success" in result:
+                        response["success"] = bool(result.get("success"))
+                    if result.get("document_id"):
+                        response["document_id"] = result["document_id"]
+                    if result.get("message"):
+                        response["message"] = result["message"]
+                elif task_result.successful():
+                    response["success"] = True
+
+            info = task_result.info if hasattr(task_result, "info") else None
+            if isinstance(info, dict):
+                safe_info = {}
+                for key in ("current", "total", "message"):
+                    if key in info:
+                        safe_info[key] = info[key]
+                if safe_info:
+                    response["info"] = safe_info
+
+            return response
 
         except Exception as e:
             return {"task_id": task_id, "status": "UNKNOWN", "error": str(e)}

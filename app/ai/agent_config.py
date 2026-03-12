@@ -44,7 +44,7 @@ AGENT_CONFIG = {
         "langchain_model": "gemini-3-flash-preview",  # For tool calling
     },
     "canvas": {
-        "model": settings.chat_agent_model,
+        "model": "gemini-3.1-pro-preview",
         "temperature": 1.0,
     },
     "suggestion": {
@@ -54,13 +54,13 @@ AGENT_CONFIG = {
     },
     "title_generator": {
         "model": "gemini-3-flash-preview",
-        "temperature": 1,
+        "temperature": 1.0,
     },
     "summarization": {
         "model": (
             getattr(settings, "summarization_model", None) or "gemini-3-flash-preview"
         ),
-        "temperature": 1,
+        "temperature": 1.0,
     },
 }
 

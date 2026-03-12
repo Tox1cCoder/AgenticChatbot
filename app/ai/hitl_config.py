@@ -103,6 +103,7 @@ def build_interrupt_response(
     """Build a structured InterruptResponse from raw interrupt data."""
     action_requests: List[ToolInterruptRequest] = []
     interrupt_id: Optional[str] = None
+    response_metadata: Dict[str, Any] = {}
 
     # Normalize interrupt_data to a list of payloads
     payloads: List[Any] = []
@@ -125,6 +126,19 @@ def build_interrupt_response(
 
         if not interrupt_id:
             interrupt_id = payload.get("interrupt_id")
+
+        payload_metadata = payload.get("metadata")
+        if isinstance(payload_metadata, dict):
+            response_metadata.update(payload_metadata)
+
+        for key in ("message", "reason"):
+            value = payload.get(key)
+            if (
+                key not in response_metadata
+                and isinstance(value, str)
+                and value.strip()
+            ):
+                response_metadata[key] = value.strip()
 
         default_prefix = interrupt_id or "task"
 
@@ -154,6 +168,7 @@ def build_interrupt_response(
         action_requests=action_requests,
         thread_id=thread_id,
         conversation_id=conversation_id,
+        metadata=response_metadata,
     )
 
     return response.model_dump()

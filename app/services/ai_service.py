@@ -22,7 +22,6 @@ from ..core.response_constants import (
     ERROR_NO_RESPONSE,
     ERROR_NO_RESPONSE_RESUME,
     UNKNOWN_ERROR,
-    WORKFLOW_PAUSED_MESSAGE,
 )
 from ..ai.prompts import TITLE_GENERATION_PROMPT
 
@@ -241,13 +240,23 @@ class AIService:
                 yield event
 
             elif event_type == "interrupt":
+                interrupt_payload = event.get("interrupt")
+                interrupt_message = None
+                if isinstance(interrupt_payload, dict):
+                    interrupt_metadata = interrupt_payload.get("metadata")
+                    if isinstance(interrupt_metadata, dict):
+                        message_value = interrupt_metadata.get("message") or interrupt_metadata.get(
+                            "reason"
+                        )
+                        if isinstance(message_value, str) and message_value.strip():
+                            interrupt_message = message_value.strip()
                 yield {
                     "type": "interrupt",
                     "next": event.get("next", []),
                     "thread_id": event.get("thread_id"),
                     "pending_tool_calls": event.get("pending_tool_calls"),
-                    "interrupt": event.get("interrupt"),
-                    "message": WORKFLOW_PAUSED_MESSAGE,
+                    "interrupt": interrupt_payload,
+                    "message": interrupt_message,
                 }
 
         if final_response:

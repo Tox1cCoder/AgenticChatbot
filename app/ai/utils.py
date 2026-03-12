@@ -5,6 +5,8 @@ Shared utility functions for AI agents.
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import json
 
+from langchain_core.messages import AIMessage
+
 
 def coerce_response_text(content: Any) -> str:
     """
@@ -280,6 +282,27 @@ def normalize_tool_call(tool_call: Any) -> Dict[str, Any]:
         "id": tool_id,
         "tool_call_id": tool_id,
     }
+
+
+def find_pending_tool_call_message(
+    messages: Sequence[Any],
+) -> Optional[Tuple[int, AIMessage]]:
+    """
+    Find the most recent AIMessage that still has pending tool calls.
+
+    The approval node may append rejection ToolMessages after the rewritten
+    AIMessage. In that case the pending tool-call message is no longer the last
+    entry, so consumers must scan backward until they reach the most recent
+    AIMessage boundary.
+    """
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
+        if isinstance(message, AIMessage):
+            if getattr(message, "tool_calls", None):
+                return idx, message
+            return None
+
+    return None
 
 
 def extract_rejection_reason(decision: Any) -> Optional[str]:

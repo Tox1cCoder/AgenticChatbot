@@ -6,7 +6,7 @@ from typing import List, Optional, Any, Dict
 from uuid import UUID
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
-from sqlalchemy import select, asc, func
+from sqlalchemy import select, asc, func, case
 
 from app.models.task_plan import TaskPlan
 from app.models.enums import TaskStatus
@@ -58,38 +58,30 @@ class TaskPlanCRUDStrategy(
         statement = statement.order_by(asc(self.model.task_order))
         return list(db.execute(statement).scalars().all())
 
-    def get_pending_tasks(self, db: Session, conversation_id: UUID) -> List[TaskPlan]:
-        """Get tasks with status=pending, ordered by task_order.
+    def get_active_or_next_task(
+        self, db: Session, conversation_id: UUID
+    ) -> Optional[TaskPlan]:
+        """Get the first in-progress task, otherwise the first pending task.
 
         Args:
             db: Database session
             conversation_id: The conversation ID to filter by
 
         Returns:
-            List of pending TaskPlan ordered by task_order ASC
+            The active or next TaskPlan to work on, or None if all tasks are complete
         """
         statement = (
             select(self.model)
             .where(
                 self.model.conversation_id == conversation_id,
-                self.model.status == TaskStatus.pending,
+                self.model.status.in_([TaskStatus.in_progress, TaskStatus.pending]),
             )
-            .order_by(asc(self.model.task_order))
+            .order_by(
+                case((self.model.status == TaskStatus.in_progress, 0), else_=1),
+                asc(self.model.task_order),
+            )
         )
-        return list(db.execute(statement).scalars().all())
-
-    def get_next_task(self, db: Session, conversation_id: UUID) -> Optional[TaskPlan]:
-        """Get the first pending task by task_order.
-
-        Args:
-            db: Database session
-            conversation_id: The conversation ID to filter by
-
-        Returns:
-            The next TaskPlan to work on, or None if all tasks are complete
-        """
-        pending_tasks = self.get_pending_tasks(db, conversation_id)
-        return pending_tasks[0] if pending_tasks else None
+        return db.execute(statement).scalars().first()
 
     def mark_completed(self, db: Session, task_id: UUID) -> Optional[TaskPlan]:
         """Update task status to completed and set completed_at timestamp.
@@ -153,6 +145,13 @@ class TaskPlanCRUDStrategy(
             statement = statement.where(self.model.status == status)
 
         return db.execute(statement).scalar() or 0
+
+    def get_max_task_order(self, db: Session, conversation_id: UUID) -> Optional[int]:
+        """Get the highest task_order value for a conversation."""
+        statement = select(func.max(self.model.task_order)).where(
+            self.model.conversation_id == conversation_id
+        )
+        return db.execute(statement).scalar_one_or_none()
 
     def delete(self, db: Session, id: UUID) -> bool:
         """Hard delete a task plan (TaskPlan doesn't have soft delete).
@@ -240,29 +239,17 @@ class TaskPlanRepository:
                 session, conversation_id, include_completed
             )
 
-    def get_pending_tasks(self, conversation_id: UUID) -> List[TaskPlan]:
-        """Get tasks with status=pending.
+    def get_active_or_next_task(self, conversation_id: UUID) -> Optional[TaskPlan]:
+        """Get the first in-progress task, otherwise the first pending task.
 
         Args:
             conversation_id: The conversation ID to filter by
 
         Returns:
-            List of pending TaskPlan ordered by task_order ASC
+            The active or next TaskPlan to work on, or None if all tasks are complete
         """
         with self.session_factory() as session:
-            return self._crud_strategy.get_pending_tasks(session, conversation_id)
-
-    def get_next_task(self, conversation_id: UUID) -> Optional[TaskPlan]:
-        """Get the first pending task.
-
-        Args:
-            conversation_id: The conversation ID to filter by
-
-        Returns:
-            The next TaskPlan to work on, or None if all tasks are complete
-        """
-        with self.session_factory() as session:
-            return self._crud_strategy.get_next_task(session, conversation_id)
+            return self._crud_strategy.get_active_or_next_task(session, conversation_id)
 
     def mark_completed(self, task_id: UUID) -> Optional[TaskPlan]:
         """Update task status to completed and set completed_at timestamp.
@@ -309,6 +296,11 @@ class TaskPlanRepository:
             return self._crud_strategy.count_by_conversation(
                 session, conversation_id, status
             )
+
+    def get_max_task_order(self, conversation_id: UUID) -> Optional[int]:
+        """Get the highest task_order value for a conversation."""
+        with self.session_factory() as session:
+            return self._crud_strategy.get_max_task_order(session, conversation_id)
 
     def update(self, id: UUID, input_schema: TaskPlanUpdate) -> Optional[TaskPlan]:
         """Update task plan by ID.

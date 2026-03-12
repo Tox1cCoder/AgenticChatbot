@@ -2990,6 +2990,26 @@ def get_message_metadata(msg: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+def extract_interrupt_message(interrupt_payload: Any) -> Optional[str]:
+    """Extract a displayable message directly from an interrupt payload."""
+    if not isinstance(interrupt_payload, dict):
+        return None
+
+    for key in ("message", "reason"):
+        value = interrupt_payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    metadata = interrupt_payload.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("message", "reason"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    return None
+
+
 def render_tool_artifacts(tool_artifacts: List[Dict[str, Any]]):
     """
     Render tool execution artifacts as collapsible sections.
@@ -4290,6 +4310,8 @@ def render_interrupt_approval_ui():
     if not interrupt_info:
         return
 
+    interrupt_message = extract_interrupt_message(interrupt_info)
+
     thread_id = interrupt_info.get("thread_id")
     interrupt_id = interrupt_info.get("interrupt_id")
     action_requests = interrupt_info.get("action_requests", [])
@@ -4298,24 +4320,26 @@ def render_interrupt_approval_ui():
     # on reload or when multiple interrupts occur in a single session.
     decisions_key = f"pending_decisions_{interrupt_id}" if interrupt_id else "pending_decisions"
 
+    if interrupt_message:
+        st.warning(f"**{interrupt_message}**", icon=":material/pause_circle:")
+
     if not action_requests:
-        st.warning("No tool actions to approve")
         if st.button("Cancel"):
             st.session_state.pop("pending_interrupt", None)
             st.rerun()
         return
-
-    st.warning("**Tool Execution Requires Approval**", icon=":material/pause_circle:")
-    st.markdown(
-        "The AI assistant wants to execute the following tool(s). Please review and approve:"
-    )
 
     # Initialize decisions in session state if not present for this interrupt
     if decisions_key not in st.session_state:
         st.session_state[decisions_key] = {}
 
     for idx, action_request in enumerate(action_requests):
-        tool_name = action_request.get("action", "unknown")
+        tool_name = (
+            action_request.get("action")
+            or action_request.get("tool")
+            or action_request.get("name")
+            or str(idx + 1)
+        )
         tool_args = action_request.get("args", {})
         description = action_request.get("description", "")
         tool_call_id = (
@@ -4348,20 +4372,21 @@ def render_interrupt_approval_ui():
         if description:
             st.markdown(f"**Description:** {description}")
         if task_id:
-            st.caption(f"Task ID: `{task_id}`")
+            st.caption(f"`{task_id}`")
 
         # Show decision status if already decided
         if current_decision:
             decision_type = current_decision.get("type", "")
+            decision_label = str(decision_type).replace("_", " ").title()
             if decision_type == "approve":
-                st.success(f"Approved", icon=":material/check_circle:")
+                st.success(decision_label, icon=":material/check_circle:")
             elif decision_type == "edit":
-                st.info(f"Edited and approved", icon=":material/edit:")
+                st.info(decision_label, icon=":material/edit:")
             elif decision_type == "reject":
-                st.error(f"Rejected", icon=":material/cancel:")
+                st.error(decision_label, icon=":material/cancel:")
 
             # Option to change decision
-            if st.button(f"Change decision", key=f"change_{idx}"):
+            if st.button("Change decision", key=f"change_{idx}"):
                 st.session_state[decisions_key].pop(task_id, None)
                 st.session_state.pop(f"editing_tool_{idx}", None)
                 st.rerun()
@@ -4376,7 +4401,7 @@ def render_interrupt_approval_ui():
             with col1:
                 if "approve" in allowed_decisions:
                     if st.button(
-                        f"Approve",
+                        "Approve",
                         key=f"approve_{idx}",
                         width='stretch',
                         type="primary",
@@ -4391,13 +4416,17 @@ def render_interrupt_approval_ui():
 
             with col2:
                 if "edit" in allowed_decisions:
-                    if st.button(f"Edit Args", key=f"edit_{idx}", width='stretch'):
+                    if st.button(
+                        "Edit Args", key=f"edit_{idx}", width='stretch'
+                    ):
                         st.session_state[f"editing_tool_{idx}"] = True
                         st.rerun()
 
             with col3:
                 if "reject" in allowed_decisions:
-                    if st.button(f"Reject", key=f"reject_{idx}", width='stretch'):
+                    if st.button(
+                        "Reject", key=f"reject_{idx}", width='stretch'
+                    ):
                         st.session_state[decisions_key][task_id] = {
                             "type": "reject",
                             "task_id": task_id,
@@ -4419,7 +4448,9 @@ def render_interrupt_approval_ui():
                     col_save, col_cancel = st.columns(2)
                     with col_save:
                         if st.form_submit_button(
-                            "Save & Approve", width='stretch', type="primary"
+                            "Save & Approve",
+                            width='stretch',
+                            type="primary",
                         ):
                             try:
                                 edited_args = json.loads(edited_args_text)
@@ -4565,14 +4596,13 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
         if next_interrupt:
             st.session_state.pending_interrupt = next_interrupt
             st.session_state.interrupt_conversation_id = conversation_id
-            st.toast(
-                "Additional tool approval required.", icon=":material/warning:"
-            )
+            next_interrupt_message = extract_interrupt_message(next_interrupt)
+            if next_interrupt_message:
+                st.toast(next_interrupt_message, icon=":material/warning:")
             st.rerun()
 
         st.session_state.pop("pending_interrupt", None)
         st.session_state.pop("interrupt_conversation_id", None)
-        st.toast("Tool execution completed!", icon=":material/check_circle:")
         st.session_state.conversation_messages_page = 0
         st.rerun()
 
@@ -5177,11 +5207,11 @@ def render_chat_view():
                             )
                             # Extract the full interrupt response data
                             interrupt_data = event.get("interrupt")
-
-                            status.update(
-                                label="Workflow paused - Tool approval required",
-                                state="running",
+                            interrupt_message = extract_interrupt_message(
+                                interrupt_data
                             )
+                            if interrupt_message:
+                                status.update(label=interrupt_message, state="running")
 
                             # Store interrupt state in session for the approval UI
                             if interrupt_data:
@@ -5190,16 +5220,7 @@ def render_chat_view():
                                     conversation_id
                                 )
                             else:
-                                st.error(
-                                    "Interrupt detected but no interrupt data provided. Check HITL configuration.",
-                                    icon=":material/error:",
-                                )
-
-                            # Display info message
-                            st.info(
-                                "The assistant wants to use tools. Please review and approve below.",
-                                icon=":material/handyman:",
-                            )
+                                st.json(event)
 
                             # Stop processing further events and rerun to show approval UI
                             _clear_inflight_state()
@@ -6406,7 +6427,7 @@ def render_models_view() -> None:
 
     gemini_model_options = [
         "gemini-3-flash-preview",
-        "gemini-3-pro-preview",
+        "gemini-3.1-pro-preview",
         "gemini-2.5-flash-latest",
         "gemini-2.5-pro",
     ]

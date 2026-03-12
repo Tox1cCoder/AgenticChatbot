@@ -16,8 +16,6 @@ from ..schemas import (
     AgentResponse,
     AgentType,
     MessageRole,
-    Plan,
-    Task,
     TodoStatus,
 )
 from ..todo_actions import apply_write_todos_action
@@ -121,6 +119,7 @@ class PlanningAgent(BaseAgent):
                 - Create or modify the task plan using: set_todos, add_todo, update_todo, remove_todo
                 - Do NOT execute tasks: no start_todo or complete_todo
                 - Ask for confirmation before starting execution
+                - When modifying an existing plan, preserve task IDs and statuses for unchanged tasks
 
                 When the user explicitly asks to start/execute/implement:
                 - Begin execution by calling start_todo for the next task
@@ -211,7 +210,7 @@ class PlanningAgent(BaseAgent):
     async def generate_plan(
         self, message: AgentMessage, conversation_id: Optional[str] = None
     ) -> AgentResponse:
-        """Generate a plan payload for persistence (used by TaskPlanService)."""
+        """Generate a canonical todo payload for persistence."""
         return await self._generate_or_modify_plan(
             message=message,
             existing_tasks=None,
@@ -225,7 +224,7 @@ class PlanningAgent(BaseAgent):
         existing_tasks: List[Dict[str, Any]],
         conversation_id: Optional[str] = None,
     ) -> AgentResponse:
-        """Modify an existing plan payload for persistence (used by TaskPlanService)."""
+        """Modify an existing canonical todo payload for persistence."""
         return await self._generate_or_modify_plan(
             message=message,
             existing_tasks=existing_tasks,
@@ -321,19 +320,20 @@ class PlanningAgent(BaseAgent):
                 }
             ]
 
-        plan = self._todos_to_plan(
-            todos=updated_todos,
-            overall_goal=((message_content.strip() or None) if not plan_modified else None),
-        )
+        canonical_todos = self._canonicalize_todos(updated_todos)
+        overall_goal = (message_content.strip() or None) if not plan_modified else None
 
-        response_text = self._format_plan_summary(plan, plan_modified=plan_modified)
+        response_text = self._format_plan_summary(
+            canonical_todos,
+            overall_goal=overall_goal,
+            plan_modified=plan_modified,
+        )
 
         metadata: Dict[str, Any] = {
             "model": self.model_name,
             "conversation_id": conversation_id,
-            "plan": plan.model_dump(),
-            "task_count": len(plan.tasks),
-            "todos": updated_todos,
+            "task_count": len(canonical_todos),
+            "todos": canonical_todos,
         }
         if plan_modified:
             metadata["plan_modified"] = True
@@ -374,9 +374,7 @@ class PlanningAgent(BaseAgent):
 
         return todos
 
-    def _todos_to_plan(
-        self, *, todos: List[Dict[str, Any]], overall_goal: Optional[str]
-    ) -> Plan:
+    def _canonicalize_todos(self, todos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         def sort_key(item: Dict[str, Any]) -> int:
             order = item.get("order")
             try:
@@ -386,28 +384,61 @@ class PlanningAgent(BaseAgent):
 
         ordered = sorted(todos, key=sort_key) if todos else []
 
-        seen: set[str] = set()
-        tasks: List[Task] = []
+        seen_ids: set[str] = set()
+        active_task_seen = False
+        canonical: List[Dict[str, Any]] = []
         for item in ordered:
             desc = str(item.get("description", "")).strip()
-            if not desc or desc in seen:
+            if not desc:
                 continue
-            seen.add(desc)
-            tasks.append(Task(description=desc))
+            todo_id = str(item.get("id") or uuid.uuid4())
+            if todo_id in seen_ids:
+                continue
+            seen_ids.add(todo_id)
 
-        return Plan(tasks=tasks, overall_goal=overall_goal)
+            raw_status = item.get("status", TodoStatus.PENDING.value)
+            status = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
+            if status not in {
+                TodoStatus.PENDING.value,
+                TodoStatus.IN_PROGRESS.value,
+                TodoStatus.COMPLETED.value,
+                TodoStatus.SKIPPED.value,
+            }:
+                status = TodoStatus.PENDING.value
+            if status == TodoStatus.IN_PROGRESS.value:
+                if active_task_seen:
+                    status = TodoStatus.PENDING.value
+                else:
+                    active_task_seen = True
 
-    def _format_plan_summary(self, plan: Plan, *, plan_modified: bool) -> str:
-        if not plan.tasks:
+            canonical.append(
+                {
+                    "id": todo_id,
+                    "description": desc,
+                    "status": status,
+                    "order": len(canonical),
+                }
+            )
+
+        return canonical
+
+    def _format_plan_summary(
+        self,
+        todos: List[Dict[str, Any]],
+        *,
+        overall_goal: Optional[str],
+        plan_modified: bool,
+    ) -> str:
+        if not todos:
             return "I couldn't generate any actionable tasks."
 
         parts = [
             "I've updated the plan:" if plan_modified else "I've created a plan:",
             "",
         ]
-        if plan.overall_goal:
-            parts.append(f"Goal: {plan.overall_goal}")
+        if overall_goal:
+            parts.append(f"Goal: {overall_goal}")
             parts.append("")
-        for i, task in enumerate(plan.tasks, start=1):
-            parts.append(f"{i}. {task.description}")
+        for i, todo in enumerate(todos, start=1):
+            parts.append(f"{i}. {todo['description']}")
         return "\n".join(parts)

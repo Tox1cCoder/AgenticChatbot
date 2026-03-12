@@ -83,9 +83,10 @@ async def upload_document(
 @AppAutoInjector.auto_inject()
 async def get_task_status(
     document_processing_service: DocumentProcessingService,
+    current_user_id: UUID,
     task_id: str,
 ) -> ApiResponse[Dict[str, Any]]:
-    """Get Celery task status by task ID"""
+    """Get sanitized background task status by task ID."""
     task_status = await document_processing_service.get_processing_status(task_id)
 
     return ApiResponse(

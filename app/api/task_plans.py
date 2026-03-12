@@ -62,8 +62,8 @@ async def create_task_plan_manual(
     user_id: UUID,
 ) -> ApiResponse[List[TaskPlanRead]]:
     """
-    Create a task plan from a manual list of task descriptions.
-    Tasks will be created in order.
+    Create task plan items from a manual list of task descriptions.
+    If a plan already exists, new tasks are appended after the current last task.
     """
     result = task_plan_service.create_task_plan_from_list(
         conversation_id=conversation_id,
@@ -72,7 +72,7 @@ async def create_task_plan_manual(
     )
     return ApiResponse(
         success=True,
-        message=f"Task plan created successfully with {len(result)} tasks",
+        message=f"Task plan updated successfully with {len(result)} tasks",
         data=result,
     )
 
