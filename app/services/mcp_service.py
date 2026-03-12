@@ -1,7 +1,7 @@
 """Service layer for MCP (Model Context Protocol) operations."""
 
 import logging
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, Any
 
 from app.ai.mcp_integration import MCPManager
 from app.core.exceptions.mcp import (

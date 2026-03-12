@@ -5,6 +5,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
 from app.models.base import Base
+from app.models.enums import PlanLifecycleType
 
 
 class Conversation(Base):
@@ -23,6 +24,8 @@ class Conversation(Base):
     title = Column(String(255), nullable=False)
     persona_prompt = Column(Text, nullable=True)
     planning_mode_enabled = Column(Boolean, default=False, nullable=False)
+    # Explicit plan lifecycle state; NULL means no plan has been created.
+    plan_lifecycle = Column(PlanLifecycleType, nullable=True, default=None)
 
     # Relationships
     user = relationship("User", back_populates="conversations")

@@ -185,7 +185,9 @@ class SkillsRegistry:
         description = self._extract_yaml_value(yaml_block, "description")
 
         if not name:
-            logger.warning("Missing 'name' in front-matter of %s — skipping", skill_file)
+            logger.warning(
+                "Missing 'name' in front-matter of %s — skipping", skill_file
+            )
             return None
 
         if not description:
@@ -251,20 +253,23 @@ class SkillsRegistry:
         try:
             return json.loads(config_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning("Failed to read skills config (%s): %s", self._config_path, exc)
+            logger.warning(
+                "Failed to read skills config (%s): %s", self._config_path, exc
+            )
             return {"skills": {}}
 
     def _save_config(self) -> None:
         """Write current skill states to skills_config.json atomically."""
         data = {
             "skills": {
-                name: {"enabled": skill.enabled}
-                for name, skill in self._skills.items()
+                name: {"enabled": skill.enabled} for name, skill in self._skills.items()
             }
         }
         self._atomic_write(data)
 
-    def _merge_and_save_config(self, config: dict, discovered: Dict[str, SkillMeta]) -> None:
+    def _merge_and_save_config(
+        self, config: dict, discovered: Dict[str, SkillMeta]
+    ) -> None:
         """Merge discovered skills into config and save."""
         skills_section = config.get("skills", {})
         changed = False
@@ -278,8 +283,7 @@ class SkillsRegistry:
             config["skills"] = skills_section
             data = {
                 "skills": {
-                    name: {"enabled": discovered[name].enabled}
-                    for name in discovered
+                    name: {"enabled": discovered[name].enabled} for name in discovered
                 }
             }
             self._atomic_write(data)

@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,7 +13,11 @@ from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.message_service_interface import IMessageService
 from app.interfaces.conversation_service_interface import IConversationService
 from app.models.enums import MessageRole
-from app.schemas.conversation import ConversationCreate, ConversationUpdate, ConversationRead
+from app.schemas.conversation import (
+    ConversationCreate,
+    ConversationUpdate,
+    ConversationRead,
+)
 from app.schemas.message import MessageCreate, InterruptResumeRequest
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
@@ -46,9 +50,7 @@ class AISDKMessagePart(BaseModel):
 
     type: str = Field(..., description="Part type: 'text', 'file', or 'reasoning'")
     text: Optional[str] = Field(None, description="Text content (when type='text')")
-    url: Optional[str] = Field(
-        None, description="File or data URL (when type='file')"
-    )
+    url: Optional[str] = Field(None, description="File or data URL (when type='file')")
     media_type: Optional[str] = Field(
         None, alias="mediaType", description="MIME type (when type='file')"
     )
@@ -289,9 +291,7 @@ def _normalize_image_item_to_file_part(item: Any) -> Optional[Dict[str, str]]:
     for candidate in candidate_values:
         if isinstance(candidate, dict):
             candidate = (
-                candidate.get("url")
-                or candidate.get("data")
-                or candidate.get("base64")
+                candidate.get("url") or candidate.get("data") or candidate.get("base64")
             )
         if not isinstance(candidate, str):
             continue
@@ -349,7 +349,9 @@ def _extract_image_file_parts_from_metadata(
     return file_parts
 
 
-def _extract_image_file_parts_from_message(message: Dict[str, Any]) -> List[Dict[str, str]]:
+def _extract_image_file_parts_from_message(
+    message: Dict[str, Any],
+) -> List[Dict[str, str]]:
     if not isinstance(message, dict):
         return []
 
@@ -765,9 +767,7 @@ class CompleteEventHandler(EventHandler):
             # side-channel metadata that is not available in the stream itself
             # (backend message ID, citations, suggested questions, etc.).
             STRIP_KEYS = {"content"}
-            message_meta = {
-                k: v for k, v in message.items() if k not in STRIP_KEYS
-            }
+            message_meta = {k: v for k, v in message.items() if k not in STRIP_KEYS}
             if message_meta:
                 yield _sse(
                     {
@@ -909,7 +909,9 @@ async def create_conversation_ai_sdk(
     current_user_id: UUID,
 ) -> ApiResponse[ConversationRead]:
     """Create a new conversation for AI SDK client."""
-    result = conversation_service.create_conversation(conversation_data, current_user_id)
+    result = conversation_service.create_conversation(
+        conversation_data, current_user_id
+    )
     return ApiResponse(
         success=True, message="Conversation created successfully", data=result
     )

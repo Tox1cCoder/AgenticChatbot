@@ -41,4 +41,3 @@ def create_write_todos_tool():
         return f"Unsupported action: {action_value}"
 
     return write_todos
-

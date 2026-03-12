@@ -1,10 +1,9 @@
 from typing import List, Optional
 from uuid import UUID
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import select, asc, desc, or_
+from sqlalchemy import select, asc, desc
 
 from app.models.message import Message
-from app.models.conversation import Conversation
 from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.query_strategy import DefaultQueryStrategy
 from app.repositories.utils.pagination import Paginator
@@ -262,9 +261,7 @@ class MessageRepository:
         with self.session_factory() as session:
             return self._crud_strategy.delete(session, id)
 
-    def get_latest_by_conversation(
-        self, conversation_id: UUID
-    ) -> Optional[Message]:
+    def get_latest_by_conversation(self, conversation_id: UUID) -> Optional[Message]:
         """Retrieve the most recent message in a conversation."""
         with self.session_factory() as session:
             statement = (

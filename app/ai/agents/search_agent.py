@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 class SearchAgent(BaseAgent):
-
     def __init__(self):
         super().__init__(agent_config_key="search")
 

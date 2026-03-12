@@ -29,8 +29,7 @@ from typing import Optional, List, Dict, Any, AsyncIterator
 from langchain_core.messages import BaseMessage, HumanMessage as LCHumanMessage
 
 from .base_agent import BaseAgent
-from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..utils import coerce_response_text
+from ..schemas import AgentMessage, AgentResponse, AgentType
 
 logger = logging.getLogger(__name__)
 

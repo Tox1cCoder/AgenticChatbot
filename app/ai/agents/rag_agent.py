@@ -48,7 +48,6 @@ logger = logging.getLogger(__name__)
 
 
 class RAGAgent(BaseAgent):
-
     def __init__(
         self,
         settings: Settings,
@@ -349,7 +348,7 @@ class RAGAgent(BaseAgent):
                         response_text = coerce_response_text(
                             getattr(response, "content", "")
                         )
-                    except Exception as exc:
+                    except Exception:
                         used_fallback = True
                         provider = "gemini"
                         effective_model_name = self.model_name
@@ -381,12 +380,14 @@ class RAGAgent(BaseAgent):
                     response_text = await self._generate_with_vision(prompt, images)
                 elif has_tool_binding:
                     # Use tools without images
-                    response_text, tools_used, tool_artifacts = (
-                        await self._generate_with_tools(
-                            prompt,
-                            conversation_id=conversation_id,
-                            tools_to_bind=tools_for_binding,
-                        )
+                    (
+                        response_text,
+                        tools_used,
+                        tool_artifacts,
+                    ) = await self._generate_with_tools(
+                        prompt,
+                        conversation_id=conversation_id,
+                        tools_to_bind=tools_for_binding,
                     )
                 else:
                     # Regular text-only generation
@@ -1829,7 +1830,7 @@ class RAGAgent(BaseAgent):
                     response = await self._ainvoke_with_retries(
                         llm_with_tools, messages
                     )
-                except Exception as exc:
+                except Exception:
                     used_fallback = True
                     provider = "gemini"
                     effective_model_name = self.model_name

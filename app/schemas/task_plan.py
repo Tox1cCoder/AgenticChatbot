@@ -127,6 +127,10 @@ class PlanningStatusResponse(BaseModel):
     planning_mode_enabled: bool = Field(
         ..., description="Whether planning mode is enabled for the conversation"
     )
+    plan_lifecycle: Optional[str] = Field(
+        None,
+        description="Explicit plan lifecycle state: draft, ready, executing, paused, completed",
+    )
     total_tasks: int = Field(..., ge=0, description="Total number of tasks")
     pending_tasks: int = Field(..., ge=0, description="Number of pending tasks")
     in_progress_tasks: int = Field(..., ge=0, description="Number of in-progress tasks")

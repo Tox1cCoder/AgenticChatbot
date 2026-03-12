@@ -30,7 +30,9 @@ class IConversationService(ABC):
         pass
 
     @abstractmethod
-    def get_by_id_for_user(self, conversation_id: UUID, owner_id: UUID) -> ConversationRead:
+    def get_by_id_for_user(
+        self, conversation_id: UUID, owner_id: UUID
+    ) -> ConversationRead:
         """Get conversation by ID with ownership validation"""
         pass
 

@@ -43,6 +43,10 @@ class ConversationService(IConversationService):
             "owner_id": conversation_entity.owner_id,
             "title": conversation_entity.title,
             "persona_prompt": conversation_entity.persona_prompt,
+            "planning_mode_enabled": getattr(
+                conversation_entity, "planning_mode_enabled", False
+            ),
+            "plan_lifecycle": getattr(conversation_entity, "plan_lifecycle", None),
         }
 
         if hasattr(conversation_entity, "message_count"):
@@ -85,7 +89,9 @@ class ConversationService(IConversationService):
         conversation_entity = self.repository.get_by_id(conversation_id)
         return self._convert_to_read_schema(conversation_entity, include=[])
 
-    def get_by_id_for_user(self, conversation_id: UUID, owner_id: UUID) -> ConversationRead:
+    def get_by_id_for_user(
+        self, conversation_id: UUID, owner_id: UUID
+    ) -> ConversationRead:
         self.conversation_validation_utils.validate_conversation_access(
             owner_id, conversation_id
         )

@@ -655,14 +655,16 @@ class Settings(BaseSettings):
             raise ValueError("Value must be non-negative")
         return v
 
-    @field_validator("summarization_trigger_fraction", "auto_continue_soft_limit_ratio", mode="before")
+    @field_validator(
+        "summarization_trigger_fraction",
+        "auto_continue_soft_limit_ratio",
+        mode="before",
+    )
     @classmethod
     def _validate_fraction_fields(cls, v: float) -> float:
         v = float(v)
         if not (0.0 < v <= 1.0):
-            raise ValueError(
-                "Value must be in the range (0.0, 1.0]"
-            )
+            raise ValueError("Value must be in the range (0.0, 1.0]")
         return v
 
     @model_validator(mode="after")

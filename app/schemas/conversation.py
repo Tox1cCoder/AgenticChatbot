@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, ConfigDict
 from app.schemas.message import MessageRead
 from app.utils.case_conversion import to_camel_case as to_camel
+from app.models.enums import PlanLifecycle
 
 
 class ConversationCreate(BaseModel):
@@ -63,6 +64,10 @@ class ConversationRead(BaseModel):
         default=False,
         description="Whether planning mode is enabled",
     )
+    plan_lifecycle: Optional[PlanLifecycle] = Field(
+        default=None,
+        description="Explicit lifecycle state of the plan",
+    )
     message_count: Optional[int] = Field(
         default=None, description="Total number of messages in the conversation"
     )
@@ -92,6 +97,10 @@ class ConversationInDB(BaseModel):
     planning_mode_enabled: bool = Field(
         default=False,
         description="Whether planning mode is enabled",
+    )
+    plan_lifecycle: Optional[PlanLifecycle] = Field(
+        default=None,
+        description="Explicit lifecycle state of the plan",
     )
 
 

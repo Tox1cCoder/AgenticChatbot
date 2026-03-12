@@ -229,6 +229,100 @@ Why:
 - this removes redundant copies of large files
 - it reduces pressure on the API process and Redis
 
+---
+
+## Implementation Progress
+
+### Workstream A — Plan lifecycle state & routing ✅
+
+**Status:** COMPLETE (migrations applied, DB at `h8i9j0k1l2m3`)
+
+Files modified:
+- `app/models/enums.py` — added `PlanLifecycle` enum (`draft|ready|executing|paused|completed`) and `PlanLifecycleType = String(20)` (plain VARCHAR, not a PG enum type)
+- `app/models/conversation.py` — added `plan_lifecycle` column
+- `app/schemas/conversation.py` — added `plan_lifecycle` field to `ConversationUpdate`, `ConversationRead`, `ConversationInDB`
+- `app/schemas/task_plan.py` — added `plan_lifecycle` field to `PlanningStatusResponse`
+- `app/services/task_plan_service.py` — added `_transition_lifecycle()`, updated `create_task_plan`, `modify_task_plan`, `sync_todos_from_agent` (opt-in lifecycle param), and `get_planning_status`
+- `app/ai/schemas.py` — added `plan_lifecycle: NotRequired[Optional[str]]` to `GraphState`
+- `app/ai/graph.py` — `_build_initial_state` sets `planning_phase = "executing"` when `plan_lifecycle == "executing"`, propagated through `execute` / `execute_stream`
+- `app/services/ai_service.py` — `plan_lifecycle` propagated through `process_message`, `generate_bot_response`, `generate_bot_response_stream`
+- `app/services/message_service.py` — `plan_lifecycle` extracted from conversation, propagated through `create_message`, `create_message_stream`, `_prepare_planning_context`, `_run_plan_execution_loop`
+- `app/alembic/versions/g7h8i9j0k1l2_add_plan_lifecycle_to_conversations.py` — migration: `plan_lifecycle VARCHAR(20) NULL`
+
+**Design decisions:**
+- Plain `VARCHAR(20)` instead of a PostgreSQL `ENUM` type — avoids a new PG type object and allows future enum extension without DDL changes.
+- `sync_todos_from_agent` lifecycle parameter is opt-in (`None` = don't change). A streaming mid-execution sync cannot accidentally overwrite `executing → draft`.
+- `plan_lifecycle == "executing"` is the trigger that forces `planning_phase = "executing"` in `_build_initial_state`, skipping the LLM planning loop entirely.
+
+---
+
+### Workstream B — DB hardening ✅
+
+**Status:** COMPLETE (migrations applied, DB at `h8i9j0k1l2m3`)
+
+Files modified:
+- `app/models/task_plan.py` — replaced `Index("idx_task_plan_conversation_order", ...)` with `UniqueConstraint("conversation_id", "task_order", name="uq_task_plan_conversation_order", deferrable=True, initially="DEFERRED")`
+- `app/services/task_plan_service.py` — added `SELECT FOR UPDATE` lock on `Conversation` row at the start of `_sync_todo_snapshot` to serialise concurrent writes per conversation
+- `app/alembic/versions/h8i9j0k1l2m3_task_plan_unique_order.py` — migration: dedup-resequences duplicate `task_order` rows using `ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY task_order, created_at, id)`, drops old non-unique index, adds unique constraint
+
+**Design decisions:**
+- `DEFERRABLE INITIALLY DEFERRED` constraint is used so in-flight bulk upserts within a single transaction can temporarily violate ordering without hitting the constraint mid-transaction.
+- Row-level `SELECT FOR UPDATE` on `Conversation` (rather than a PostgreSQL advisory lock) is used because it requires no additional schema and works within the existing SQLAlchemy session pattern.
+
+---
+
+### Workstream C — Task quality ✅
+
+**Status:** COMPLETE
+
+Files modified:
+- `app/ai/agents/planning_agent.py` — added `_MIN_DESC_LEN = 20`, `_ACTION_VERB_RE` (regex for ~50 common action verbs), `_validate_task_descriptions()` returning `(index, reason)` pairs for under-specified tasks; added quality gate in `_generate_or_modify_plan` that rejects tasks failing the validator before persisting
+- `app/ai/prompts.py` — strengthened `PLANNING_EXECUTION_PROMPT` with explicit 20-character minimum, action-verb requirement, and bad/good examples
+- `app/ai/graph.py` — `_approval_node` and the planning-tools HITL gate both set `context["pause_reason"] = "awaiting_approval"` before the `interrupt()` call; `execute()` extracts `pause_reason` from final context and surfaces it in `agent_response.metadata`
+
+**Design decisions:**
+- Quality validation runs on the canonicalised list after `_canonicalize_todos`, so the validator sees the same data the DB will receive.
+- `pause_reason` is surfaced in `metadata` rather than a dedicated response field, keeping the `AgentResponse` schema backwards-compatible.
+
+---
+
+### Workstream D — Document task ownership ✅
+
+**Status:** COMPLETE (migration applied, DB at `i9j0k1l2m3n4`)
+
+Files modified:
+- `app/models/document.py` — added `processing_task_id = Column(String(255), nullable=True)` with index `idx_document_processing_task_id`
+- `app/schemas/document.py` — added `processing_task_id: Optional[str] = None` to `DocumentUpdate`
+- `app/repositories/document.py` — added `get_by_processing_task_id(task_id)` query method
+- `app/services/document_processing_service.py` — `start_processing_task` writes the file to a deterministic temp path via `_staged_temp_path()` before enqueuing; passes the path string (not bytes) to Celery
+- `app/workers/document_processor.py` — `process_document_task` accepts `temp_file_path: str` instead of `file_content: bytes`; reads from the pre-staged path; cleans it up in `finally`
+- `app/api/documents.py` — `/documents/upload` persists `processing_task_id` after task enqueue; `/documents/task/{task_id}` looks up document by task_id and enforces ownership via `DocumentValidationUtils`
+- `app/alembic/versions/i9j0k1l2m3n4_document_processing_task_id.py` — migration: `processing_task_id VARCHAR(255) NULL` + index
+
+**Design decisions:**
+- Staged file handoff (service writes → worker reads path) removes large byte payloads from the Redis task queue and prevents memory spikes on the message broker.
+- Ownership check on `/documents/task/{task_id}` is a best-effort guard: if the task_id is unknown (race between enqueue and DB write), the endpoint falls through gracefully rather than 403-ing.
+
+---
+
+### Workstream E — Test coverage ✅
+
+**Status:** COMPLETE (39/39 tests passing)
+
+Test files created:
+- `tests/conftest.py` — shared fixtures (async event loop, mock database session)
+- `tests/ai/test_todo_actions.py` — 17 tests for `handle_todo_action`: set/add/complete/start/update/remove/unknown actions
+- `tests/api/test_documents.py` — 5 tests: upload persists `processing_task_id`, task-status ownership enforcement, unknown task_id graceful handling, staged file write
+- `tests/api/test_task_plans.py` — 4 tests: `PlanningStatusResponse` includes `plan_lifecycle`, `None` for new conversations, all lifecycle enum values valid, `create_task_plan` transitions to `draft`
+- `tests/services/test_task_plan_service.py` — 10 tests: `_transition_lifecycle` persists & swallows errors, `sync_todos_from_agent` lifecycle opt-in, `get_planning_status` lifecycle field, `_sync_todo_snapshot` upsert/delete/dedup semantics
+- `tests/services/test_message_service.py` — 3 tests: `_prepare_planning_context` propagates `plan_lifecycle`, `_run_plan_execution_loop` forwards lifecycle to AI service
+
+**Design decisions:**
+- All tests are pure unit tests with no live DB or network: all external dependencies are mocked.
+- `TaskPlanRead.model_validate` with `alias_generator=to_camel` accesses attributes via camelCase aliases on mock objects; end-of-snapshot re-fetch is mocked to return `[]` to avoid pydantic validation of `MagicMock` fields.
+- `pytest-asyncio` with `asyncio_mode=auto` handles all `async def` tests.
+
+
 ## Implementation Workstreams
 
 ### Workstream A: Lifecycle state and routing

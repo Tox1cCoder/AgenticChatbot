@@ -22,7 +22,7 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel as PydanticBaseModel
 
 if TYPE_CHECKING:
-    from .mcp_registry import MCPRegistry
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +160,7 @@ class MCPManager:
         for server_name in missing_servers:
             try:
                 await self.get_server_tools(server_name)
-            except ServerNotFoundError as exc:
+            except ServerNotFoundError:
                 pass
             except Exception as exc:
                 logger.error(
@@ -634,9 +634,7 @@ class MCPManager:
             self._tool_server_map.pop(id(tool), None)
             indexed = self._tool_index.get(tool.name)
             if indexed:
-                self._tool_index[tool.name] = [
-                    t for t in indexed if t is not tool
-                ]
+                self._tool_index[tool.name] = [t for t in indexed if t is not tool]
                 if not self._tool_index[tool.name]:
                     del self._tool_index[tool.name]
         self._tools = [t for t in self._tools if t not in removed_tools]
@@ -661,9 +659,7 @@ class MCPManager:
         )
         return fresh_tools
 
-    async def reconnect_and_get_tool(
-        self, tool_name: str
-    ) -> Optional[BaseTool]:
+    async def reconnect_and_get_tool(self, tool_name: str) -> Optional[BaseTool]:
         """
         Reconnect whichever server owns *tool_name* and return a fresh tool.
 
@@ -685,9 +681,7 @@ class MCPManager:
                     break
 
         if not server_name:
-            logger.warning(
-                "Cannot reconnect for tool '%s': server unknown", tool_name
-            )
+            logger.warning("Cannot reconnect for tool '%s': server unknown", tool_name)
             return None
 
         await self.reconnect_server(server_name)

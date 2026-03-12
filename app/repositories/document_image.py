@@ -9,7 +9,6 @@ from app.schemas.document_image import DocumentImageCreate, DocumentImageUpdate
 
 
 class DocumentImageRepository:
-
     def __init__(self, session_factory: callable):
         self.session_factory = session_factory
 

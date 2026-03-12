@@ -16,7 +16,6 @@ from app.schemas.message import MessageRead
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.schemas.pagination import ConversationPaginationParams, MessagePaginationParams
-from app.core.config import settings
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -27,9 +26,6 @@ class GenerateTitleRequest(BaseModel):
 
 class GenerateTitleResponse(BaseModel):
     title: str
-
-
-
 
 
 @router.post("/generate-title", response_model=ApiResponse[GenerateTitleResponse])

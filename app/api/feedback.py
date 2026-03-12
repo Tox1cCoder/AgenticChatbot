@@ -45,14 +45,10 @@ async def get_message_rating_stats(
     )
 
 
-@router.get(
-    "/{message_id}/feedbacks/user", response_model=ApiResponse[FeedbackRead]
-)
+@router.get("/{message_id}/feedbacks/user", response_model=ApiResponse[FeedbackRead])
 @AppAutoInjector.auto_inject()
 async def get_user_feedback_for_message(
-    message_id: UUID,
-    user_id: UUID,
-    feedback_service: IFeedbackService
+    message_id: UUID, user_id: UUID, feedback_service: IFeedbackService
 ) -> ApiResponse[FeedbackRead]:
     """Get authenticated user's feedback for a message"""
     feedback = feedback_service.get_user_feedback_for_message(message_id, user_id)

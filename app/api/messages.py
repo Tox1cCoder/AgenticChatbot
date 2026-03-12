@@ -8,7 +8,12 @@ from fastapi.responses import StreamingResponse
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.message_service_interface import IMessageService
-from app.schemas.message import MessageCreate, MessageRead, InterruptResumeRequest, StopGenerationRequest
+from app.schemas.message import (
+    MessageCreate,
+    MessageRead,
+    InterruptResumeRequest,
+    StopGenerationRequest,
+)
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.schemas.pagination import MessagePaginationParams

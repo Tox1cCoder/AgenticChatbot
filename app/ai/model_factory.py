@@ -167,8 +167,8 @@ class ModelFactory:
             # Older langchain-openai versions may not support reasoning parameter
             if "reasoning" in str(exc) and "unexpected keyword argument" in str(exc):
                 logger.warning(
-                    f"langchain-openai version does not support 'reasoning' parameter. "
-                    f"Consider upgrading to get extended thinking support for o1/o3 models."
+                    "langchain-openai version does not support 'reasoning' parameter. "
+                    "Consider upgrading to get extended thinking support for o1/o3 models."
                 )
                 model_kwargs.pop("reasoning", None)
                 return ChatOpenAI(**model_kwargs)

@@ -127,10 +127,14 @@ class ModelConfigService:
             model = str(model_value).strip() if isinstance(model_value, str) else ""
             if not model:
                 default_model = _default_agent_config(agent_key).get("model")
-                model = str(default_model).strip() if isinstance(default_model, str) else ""
+                model = (
+                    str(default_model).strip() if isinstance(default_model, str) else ""
+                )
 
             if provider == "openai" and not model:
-                raise ValueError(f"OpenAI provider requires a model for agent {agent_key}")
+                raise ValueError(
+                    f"OpenAI provider requires a model for agent {agent_key}"
+                )
 
             temperature: Optional[float] = None
             if isinstance(temp_value, (int, float)):
@@ -148,4 +152,3 @@ class ModelConfigService:
 
     def reset_configs(self, user_id: UUID) -> int:
         return self.repository.delete_all_by_user(user_id)
-

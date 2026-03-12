@@ -1,5 +1,5 @@
 import enum
-from sqlalchemy import Integer, Enum
+from sqlalchemy import Integer, Enum, String
 
 
 class MessageRole(enum.IntEnum):
@@ -20,6 +20,16 @@ class TaskStatus(str, enum.Enum):
     skipped = "skipped"
 
 
+class PlanLifecycle(str, enum.Enum):
+    """Explicit lifecycle state for a conversation's task plan."""
+
+    draft = "draft"  # Tasks created/modified, not yet approved for execution
+    ready = "ready"  # User confirmed; ready to execute
+    executing = "executing"  # Execution in progress
+    paused = "paused"  # Execution paused (clarification, approval, budget, error)
+    completed = "completed"  # All tasks complete
+
+
 # SQLAlchemy types
 MessageRoleType = Integer
 DocumentStatusType = Integer
@@ -31,3 +41,5 @@ TaskStatusType = Enum(
     name="task_status",
     create_type=False,
 )
+# Plain String for plan lifecycle (avoids creating a new PG enum type mid-migration)
+PlanLifecycleType = String(20)

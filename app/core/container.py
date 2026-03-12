@@ -35,7 +35,7 @@ from app.services.skills_service import SkillsService
 from app.ai.checkpoint import CheckpointManager
 from app.ai.mcp_integration import MCPManager
 from app.ai.mcp_registry import MCPRegistry
-from app.ai.skills_registry import SkillsRegistry, get_skills_registry
+from app.ai.skills_registry import get_skills_registry
 from app.ai.agents.planning_agent import PlanningAgent
 from app.repositories.document_image import DocumentImageRepository
 

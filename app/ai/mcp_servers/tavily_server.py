@@ -44,7 +44,7 @@ def tavily_search(query: str, max_results: int = 5) -> str:
         if not api_key:
             try:
                 api_key = settings.tavily_api_key
-            except Exception as e:
+            except Exception:
                 pass
 
         if not api_key:

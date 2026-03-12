@@ -19,7 +19,6 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from ..core.config import settings
 from .mcp_registry import get_mcp_tools_generation
 
 logger = logging.getLogger(__name__)

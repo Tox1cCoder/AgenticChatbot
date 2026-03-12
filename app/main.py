@@ -86,6 +86,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     try:
         from app.ai.mcp_integration import get_global_mcp_manager
+
         mcp_manager = await get_global_mcp_manager()
         if mcp_manager:
             await mcp_manager.cleanup()

@@ -110,4 +110,3 @@ class AgentModelConfigRepository:
             )
             session.commit()
             return bool(deleted)
-

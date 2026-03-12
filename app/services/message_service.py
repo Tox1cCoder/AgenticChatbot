@@ -8,12 +8,12 @@ import redis
 
 
 from app.repositories.message import MessageRepository
-from app.services.generation_registry import get_generation_registry, InflightEntry
+from app.services.generation_registry import get_generation_registry
 from app.repositories.tool_approval import ToolApprovalRepository
 from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
-from app.models.enums import MessageRole
+from app.models.enums import MessageRole, PlanLifecycle
 from app.models.tool_approval import DecisionType
 from app.factories.message_factory import MessageFactory
 from app.utils.validation.conversation_validation import ConversationValidationUtils
@@ -109,7 +109,10 @@ class MessageService(IMessageService):
         return resolved_user_id, persona
 
     def _create_bot_response_message(
-        self, conversation_id: UUID, content: str, metadata: Dict[str, Any],
+        self,
+        conversation_id: UUID,
+        content: str,
+        metadata: Dict[str, Any],
         message_id: UUID | None = None,
     ) -> MessageRead:
         """Create and persist a bot response message."""
@@ -126,6 +129,126 @@ class MessageService(IMessageService):
         except Exception:
             pass
         return MessageRead.model_validate(bot_message)
+
+    @staticmethod
+    def _coerce_plan_lifecycle(
+        raw_lifecycle: Optional[str | PlanLifecycle],
+    ) -> Optional[PlanLifecycle]:
+        if isinstance(raw_lifecycle, PlanLifecycle):
+            return raw_lifecycle
+        if isinstance(raw_lifecycle, str):
+            try:
+                return PlanLifecycle(raw_lifecycle.strip().lower())
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _infer_lifecycle_from_todos(
+        todos: Optional[List[Dict[str, Any]]],
+    ) -> Optional[PlanLifecycle]:
+        if not isinstance(todos, list) or not todos:
+            return None
+
+        statuses = []
+        for todo in todos:
+            if not isinstance(todo, dict):
+                continue
+            raw_status = todo.get("status")
+            if hasattr(raw_status, "value"):
+                raw_status = raw_status.value
+            statuses.append(str(raw_status or "").strip().lower())
+
+        if not statuses:
+            return None
+
+        if all(status in {"completed", "skipped"} for status in statuses):
+            return PlanLifecycle.completed
+
+        if any(
+            status in {"in_progress", "completed", "skipped"} for status in statuses
+        ):
+            return PlanLifecycle.executing
+
+        return PlanLifecycle.draft
+
+    def _infer_plan_lifecycle(
+        self,
+        *,
+        response: Optional[AgentResponse],
+        current_lifecycle: Optional[str | PlanLifecycle],
+    ) -> Optional[PlanLifecycle]:
+        if not response or not isinstance(getattr(response, "metadata", None), dict):
+            return None
+
+        metadata = response.metadata
+        if metadata.get("interrupt") is not None:
+            return PlanLifecycle.paused
+
+        if metadata.get("all_tasks_completed"):
+            return PlanLifecycle.completed
+
+        if metadata.get("pause_reason") or metadata.get("planning_budget_reached"):
+            return PlanLifecycle.paused
+
+        inferred_from_todos = self._infer_lifecycle_from_todos(metadata.get("todos"))
+        if inferred_from_todos is not None:
+            return inferred_from_todos
+
+        current = self._coerce_plan_lifecycle(current_lifecycle)
+        if current == PlanLifecycle.executing:
+            return PlanLifecycle.executing
+        return None
+
+    def _set_plan_lifecycle(
+        self,
+        conversation_id: UUID,
+        user_id: Optional[UUID],
+        lifecycle: Optional[PlanLifecycle],
+    ) -> None:
+        if not self.task_plan_service or user_id is None or lifecycle is None:
+            return
+
+        try:
+            self.task_plan_service.set_plan_lifecycle(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                lifecycle=lifecycle,
+            )
+        except Exception as exc:
+            logging.warning(
+                "Failed to set plan lifecycle for conversation %s: %s",
+                conversation_id,
+                type(exc).__name__,
+                exc_info=True,
+            )
+
+    def _sync_response_plan_state(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: Optional[UUID],
+        bot_response: Optional[AgentResponse],
+        current_lifecycle: Optional[str | PlanLifecycle],
+    ) -> bool:
+        lifecycle = self._infer_plan_lifecycle(
+            response=bot_response,
+            current_lifecycle=current_lifecycle,
+        )
+        metadata = getattr(bot_response, "metadata", None) or {}
+        todos = metadata.get("todos")
+
+        if isinstance(todos, list):
+            self._sync_todos_to_database(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                todos=todos,
+                lifecycle=lifecycle,
+            )
+            return True
+
+        self._set_plan_lifecycle(conversation_id, user_id, lifecycle)
+        return False
 
     async def _generate_and_add_suggestions(
         self, user_query: str, response_content: str, metadata: Dict[str, Any]
@@ -323,18 +446,28 @@ class MessageService(IMessageService):
             planning_mode_enabled = (
                 conversation.planning_mode_enabled if conversation else False
             )
+            _lifecycle = getattr(conversation, "plan_lifecycle", None)
+            plan_lifecycle_value = (
+                _lifecycle.value
+                if hasattr(_lifecycle, "value")
+                else str(_lifecycle)
+                if _lifecycle is not None
+                else None
+            )
 
-            # Use shared helper to prepare planning context
+            # Use shared helper to prepare planning context (non-stream path)
             planning_ctx = await self._prepare_planning_context(
                 conversation_id=message_create_data.conversation_id,
                 user_id=user_id,
                 message_content=message_create_data.content,
                 planning_mode_enabled=planning_mode_enabled,
+                plan_lifecycle=plan_lifecycle_value,
             )
             planning_mode_enabled = planning_ctx["planning_mode_enabled"]
             has_existing_plan = planning_ctx["has_existing_plan"]
             current_task_context = planning_ctx["current_task_context"]
             existing_tasks_dict = planning_ctx["existing_tasks_dict"]
+            plan_lifecycle_value = planning_ctx.get("plan_lifecycle")
 
             # Extract attachments from message_create_data if present
             attachments = (
@@ -369,6 +502,7 @@ class MessageService(IMessageService):
                 attachments=attachments,
                 model_request=model_request,
                 persona=sanitized_persona,
+                plan_lifecycle=plan_lifecycle_value,
             )
 
             if interrupt_payload:
@@ -413,7 +547,9 @@ class MessageService(IMessageService):
         return MessageRead.model_validate(created_message)
 
     async def create_message_stream(
-        self, message_create_data: MessageCreate, user_id: UUID,
+        self,
+        message_create_data: MessageCreate,
+        user_id: UUID,
         bot_message_id: UUID | None = None,
     ):
         """
@@ -461,9 +597,8 @@ class MessageService(IMessageService):
                 )
             )
             default_titles = {"New Conversation", "Untitled", ""}
-            needs_title = (
-                conversation is not None
-                and (conversation.title in default_titles or conversation.title is None)
+            needs_title = conversation is not None and (
+                conversation.title in default_titles or conversation.title is None
             )
             if needs_title:
                 title_task = asyncio.create_task(
@@ -486,18 +621,28 @@ class MessageService(IMessageService):
             planning_mode_enabled = (
                 conversation.planning_mode_enabled if conversation else False
             )
+            _lc = getattr(conversation, "plan_lifecycle", None)
+            plan_lifecycle_value = (
+                _lc.value
+                if hasattr(_lc, "value")
+                else str(_lc)
+                if _lc is not None
+                else None
+            )
 
-            # Use shared helper to prepare planning context
+            # Use shared helper to prepare planning context (stream path)
             planning_ctx = await self._prepare_planning_context(
                 conversation_id=message_create_data.conversation_id,
                 user_id=user_id,
                 message_content=message_create_data.content,
                 planning_mode_enabled=planning_mode_enabled,
+                plan_lifecycle=plan_lifecycle_value,
             )
             planning_mode_enabled = planning_ctx["planning_mode_enabled"]
             has_existing_plan = planning_ctx["has_existing_plan"]
             current_task_context = planning_ctx["current_task_context"]
             existing_tasks_dict = planning_ctx["existing_tasks_dict"]
+            plan_lifecycle_value = planning_ctx.get("plan_lifecycle")
 
             # Extract attachments from message_create_data if present
             attachments = (
@@ -533,6 +678,7 @@ class MessageService(IMessageService):
                     existing_tasks=existing_tasks_dict,
                     model_request=model_request,
                     persona=sanitized_persona,
+                    plan_lifecycle=plan_lifecycle_value,
                 ):
                     # ---- Check cancellation before processing each event ----
                     if inflight.is_cancelled:
@@ -584,6 +730,11 @@ class MessageService(IMessageService):
                             message_create_data.conversation_id,
                             interrupt_id,
                             interrupt_response,
+                        )
+                        self._set_plan_lifecycle(
+                            message_create_data.conversation_id,
+                            user_id,
+                            PlanLifecycle.paused,
                         )
 
                         yield {
@@ -668,17 +819,13 @@ class MessageService(IMessageService):
                 bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
                 bot_metadata["reply_to_user_message_id"] = str(user_message_id)
 
-                # Sync todos from graph state if present (for planning agent)
-                if (
-                    bot_response
-                    and bot_response.metadata
-                    and bot_response.metadata.get("todos")
+                # Sync todos and persist the derived lifecycle from graph state.
+                if self._sync_response_plan_state(
+                    conversation_id=message_create_data.conversation_id,
+                    user_id=user_id,
+                    bot_response=bot_response,
+                    current_lifecycle=plan_lifecycle_value,
                 ):
-                    self._sync_todos_to_database(
-                        conversation_id=message_create_data.conversation_id,
-                        user_id=user_id,
-                        todos=bot_response.metadata["todos"],
-                    )
                     bot_metadata["todos_synced"] = True
 
                 # Generate follow-up question suggestions
@@ -805,7 +952,8 @@ class MessageService(IMessageService):
                 )
             now = datetime.now(timezone.utc)
             if record.status == HITLInterruptStatus.EXPIRED or (
-                record.status == HITLInterruptStatus.PENDING and record.expires_at <= now
+                record.status == HITLInterruptStatus.PENDING
+                and record.expires_at <= now
             ):
                 if record.status == HITLInterruptStatus.PENDING:
                     try:
@@ -887,7 +1035,10 @@ class MessageService(IMessageService):
         stored_original_args: Dict[str, Any] = {}
         if interrupt_id:
             try:
-                if fetched_interrupt_record and fetched_interrupt_record.action_requests_json:
+                if (
+                    fetched_interrupt_record
+                    and fetched_interrupt_record.action_requests_json
+                ):
                     for req in fetched_interrupt_record.action_requests_json:
                         if isinstance(req, dict):
                             key = req.get("tool_call_id") or req.get("task_id")
@@ -935,13 +1086,11 @@ class MessageService(IMessageService):
                     exc_info=True,
                 )
 
-    def _normalize_nested_interrupt_payload(
-        self, interrupt_payload: Any
-    ) -> Any:
+    def _normalize_nested_interrupt_payload(self, interrupt_payload: Any) -> Any:
         if isinstance(interrupt_payload, dict):
-            interrupt_count = (
-                (interrupt_payload.get("metadata") or {}).get("interrupt_count", 0) + 1
-            )
+            interrupt_count = (interrupt_payload.get("metadata") or {}).get(
+                "interrupt_count", 0
+            ) + 1
             if not interrupt_payload.get("metadata"):
                 interrupt_payload["metadata"] = {}
             interrupt_payload["metadata"]["interrupt_count"] = interrupt_count
@@ -1052,6 +1201,11 @@ class MessageService(IMessageService):
                         user_id=user_id,
                         message_id=bot_message_id,
                     )
+                    self._set_plan_lifecycle(
+                        conversation_id,
+                        user_id,
+                        PlanLifecycle.paused,
+                    )
                     bot_message_persisted = True
 
                     yield {
@@ -1081,20 +1235,17 @@ class MessageService(IMessageService):
                     bot_response_content = extract_response_content(
                         bot_response, ERROR_RESPONSE_AFTER_RESUME
                     )
-                    bot_response_content = fix_markdown_code_blocks(bot_response_content)
+                    bot_response_content = fix_markdown_code_blocks(
+                        bot_response_content
+                    )
 
                     bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
-                    if (
-                        bot_response
-                        and bot_response.metadata
-                        and bot_response.metadata.get("todos")
-                        and self.task_plan_service
+                    if self._sync_response_plan_state(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        bot_response=bot_response,
+                        current_lifecycle=None,
                     ):
-                        self._sync_todos_to_database(
-                            conversation_id=conversation_id,
-                            user_id=user_id,
-                            todos=bot_response.metadata["todos"],
-                        )
                         bot_metadata["todos_synced"] = True
                     bot_message = self._create_bot_response_message(
                         conversation_id=conversation_id,
@@ -1342,6 +1493,13 @@ class MessageService(IMessageService):
         )
 
         bot_metadata = build_bot_metadata(bot_response)
+        if self._sync_response_plan_state(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            bot_response=bot_response,
+            current_lifecycle=None,
+        ):
+            bot_metadata["todos_synced"] = True
 
         return self._create_bot_response_message(
             conversation_id=conversation_id,
@@ -1368,6 +1526,7 @@ class MessageService(IMessageService):
         user_id: UUID,
         message_content: str,
         planning_mode_enabled: bool,
+        plan_lifecycle: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Prepare task planning context for message creation.
@@ -1377,12 +1536,14 @@ class MessageService(IMessageService):
         - has_existing_plan: bool
         - current_task_context: Optional[dict]
         - existing_tasks_dict: Optional[List[dict]]
+        - plan_lifecycle: Optional[str]
         """
         result = {
             "planning_mode_enabled": planning_mode_enabled,
             "has_existing_plan": False,
             "current_task_context": None,
             "existing_tasks_dict": None,
+            "plan_lifecycle": plan_lifecycle,
         }
 
         if not self.task_plan_service or not user_id:
@@ -1453,6 +1614,7 @@ class MessageService(IMessageService):
         attachments: Optional[list],
         model_request: Optional[Dict[str, Any]] = None,
         persona: Optional[str] = None,
+        plan_lifecycle: Optional[str] = None,
     ) -> Tuple[
         Optional[str],
         Dict[str, Any],
@@ -1481,6 +1643,7 @@ class MessageService(IMessageService):
             existing_tasks=existing_tasks_dict,
             model_request=model_request,
             persona=persona,
+            plan_lifecycle=plan_lifecycle,
         )
 
         # Handle interrupts (HITL)
@@ -1489,6 +1652,11 @@ class MessageService(IMessageService):
             and bot_response.metadata
             and "interrupt" in bot_response.metadata
         ):
+            self._set_plan_lifecycle(
+                conversation_id,
+                user_id,
+                PlanLifecycle.paused,
+            )
             return (
                 None,
                 {},
@@ -1499,13 +1667,13 @@ class MessageService(IMessageService):
 
         bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
 
-        # Sync todos from graph state if present
-        if bot_response and bot_response.metadata.get("todos"):
-            self._sync_todos_to_database(
-                conversation_id=conversation_id,
-                user_id=user_id,
-                todos=bot_response.metadata["todos"],
-            )
+        # Sync todos and persist the derived lifecycle from graph state if present.
+        if self._sync_response_plan_state(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            bot_response=bot_response,
+            current_lifecycle=plan_lifecycle,
+        ):
             bot_metadata["todos_synced"] = True
 
         # Check if planning budget was reached
@@ -1540,6 +1708,7 @@ class MessageService(IMessageService):
         conversation_id: UUID,
         user_id: Optional[UUID],
         todos: List[Dict[str, Any]],
+        lifecycle: Optional[PlanLifecycle] = None,
     ) -> None:
         if not self.task_plan_service or user_id is None or todos is None:
             return
@@ -1550,6 +1719,7 @@ class MessageService(IMessageService):
                 user_id=user_id,
                 todos=todos,
                 preserve_existing_status=False,
+                lifecycle=lifecycle,
             )
         except Exception as exc:
             logging.warning(

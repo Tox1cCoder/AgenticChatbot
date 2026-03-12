@@ -72,7 +72,6 @@ _apply_decisions = apply_hitl_decisions
 
 
 class MultiAgentWorkflow:
-
     def __init__(
         self,
         qdrant_client: QdrantClient,
@@ -159,7 +158,10 @@ class MultiAgentWorkflow:
             return True
 
         nested_metadata = metadata.get("metadata") or {}
-        if isinstance(nested_metadata, dict) and nested_metadata.get("internal") is True:
+        if (
+            isinstance(nested_metadata, dict)
+            and nested_metadata.get("internal") is True
+        ):
             return True
 
         # Hard-coded fallback: always suppress the summarize node regardless of tags.
@@ -335,6 +337,7 @@ class MultiAgentWorkflow:
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
+        plan_lifecycle: Optional[str] = None,
     ) -> GraphState:
         initial_state: GraphState = {
             "messages": [HumanMessage(content=message)],
@@ -383,8 +386,17 @@ class MultiAgentWorkflow:
         # Initialize planning call count for budget tracking
         initial_state["planning_call_count"] = 0
 
-        # Default to "planning" phase - only switch to "executing" when user requests
-        initial_state["planning_phase"] = "planning"
+        # Derive planning_phase from persisted lifecycle:
+        # If lifecycle is "executing", set execution phase so the planning agent
+        # doesn't ask for confirmation again.
+        if plan_lifecycle == "executing":
+            initial_state["planning_phase"] = "executing"
+        else:
+            # Default to "planning" phase - only switch to "executing" when user requests
+            initial_state["planning_phase"] = "planning"
+
+        # Persist lifecycle so agents can read execution state without prompt inference
+        initial_state["plan_lifecycle"] = plan_lifecycle
 
         return initial_state
 
@@ -451,7 +463,12 @@ class MultiAgentWorkflow:
         )
 
         # Consolidate conditional edges for agents that use standard tool calling
-        tool_calling_agents = ["chat_agent", "search_agent", "image_generator_agent", "canvas_agent"]
+        tool_calling_agents = [
+            "chat_agent",
+            "search_agent",
+            "image_generator_agent",
+            "canvas_agent",
+        ]
         for agent_name in tool_calling_agents:
             workflow.add_conditional_edges(
                 agent_name,
@@ -505,10 +522,7 @@ class MultiAgentWorkflow:
 
         # Dynamic tool routing map based on agent registry
         # Include ALL agents (including rag_agent) so hand_off delegation works.
-        tool_routing_map = {
-            agent_name: agent_name
-            for agent_name in self.agents.keys()
-        }
+        tool_routing_map = {agent_name: agent_name for agent_name in self.agents.keys()}
         tool_routing_map["end"] = END
 
         workflow.add_conditional_edges(
@@ -538,7 +552,8 @@ class MultiAgentWorkflow:
             if isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", None)
         }
         tool_calls_pending = [
-            tc for tc in pending_message.tool_calls
+            tc
+            for tc in pending_message.tool_calls
             if normalize_tool_call(tc).get("id") not in already_resolved_ids
         ]
         if not tool_calls_pending:
@@ -714,6 +729,12 @@ class MultiAgentWorkflow:
             normalize_tool_call(tool_call) for tool_call in last_message.tool_calls
         ]
 
+        # Label the stop reason before yielding to the human so callers can
+        # distinguish approval-gate pauses from budget/error pauses.
+        context = dict(state.get("context") or {})
+        context["pause_reason"] = "awaiting_approval"
+        state["context"] = context
+
         human_decisions = interrupt(
             {
                 "action_requests": action_requests,
@@ -721,9 +742,7 @@ class MultiAgentWorkflow:
         )
 
         if not human_decisions:
-            _, rejected_feedback = _apply_decisions(
-                last_message.tool_calls, []
-            )
+            _, rejected_feedback = _apply_decisions(last_message.tool_calls, [])
         else:
             _, rejected_feedback = _apply_decisions(
                 last_message.tool_calls, human_decisions
@@ -1453,9 +1472,7 @@ class MultiAgentWorkflow:
         )
 
         # Separate write_todos calls from external/MCP tool calls
-        normalized_calls = [
-            normalize_tool_call(tc) for tc in last_message.tool_calls
-        ]
+        normalized_calls = [normalize_tool_call(tc) for tc in last_message.tool_calls]
         external_tool_calls = [
             tc for tc in normalized_calls if tc.get("name") != "write_todos"
         ]
@@ -1474,6 +1491,11 @@ class MultiAgentWorkflow:
         if external_tool_calls:
             ext_tool_names = [tc.get("name") for tc in external_tool_calls]
             if requires_human_approval(ext_tool_names):
+                # Label the stop reason before yielding to the human.
+                _ctx = dict(state.get("context") or {})
+                _ctx["pause_reason"] = "awaiting_approval"
+                state["context"] = _ctx
+
                 human_decisions = interrupt(
                     {
                         "action_requests": external_tool_calls,
@@ -1733,7 +1755,8 @@ class MultiAgentWorkflow:
                 state["context"] = context
                 logger.info(
                     "Planning soft-limit reached: %d >= %d, requesting auto-continue",
-                    planning_call_count, soft_limit,
+                    planning_call_count,
+                    soft_limit,
                 )
                 return "end"
 
@@ -1841,6 +1864,90 @@ class MultiAgentWorkflow:
         }
         return agent_type_map.get(selected_agent, AgentType.CHAT)
 
+    @staticmethod
+    def _merge_unique_items(
+        existing_items: Optional[List[Any]], new_items: Optional[List[Any]]
+    ) -> List[Any]:
+        merged = list(existing_items) if isinstance(existing_items, list) else []
+        if not isinstance(new_items, list):
+            return merged
+
+        for item in new_items:
+            if item not in merged:
+                merged.append(item)
+
+        return merged
+
+    def _attach_context_outputs(
+        self, state: Dict[str, Any], response: AgentResponse
+    ) -> AgentResponse:
+        context = state.get("context", {}) if isinstance(state, dict) else {}
+        if not isinstance(context, dict):
+            return response
+
+        tool_artifacts = self._merge_unique_items(
+            response.tool_artifacts, context.get("tool_artifacts")
+        )
+        response.tool_artifacts = tool_artifacts or None
+
+        if response.metadata is None:
+            response.metadata = {}
+
+        images = self._merge_unique_items(
+            response.metadata.get("images"), context.get("tool_images")
+        )
+        if images:
+            response.metadata["images"] = images
+
+        return response
+
+    def _recover_terminal_response(
+        self,
+        state: Optional[Dict[str, Any]],
+        *,
+        fallback_content: Optional[str] = None,
+        selected_agent: Optional[str] = None,
+    ) -> Optional[AgentResponse]:
+        if not isinstance(state, dict):
+            return None
+
+        response = state.get("response")
+        fallback_text = coerce_response_text(fallback_content)
+
+        if response:
+            if (
+                fallback_text
+                and response.message
+                and not coerce_response_text(getattr(response.message, "content", None))
+            ):
+                response.message.content = fallback_text
+            return self._attach_context_outputs(state, response)
+
+        content = fallback_text
+        if not content:
+            messages = state.get("messages", [])
+            for message in reversed(messages):
+                if not isinstance(message, AIMessage):
+                    continue
+                content = coerce_response_text(getattr(message, "content", None))
+                if content:
+                    break
+
+        if not content:
+            return None
+
+        final_selected_agent = state.get("selected_agent") or selected_agent
+        recovered_response = AgentResponse(
+            agent_type=self._get_agent_type(final_selected_agent),
+            agent_id=final_selected_agent or "unknown",
+            message=AgentMessage(
+                role=MessageRole.ASSISTANT,
+                content=content,
+            ),
+            metadata={},
+        )
+        return self._attach_context_outputs(state, recovered_response)
+
     # ------------------------------------------------------------------
     # Auto-Continue helpers
     # ------------------------------------------------------------------
@@ -1925,6 +2032,7 @@ class MultiAgentWorkflow:
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
+        plan_lifecycle: Optional[str] = None,
     ) -> Optional[AgentResponse]:
 
         initial_state = self._build_initial_state(
@@ -1939,15 +2047,14 @@ class MultiAgentWorkflow:
             planning_mode_enabled=planning_mode_enabled,
             has_existing_plan=has_existing_plan,
             existing_tasks=existing_tasks,
+            plan_lifecycle=plan_lifecycle,
         )
 
         config = self._build_graph_config(thread_id)
 
         # ── Auto-Continue outer loop ──────────────────────────────────
         max_rounds = (
-            settings.auto_continue_max_rounds
-            if settings.auto_continue_enabled
-            else 1
+            settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
         )
         total_iterations = 0
         start_time = time.monotonic()
@@ -1990,7 +2097,11 @@ class MultiAgentWorkflow:
                         ctx.get("auto_continue_requested", {}).get("reason")
                         or "soft_budget"
                     )
-                elif isinstance(ctx, dict) and ctx.get("max_iterations_reached") and settings.auto_continue_enabled:
+                elif (
+                    isinstance(ctx, dict)
+                    and ctx.get("max_iterations_reached")
+                    and settings.auto_continue_enabled
+                ):
                     should_continue = True
                     continue_reason = "max_iterations_reached"
 
@@ -2050,21 +2161,37 @@ class MultiAgentWorkflow:
                 config=config, thread_id=thread_id, fallback_state=None
             )
 
-        agent_response = result.get("response") if isinstance(result, dict) else None
+        final_state = result if isinstance(result, dict) else None
+        agent_response = self._recover_terminal_response(final_state)
+        if not agent_response and self.checkpointer and thread_id:
+            final_snapshot = await self.graph.aget_state(config)
+            final_state = (
+                final_snapshot.values
+                if final_snapshot and hasattr(final_snapshot, "values")
+                else None
+            )
+            agent_response = self._recover_terminal_response(final_state)
 
-        final_todos = result.get("todos", []) if isinstance(result, dict) else []
+        final_todos = final_state.get("todos", []) if isinstance(final_state, dict) else []
         if agent_response and final_todos:
             if agent_response.metadata is None:
                 agent_response.metadata = {}
             agent_response.metadata["todos"] = final_todos
-            context = result.get("context", {}) if isinstance(result, dict) else {}
+            context = final_state.get("context", {}) if isinstance(final_state, dict) else {}
             if context.get("all_tasks_completed"):
                 agent_response.metadata["all_tasks_completed"] = True
             if context.get("planning_budget_reached"):
                 agent_response.metadata["planning_budget_reached"] = True
-            agent_response.metadata["planning_call_count"] = result.get(
-                "planning_call_count", 0
-            ) if isinstance(result, dict) else 0
+            agent_response.metadata["planning_call_count"] = (
+                final_state.get("planning_call_count", 0)
+                if isinstance(final_state, dict)
+                else 0
+            )
+            # Surface the machine-readable stop reason so callers can distinguish
+            # budget exhaustion from errors, clarification requests, etc.
+            pause_reason = context.get("pause_reason")
+            if pause_reason:
+                agent_response.metadata["pause_reason"] = pause_reason
 
         # Add continuation metadata when multiple rounds ran
         if agent_response and total_iterations > 0:
@@ -2090,7 +2217,17 @@ class MultiAgentWorkflow:
 
         config = self._build_graph_config(thread_id)
         result = await self.graph.ainvoke(Command(resume=resume_value), config=config)
-        return result.get("response")
+        response = self._recover_terminal_response(result)
+        if response:
+            return response
+
+        final_snapshot = await self.graph.aget_state(config)
+        final_state = (
+            final_snapshot.values
+            if final_snapshot and hasattr(final_snapshot, "values")
+            else None
+        )
+        return self._recover_terminal_response(final_state)
 
     async def resume(
         self,
@@ -2134,9 +2271,10 @@ class MultiAgentWorkflow:
                 if interrupt_response:
                     return interrupt_response
 
-        response = result.get("response")
+        response = self._recover_terminal_response(result)
         if not response:
-            response = (await self.graph.aget_state(config)).values.get("response")
+            final_state = (await self.graph.aget_state(config)).values
+            response = self._recover_terminal_response(final_state)
 
         return response
 
@@ -2187,9 +2325,7 @@ class MultiAgentWorkflow:
         _internal_content_only: bool = True
 
         max_rounds = (
-            settings.auto_continue_max_rounds
-            if settings.auto_continue_enabled
-            else 1
+            settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
         )
         round_num = 1
         continue_reason: Optional[str] = "initial"
@@ -2294,22 +2430,26 @@ class MultiAgentWorkflow:
                                             }
 
                                         if tool_args:
-                                            current_tool_calls[tool_index][
-                                                "args"
-                                            ] += tool_args
+                                            current_tool_calls[tool_index]["args"] += (
+                                                tool_args
+                                            )
 
                                         if (
                                             tool_name
-                                            and not current_tool_calls[tool_index]["name"]
-                                        ):
-                                            current_tool_calls[tool_index][
+                                            and not current_tool_calls[tool_index][
                                                 "name"
-                                            ] = tool_name
+                                            ]
+                                        ):
+                                            current_tool_calls[tool_index]["name"] = (
+                                                tool_name
+                                            )
                                         if (
                                             tool_id
                                             and not current_tool_calls[tool_index]["id"]
                                         ):
-                                            current_tool_calls[tool_index]["id"] = tool_id
+                                            current_tool_calls[tool_index]["id"] = (
+                                                tool_id
+                                            )
 
                             elif hasattr(message_chunk, "content") and isinstance(
                                 message_chunk.content, list
@@ -2333,7 +2473,9 @@ class MultiAgentWorkflow:
                                                 "reasoning", ""
                                             ) or part.get("text", "")
                                             if reasoning_content:
-                                                accumulated_thinking += reasoning_content
+                                                accumulated_thinking += (
+                                                    reasoning_content
+                                                )
                                                 yield {
                                                     "type": "thinking",
                                                     "content": reasoning_content,
@@ -2346,7 +2488,10 @@ class MultiAgentWorkflow:
                                                 )
                                             )
                                             if delta and not suppress_tokens:
-                                                yield {"type": "token", "content": delta}
+                                                yield {
+                                                    "type": "token",
+                                                    "content": delta,
+                                                }
                                     elif isinstance(part, str) and part:
                                         accumulated_content, delta = (
                                             self._consume_stream_text_chunk(
@@ -2480,7 +2625,9 @@ class MultiAgentWorkflow:
                                                             ),
                                                             "tool_call_id": tool_call_id,
                                                             "args": make_json_safe(
-                                                                tool_call.get("args", {})
+                                                                tool_call.get(
+                                                                    "args", {}
+                                                                )
                                                             ),
                                                         }
 
@@ -2493,7 +2640,9 @@ class MultiAgentWorkflow:
                                                 "tool_call_id": getattr(
                                                     last_msg, "tool_call_id", None
                                                 ),
-                                                "result": make_json_safe(last_msg.content),
+                                                "result": make_json_safe(
+                                                    last_msg.content
+                                                ),
                                             }
                     else:
                         logger.debug(f"Unexpected stream chunk format: {type(chunk)}")
@@ -2523,8 +2672,7 @@ class MultiAgentWorkflow:
                         or "soft_budget"
                     )
                 elif (
-                    ctx.get("max_iterations_reached")
-                    and settings.auto_continue_enabled
+                    ctx.get("max_iterations_reached") and settings.auto_continue_enabled
                 ):
                     should_continue = True
                     continue_reason = "max_iterations_reached"
@@ -2599,7 +2747,25 @@ class MultiAgentWorkflow:
                         }
                         return
 
-            response = snapshot.values.get("response")
+            final_state = (
+                snapshot.values if snapshot and hasattr(snapshot, "values") else {}
+            )
+            fallback_content = (
+                accumulated_content
+                if not suppress_tokens and not _internal_content_only
+                else None
+            )
+            response = self._recover_terminal_response(
+                final_state,
+                fallback_content=fallback_content,
+                selected_agent=selected_agent,
+            )
+            if not response:
+                response = self._recover_terminal_response(
+                    last_state_values,
+                    fallback_content=fallback_content,
+                    selected_agent=selected_agent,
+                )
             if response:
                 if (
                     accumulated_thinking
@@ -2608,22 +2774,15 @@ class MultiAgentWorkflow:
                 ):
                     response.metadata["thinking_summary"] = accumulated_thinking
 
-                if (
-                    not suppress_tokens
-                    and not _internal_content_only
-                    and accumulated_content
-                    and not (response.message.content or "").strip()
-                ):
-                    response.message.content = accumulated_content
-
-                if selected_agent == "planning_agent":
-                    final_todos = snapshot.values.get("todos", [])
+                final_selected_agent = final_state.get("selected_agent") or selected_agent
+                if final_selected_agent == "planning_agent":
+                    final_todos = final_state.get("todos", [])
                     if final_todos:
                         response.metadata["todos"] = final_todos
-                    response.metadata["planning_call_count"] = snapshot.values.get(
+                    response.metadata["planning_call_count"] = final_state.get(
                         "planning_call_count", 0
                     )
-                    context = snapshot.values.get("context", {})
+                    context = final_state.get("context", {})
                     if context.get("all_tasks_completed"):
                         response.metadata["all_tasks_completed"] = True
                     if context.get("planning_budget_reached"):
@@ -2633,39 +2792,6 @@ class MultiAgentWorkflow:
                     response.metadata["continuation_rounds"] = round_num
                     response.metadata["total_iterations"] = total_iterations
 
-                yield {"type": "complete", "response": response}
-            elif accumulated_content and not suppress_tokens and not _internal_content_only:
-                metadata_model = (
-                    settings.chat_agent_model
-                    if selected_agent == "chat_agent"
-                    else settings.search_agent_model
-                )
-                metadata = {"model": metadata_model}
-
-                if accumulated_thinking:
-                    metadata["thinking_summary"] = accumulated_thinking
-
-                if selected_agent == "planning_agent":
-                    final_todos = snapshot.values.get("todos", [])
-                    if final_todos:
-                        metadata["todos"] = final_todos
-                    metadata["planning_call_count"] = snapshot.values.get(
-                        "planning_call_count", 0
-                    )
-
-                if round_num > 1:
-                    metadata["continuation_rounds"] = round_num
-                    metadata["total_iterations"] = total_iterations
-
-                agent_type = self._get_agent_type(selected_agent)
-                response = AgentResponse(
-                    agent_type=agent_type,
-                    agent_id=selected_agent or "unknown",
-                    message=AgentMessage(
-                        role=MessageRole.ASSISTANT, content=accumulated_content
-                    ),
-                    metadata=metadata,
-                )
                 yield {"type": "complete", "response": response}
             else:
                 yield {"type": "error", "error": NO_RESPONSE_GENERATED}
@@ -2725,7 +2851,9 @@ class MultiAgentWorkflow:
             timeout_seconds: int = settings.summarization_timeout_seconds
             try:
                 new_summary = await asyncio.wait_for(
-                    generate_summary(to_summarize, s_cfg, existing_summary=history_summary),
+                    generate_summary(
+                        to_summarize, s_cfg, existing_summary=history_summary
+                    ),
                     timeout=timeout_seconds,
                 )
             except asyncio.TimeoutError:
@@ -2794,9 +2922,7 @@ class MultiAgentWorkflow:
 
         try:
             reply_content = (
-                response.message.content
-                if response and response.message
-                else ""
+                response.message.content if response and response.message else ""
             )
             await self.graph.aupdate_state(
                 config,
@@ -2827,6 +2953,7 @@ class MultiAgentWorkflow:
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
+        plan_lifecycle: Optional[str] = None,
     ):
         initial_state = self._build_initial_state(
             message=message,
@@ -2840,6 +2967,7 @@ class MultiAgentWorkflow:
             planning_mode_enabled=planning_mode_enabled,
             has_existing_plan=has_existing_plan,
             existing_tasks=existing_tasks,
+            plan_lifecycle=plan_lifecycle,
         )
 
         config = self._build_graph_config(thread_id)
@@ -2883,9 +3011,7 @@ class MultiAgentWorkflow:
             and rag_provider != "openai"
         ):
             # Traditional RAG streaming — bypasses the graph pipeline.
-            history_summary = await self._run_fast_path_summarization(
-                config, thread_id
-            )
+            history_summary = await self._run_fast_path_summarization(config, thread_id)
 
             conversation_history = await self._get_conversation_history(
                 conversation_id, user_id, agent_key="rag"
@@ -2956,9 +3082,7 @@ class MultiAgentWorkflow:
 
         # ── Auto-Continue outer loop ──────────────────────────────────
         max_rounds = (
-            settings.auto_continue_max_rounds
-            if settings.auto_continue_enabled
-            else 1
+            settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
         )
         round_num = 1
         continue_reason: Optional[str] = "initial"
@@ -3012,7 +3136,10 @@ class MultiAgentWorkflow:
                             # Drop output from internal LLM runs (e.g. summarization node)
                             # so that internal summaries, reasoning, and tool-call chunks
                             # from those nodes never reach the client or pollute accumulators.
-                            if settings.suppress_internal_stream_chunks and self._is_internal_stream_chunk(metadata):
+                            if (
+                                settings.suppress_internal_stream_chunks
+                                and self._is_internal_stream_chunk(metadata)
+                            ):
                                 continue
 
                             # Mark that at least one non-internal chunk has arrived.
@@ -3077,23 +3204,27 @@ class MultiAgentWorkflow:
 
                                         # Accumulate args
                                         if tool_args:
-                                            current_tool_calls[tool_index][
-                                                "args"
-                                            ] += tool_args
+                                            current_tool_calls[tool_index]["args"] += (
+                                                tool_args
+                                            )
 
                                         # Update name/id if present
                                         if (
                                             tool_name
-                                            and not current_tool_calls[tool_index]["name"]
-                                        ):
-                                            current_tool_calls[tool_index][
+                                            and not current_tool_calls[tool_index][
                                                 "name"
-                                            ] = tool_name
+                                            ]
+                                        ):
+                                            current_tool_calls[tool_index]["name"] = (
+                                                tool_name
+                                            )
                                         if (
                                             tool_id
                                             and not current_tool_calls[tool_index]["id"]
                                         ):
-                                            current_tool_calls[tool_index]["id"] = tool_id
+                                            current_tool_calls[tool_index]["id"] = (
+                                                tool_id
+                                            )
 
                                 pass  # Content blocks handled
 
@@ -3121,7 +3252,9 @@ class MultiAgentWorkflow:
                                                 "reasoning", ""
                                             ) or part.get("text", "")
                                             if reasoning_content:
-                                                accumulated_thinking += reasoning_content
+                                                accumulated_thinking += (
+                                                    reasoning_content
+                                                )
                                                 yield {
                                                     "type": "thinking",
                                                     "content": reasoning_content,
@@ -3134,7 +3267,10 @@ class MultiAgentWorkflow:
                                                 )
                                             )
                                             if delta and not suppress_tokens:
-                                                yield {"type": "token", "content": delta}
+                                                yield {
+                                                    "type": "token",
+                                                    "content": delta,
+                                                }
                                     elif isinstance(part, str) and part:
                                         accumulated_content, delta = (
                                             self._consume_stream_text_chunk(
@@ -3283,7 +3419,9 @@ class MultiAgentWorkflow:
                                                             ),
                                                             "tool_call_id": tool_call_id,
                                                             "args": make_json_safe(
-                                                                tool_call.get("args", {})
+                                                                tool_call.get(
+                                                                    "args", {}
+                                                                )
                                                             ),
                                                         }
 
@@ -3297,7 +3435,9 @@ class MultiAgentWorkflow:
                                                 "tool_call_id": getattr(
                                                     last_msg, "tool_call_id", None
                                                 ),
-                                                "result": make_json_safe(last_msg.content),
+                                                "result": make_json_safe(
+                                                    last_msg.content
+                                                ),
                                             }
                     else:
                         # Single mode or legacy format - try to handle gracefully
@@ -3328,7 +3468,9 @@ class MultiAgentWorkflow:
                         ctx.get("auto_continue_requested", {}).get("reason")
                         or "soft_budget"
                     )
-                elif ctx.get("max_iterations_reached") and settings.auto_continue_enabled:
+                elif (
+                    ctx.get("max_iterations_reached") and settings.auto_continue_enabled
+                ):
                     should_continue = True
                     continue_reason = "max_iterations_reached"
 
@@ -3407,31 +3549,48 @@ class MultiAgentWorkflow:
                             }
                             return
 
-                response = snapshot.values.get("response")
+                final_state = (
+                    snapshot.values
+                    if snapshot and hasattr(snapshot, "values")
+                    else {}
+                )
+                fallback_content = (
+                    accumulated_content
+                    if not suppress_tokens and not _internal_content_only
+                    else None
+                )
+                response = self._recover_terminal_response(
+                    final_state,
+                    fallback_content=fallback_content,
+                    selected_agent=selected_agent,
+                )
+                if not response:
+                    response = self._recover_terminal_response(
+                        last_state_values,
+                        fallback_content=fallback_content,
+                        selected_agent=selected_agent,
+                    )
                 if response:
-                    if accumulated_thinking and not _internal_content_only and not response.metadata.get(
-                        "thinking_summary"
+                    if (
+                        accumulated_thinking
+                        and not _internal_content_only
+                        and not response.metadata.get("thinking_summary")
                     ):
                         response.metadata["thinking_summary"] = accumulated_thinking
 
-                    if (
-                        not suppress_tokens
-                        and not _internal_content_only
-                        and accumulated_content
-                        and not (response.message.content or "").strip()
-                    ):
-                        response.message.content = accumulated_content
-
                     # For planning agent, include todos in metadata
-                    if selected_agent == "planning_agent":
-                        final_todos = snapshot.values.get("todos", [])
+                    final_selected_agent = (
+                        final_state.get("selected_agent") or selected_agent
+                    )
+                    if final_selected_agent == "planning_agent":
+                        final_todos = final_state.get("todos", [])
                         if final_todos:
                             response.metadata["todos"] = final_todos
-                        response.metadata["planning_call_count"] = snapshot.values.get(
+                        response.metadata["planning_call_count"] = final_state.get(
                             "planning_call_count", 0
                         )
                         # Check context for completion status
-                        context = snapshot.values.get("context", {})
+                        context = final_state.get("context", {})
                         if context.get("all_tasks_completed"):
                             response.metadata["all_tasks_completed"] = True
                         if context.get("planning_budget_reached"):
@@ -3443,67 +3602,33 @@ class MultiAgentWorkflow:
                         response.metadata["total_iterations"] = total_iterations
 
                     yield {"type": "complete", "response": response}
-                elif accumulated_content and not suppress_tokens and not _internal_content_only:
-                    metadata_model = (
-                        settings.chat_agent_model
-                        if selected_agent == "chat_agent"
-                        else settings.search_agent_model
-                    )
-                    metadata = {"model": metadata_model}
-
-                    # Include thinking summary in metadata
-                    if accumulated_thinking:
-                        metadata["thinking_summary"] = accumulated_thinking
-
-                    # For planning agent, include todos in metadata
-                    if selected_agent == "planning_agent":
-                        final_todos = snapshot.values.get("todos", [])
-                        if final_todos:
-                            metadata["todos"] = final_todos
-                        metadata["planning_call_count"] = snapshot.values.get(
-                            "planning_call_count", 0
-                        )
-
-                    # Add continuation metadata when multiple rounds ran
-                    if round_num > 1:
-                        metadata["continuation_rounds"] = round_num
-                        metadata["total_iterations"] = total_iterations
-
-                    agent_type = self._get_agent_type(selected_agent)
-                    response = AgentResponse(
-                        agent_type=agent_type,
-                        agent_id=selected_agent or "unknown",
-                        message=AgentMessage(
-                            role=MessageRole.ASSISTANT, content=accumulated_content
-                        ),
-                        metadata=metadata,
-                    )
-                    yield {"type": "complete", "response": response}
                 else:
                     yield {"type": "error", "error": NO_RESPONSE_GENERATED}
             except Exception as e:
                 yield {"type": "error", "error": str(e)}
         else:
-            if accumulated_content and not suppress_tokens and not _internal_content_only:
-                metadata = {}
-                # Include thinking summary in metadata
-                if accumulated_thinking:
-                    metadata["thinking_summary"] = accumulated_thinking
+            fallback_content = (
+                accumulated_content
+                if not suppress_tokens and not _internal_content_only
+                else None
+            )
+            response = self._recover_terminal_response(
+                last_state_values,
+                fallback_content=fallback_content,
+                selected_agent=selected_agent,
+            )
+            if response:
+                if (
+                    accumulated_thinking
+                    and not _internal_content_only
+                    and not response.metadata.get("thinking_summary")
+                ):
+                    response.metadata["thinking_summary"] = accumulated_thinking
 
-                # Add continuation metadata when multiple rounds ran
                 if round_num > 1:
-                    metadata["continuation_rounds"] = round_num
-                    metadata["total_iterations"] = total_iterations
+                    response.metadata["continuation_rounds"] = round_num
+                    response.metadata["total_iterations"] = total_iterations
 
-                agent_type = self._get_agent_type(selected_agent)
-                response = AgentResponse(
-                    agent_type=agent_type,
-                    agent_id=selected_agent or "unknown",
-                    message=AgentMessage(
-                        role=MessageRole.ASSISTANT, content=accumulated_content
-                    ),
-                    metadata=metadata,
-                )
                 yield {"type": "complete", "response": response}
             else:
                 yield {"type": "error", "error": NO_RESPONSE_GENERATED}

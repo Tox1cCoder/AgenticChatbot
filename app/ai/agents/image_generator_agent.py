@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 class ImageGeneratorAgent(BaseAgent):
-
     def __init__(self):
         self.default_aspect_ratio = settings.image_generator_default_aspect_ratio
         self.max_images = max(1, settings.image_generator_max_images)
@@ -213,7 +212,11 @@ Do not output anything else, just the prompt."""
         # Derive the original user request from the current turn messages.
         original_prompt = enhanced_prompt
         for msg in reversed(messages):
-            if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content.strip():
+            if (
+                hasattr(msg, "content")
+                and isinstance(msg.content, str)
+                and msg.content.strip()
+            ):
                 if isinstance(msg, LCHumanMessage):
                     original_prompt = msg.content.strip()
                     break

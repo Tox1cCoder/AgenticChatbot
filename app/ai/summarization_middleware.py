@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 
-from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.message import RemoveMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -355,7 +355,9 @@ async def summarize_for_state(
 
     try:
         summary = await asyncio.wait_for(
-            generate_summary(messages_to_summarize, config, existing_summary=existing_summary),
+            generate_summary(
+                messages_to_summarize, config, existing_summary=existing_summary
+            ),
             timeout=timeout_seconds,
         )
     except asyncio.TimeoutError:

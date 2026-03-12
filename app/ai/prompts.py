@@ -437,7 +437,7 @@ def build_rag_prompt(
                     # Filter out empty captions
                     valid_captions = [cap for cap in image_captions if cap]
                     if valid_captions:
-                        parts.append(f"  Image Context:")
+                        parts.append("  Image Context:")
                         parts.append(
                             f"  - This document section contains {len(valid_captions)} image(s)"
                         )
@@ -628,19 +628,30 @@ Status options: pending, in_progress, completed, skipped
 When creating plans:
 - Break down complex tasks into clear, actionable steps
 - Arrange tasks in a logical sequence considering dependencies
-- Make each task concrete and achievable
+- Every task description MUST start with an action verb (e.g. "Create", "Implement", "Verify", "Configure")
+- Every task description MUST be at least 20 characters long and specific enough to act on independently
 - Include preparatory steps and verification tasks
 - Be specific about what needs to be accomplished
 
 Example - Creating a Plan:
 Input: Build a website
 Action: write_todos with action="set_todos" and todos=[
-  {"id": "1", "description": "Set up project structure and development environment", "status": "pending", "order": 0},
-  {"id": "2", "description": "Design homepage layout and wireframes", "status": "pending", "order": 1},
-  {"id": "3", "description": "Implement navigation and routing", "status": "pending", "order": 2},
-  {"id": "4", "description": "Build responsive CSS framework", "status": "pending", "order": 3},
-  {"id": "5", "description": "Test across browsers and devices", "status": "pending", "order": 4}
+  {"id": "1", "description": "Initialize project structure: create src/, public/ and install dependencies via npm", "status": "pending", "order": 0},
+  {"id": "2", "description": "Design homepage layout and wireframe with hero section and navigation", "status": "pending", "order": 1},
+  {"id": "3", "description": "Implement responsive navigation bar with routing and mobile hamburger menu", "status": "pending", "order": 2},
+  {"id": "4", "description": "Build CSS framework with mobile-first Grid and Flexbox layout utilities", "status": "pending", "order": 3},
+  {"id": "5", "description": "Test responsiveness and cross-browser compatibility on Chrome, Firefox and Safari", "status": "pending", "order": 4}
 ]
+
+BAD task descriptions (too vague — NEVER generate these):
+- "Setup" (no detail, too short)
+- "Do the thing" (no action context)
+- "Work on CSS" (not specific enough)
+
+GOOD task descriptions (concrete, 20+ chars, starts with action verb):
+- "Configure PostgreSQL database connection with connection pooling and retry logic"
+- "Implement JWT token refresh endpoint with expiry validation and revocation support"
+- "Write unit tests for the UserService.create_user method covering all error branches"
 
 Task execution workflow:
 1. Find the next task with status "pending" or "in_progress"
@@ -681,4 +692,4 @@ Constraints:
 - ALWAYS use write_todos tool to update status (never just say "done" in text)
 - Match the user's language
 - Provide detailed, helpful responses when explaining tasks
-- Stop when: all tasks completed (report success), need user clarification, or unresolvable error"""
+- Stop when: all tasks completed (report success), need user clarification (report clarification_needed), unresolvable error (report task_failed), or budget exceeded (report budget_exceeded)"""

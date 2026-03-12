@@ -1,9 +1,6 @@
 import os
-import traceback
 import logging
 import asyncio
-import re
-import unicodedata
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any
 from uuid import UUID
@@ -24,22 +21,7 @@ from app.core.events import get_event_bus, DocumentEvent, DocumentEventData
 logger = logging.getLogger(__name__)
 
 
-def _build_safe_temp_file_path(document_id: str, filename: str, temp_dir: str) -> str:
-    base_name, ext = os.path.splitext(filename)
-    normalized = unicodedata.normalize("NFKD", base_name or "")
-    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-    normalized = normalized.lower()
-    normalized = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
-    if not normalized:
-        normalized = "document"
-    normalized = normalized[:80]
-    safe_ext = ext.lower() if ext else ""
-    safe_filename = f"{document_id}_{normalized}{safe_ext}"
-    return os.path.join(temp_dir, safe_filename)
-
-
 class CallbackTask(Task):
-
     def on_success(self, retval, task_id, args, kwargs):
         logger.info(f"Task {task_id} completed successfully")
 
@@ -55,13 +37,21 @@ class CallbackTask(Task):
     name="app.workers.document_processor.process_document_task",
 )
 def process_document_task(
-    self, document_id: str, file_content: bytes, filename: str
+    self, document_id: str, temp_file_path: str, filename: str
 ) -> Dict[str, Any]:
-    task_id = self.request.id
+    """Process a previously staged document file.
 
-    db = SessionLocal()
+    Args:
+        document_id: UUID string of the Document record.
+        temp_file_path: Filesystem path where the upload was staged.
+            The API layer writes the file before enqueuing so that raw
+            bytes are not serialised through the Celery broker.
+        filename: Original filename (used for loader selection).
+    """
+    task_id = self.request.id
+    cleanup_staged_file = True
+
     document_repo = DocumentRepository(SessionLocal)
-    temp_file_path = None
 
     try:
         # Get document record to retrieve conversation_id
@@ -73,27 +63,15 @@ def process_document_task(
         document_repo.update(UUID(document_id), update_data)
 
         settings = get_settings()
+        if not os.path.isfile(temp_file_path):
+            raise FileNotFoundError(f"Staged upload file not found: {temp_file_path}")
+
+        file_size = os.path.getsize(temp_file_path)
         max_size_bytes = settings.max_file_size_mb * 1024 * 1024
-        if len(file_content) > max_size_bytes:
+        if file_size > max_size_bytes:
             raise ValueError(
                 f"File size exceeds maximum allowed size of {settings.max_file_size_mb}MB"
             )
-        temp_dir = os.path.join(os.getcwd(), settings.temp_storage_path)
-        os.makedirs(temp_dir, exist_ok=True)
-
-        temp_file_path = _build_safe_temp_file_path(document_id, filename, temp_dir)
-        expected_name = f"{document_id}_{filename}"
-        actual_name = os.path.basename(temp_file_path)
-        if actual_name != expected_name:
-            logger.info(
-                "Sanitized filename for document %s: '%s' -> '%s'",
-                document_id,
-                filename,
-                actual_name,
-            )
-
-        with open(temp_file_path, "wb") as temp_file:
-            temp_file.write(file_content)
 
         # Get DocumentProcessingService from container
         container = get_container()
@@ -180,7 +158,11 @@ def process_document_task(
         except Exception:
             pass
 
-        if self.request.retries < self.max_retries:
+        retryable = self.request.retries < self.max_retries and not isinstance(
+            exc, (FileNotFoundError, ValueError)
+        )
+        if retryable:
+            cleanup_staged_file = False
             retry_delay = min(300, 60 * (2**self.request.retries))
             logger.info(
                 f"Retrying task {task_id} for document {document_id} "
@@ -199,15 +181,17 @@ def process_document_task(
         }
 
     finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            try:
+        # Clean up the staged temp file after processing (success or failure).
+        try:
+            if cleanup_staged_file and os.path.isfile(temp_file_path):
                 os.unlink(temp_file_path)
-            except Exception:
-                pass
+        except Exception:
+            pass
 
         try:
+            settings_ = get_settings()
             mineru_output_path = (
-                Path(settings.temp_storage_path) / f"mineru_output_{document_id}"
+                Path(settings_.temp_storage_path) / f"mineru_output_{document_id}"
             )
             if mineru_output_path.exists():
                 shutil.rmtree(mineru_output_path)
@@ -221,8 +205,6 @@ def process_document_task(
         except Exception:
             pass
 
-        db.close()
-
 
 @celery_app.task(name="app.workers.document_processor.cleanup_failed_documents")
 def cleanup_failed_documents() -> Dict[str, Any]:
@@ -230,7 +212,6 @@ def cleanup_failed_documents() -> Dict[str, Any]:
     document_repo = DocumentRepository(SessionLocal)
 
     try:
-
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=1)
 
         stuck_documents = (

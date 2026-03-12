@@ -39,10 +39,10 @@ from datetime import datetime
 import requests
 
 # Fix Windows console encoding for Unicode (e.g. Vietnamese) output
-if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
-    sys.stdout.reconfigure(encoding='utf-8')
-if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
-    sys.stderr.reconfigure(encoding='utf-8')
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
+    sys.stderr.reconfigure(encoding="utf-8")
 
 
 BASE_URL = "https://take100dot.com"
@@ -69,7 +69,9 @@ class Take100Client:
             r = self.session.get(f"{BASE_URL}/login", timeout=15)
             token_match = re.search(r'name="_token" value="(.*?)"', r.text)
             if not token_match:
-                print("ERROR: Could not find CSRF token on login page.", file=sys.stderr)
+                print(
+                    "ERROR: Could not find CSRF token on login page.", file=sys.stderr
+                )
                 return False
 
             csrf_token = token_match.group(1)
@@ -143,9 +145,13 @@ class Take100Client:
         other_apps_match = re.search(r"const otherApps = (\[.*?\]);", r.text, re.DOTALL)
         if not other_apps_match:
             return {
-                "date": date, "is_all_day_leave": False,
-                "is_late": False, "is_early_leave": False,
-                "late_until": None, "early_from": None, "leave_apps": [],
+                "date": date,
+                "is_all_day_leave": False,
+                "is_late": False,
+                "is_early_leave": False,
+                "late_until": None,
+                "early_from": None,
+                "leave_apps": [],
             }
 
         try:
@@ -155,8 +161,11 @@ class Take100Client:
 
         # Only approved paid-leave entries covering the target date
         day_apps = [
-            app for app in other_apps
-            if app.get("from_date", "") <= date <= app.get("to_date", app.get("from_date", ""))
+            app
+            for app in other_apps
+            if app.get("from_date", "")
+            <= date
+            <= app.get("to_date", app.get("from_date", ""))
             and app.get("status") == 1
             and app.get("application_type_name") == "paid leave"
         ]
@@ -165,18 +174,24 @@ class Take100Client:
 
         # Late: "Hour" paid leave that starts in the morning (covers shift start → actual arrival)
         late_app = next(
-            (app for app in day_apps
-             if app.get("reason_name") == "Hour"
-             and app.get("to_time", "99:99") <= "12:00"
-             and app.get("from_time", "99:99") < app.get("to_time", "00:00")),
+            (
+                app
+                for app in day_apps
+                if app.get("reason_name") == "Hour"
+                and app.get("to_time", "99:99") <= "12:00"
+                and app.get("from_time", "99:99") < app.get("to_time", "00:00")
+            ),
             None,
         )
 
         # Early leave: "Hour" paid leave that starts in the afternoon
         early_app = next(
-            (app for app in day_apps
-             if app.get("reason_name") == "Hour"
-             and app.get("from_time", "00:00") >= "13:00"),
+            (
+                app
+                for app in day_apps
+                if app.get("reason_name") == "Hour"
+                and app.get("from_time", "00:00") >= "13:00"
+            ),
             None,
         )
 
@@ -190,15 +205,41 @@ class Take100Client:
             "leave_apps": day_apps,
         }
 
-    def save_timesheet(self, date: str, entries: list, message: str = "",
-                       time_in: str = DEFAULT_TIME_IN, time_out: str = DEFAULT_TIME_OUT) -> dict:
+    def save_timesheet(
+        self,
+        date: str,
+        entries: list,
+        message: str = "",
+        time_in: str = DEFAULT_TIME_IN,
+        time_out: str = DEFAULT_TIME_OUT,
+    ) -> dict:
         """Save a timesheet as DRAFT."""
-        return self._post_timesheet(f"{BASE_URL}/wt-applications/save", date, entries, message, time_in, time_out)
+        return self._post_timesheet(
+            f"{BASE_URL}/wt-applications/save",
+            date,
+            entries,
+            message,
+            time_in,
+            time_out,
+        )
 
-    def submit_timesheet(self, date: str, entries: list, message: str = "",
-                         time_in: str = DEFAULT_TIME_IN, time_out: str = DEFAULT_TIME_OUT) -> dict:
+    def submit_timesheet(
+        self,
+        date: str,
+        entries: list,
+        message: str = "",
+        time_in: str = DEFAULT_TIME_IN,
+        time_out: str = DEFAULT_TIME_OUT,
+    ) -> dict:
         """Save and SUBMIT a timesheet for approval."""
-        return self._post_timesheet(f"{BASE_URL}/wt-applications/submit", date, entries, message, time_in, time_out)
+        return self._post_timesheet(
+            f"{BASE_URL}/wt-applications/submit",
+            date,
+            entries,
+            message,
+            time_in,
+            time_out,
+        )
 
     def delete_application(self, application_id: int) -> dict:
         """Delete an existing application by ID.
@@ -216,8 +257,8 @@ class Take100Client:
             return {
                 "success": False,
                 "error": "Delete via API is not supported (requires Bearer token auth). "
-                          f"Please delete application {application_id} manually at "
-                          f"{BASE_URL}/wt-applications/{application_id}",
+                f"Please delete application {application_id} manually at "
+                f"{BASE_URL}/wt-applications/{application_id}",
             }
         r.raise_for_status()
         return r.json() if r.text else {"status": "deleted"}
@@ -227,6 +268,7 @@ class Take100Client:
         r = self.session.get(f"{BASE_URL}/wt-applications", timeout=15)
         # Parse the table from HTML
         from bs4 import BeautifulSoup
+
         soup = BeautifulSoup(r.text, "html.parser")
         table = soup.find("table")
         if not table:
@@ -240,17 +282,26 @@ class Take100Client:
                 link = row.find("a", href=True)
                 app_url = link["href"].strip() if link else ""
                 app_id = app_url.rstrip("/").split("/")[-1] if app_url else ""
-                applications.append({
-                    "no": cells[1],
-                    "date_range": cells[2],
-                    "requested_time": cells[3],
-                    "process": cells[4],
-                    "id": app_id,
-                })
+                applications.append(
+                    {
+                        "no": cells[1],
+                        "date_range": cells[2],
+                        "requested_time": cells[3],
+                        "process": cells[4],
+                        "id": app_id,
+                    }
+                )
         return applications
 
-    def _post_timesheet(self, url: str, date: str, entries: list, message: str,
-                         time_in: str = DEFAULT_TIME_IN, time_out: str = DEFAULT_TIME_OUT) -> dict:
+    def _post_timesheet(
+        self,
+        url: str,
+        date: str,
+        entries: list,
+        message: str,
+        time_in: str = DEFAULT_TIME_IN,
+        time_out: str = DEFAULT_TIME_OUT,
+    ) -> dict:
         """Internal method to POST timesheet data."""
         # Build the ISO date
         date_iso = f"{date}T00:00:00.000Z"
@@ -258,13 +309,15 @@ class Take100Client:
         # Build working_day_projects from entries
         working_day_projects = []
         for entry in entries:
-            working_day_projects.append({
-                "project_id": entry["project_id"],
-                "work_content": entry["work_content"],
-                "from": entry["from"],
-                "to": entry["to"],
-                "work_item_id": entry["work_item_id"],
-            })
+            working_day_projects.append(
+                {
+                    "project_id": entry["project_id"],
+                    "work_content": entry["work_content"],
+                    "from": entry["from"],
+                    "to": entry["to"],
+                    "work_item_id": entry["work_item_id"],
+                }
+            )
 
         payload = {
             "message": message,
@@ -281,7 +334,9 @@ class Take100Client:
             ],
         }
 
-        r = self.session.post(url, json=payload, headers=self._get_headers(), timeout=15)
+        r = self.session.post(
+            url, json=payload, headers=self._get_headers(), timeout=15
+        )
         r.raise_for_status()
         return r.json()
 
@@ -295,15 +350,28 @@ def main():
         help="Action to perform: save (draft), submit (for approval), delete, list, or check-day",
     )
     parser.add_argument("--date", help="Date for the timesheet (YYYY-MM-DD)")
-    parser.add_argument("--entries", help="JSON array of work entries (ASCII-safe only; use --entries-file for Unicode)")
+    parser.add_argument(
+        "--entries",
+        help="JSON array of work entries (ASCII-safe only; use --entries-file for Unicode)",
+    )
     parser.add_argument(
         "--entries-file",
         help="Path to a UTF-8 JSON file containing the entries array (recommended for Vietnamese/Unicode content)",
     )
-    parser.add_argument("--application-id", type=int, help="Application ID (for delete)")
+    parser.add_argument(
+        "--application-id", type=int, help="Application ID (for delete)"
+    )
     parser.add_argument("--message", default="", help="Optional message")
-    parser.add_argument("--time-in", default=None, help="Override time_in, e.g. '08:06' when late (default: 08:00)")
-    parser.add_argument("--time-out", default=None, help="Override time_out, e.g. '16:30' for early leave (default: 17:00)")
+    parser.add_argument(
+        "--time-in",
+        default=None,
+        help="Override time_in, e.g. '08:06' when late (default: 08:00)",
+    )
+    parser.add_argument(
+        "--time-out",
+        default=None,
+        help="Override time_out, e.g. '16:30' for early leave (default: 17:00)",
+    )
 
     args = parser.parse_args()
 
@@ -317,7 +385,11 @@ def main():
     try:
         if args.action == "check-day":
             if not args.date:
-                print(json.dumps({"success": False, "error": "--date is required for check-day"}))
+                print(
+                    json.dumps(
+                        {"success": False, "error": "--date is required for check-day"}
+                    )
+                )
                 sys.exit(1)
             status = client.get_day_status(args.date)
             result = {"success": True, "day_status": status}
@@ -328,13 +400,21 @@ def main():
 
         elif args.action in ("save", "submit"):
             if not args.date or not (args.entries or args.entries_file):
-                print(json.dumps({"success": False, "error": "--date and (--entries or --entries-file) are required for save/submit"}))
+                print(
+                    json.dumps(
+                        {
+                            "success": False,
+                            "error": "--date and (--entries or --entries-file) are required for save/submit",
+                        }
+                    )
+                )
                 sys.exit(1)
 
             if args.entries_file:
                 # Read entries from file — avoids Windows terminal encoding issues with Unicode
                 # utf-8-sig strips the BOM that PowerShell's Set-Content -Encoding utf8 adds
                 import os
+
                 with open(args.entries_file, encoding="utf-8-sig") as f:
                     entries = json.load(f)
                 # Auto-cleanup: delete the temp file after reading so it isn't left on disk
@@ -349,15 +429,26 @@ def main():
             time_out = args.time_out or DEFAULT_TIME_OUT
 
             if args.action == "save":
-                resp = client.save_timesheet(args.date, entries, args.message, time_in=time_in, time_out=time_out)
+                resp = client.save_timesheet(
+                    args.date, entries, args.message, time_in=time_in, time_out=time_out
+                )
             else:
-                resp = client.submit_timesheet(args.date, entries, args.message, time_in=time_in, time_out=time_out)
+                resp = client.submit_timesheet(
+                    args.date, entries, args.message, time_in=time_in, time_out=time_out
+                )
 
             result = {"success": True, "action": args.action, "application": resp}
 
         elif args.action == "delete":
             if not args.application_id:
-                print(json.dumps({"success": False, "error": "--application-id is required for delete"}))
+                print(
+                    json.dumps(
+                        {
+                            "success": False,
+                            "error": "--application-id is required for delete",
+                        }
+                    )
+                )
                 sys.exit(1)
 
             resp = client.delete_application(args.application_id)
@@ -367,7 +458,15 @@ def main():
 
     except requests.HTTPError as e:
         error_body = e.response.text[:500] if e.response else str(e)
-        print(json.dumps({"success": False, "error": f"HTTP {e.response.status_code}", "details": error_body}))
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error": f"HTTP {e.response.status_code}",
+                    "details": error_body,
+                }
+            )
+        )
         sys.exit(1)
     except Exception as e:
         print(json.dumps({"success": False, "error": str(e)}))

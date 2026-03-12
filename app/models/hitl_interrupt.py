@@ -12,10 +12,10 @@ from app.models.base import Base
 class HITLInterruptStatus(str, enum.Enum):
     """Lifecycle status of a HITL interrupt session."""
 
-    PENDING = "pending"       # Awaiting human decision
-    RESOLVING = "resolving"   # Decision received; graph being resumed (transient)
-    RESOLVED = "resolved"     # Workflow resumed successfully
-    EXPIRED = "expired"       # Timeout elapsed before decision
+    PENDING = "pending"  # Awaiting human decision
+    RESOLVING = "resolving"  # Decision received; graph being resumed (transient)
+    RESOLVED = "resolved"  # Workflow resumed successfully
+    EXPIRED = "expired"  # Timeout elapsed before decision
 
 
 class HITLInterrupt(Base):

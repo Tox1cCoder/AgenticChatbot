@@ -26,13 +26,10 @@ from ..mcp_registry import get_mcp_tools_generation
 from ..hand_off_tool import hand_off as _hand_off_tool
 from ..skills_registry import get_skills_registry, get_skills_generation
 from ..skills_tool import create_activate_skill_tool
-from ..token_instrumentation import (
-    compute_token_breakdown,
-    extract_actual_usage
-)
+from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
 from ..deferred_tool_binding import (
     should_use_deferred_loading,
-    build_deferred_tool_list
+    build_deferred_tool_list,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,7 +121,6 @@ class BaseAgent(ABC):
 
             # Update our tracked generation
             self._tools_generation_seen = current_generation
-
 
         except Exception as e:
             logger.error(f"Error initializing MCP tools: {e}")
@@ -360,7 +356,7 @@ class BaseAgent(ABC):
                 return await llm_with_tools.ainvoke(messages)
             except Exception as exc:
                 last_exc = exc
-   
+
                 if attempt >= attempts:
                     break
                 sleep_for = delay * (2 ** (attempt - 1))
@@ -554,15 +550,11 @@ class BaseAgent(ABC):
                     response = await self._ainvoke_with_retries(
                         llm_with_tools, langchain_messages
                     )
-                except Exception as exc:
-                    if (
-                        openai_api_key
-                        and openai_reasoning_summary_requested
-                    ):
+                except Exception:
+                    if openai_api_key and openai_reasoning_summary_requested:
                         user_key = str(user_id).strip() if user_id else ""
                         if user_key:
                             _OPENAI_REASONING_SUMMARY_DISABLED_USERS.add(user_key)
-
 
                         try:
                             from ..model_factory import ModelFactory
@@ -582,7 +574,7 @@ class BaseAgent(ABC):
                             response = await self._ainvoke_with_retries(
                                 llm_with_tools, langchain_messages
                             )
-                        except Exception as exc2:
+                        except Exception:
                             # Retry exhausted or provider error: fall back to Gemini defaults.
                             used_fallback = True
                             provider = "gemini"
@@ -738,7 +730,10 @@ class BaseAgent(ABC):
         when a skill is toggled or the registry is reloaded.
         """
         current_gen = get_skills_generation()
-        if current_gen == self._skills_generation_seen and self._cached_skills_suffix is not None:
+        if (
+            current_gen == self._skills_generation_seen
+            and self._cached_skills_suffix is not None
+        ):
             return self._cached_skills_suffix
 
         try:

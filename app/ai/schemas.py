@@ -139,6 +139,8 @@ class GraphState(TypedDict):
     planning_call_count: NotRequired[Optional[int]]
     # Planning phase: "planning" = create/edit only, "executing" = work through tasks
     planning_phase: NotRequired[Optional[str]]
+    # Persisted plan lifecycle (draft/ready/executing/paused/completed); None = no plan yet
+    plan_lifecycle: NotRequired[Optional[str]]
     # Inter-agent delegation depth counter (reset each user turn)
     delegation_count: NotRequired[Optional[int]]
     # Rolling conversation summary memory (checkpoint-backed)

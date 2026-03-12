@@ -102,7 +102,9 @@ class CheckpointManager:
 
         for attempt, delay in enumerate(delays, 1):
             try:
-                logger.debug(f"Attempting checkpoint reconnection (attempt {attempt}/3)")
+                logger.debug(
+                    f"Attempting checkpoint reconnection (attempt {attempt}/3)"
+                )
 
                 # Close existing pool if present
                 if self._pool:

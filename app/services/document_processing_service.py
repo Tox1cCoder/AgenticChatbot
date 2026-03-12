@@ -12,7 +12,7 @@ import mimetypes
 import unicodedata
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any
 from uuid import UUID
 
 from PIL import Image
@@ -34,7 +34,6 @@ logger = logging.getLogger(__name__)
 
 
 class DocumentProcessingService:
-
     def __init__(
         self,
         settings: Settings,
@@ -67,7 +66,7 @@ class DocumentProcessingService:
 
         try:
             self.gemini_client = genai.Client(api_key=api_key)
-        except Exception as e:
+        except Exception:
             self.gemini_client = None
 
     def _ensure_collection_exists(self):
@@ -104,19 +103,13 @@ class DocumentProcessingService:
     async def validate_upload_file(
         self, filename: str, file_size: int
     ) -> Dict[str, Any]:
-
         max_size_bytes = self.settings.max_file_size_mb * 1024 * 1024
         if file_size > max_size_bytes:
             raise ValueError(
                 f"File size ({file_size} bytes) exceeds maximum allowed size of {self.settings.max_file_size_mb}MB"
             )
 
-        allowed_extensions = {".txt", ".pdf", ".docx"}
-        file_extension = os.path.splitext(filename)[1].lower()
-        if file_extension not in allowed_extensions:
-            raise ValueError(
-                f"Unsupported file type '{file_extension}'. Allowed: {', '.join(allowed_extensions)}"
-            )
+        file_extension = self._validate_file_extension(filename)
 
         return {
             "valid": True,
@@ -124,22 +117,99 @@ class DocumentProcessingService:
             "size_mb": round(file_size / (1024 * 1024), 2),
         }
 
-    async def start_processing_task(
-        self, document_id: str, file_content: bytes, filename: str
-    ) -> Dict[str, Any]:
-        validation = await self.validate_upload_file(filename, len(file_content))
+    @staticmethod
+    def _validate_file_extension(filename: str) -> str:
+        allowed_extensions = {".txt", ".pdf", ".docx"}
+        file_extension = os.path.splitext(filename)[1].lower()
+        if file_extension not in allowed_extensions:
+            raise ValueError(
+                f"Unsupported file type '{file_extension}'. Allowed: {', '.join(allowed_extensions)}"
+            )
+        return file_extension
 
-        task = self.celery_app.send_task(
-            "app.workers.document_processor.process_document_task",
-            args=[document_id, file_content, filename],
-            retry=True,
-            retry_policy={
-                "max_retries": 3,
-                "interval_start": 0,
-                "interval_step": 30,
-                "interval_max": 180,
-            },
+    async def stage_upload_file(
+        self, upload_file: Any, filename: str
+    ) -> Dict[str, Any]:
+        """Stream an upload to temp storage without holding the full payload in memory."""
+        self._validate_file_extension(filename)
+
+        temp_dir = Path(os.getcwd()) / self.settings.temp_storage_path
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_file_path = self._staged_temp_path(uuid.uuid4().hex, filename, temp_dir)
+
+        bytes_written = 0
+        max_size_bytes = self.settings.max_file_size_mb * 1024 * 1024
+
+        try:
+            if hasattr(upload_file, "seek"):
+                await upload_file.seek(0)
+
+            with temp_file_path.open("wb") as staged_file:
+                while True:
+                    chunk = await upload_file.read(1024 * 1024)
+                    if not chunk:
+                        break
+
+                    bytes_written += len(chunk)
+                    if bytes_written > max_size_bytes:
+                        raise ValueError(
+                            f"File size ({bytes_written} bytes) exceeds maximum allowed size of {self.settings.max_file_size_mb}MB"
+                        )
+
+                    staged_file.write(chunk)
+
+            validation = await self.validate_upload_file(filename, bytes_written)
+            return {
+                "temp_file_path": str(temp_file_path),
+                "file_size": bytes_written,
+                "file_info": validation,
+            }
+        except Exception:
+            try:
+                if temp_file_path.exists():
+                    temp_file_path.unlink()
+            except Exception:
+                pass
+            raise
+
+    async def start_processing_task(
+        self,
+        document_id: str,
+        temp_file_path: str,
+        filename: str,
+        file_size: int,
+    ) -> Dict[str, Any]:
+        validation = await self.validate_upload_file(filename, file_size)
+        staged_path = Path(temp_file_path)
+        if not staged_path.is_file():
+            raise FileNotFoundError(f"Staged upload file not found: {temp_file_path}")
+
+        logger.debug(
+            "Queueing staged upload for document %s from %s (%d bytes)",
+            document_id,
+            staged_path,
+            file_size,
         )
+
+        try:
+            task = self.celery_app.send_task(
+                "app.workers.document_processor.process_document_task",
+                args=[document_id, str(staged_path), filename],
+                retry=True,
+                retry_policy={
+                    "max_retries": 3,
+                    "interval_start": 0,
+                    "interval_step": 30,
+                    "interval_max": 180,
+                },
+            )
+        except Exception:
+            try:
+                if staged_path.is_file():
+                    staged_path.unlink()
+            except Exception:
+                pass
+            raise
 
         try:
             await self._event_bus.emit(
@@ -159,11 +229,21 @@ class DocumentProcessingService:
             "task_id": task.id,
             "document_id": document_id,
             "file_info": validation,
-            "estimated_processing_time": self._estimate_processing_time(
-                len(file_content)
-            ),
+            "estimated_processing_time": self._estimate_processing_time(file_size),
             "message": f"Document '{filename}' queued for processing",
         }
+
+    @staticmethod
+    def _staged_temp_path(document_id: str, filename: str, temp_dir: Path) -> Path:
+        """Return a deterministic, safe temp file path for a staged upload."""
+        base_name, ext = os.path.splitext(filename)
+        normalized = unicodedata.normalize("NFKD", base_name or "")
+        normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+        normalized = normalized.lower()
+        normalized = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-") or "document"
+        normalized = normalized[:80]
+        safe_ext = ext.lower() if ext else ""
+        return temp_dir / f"{document_id}_{normalized}{safe_ext}"
 
     def _estimate_processing_time(self, file_size_bytes: int) -> str:
         size_mb = file_size_bytes / (1024 * 1024)

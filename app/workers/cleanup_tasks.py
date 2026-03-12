@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import redis
 
 from celery.schedules import crontab
@@ -125,7 +125,9 @@ def cleanup_abandoned_interrupts():
                 except Exception:
                     pass
         except Exception as db_exc:
-            logger.warning("DB interrupt expiry check failed: %s", db_exc, exc_info=True)
+            logger.warning(
+                "DB interrupt expiry check failed: %s", db_exc, exc_info=True
+            )
 
         # ── Redis cleanup (supplementary) ────────────────────────────────────────
         redis_url = getattr(settings, "redis_url", "") or ""
@@ -143,7 +145,9 @@ def cleanup_abandoned_interrupts():
                     if not stored_timestamp:
                         continue
 
-                    stored_time = datetime.fromisoformat(stored_timestamp.decode("utf-8"))
+                    stored_time = datetime.fromisoformat(
+                        stored_timestamp.decode("utf-8")
+                    )
                     # Ensure comparison is between two tz-aware datetimes
                     if stored_time.tzinfo is None:
                         stored_time = stored_time.replace(tzinfo=timezone.utc)
@@ -215,35 +219,34 @@ def cleanup_abandoned_interrupts():
 async def _cleanup_checkpoint_states(thread_ids: list) -> int:
     """
     Clean up LangGraph checkpoint states for the given thread IDs.
-    
+
     Args:
         thread_ids: List of thread IDs (conversation IDs) to clean up
-        
+
     Returns:
         Number of successfully cleaned checkpoint states
     """
     cleaned_count = 0
-    
+
     try:
         from app.ai.checkpoint import CheckpointManager
-        
+
         checkpoint_manager = CheckpointManager(
             db_url=settings.database_url,
             settings=settings,
         )
         await checkpoint_manager.setup()
-        
+
         for thread_id in thread_ids:
             try:
                 if await checkpoint_manager.delete_thread(thread_id):
                     cleaned_count += 1
             except Exception:
                 continue
-        
+
         await checkpoint_manager.cleanup()
-        
+
     except Exception:
         pass
-    
-    return cleaned_count
 
+    return cleaned_count

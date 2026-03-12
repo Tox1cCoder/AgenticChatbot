@@ -33,9 +33,9 @@ def get_http_session() -> requests.Session:
 
 def _bump_api_cache_version() -> None:
     """Invalidate cached GET responses after mutations."""
-    st.session_state.api_cache_version = int(
-        st.session_state.get("api_cache_version", 0)
-    ) + 1
+    st.session_state.api_cache_version = (
+        int(st.session_state.get("api_cache_version", 0)) + 1
+    )
 
 
 def render_upload_section():
@@ -46,7 +46,7 @@ def render_upload_section():
         and st.session_state.current_conversation_id != "pending_new"
     ):
         st.markdown("### :material/upload_file: Upload Documents")
-        st.caption(f"Upload to current conversation")
+        st.caption("Upload to current conversation")
 
         uploaded_file = st.file_uploader(
             "Choose a file",
@@ -224,7 +224,7 @@ def get_document_status(document_id: str) -> Optional[Dict[str, Any]]:
         else:
             return None
 
-    except Exception as e:
+    except Exception:
         return None
 
 

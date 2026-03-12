@@ -1,7 +1,15 @@
 """Model for tracking task plans in conversations with planning mode."""
 
 import uuid
-from sqlalchemy import Column, String, Text, Integer, ForeignKey, DateTime, Index, func
+from sqlalchemy import (
+    Column,
+    Text,
+    Integer,
+    ForeignKey,
+    DateTime,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 
@@ -19,7 +27,16 @@ class TaskPlan(Base):
 
     __tablename__ = "task_plans"
     __table_args__ = (
-        Index("idx_task_plan_conversation_order", "conversation_id", "task_order"),
+        # Non-unique fallback index kept for query performance (pre-constraint rows).
+        # The unique constraint on (conversation_id, task_order) is the authoritative
+        # database-level invariant enforced by the migration that resequences dupes first.
+        UniqueConstraint(
+            "conversation_id",
+            "task_order",
+            name="uq_task_plan_conversation_order",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)

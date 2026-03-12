@@ -104,14 +104,26 @@ def apply_write_todos_action(
             )
             return todos, current_task_index, msg, action
 
-        coerced = [coerce_todo_item(t, fallback_order=i) for i, t in enumerate(new_todos)]
+        coerced = [
+            coerce_todo_item(t, fallback_order=i) for i, t in enumerate(new_todos)
+        ]
         current_task_index = find_active_or_next_task(coerced, 0)
-        return coerced, current_task_index, f"Set {len(coerced)} todos in the plan.", action
+        return (
+            coerced,
+            current_task_index,
+            f"Set {len(coerced)} todos in the plan.",
+            action,
+        )
 
     if action == TodoAction.ADD_TODO.value:
         new_todo_raw = args.get("todo")
         if not new_todo_raw:
-            return todos, current_task_index, "Error: No todo provided for ADD_TODO", action
+            return (
+                todos,
+                current_task_index,
+                "Error: No todo provided for ADD_TODO",
+                action,
+            )
 
         new_todo = coerce_todo_item(new_todo_raw, fallback_order=len(todos))
         todos.append(new_todo)
@@ -127,7 +139,12 @@ def apply_write_todos_action(
     if action == TodoAction.COMPLETE_TODO.value:
         todo_id = args.get("todo_id")
         if not todo_id:
-            return todos, current_task_index, "Error: todo_id required for COMPLETE_TODO", action
+            return (
+                todos,
+                current_task_index,
+                "Error: todo_id required for COMPLETE_TODO",
+                action,
+            )
 
         for i, todo in enumerate(todos):
             if str(todo.get("id")) == str(todo_id):
@@ -141,7 +158,12 @@ def apply_write_todos_action(
     if action == TodoAction.START_TODO.value:
         todo_id = args.get("todo_id")
         if not todo_id:
-            return todos, current_task_index, "Error: todo_id required for START_TODO", action
+            return (
+                todos,
+                current_task_index,
+                "Error: todo_id required for START_TODO",
+                action,
+            )
 
         for todo in todos:
             if _status_value(todo.get("status")) == TodoStatus.IN_PROGRESS.value:
@@ -163,14 +185,26 @@ def apply_write_todos_action(
         updated_todo = _as_dict(args.get("todo"))
         todo_id = updated_todo.get("id")
         if not todo_id:
-            return todos, current_task_index, "Error: todo.id required for UPDATE_TODO", action
+            return (
+                todos,
+                current_task_index,
+                "Error: todo.id required for UPDATE_TODO",
+                action,
+            )
 
         for i, todo in enumerate(todos):
             if str(todo.get("id")) == str(todo_id):
                 todos[i] = {**todo, **updated_todo}
-                if _status_value(todos[i].get("status")) == TodoStatus.IN_PROGRESS.value:
+                if (
+                    _status_value(todos[i].get("status"))
+                    == TodoStatus.IN_PROGRESS.value
+                ):
                     for j, other in enumerate(todos):
-                        if j != i and _status_value(other.get("status")) == TodoStatus.IN_PROGRESS.value:
+                        if (
+                            j != i
+                            and _status_value(other.get("status"))
+                            == TodoStatus.IN_PROGRESS.value
+                        ):
                             other["status"] = TodoStatus.PENDING.value
                     current_task_index = i
                 return todos, current_task_index, f"Updated todo: {todo_id}", action
@@ -179,7 +213,12 @@ def apply_write_todos_action(
     if action == TodoAction.REMOVE_TODO.value:
         todo_id = args.get("todo_id")
         if not todo_id:
-            return todos, current_task_index, "Error: todo_id required for REMOVE_TODO", action
+            return (
+                todos,
+                current_task_index,
+                "Error: todo_id required for REMOVE_TODO",
+                action,
+            )
 
         for i, todo in enumerate(todos):
             if str(todo.get("id")) == str(todo_id):

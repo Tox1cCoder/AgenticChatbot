@@ -32,6 +32,13 @@ class IDocumentService(ABC):
         pass
 
     @abstractmethod
+    async def set_processing_task_id(
+        self, document_id: UUID, task_id: str
+    ) -> Optional[DocumentResponse]:
+        """Persist the background-processing task ID for a document."""
+        pass
+
+    @abstractmethod
     async def delete_document(self, document_id: UUID) -> bool:
         """Delete document"""
         pass
@@ -54,7 +61,7 @@ class IDocumentService(ABC):
     async def validate_and_create_document(
         self,
         filename: str,
-        file_content: bytes,
+        file_size: int,
         content_type: str,
         conversation_id: UUID,
     ) -> DocumentResponse:

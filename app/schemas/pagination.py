@@ -1,6 +1,5 @@
 from enum import Enum
 from pydantic import BaseModel, Field
-from app.utils.case_conversion import to_camel_case as to_camel
 
 
 class OrderDirection(str, Enum):

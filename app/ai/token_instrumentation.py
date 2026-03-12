@@ -6,15 +6,11 @@ This helps identify prompt bloat and optimize token budgets.
 """
 
 import logging
-import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import (
     BaseMessage,
-    SystemMessage,
-    HumanMessage,
-    AIMessage,
     ToolMessage,
 )
 
@@ -252,6 +248,7 @@ def extract_actual_usage(response: Any) -> Dict[str, Optional[int]]:
             result["output_tokens"] = usage.output_tokens
 
     return result
+
 
 def trim_history_to_budget(
     history: List[Any],

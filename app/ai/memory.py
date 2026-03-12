@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 class ConversationMemory:
-
     def __init__(
         self,
         conversation_id: UUID,
@@ -150,7 +149,6 @@ class ConversationMemory:
 
 
 class MemoryManager:
-
     def __init__(
         self,
         batch_size: int = 100,

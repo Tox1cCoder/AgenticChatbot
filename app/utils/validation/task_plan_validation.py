@@ -7,7 +7,7 @@ from uuid import UUID
 
 from app.repositories.task_plan import TaskPlanRepository
 from app.repositories.conversation import ConversationRepository
-from app.core.exceptions import ResourceNotFoundException, ValidationException
+from app.core.exceptions import ResourceNotFoundException
 
 
 class TaskPlanValidationUtils:

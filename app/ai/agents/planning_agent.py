@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 import uuid
 from textwrap import dedent
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
@@ -321,6 +322,20 @@ class PlanningAgent(BaseAgent):
             ]
 
         canonical_todos = self._canonicalize_todos(updated_todos)
+
+        # Quality gate: reject plans that contain under-specified task descriptions.
+        quality_issues = self._validate_task_descriptions(canonical_todos)
+        if quality_issues:
+            problem_lines = "; ".join(
+                f"task {i + 1}: {reason}" for i, reason in quality_issues
+            )
+            return self._build_error_response(
+                f"Generated plan contains under-specified tasks ({problem_lines}). "
+                "Please provide a more detailed request so each task can be "
+                "described with a concrete action and sufficient detail.",
+                conversation_id,
+            )
+
         overall_goal = (message_content.strip() or None) if not plan_modified else None
 
         response_text = self._format_plan_summary(
@@ -397,7 +412,9 @@ class PlanningAgent(BaseAgent):
             seen_ids.add(todo_id)
 
             raw_status = item.get("status", TodoStatus.PENDING.value)
-            status = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
+            status = (
+                raw_status.value if hasattr(raw_status, "value") else str(raw_status)
+            )
             if status not in {
                 TodoStatus.PENDING.value,
                 TodoStatus.IN_PROGRESS.value,
@@ -421,6 +438,44 @@ class PlanningAgent(BaseAgent):
             )
 
         return canonical
+
+    # ---- Task-description quality ----------------------------------------
+
+    # Minimum character length a task description must meet.
+    _MIN_DESC_LEN: int = 20
+
+    # Token patterns that signal an action verb at the start of the description
+    # or anywhere in it.  Intentionally broad; quality check, not NLP parsing.
+    _ACTION_VERB_RE = re.compile(
+        r"\b(?:add|analyze|apply|authenticate|build|calculate|check|clean|"
+        r"compile|configure|connect|create|debug|define|delete|deploy|design|"
+        r"document|download|enable|evaluate|execute|extract|fetch|fix|generate|"
+        r"get|implement|import|initialize|install|integrate|list|load|log|make|"
+        r"migrate|mock|move|open|optimize|parse|process|publish|read|refactor|"
+        r"register|remove|render|replace|research|resolve|review|run|save|send|"
+        r"set|setup|start|store|sync|test|trace|update|upload|validate|verify|"
+        r"write)\b",
+        re.IGNORECASE,
+    )
+
+    def _validate_task_descriptions(
+        self, todos: List[Dict[str, Any]]
+    ) -> List[Tuple[int, str]]:
+        """Return (0-based index, reason) for every invalid task description.
+
+        A description is considered invalid if it is shorter than
+        ``_MIN_DESC_LEN`` characters or contains no recognisable action verb.
+        """
+        issues: List[Tuple[int, str]] = []
+        for i, todo in enumerate(todos):
+            desc = str(todo.get("description", "")).strip()
+            if len(desc) < self._MIN_DESC_LEN:
+                issues.append(
+                    (i, f"too short ({len(desc)} chars, min {self._MIN_DESC_LEN})")
+                )
+            elif not self._ACTION_VERB_RE.search(desc):
+                issues.append((i, "no recognisable action verb found"))
+        return issues
 
     def _format_plan_summary(
         self,

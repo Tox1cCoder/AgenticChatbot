@@ -88,7 +88,9 @@ async def execute_search_documents_action(
         elif action == DocumentAction.SEARCH_CHUNKS.value:
             query = tool_args.get("query")
             if query:
-                search_results = await rag_agent._search(query, conversation_id=conversation_id)
+                search_results = await rag_agent._search(
+                    query, conversation_id=conversation_id
+                )
                 if search_results:
                     attached_count = 0
                     try:
@@ -147,9 +149,7 @@ async def execute_search_documents_action(
                         )
 
                     if attached_count:
-                        result += (
-                            f"(Attached {attached_count} image(s) from matching chunks for multimodal analysis.)\n"
-                        )
+                        result += f"(Attached {attached_count} image(s) from matching chunks for multimodal analysis.)\n"
                 else:
                     result = "No search results found"
             else:
@@ -189,9 +189,7 @@ async def execute_search_documents_action(
                         new_images=images,
                         max_agentic_images=max_agentic_images,
                     )
-                    result = (
-                        f"IMAGES ({len(images)} found, {attached_count} added to context):\n\n"
-                    )
+                    result = f"IMAGES ({len(images)} found, {attached_count} added to context):\n\n"
                     for i, img in enumerate(images, 1):
                         page = img.get("page_number", "?")
                         caption = img.get("caption") or "No caption"
@@ -212,4 +210,3 @@ async def execute_search_documents_action(
         logger.debug("RAG Agentic: %s - %s", action, reason)
 
     return result, action
-

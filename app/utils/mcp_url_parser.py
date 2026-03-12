@@ -1,4 +1,3 @@
-
 from typing import Any, Dict
 from app.core.exceptions.mcp import ServerConfigurationError
 

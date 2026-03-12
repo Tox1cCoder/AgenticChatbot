@@ -39,7 +39,10 @@ class MessageFactory:
         # Store attachments in metadata if present
         if hasattr(message_data, "attachments") and message_data.attachments:
             metadata["attachments"] = message_data.attachments
-        if hasattr(message_data, "model_config_field") and message_data.model_config_field:
+        if (
+            hasattr(message_data, "model_config_field")
+            and message_data.model_config_field
+        ):
             metadata["model_request"] = message_data.model_config_field
 
         return {

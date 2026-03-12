@@ -219,9 +219,7 @@ class StopGenerationRequest(BaseModel):
 class StopGenerationResponse(BaseModel):
     """Response from the stop generation endpoint."""
 
-    status: str = Field(
-        ..., description="'cancelled' or 'not_inflight'"
-    )
+    status: str = Field(..., description="'cancelled' or 'not_inflight'")
     message: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Persisted assistant message (partial or final), if available",

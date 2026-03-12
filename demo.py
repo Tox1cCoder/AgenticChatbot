@@ -1,4 +1,4 @@
-﻿import base64
+import base64
 import mimetypes
 import uuid
 import json
@@ -1035,7 +1035,7 @@ def render_conversation_button(
     if st.button(
         title,
         key=f"conv_{conversation['id']}",
-        width='stretch',
+        width="stretch",
         type=button_type,
     ):
         if conversation["id"] != st.session_state.current_conversation_id:
@@ -1585,7 +1585,9 @@ def close_conversation_manager() -> None:
     st.session_state.pop("manager_conv_total", None)
 
 
-def find_conversation_in_state(conversation_id: Optional[str]) -> Optional[Dict[str, Any]]:
+def find_conversation_in_state(
+    conversation_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
     """Find a conversation from session state by ID."""
     if not conversation_id:
         return None
@@ -1789,9 +1791,9 @@ def make_api_request(method: str, endpoint: str, data: Optional[Dict] = None) ->
         return {}
 
     if method in {"POST", "PUT", "PATCH", "DELETE"}:
-        st.session_state.api_cache_version = int(
-            st.session_state.get("api_cache_version", 0)
-        ) + 1
+        st.session_state.api_cache_version = (
+            int(st.session_state.get("api_cache_version", 0)) + 1
+        )
 
     return response_data
 
@@ -1820,9 +1822,9 @@ def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
             timeout=STREAM_REQUEST_TIMEOUT,
         )
         response.raise_for_status()
-        st.session_state.api_cache_version = int(
-            st.session_state.get("api_cache_version", 0)
-        ) + 1
+        st.session_state.api_cache_version = (
+            int(st.session_state.get("api_cache_version", 0)) + 1
+        )
 
         # Parse SSE stream
         for line in response.iter_lines(decode_unicode=True):
@@ -1849,7 +1851,7 @@ def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
             f"HTTP error {http_error.response.status_code}", icon=":material/cancel:"
         )
         yield {"type": "error", "error": f"HTTP {http_error.response.status_code}"}
-    except requests.exceptions.ConnectionError as conn_error:
+    except requests.exceptions.ConnectionError:
         if not stream_completed:
             st.toast("Cannot connect to API", icon=":material/cancel:")
             yield {"type": "error", "error": "Connection error"}
@@ -2334,9 +2336,7 @@ def render_login_page():
                     placeholder="Enter password",
                 )
 
-                if st.form_submit_button(
-                    "Sign In", width='stretch', type="primary"
-                ):
+                if st.form_submit_button("Sign In", width="stretch", type="primary"):
                     with st.spinner("Signing in..."):
                         auth_response = make_api_request(
                             "POST",
@@ -2382,7 +2382,7 @@ def render_login_page():
                 )
 
                 if st.form_submit_button(
-                    "Create Account", width='stretch', type="primary"
+                    "Create Account", width="stretch", type="primary"
                 ):
                     if not username or not email or not password:
                         st.error("Please fill all fields")
@@ -2428,7 +2428,7 @@ def render_sidebar():
         st.markdown("# Multi-agent ChatBot")
 
         # New chat button
-        if st.button("New Chat", width='stretch', type="primary"):
+        if st.button("New Chat", width="stretch", type="primary"):
             st.session_state.current_conversation_id = "pending_new"
             st.session_state.active_view = "chat"
             close_conversation_manager()
@@ -2436,7 +2436,7 @@ def render_sidebar():
             st.rerun()
 
         # Manage conversations button
-        if st.button("Manage Conversations", width='stretch'):
+        if st.button("Manage Conversations", width="stretch"):
             if st.session_state.get("conversation_manager_visible"):
                 close_conversation_manager()
             else:
@@ -2501,7 +2501,7 @@ def render_sidebar():
                     st.session_state.current_user_profile = user
             if user:
                 st.markdown(f"**{user['username']}**")
-                if st.button("Sign Out", width='stretch'):
+                if st.button("Sign Out", width="stretch"):
                     st.session_state.current_user_id = None
                     st.session_state.current_user_profile = None
                     st.session_state.current_conversation_id = None
@@ -2732,21 +2732,21 @@ def render_canvas_artifact(message_metadata: dict):
     lower = patched.lower()
     base_tag = '<base target="_blank">'
 
-    head_open = lower.find('<head>')
+    head_open = lower.find("<head>")
     if head_open != -1:
-        ins = head_open + len('<head>')
-        patched = patched[:ins] + '\n' + base_tag + '\n' + patched[ins:]
+        ins = head_open + len("<head>")
+        patched = patched[:ins] + "\n" + base_tag + "\n" + patched[ins:]
         lower = patched.lower()
 
-    body_open = lower.find('<body')
+    body_open = lower.find("<body")
     if body_open != -1:
-        body_tag_end = lower.find('>', body_open)
+        body_tag_end = lower.find(">", body_open)
         if body_tag_end != -1:
             ins = body_tag_end + 1
-            patched = patched[:ins] + '\n' + injected_toolbar + '\n' + patched[ins:]
+            patched = patched[:ins] + "\n" + injected_toolbar + "\n" + patched[ins:]
     elif head_open == -1:
         # Bare fragment — no html/head/body structure
-        patched = base_tag + '\n' + injected_toolbar + '\n' + patched
+        patched = base_tag + "\n" + injected_toolbar + "\n" + patched
 
     # ── Live iframe ───────────────────────────────────────────────────────────
     _stc.html(patched, height=520, scrolling=True)
@@ -2840,16 +2840,17 @@ def render_agent_images(message_metadata: dict):
 
         cap_html = (
             f'<div class="agent-thumb-caption" title="{entry["caption"]}">{short_cap}</div>'
-            if entry["caption"] else ""
+            if entry["caption"]
+            else ""
         )
         thumbs_html += (
             f'<div class="agent-thumb-cell">'
             f'  <img src="{entry["src"]}" alt="{short_cap}" '
             f'       title="Click to view full size" data-idx="{i}" '
             f'       class="agent-thumb-img" '
-            f'       onerror="this.parentElement.classList.add(\'broken\')" />'
-            f'  {cap_html}'
-            f'</div>'
+            f"       onerror=\"this.parentElement.classList.add('broken')\" />"
+            f"  {cap_html}"
+            f"</div>"
         )
 
     # The JS injects a lightbox overlay into the TOP-LEVEL document (parent
@@ -2857,6 +2858,7 @@ def render_agent_images(message_metadata: dict):
     # including the sidebar.  Clicking the overlay closes it.
     # We JSON-encode the sources list for safe embedding.
     import json as _json
+
     sources_json = _json.dumps([e["src"] for e in thumb_entries])
 
     component_html = f"""
@@ -3180,7 +3182,7 @@ def render_citations(message_metadata: Dict[str, Any], msg_id: Optional[str] = N
                         "View",
                         key=f"cite_doc_{msg_id}_{doc_num}",
                         help="View chunk content",
-                        width='stretch',
+                        width="stretch",
                     ):
                         st.session_state["selected_chunk_info"] = {
                             "source": source,
@@ -3235,7 +3237,7 @@ def render_citations(message_metadata: Dict[str, Any], msg_id: Optional[str] = N
                                 "Details",
                                 key=f"cite_chunk_{msg_id}_{doc_num}_{chunk_idx}",
                                 help="View chunk content",
-                                width='stretch',
+                                width="stretch",
                             ):
                                 st.session_state["selected_chunk_info"] = {
                                     "source": source,
@@ -3311,7 +3313,7 @@ def render_citations(message_metadata: Dict[str, Any], msg_id: Optional[str] = N
 
                     if gallery_parts:
                         st.markdown(
-                            f'<div style="display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0;">'
+                            '<div style="display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0;">'
                             + "".join(gallery_parts)
                             + "</div>",
                             unsafe_allow_html=True,
@@ -3324,9 +3326,7 @@ def render_thinking_summary(message_metadata: Dict[str, Any]):
     if thinking_summary:
         with st.expander("Thought Process", expanded=False):
             # Convert markdown to HTML using the markdown library for reliable rendering
-            formatted_html = _markdown.markdown(
-                thinking_summary, extensions=["nl2br"]
-            )
+            formatted_html = _markdown.markdown(thinking_summary, extensions=["nl2br"])
 
             # Use custom styled container for thinking content
             st.markdown(
@@ -3376,7 +3376,7 @@ def render_suggestion_buttons(suggestions: List[str], msg_id: str):
             if st.button(
                 f"{suggestion}",
                 key=button_key,
-                width='stretch',
+                width="stretch",
                 help="Click to use this question",
             ):
                 # Store in session state so the chat input can pick it up
@@ -3487,9 +3487,7 @@ def render_message_feedback_inline(msg: Dict[str, Any]):
                         height=68,
                     )
 
-                    if st.form_submit_button(
-                        "Update", width='stretch', type="primary"
-                    ):
+                    if st.form_submit_button("Update", width="stretch", type="primary"):
                         feedback_data = {
                             "messageId": msg["id"],
                             "rating": rating,
@@ -3512,9 +3510,7 @@ def render_message_feedback_inline(msg: Dict[str, Any]):
                 rating = st.select_slider("Rating", options=[1, 2, 3, 4, 5], value=5)
                 comment = st.text_area("Comment (optional)", height=68)
 
-                if st.form_submit_button(
-                    "Submit", width='stretch', type="primary"
-                ):
+                if st.form_submit_button("Submit", width="stretch", type="primary"):
                     feedback_data = {
                         "messageId": msg["id"],
                         "rating": rating,
@@ -3669,7 +3665,7 @@ def render_tools_tab():
         "Discover and test Model Context Protocol (MCP) tools available to the chatbot."
     )
 
-    if st.button("Refresh", icon=":material/refresh:", width='stretch'):
+    if st.button("Refresh", icon=":material/refresh:", width="stretch"):
         st.rerun()
 
     st.markdown("---")
@@ -3708,7 +3704,7 @@ def render_tools_tab():
                 label_visibility="collapsed",
             )
 
-            if st.button("Add Server from JSON", width='stretch'):
+            if st.button("Add Server from JSON", width="stretch"):
                 if json_config.strip():
                     try:
                         config = json.loads(json_config)
@@ -3844,7 +3840,7 @@ def render_tools_tab():
                 )
                 enabled_input = st.checkbox("Enable server", value=True)
 
-                if st.form_submit_button("Add Server", width='stretch'):
+                if st.form_submit_button("Add Server", width="stretch"):
                     if not server_name_input:
                         st.error("Server name is required")
                     else:
@@ -3934,7 +3930,7 @@ def render_tools_tab():
 
             enabled_url = st.checkbox("Enable server", value=True, key="url_enabled")
 
-            if st.button("Add Server from URL", width='stretch'):
+            if st.button("Add Server from URL", width="stretch"):
                 if not url_input.strip():
                     st.error("URL is required")
                 else:
@@ -4055,7 +4051,9 @@ def render_tools_tab():
     selected_tool_name = st.selectbox(
         "Select a tool to test",
         options=[tool.get("name") for tool in filtered_tools],
-        format_func=lambda x: f"{x} ({next((t.get('serverName', '') for t in filtered_tools if t.get('name') == x), '')})",
+        format_func=lambda x: (
+            f"{x} ({next((t.get('serverName', '') for t in filtered_tools if t.get('name') == x), '')})"
+        ),
     )
 
     if not selected_tool_name:
@@ -4077,7 +4075,7 @@ def render_tools_tab():
     with col1:
         st.markdown(f"**Server:** `{selected_tool.get('serverName', 'Unknown')}`")
     with col2:
-        st.markdown(f"**Type:** Tool")
+        st.markdown("**Type:** Tool")
 
     st.markdown(
         f"**Description:** {selected_tool.get('description', 'No description available')}"
@@ -4096,7 +4094,7 @@ def render_tools_tab():
         )
 
         # Submit button
-        execute_button = st.form_submit_button("Execute Tool", width='stretch')
+        execute_button = st.form_submit_button("Execute Tool", width="stretch")
 
         if execute_button:
             if parameter_errors:
@@ -4164,16 +4162,27 @@ def render_skills_tab():
 
     col_refresh, col_reload = st.columns(2)
     with col_refresh:
-        if st.button("Refresh", icon=":material/refresh:", key="skills_refresh", use_container_width=True):
+        if st.button(
+            "Refresh",
+            icon=":material/refresh:",
+            key="skills_refresh",
+            use_container_width=True,
+        ):
             st.rerun()
     with col_reload:
-        if st.button("Reload from Disk", icon=":material/sync:", key="skills_reload", use_container_width=True):
+        if st.button(
+            "Reload from Disk",
+            icon=":material/sync:",
+            key="skills_reload",
+            use_container_width=True,
+        ):
             with st.spinner("Rescanning skills folder..."):
                 result = reload_skills()
                 if result:
                     msg = result.get("message", "Skills reloaded")
                     st.success(msg, icon=":material/check_circle:")
                     import time
+
                     time.sleep(0.8)
                     st.rerun()
                 else:
@@ -4234,14 +4243,18 @@ def render_skills_tab():
 
             with col_toggle:
                 toggle_label = "Disable" if enabled else "Enable"
-                toggle_icon = ":material/toggle_off:" if enabled else ":material/toggle_on:"
+                toggle_icon = (
+                    ":material/toggle_off:" if enabled else ":material/toggle_on:"
+                )
                 if st.button(
                     toggle_label,
                     key=f"skill_toggle_{skill_name}",
                     icon=toggle_icon,
                     use_container_width=True,
                 ):
-                    with st.spinner(f"{'Disabling' if enabled else 'Enabling'} skill..."):
+                    with st.spinner(
+                        f"{'Disabling' if enabled else 'Enabling'} skill..."
+                    ):
                         result = toggle_skill(skill_name, not enabled)
                         if result:
                             st.rerun()
@@ -4318,7 +4331,9 @@ def render_interrupt_approval_ui():
 
     # Key all pending decisions under the interrupt_id to avoid cross-contamination
     # on reload or when multiple interrupts occur in a single session.
-    decisions_key = f"pending_decisions_{interrupt_id}" if interrupt_id else "pending_decisions"
+    decisions_key = (
+        f"pending_decisions_{interrupt_id}" if interrupt_id else "pending_decisions"
+    )
 
     if interrupt_message:
         st.warning(f"**{interrupt_message}**", icon=":material/pause_circle:")
@@ -4354,9 +4369,8 @@ def render_interrupt_approval_ui():
         )
 
         # Determine which decision types are allowed for this tool
-        allowed_raw = (
-            action_request.get("allowed_decisions")
-            or action_request.get("allowedDecisions")
+        allowed_raw = action_request.get("allowed_decisions") or action_request.get(
+            "allowedDecisions"
         )
         if allowed_raw:
             allowed_decisions = {
@@ -4403,7 +4417,7 @@ def render_interrupt_approval_ui():
                     if st.button(
                         "Approve",
                         key=f"approve_{idx}",
-                        width='stretch',
+                        width="stretch",
                         type="primary",
                     ):
                         st.session_state[decisions_key][task_id] = {
@@ -4416,17 +4430,13 @@ def render_interrupt_approval_ui():
 
             with col2:
                 if "edit" in allowed_decisions:
-                    if st.button(
-                        "Edit Args", key=f"edit_{idx}", width='stretch'
-                    ):
+                    if st.button("Edit Args", key=f"edit_{idx}", width="stretch"):
                         st.session_state[f"editing_tool_{idx}"] = True
                         st.rerun()
 
             with col3:
                 if "reject" in allowed_decisions:
-                    if st.button(
-                        "Reject", key=f"reject_{idx}", width='stretch'
-                    ):
+                    if st.button("Reject", key=f"reject_{idx}", width="stretch"):
                         st.session_state[decisions_key][task_id] = {
                             "type": "reject",
                             "task_id": task_id,
@@ -4449,7 +4459,7 @@ def render_interrupt_approval_ui():
                     with col_save:
                         if st.form_submit_button(
                             "Save & Approve",
-                            width='stretch',
+                            width="stretch",
                             type="primary",
                         ):
                             try:
@@ -4466,7 +4476,7 @@ def render_interrupt_approval_ui():
                                 st.error("Invalid JSON format")
 
                     with col_cancel:
-                        if st.form_submit_button("Cancel", width='stretch'):
+                        if st.form_submit_button("Cancel", width="stretch"):
                             st.session_state.pop(f"editing_tool_{idx}", None)
                             st.rerun()
 
@@ -4501,14 +4511,16 @@ def render_interrupt_approval_ui():
     with col_submit:
         if st.button(
             "Submit Decisions",
-            width='stretch',
+            width="stretch",
             type="primary",
             disabled=not all_decided,
         ):
-            _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisions_key)
+            _submit_interrupt_decisions(
+                thread_id, interrupt_id, action_requests, decisions_key
+            )
 
     with col_approve_all:
-        if st.button("Approve All", width='stretch'):
+        if st.button("Approve All", width="stretch"):
             # Auto-approve all remaining tools
             for req in action_requests:
                 task_id = (
@@ -4526,10 +4538,12 @@ def render_interrupt_approval_ui():
                         "args": None,
                     }
             # Submit immediately
-            _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisions_key)
+            _submit_interrupt_decisions(
+                thread_id, interrupt_id, action_requests, decisions_key
+            )
 
     with col_cancel:
-        if st.button("Cancel All", width='stretch'):
+        if st.button("Cancel All", width="stretch"):
             # Reject all tools
             for req in action_requests:
                 task_id = (
@@ -4547,13 +4561,19 @@ def render_interrupt_approval_ui():
                         "args": {},
                     }
             # Submit immediately
-            _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisions_key)
+            _submit_interrupt_decisions(
+                thread_id, interrupt_id, action_requests, decisions_key
+            )
 
 
-def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisions_key=None):
+def _submit_interrupt_decisions(
+    thread_id, interrupt_id, action_requests, decisions_key=None
+):
     """Helper function to submit interrupt decisions to the backend"""
     if decisions_key is None:
-        decisions_key = f"pending_decisions_{interrupt_id}" if interrupt_id else "pending_decisions"
+        decisions_key = (
+            f"pending_decisions_{interrupt_id}" if interrupt_id else "pending_decisions"
+        )
     conversation_id = st.session_state.get("interrupt_conversation_id")
     decisions = list(st.session_state.get(decisions_key, {}).values())
 
@@ -4855,7 +4875,7 @@ def render_chat_view():
     # Load more button
     if conversation_id and conversation_id != "pending_new":
         if st.session_state.has_more_messages:
-            if st.button("Load older messages", width='stretch'):
+            if st.button("Load older messages", width="stretch"):
                 next_page = st.session_state.conversation_messages_page + 1
                 load_messages_page(next_page, show_spinner=True)
 
@@ -4985,9 +5005,7 @@ def render_chat_view():
                 )
 
             with col3:
-                _form_attach = st.form_submit_button(
-                    "Attach", use_container_width=True
-                )
+                _form_attach = st.form_submit_button("Attach", use_container_width=True)
 
         # Placeholder for the "Stop generating" button lives OUTSIDE the form
         # but directly below it, so it appears next to Send / Attach.
@@ -5017,9 +5035,7 @@ def render_chat_view():
                 if conversation_id == "pending_new":
                     saved_attachments = list(pending_attachments)
 
-                    with st.status(
-                        "Creating conversation...", expanded=True
-                    ) as status:
+                    with st.status("Creating conversation...", expanded=True) as status:
                         # Use placeholder title - backend will generate and update it in parallel
                         conversation_data = {"title": "New Conversation"}
                         pending_persona = st.session_state.get(
@@ -5029,26 +5045,22 @@ def render_chat_view():
                         if persona_payload:
                             conversation_data["personaPrompt"] = persona_payload
 
-                        status.update(
-                            label="Creating conversation...", state="running"
-                        )
+                        status.update(label="Creating conversation...", state="running")
                         conv_response = make_api_request(
                             "POST", "/conversations/", conversation_data
                         )
                         if conv_response and conv_response.get("data"):
                             new_conversation = conv_response["data"]
-                            st.session_state.current_conversation_id = (
-                                new_conversation["id"]
-                            )
+                            st.session_state.current_conversation_id = new_conversation[
+                                "id"
+                            ]
                             upsert_conversation_in_state(new_conversation)
                             st.session_state.conversations_loaded = True
                             reset_conversation_state()
                             st.session_state.pending_image_attachments = (
                                 saved_attachments
                             )
-                            conversation_id = (
-                                st.session_state.current_conversation_id
-                            )
+                            conversation_id = st.session_state.current_conversation_id
                             pending_attachments = list(saved_attachments)
                             status.update(
                                 label="Conversation created!", state="complete"
@@ -5133,7 +5145,9 @@ def render_chat_view():
                             # Accumulate and display thinking content with animated indicator
                             content = event.get("content", "")
                             accumulated_thinking += content
-                            st.session_state.stream_partial_thinking = accumulated_thinking
+                            st.session_state.stream_partial_thinking = (
+                                accumulated_thinking
+                            )
                             with thinking_placeholder.container():
                                 # Animated thinking header with dots
                                 st.markdown(
@@ -5163,9 +5177,7 @@ def render_chat_view():
                         elif event_type == "token":
                             # Accumulate and display tokens in real-time
                             content = event.get("content", "")
-                            accumulated_content += (
-                                content  # Append each token chunk
-                            )
+                            accumulated_content += content  # Append each token chunk
                             st.session_state.stream_partial_text = accumulated_content
                             # Collapse thinking when answer starts - just show summary
                             if accumulated_thinking and accumulated_content:
@@ -5202,9 +5214,7 @@ def render_chat_view():
                         elif event_type == "interrupt":
                             # Workflow paused for human approval
                             thread_id = event.get("thread_id")
-                            pending_tool_calls = (
-                                event.get("pending_tool_calls") or []
-                            )
+                            pending_tool_calls = event.get("pending_tool_calls") or []
                             # Extract the full interrupt response data
                             interrupt_data = event.get("interrupt")
                             interrupt_message = extract_interrupt_message(
@@ -5234,12 +5244,8 @@ def render_chat_view():
                         elif event_type == "error":
                             # Handle error
                             error_msg = event.get("error", "Unknown error")
-                            status.update(
-                                label=f"Error: {error_msg}", state="error"
-                            )
-                            st.toast(
-                                f"Error: {error_msg}", icon=":material/cancel:"
-                            )
+                            status.update(label=f"Error: {error_msg}", state="error")
+                            st.toast(f"Error: {error_msg}", icon=":material/cancel:")
                             _clear_inflight_state()
                             break
 
@@ -5270,10 +5276,7 @@ def render_chat_view():
 
                     # If successful, update UI
                     if final_message:
-                        if (
-                            title_sync_conversation_id
-                            and not received_title_update
-                        ):
+                        if title_sync_conversation_id and not received_title_update:
                             sync_conversation_title_from_server(
                                 title_sync_conversation_id
                             )
@@ -5388,12 +5391,14 @@ def render_manage_modal():
             display_conversations = _deduplicate_conversations(filtered_convs)
 
             if display_conversations:
-                total_known = st.session_state.get("manager_conv_total", len(display_conversations))
+                total_known = st.session_state.get(
+                    "manager_conv_total", len(display_conversations)
+                )
                 loaded_count = len(manager_conversations)
                 if total_known > loaded_count:
                     st.caption(
                         f"Showing {len(display_conversations)} of {total_known} conversation(s) "
-                    )   
+                    )
                 else:
                     st.caption(f"Found {len(display_conversations)} conversation(s)")
 
@@ -5441,7 +5446,7 @@ def render_manage_modal():
                             if st.button(
                                 "Open",
                                 key=open_button_key,
-                                width='stretch',
+                                width="stretch",
                                 type="primary",
                             ):
                                 if conv_id is not None:
@@ -5463,7 +5468,7 @@ def render_manage_modal():
                             if st.button(
                                 "Delete",
                                 key=delete_button_key,
-                                width='stretch',
+                                width="stretch",
                             ):
                                 if conv_id is None:
                                     st.toast(
@@ -5518,7 +5523,7 @@ def render_manage_modal():
                 st.info("No conversations found matching your search.")
         else:
             st.info("No conversations available.")
-        if st.button("Close", width='stretch'):
+        if st.button("Close", width="stretch"):
             close_conversation_manager()
             st.rerun()
 
@@ -5539,7 +5544,7 @@ def render_chunk_preview_modal():
 
         if not selected_info:
             st.warning("No chunk information available.")
-            if st.button("Close", width='stretch'):
+            if st.button("Close", width="stretch"):
                 st.session_state["chunk_preview_dialog_key"] = False
                 st.rerun()
             return
@@ -5604,7 +5609,7 @@ def render_chunk_preview_modal():
         st.divider()
 
         # Close button
-        if st.button("Close", width='stretch'):
+        if st.button("Close", width="stretch"):
             st.session_state["chunk_preview_dialog_key"] = False
             st.session_state["selected_chunk_info"] = None
             st.rerun()
@@ -5665,7 +5670,7 @@ def render_documents_tab():
             if st.button(
                 "Upload & Process",
                 key=f"upload_doc_{conversation_id}",
-                width='stretch',
+                width="stretch",
                 type="primary",
             ):
                 with st.spinner("Uploading document..."):
@@ -5688,7 +5693,7 @@ def render_documents_tab():
         if st.button(
             "Refresh document list",
             key="documents_refresh",
-            width='stretch',
+            width="stretch",
         ):
             st.cache_data.clear()
             st.rerun()
@@ -5767,7 +5772,7 @@ def render_documents_tab():
                 if st.button(
                     "Delete",
                     key=f"delete_doc_{doc.get('id')}",
-                    width='stretch',
+                    width="stretch",
                 ):
                     with st.spinner("Removing document..."):
                         if delete_document(doc.get("id")):
@@ -6039,7 +6044,7 @@ def render_planning_tab():
             "Show completed tasks", value=True, key="show_completed_tasks"
         )
     with col2:
-        if st.button("Refresh", key="refresh_tasks_btn", width='stretch'):
+        if st.button("Refresh", key="refresh_tasks_btn", width="stretch"):
             st.rerun()
 
     tasks = get_task_plans(conversation_id, include_completed=show_completed)
@@ -6071,15 +6076,15 @@ def render_planning_tab():
                         <div style="display: flex; justify-content: space-between; align-items: center;">
                             <div>
                                 <span style="font-weight: 600; color: #1f2937;">
-                                    {status_info['icon']} Task {task_order + 1}
+                                    {status_info["icon"]} Task {task_order + 1}
                                 </span>
                             </div>
                             <span style="color: {border_color}; font-size: 0.85rem; font-weight: 500;">
-                                {status_info['label']}
+                                {status_info["label"]}
                             </span>
                         </div>
                         <p style="margin: 8px 0 0 0; color: #374151;">{html.escape(description)}</p>
-                        {f'<p style="margin: 4px 0 0 0; color: #6b7280; font-size: 0.8rem;">Completed: {completed_at[:16] if completed_at else "N/A"}</p>' if task_status == "completed" else ''}
+                        {f'<p style="margin: 4px 0 0 0; color: #6b7280; font-size: 0.8rem;">Completed: {completed_at[:16] if completed_at else "N/A"}</p>' if task_status == "completed" else ""}
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -6094,7 +6099,7 @@ def render_planning_tab():
                             "Start",
                             icon=":material/play_arrow:",
                             key=f"start_{task_id}",
-                            width='stretch',
+                            width="stretch",
                         ):
                             result = update_task_plan(
                                 task_id, {"status": "in_progress"}
@@ -6111,7 +6116,7 @@ def render_planning_tab():
                         if st.button(
                             "Complete",
                             key=f"complete_{task_id}",
-                            width='stretch',
+                            width="stretch",
                         ):
                             result = complete_task_plan(task_id)
                             if result:
@@ -6129,7 +6134,7 @@ def render_planning_tab():
                             "Skip",
                             icon=":material/skip_next:",
                             key=f"skip_{task_id}",
-                            width='stretch',
+                            width="stretch",
                         ):
                             result = update_task_plan(task_id, {"status": "skipped"})
                             if result:
@@ -6137,9 +6142,7 @@ def render_planning_tab():
                                 st.rerun()
 
                 with col4:
-                    if st.button(
-                        "Delete", key=f"delete_{task_id}", width='stretch'
-                    ):
+                    if st.button("Delete", key=f"delete_{task_id}", width="stretch"):
                         if delete_task_plan(task_id):
                             st.toast("Task deleted!", icon=":material/delete:")
                             st.rerun()
@@ -6194,7 +6197,7 @@ def render_settings_view():
         cols = st.columns(len(PERSONA_TEMPLATES))
         for idx, (label, template) in enumerate(PERSONA_TEMPLATES.items()):
             with cols[idx]:
-                if st.button(label, key=f"template_{idx}", width='stretch'):
+                if st.button(label, key=f"template_{idx}", width="stretch"):
                     st.session_state.persona_editor_value = template[
                         :_MAX_PERSONA_LENGTH
                     ]
@@ -6232,7 +6235,7 @@ def render_settings_view():
         if is_new_conversation:
             if st.button(
                 "Apply to New Chat",
-                width='stretch',
+                width="stretch",
                 disabled=exceeds_limit,
                 type="primary",
             ):
@@ -6246,7 +6249,7 @@ def render_settings_view():
         else:
             if st.button(
                 "Save Persona",
-                width='stretch',
+                width="stretch",
                 disabled=exceeds_limit,
                 type="primary",
             ):
@@ -6265,13 +6268,13 @@ def render_settings_view():
 
     with col2:
         if is_new_conversation:
-            if st.button("Clear", width='stretch'):
+            if st.button("Clear", width="stretch"):
                 st.session_state.persona_editor_pending_value = ""
                 st.session_state.persona_editor_pending = True
                 st.session_state.pending_persona_prompt = ""
                 st.rerun()
         else:
-            if st.button("Clear Persona", width='stretch'):
+            if st.button("Clear Persona", width="stretch"):
                 response = make_api_request(
                     "PATCH",
                     f"/conversations/{conversation_id}",
@@ -6315,7 +6318,7 @@ def render_models_view() -> None:
         api_key = st.text_input("OpenAI API key", type="password", placeholder="sk-...")
         submitted = st.form_submit_button(
             "Save / Update OpenAI Key",
-            width='stretch',
+            width="stretch",
             type="primary",
         )
         if submitted:
@@ -6337,7 +6340,7 @@ def render_models_view() -> None:
     with col1:
         if st.button(
             "Refresh OpenAI model list",
-            width='stretch',
+            width="stretch",
         ):
             with st.spinner("Fetching models from OpenAI..."):
                 models = fetch_provider_models("openai")
@@ -6359,7 +6362,7 @@ def render_models_view() -> None:
     with col2:
         if st.button(
             "Delete OpenAI key",
-            width='stretch',
+            width="stretch",
             disabled=openai_provider is None,
         ):
             if delete_provider("openai"):
@@ -6378,7 +6381,7 @@ def render_models_view() -> None:
 
     models = st.session_state.get("openai_models") or []
     if models:
-        st.dataframe(models, width='stretch', hide_index=True)
+        st.dataframe(models, width="stretch", hide_index=True)
     else:
         st.info("Click “Refresh OpenAI model list” to load available models.")
 
@@ -6398,7 +6401,7 @@ def render_models_view() -> None:
 
     controls_col1, controls_col2, controls_col3 = st.columns([1.2, 1.2, 3])
     with controls_col1:
-        if st.button("Reload from server", width='stretch'):
+        if st.button("Reload from server", width="stretch"):
             with st.spinner("Loading model configuration..."):
                 st.session_state.agent_model_config_cache = get_model_config()
                 st.session_state.agent_model_config_last_fetch = datetime.now(
@@ -6409,7 +6412,7 @@ def render_models_view() -> None:
             st.rerun()
 
     with controls_col2:
-        if st.button("Reset to defaults", width='stretch'):
+        if st.button("Reset to defaults", width="stretch"):
             with st.spinner("Resetting..."):
                 st.session_state.agent_model_config_cache = reset_model_config()
                 st.session_state.agent_model_config_last_fetch = datetime.now(
@@ -6568,7 +6571,7 @@ def render_models_view() -> None:
         submitted = st.form_submit_button(
             "Save agent model settings",
             type="primary",
-            width='stretch',
+            width="stretch",
         )
 
         if submitted:
@@ -6633,7 +6636,15 @@ def main():
     render_chunk_preview_modal()
 
     # Tab-based navigation across primary workspaces
-    tab_chat, tab_planning, tab_docs, tab_instructions, tab_models, tab_mcp, tab_skills = st.tabs(
+    (
+        tab_chat,
+        tab_planning,
+        tab_docs,
+        tab_instructions,
+        tab_models,
+        tab_mcp,
+        tab_skills,
+    ) = st.tabs(
         [
             ":material/chat: Chat",
             ":material/checklist: Planning",

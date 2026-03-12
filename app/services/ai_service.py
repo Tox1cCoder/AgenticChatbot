@@ -17,7 +17,6 @@ from ..repositories.conversation import ConversationRepository
 from ..repositories.document import DocumentRepository
 from ..utils.text_processing import sanitize_persona
 from ..ai.utils import make_json_safe
-from ..core.config import settings
 from ..core.response_constants import (
     ERROR_NO_RESPONSE,
     ERROR_NO_RESPONSE_RESUME,
@@ -27,7 +26,6 @@ from ..ai.prompts import TITLE_GENERATION_PROMPT
 
 
 class AIService:
-
     def __init__(
         self,
         qdrant_client: QdrantClient,
@@ -51,7 +49,7 @@ class AIService:
         try:
             conversation = self.conversation_repository.get_by_id(conversation_id)
             return conversation.persona_prompt if conversation else None
-        except Exception as e:
+        except Exception:
             return None
 
     def _build_error_response(self, message: str = ERROR_NO_RESPONSE) -> AgentResponse:
@@ -76,6 +74,7 @@ class AIService:
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
         model_request: Optional[Dict[str, Any]] = None,
         persona: Optional[str] = None,
+        plan_lifecycle: Optional[str] = None,
     ) -> AgentResponse:
 
         thread_id = (
@@ -99,6 +98,7 @@ class AIService:
             has_existing_plan=has_existing_plan,
             existing_tasks=existing_tasks,
             model_request=model_request,
+            plan_lifecycle=plan_lifecycle,
         )
 
         if response:
@@ -121,6 +121,7 @@ class AIService:
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
         model_request: Optional[Dict[str, Any]] = None,
         persona: Optional[str] = None,
+        plan_lifecycle: Optional[str] = None,
     ) -> AgentResponse:
 
         if conversation_id is None or user_id is None:
@@ -136,6 +137,7 @@ class AIService:
                 has_existing_plan=has_existing_plan,
                 existing_tasks=existing_tasks,
                 model_request=model_request,
+                plan_lifecycle=plan_lifecycle,
             )
             if response:
                 return response
@@ -153,6 +155,7 @@ class AIService:
             existing_tasks=existing_tasks,
             model_request=model_request,
             persona=persona,
+            plan_lifecycle=plan_lifecycle,
         )
 
     async def resume_workflow(
@@ -245,9 +248,9 @@ class AIService:
                 if isinstance(interrupt_payload, dict):
                     interrupt_metadata = interrupt_payload.get("metadata")
                     if isinstance(interrupt_metadata, dict):
-                        message_value = interrupt_metadata.get("message") or interrupt_metadata.get(
-                            "reason"
-                        )
+                        message_value = interrupt_metadata.get(
+                            "message"
+                        ) or interrupt_metadata.get("reason")
                         if isinstance(message_value, str) and message_value.strip():
                             interrupt_message = message_value.strip()
                 yield {
@@ -278,6 +281,7 @@ class AIService:
         existing_tasks: Optional[List[Dict[str, Any]]] = None,
         model_request: Optional[Dict[str, Any]] = None,
         persona: Optional[str] = None,
+        plan_lifecycle: Optional[str] = None,
     ):
         thread_id = (
             str(conversation_id) if conversation_id and self.checkpointer else None
@@ -301,6 +305,7 @@ class AIService:
                 has_existing_plan=has_existing_plan,
                 existing_tasks=existing_tasks,
                 model_request=model_request,
+                plan_lifecycle=plan_lifecycle,
             )
         ):
             yield mapped_event
@@ -354,7 +359,7 @@ class AIService:
 
             response = await llm.ainvoke(prompt)
             raw_title = response.content
-            
+
             if isinstance(raw_title, list):
                 # Handle list content (e.g. from Gemini)
                 title_text = ""
@@ -383,7 +388,7 @@ class AIService:
 
             return title
 
-        except Exception as e:
+        except Exception:
             # Fallback: use truncated user message
             title = user_message[:50]
             if len(user_message) > 50:

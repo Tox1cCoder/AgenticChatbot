@@ -5,6 +5,7 @@ from sqlalchemy import select, asc, desc, func
 
 
 from app.models.conversation import Conversation
+from app.models.enums import PlanLifecycle
 from app.models.message import Message
 from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.query_strategy import DefaultQueryStrategy
@@ -253,6 +254,20 @@ class ConversationRepository:
             if db_obj is None:
                 return None
             return self._crud_strategy.update(session, db_obj, input_schema)
+
+    def set_plan_lifecycle(
+        self, id: UUID, lifecycle: Optional[PlanLifecycle]
+    ) -> Optional[Conversation]:
+        """Persist the internal plan lifecycle state."""
+        with self.session_factory() as session:
+            db_obj = self._crud_strategy.get_by_id(session, id)
+            if db_obj is None:
+                return None
+
+            db_obj.plan_lifecycle = lifecycle
+            session.commit()
+            session.refresh(db_obj)
+            return db_obj
 
     def delete(self, id: UUID) -> bool:
         """Delete conversation by ID"""

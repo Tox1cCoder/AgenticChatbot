@@ -6,7 +6,6 @@ import inspect
 import functools
 from typing import Dict, Any, Type
 from fastapi import Depends
-from dependency_injector.wiring import Provide
 from dependency_injector import providers
 
 from app.interfaces import (

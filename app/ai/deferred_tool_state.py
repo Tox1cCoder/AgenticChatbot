@@ -6,7 +6,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..core.config import settings
 from .mcp_registry import get_mcp_tools_generation

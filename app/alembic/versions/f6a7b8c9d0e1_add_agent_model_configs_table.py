@@ -72,7 +72,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("idx_agent_model_configs_user_agent", table_name="agent_model_configs")
+    op.drop_index(
+        "idx_agent_model_configs_user_agent", table_name="agent_model_configs"
+    )
     op.drop_index("idx_agent_model_configs_user_id", table_name="agent_model_configs")
     op.drop_table("agent_model_configs")
-

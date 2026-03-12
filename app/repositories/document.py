@@ -1,6 +1,7 @@
 from typing import List, Optional, Tuple
 from uuid import UUID
 from sqlalchemy import desc
+from sqlalchemy.exc import MultipleResultsFound
 
 from app.models.document import Document
 from app.models.conversation import Conversation
@@ -32,6 +33,29 @@ class DocumentRepository:
         """Get document by ID"""
         with self.session_factory() as db:
             return db.query(Document).filter(Document.id == document_id).first()
+
+    def get_by_processing_task_id(self, task_id: str) -> Optional[Document]:
+        """Get document by its Celery processing task ID."""
+        with self.session_factory() as db:
+            query = db.query(Document).filter(Document.processing_task_id == task_id)
+            try:
+                return query.one_or_none()
+            except MultipleResultsFound:
+                return None
+
+    def set_processing_task_id(
+        self, document_id: UUID, task_id: str
+    ) -> Optional[Document]:
+        """Persist the Celery processing task ID for a document."""
+        with self.session_factory() as db:
+            db_document = db.query(Document).filter(Document.id == document_id).first()
+            if not db_document:
+                return None
+
+            db_document.processing_task_id = task_id
+            db.commit()
+            db.refresh(db_document)
+            return db_document
 
     def get_by_conversation_id(
         self, conversation_id: UUID, page: int = 1, page_size: int = 20

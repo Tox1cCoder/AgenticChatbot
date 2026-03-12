@@ -42,7 +42,7 @@ class SuggestionGenerator:
         """Initialize Gemini client."""
         try:
             self.client = create_gemini_client()
-        except Exception as e:
+        except Exception:
             self.client = None
 
     def _create_cache_key(self, user_query: str, response_content: str) -> str:
@@ -175,5 +175,3 @@ async def generate_follow_up_suggestions(
     """
     generator = get_suggestion_generator()
     return await generator.generate_suggestions(user_query, response_content)
-
-

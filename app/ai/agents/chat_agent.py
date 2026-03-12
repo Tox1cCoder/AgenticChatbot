@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 import base64
 from typing import Optional, List
 
@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 class ChatAgent(BaseAgent):
-
     def __init__(self):
         super().__init__(agent_config_key="chat")
 

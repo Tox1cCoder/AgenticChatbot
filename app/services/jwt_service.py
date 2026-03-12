@@ -18,15 +18,15 @@ class JwtService:
         self.access_token_expire_minutes = settings.access_token_expire_minutes
         self.refresh_token_expire_days = settings.refresh_token_expire_days
 
-    def _calculate_expiration_time(self, delta: Optional[timedelta] = None, now: Optional[datetime] = None) -> datetime:
+    def _calculate_expiration_time(
+        self, delta: Optional[timedelta] = None, now: Optional[datetime] = None
+    ) -> datetime:
         """Calculate token expiration time"""
         if now is None:
             now = datetime.now(timezone.utc)
         if delta:
             return now + delta
-        return now + timedelta(
-            minutes=self.access_token_expire_minutes
-        )
+        return now + timedelta(minutes=self.access_token_expire_minutes)
 
     def create_access_token(
         self, data: dict, expires_delta: Optional[timedelta] = None

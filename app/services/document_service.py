@@ -64,6 +64,15 @@ class DocumentService(IDocumentService):
             return DocumentResponse.model_validate(document)
         return None
 
+    async def set_processing_task_id(
+        self, document_id: UUID, task_id: str
+    ) -> Optional[DocumentResponse]:
+        """Persist the background-processing task ID for a document."""
+        document = self.repository.set_processing_task_id(document_id, task_id)
+        if document:
+            return DocumentResponse.model_validate(document)
+        return None
+
     async def delete_document(self, document_id: UUID) -> bool:
         """Delete document and its vectors from Qdrant."""
         # Fetch document to include details and validate existence
@@ -139,7 +148,7 @@ class DocumentService(IDocumentService):
     async def validate_and_create_document(
         self,
         filename: str,
-        file_content: bytes,
+        file_size: int,
         content_type: str,
         conversation_id: UUID,
     ) -> DocumentResponse:
@@ -149,7 +158,7 @@ class DocumentService(IDocumentService):
             raise FileValidationError(detail="No file provided")
 
         # Use processing service for validation
-        await self.processing_service.validate_upload_file(filename, len(file_content))
+        await self.processing_service.validate_upload_file(filename, file_size)
 
         # Create document record
         document_data = DocumentCreate(

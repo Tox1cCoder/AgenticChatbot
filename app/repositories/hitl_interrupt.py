@@ -6,7 +6,6 @@ from typing import List, Optional
 from uuid import UUID
 
 from sqlalchemy import select, update
-from sqlalchemy.orm import Session
 
 from app.models.hitl_interrupt import HITLInterrupt, HITLInterruptStatus
 
@@ -152,9 +151,7 @@ class HITLInterruptRepository:
         with self.session_factory() as db:
             return db.get(HITLInterrupt, interrupt_id)
 
-    def get_pending_by_conversation(
-        self, conversation_id: UUID
-    ) -> List[HITLInterrupt]:
+    def get_pending_by_conversation(self, conversation_id: UUID) -> List[HITLInterrupt]:
         """Return all PENDING interrupt records for a conversation."""
         with self.session_factory() as db:
             stmt = select(HITLInterrupt).where(

@@ -318,8 +318,6 @@ class TaskPlanRepository:
         else:
             update_payload = dict(getattr(input_schema, "__dict__", {}))
 
-
-
         class _UpdateWrapper:
             def __init__(self, data: Dict[str, Any]):
                 self._data = data
@@ -358,5 +356,3 @@ class TaskPlanRepository:
         """
         with self.session_factory() as session:
             return self._crud_strategy.exists(session, id)
-
-

@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, DateTime, ForeignKey, Integer
+from sqlalchemy import Column, String, DateTime, ForeignKey, Integer, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 import uuid
@@ -9,6 +9,7 @@ from app.models.base import Base
 
 class Document(Base):
     __tablename__ = "documents"
+    __table_args__ = (Index("idx_document_processing_task_id", "processing_task_id"),)
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id = Column(
@@ -22,6 +23,8 @@ class Document(Base):
     upload_time = Column(
         DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc)
     )
+    # Celery task ID persisted at enqueue time for ownership-safe status polling.
+    processing_task_id = Column(String(255), nullable=True)
 
     # Relationships
     conversation = relationship("Conversation", back_populates="documents")

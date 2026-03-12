@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 
+from app.models.enums import PlanLifecycle
 from app.schemas.task_plan import TaskPlanUpdate, TaskPlanRead, PlanningStatusResponse
 
 
@@ -38,6 +39,7 @@ class ITaskPlanService(ABC):
         todos: List[Dict[str, Any]],
         user_id: UUID,
         preserve_existing_status: bool = False,
+        lifecycle: Optional[PlanLifecycle] = None,
     ) -> List[TaskPlanRead]:
         """Persist todo data produced by the planning agent.
 
@@ -119,6 +121,16 @@ class ITaskPlanService(ABC):
         Returns:
             TaskPlanRead schema or None if no active or pending tasks
         """
+        pass
+
+    @abstractmethod
+    def set_plan_lifecycle(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        lifecycle: Optional[PlanLifecycle],
+    ) -> None:
+        """Persist an internal lifecycle transition for a conversation plan."""
         pass
 
     @abstractmethod

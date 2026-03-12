@@ -12,7 +12,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Optional
 from uuid import UUID
 
 from cachetools import TTLCache
@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Entry shape
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class InflightEntry:
@@ -71,6 +72,7 @@ class InflightEntry:
 # Registry singleton
 # ---------------------------------------------------------------------------
 
+
 class GenerationRegistry:
     """
     Best-effort in-memory registry of in-flight streaming generations.
@@ -116,7 +118,9 @@ class GenerationRegistry:
         entry = self.get(user_message_id)
         if entry is not None:
             entry.request_cancel()
-            logger.info("Cancellation requested for user_message_id=%s", user_message_id)
+            logger.info(
+                "Cancellation requested for user_message_id=%s", user_message_id
+            )
         return entry
 
     def __len__(self) -> int:

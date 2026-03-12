@@ -50,4 +50,3 @@ class AgentModelConfig(Base):
             f"<AgentModelConfig(id={self.id}, user_id={self.user_id}, "
             f"agent_key={self.agent_key}, provider_type={self.provider_type}, model={self.model})>"
         )
-

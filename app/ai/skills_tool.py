@@ -13,7 +13,6 @@ small summary upfront, full content on demand.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -24,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 # ── Pydantic schemas ────────────────────────────────────────────────
+
 
 class ActivateSkillInput(BaseModel):
     """Input schema for the activate_skill tool."""
@@ -37,6 +37,7 @@ class ActivateSkillInput(BaseModel):
 
 
 # ── Tool factory ────────────────────────────────────────────────────
+
 
 def create_activate_skill_tool():
     """
@@ -61,9 +62,7 @@ def create_activate_skill_tool():
             registry = get_skills_registry()
             skill = registry.get_skill(skill_name)
         except KeyError:
-            available = [
-                s.name for s in get_skills_registry().get_active_skills()
-            ]
+            available = [s.name for s in get_skills_registry().get_active_skills()]
             return (
                 f"Error: skill '{skill_name}' not found. "
                 f"Available skills: {', '.join(available) if available else '(none)'}"
