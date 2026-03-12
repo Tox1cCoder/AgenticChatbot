@@ -3,9 +3,10 @@ Message service interface definition
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 from uuid import UUID
 
+from app.ai.schemas import InterruptDecision
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
 
@@ -18,6 +19,16 @@ class IMessageService(ABC):
         self, message_create_data: MessageCreate, user_id: UUID
     ) -> MessageRead:
         """Create a new message with validation"""
+        pass
+
+    @abstractmethod
+    async def create_message_stream(
+        self,
+        message_create_data: MessageCreate,
+        user_id: UUID,
+        bot_message_id: Optional[UUID] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Create a new message and stream the assistant response"""
         pass
 
     @abstractmethod
@@ -69,6 +80,19 @@ class IMessageService(ABC):
         self, conversation_id: UUID, user_id: UUID, user_input: Optional[str] = None
     ) -> MessageRead:
         """Resume a paused workflow and return the bot's response message"""
+        pass
+
+    @abstractmethod
+    async def resume_message_creation_stream(
+        self,
+        thread_id: str,
+        conversation_id: UUID,
+        user_id: UUID,
+        decisions: List[InterruptDecision],
+        interrupt_id: Optional[str] = None,
+        bot_message_id: Optional[UUID] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Resume an interrupted workflow and stream the assistant response"""
         pass
 
     @abstractmethod

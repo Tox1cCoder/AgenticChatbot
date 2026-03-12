@@ -65,7 +65,7 @@ class MessageRead(BaseModel):
     deleted_at: Optional[datetime]
     conversation_id: UUID
     sender: int = Field(..., description="Message sender: 1=user, 2=assistant")
-    content: str = Field(..., min_length=1, description="Message content")
+    content: str = Field(..., description="Message content")
     message_metadata: Optional[Dict[str, Any]] = Field(
         default_factory=dict,
         description="""Message metadata including persona used and RAG citations.
@@ -199,7 +199,7 @@ class MessageInDB(BaseModel):
     sender: int = Field(
         ..., description="Message sender: 1=user, 2=assistant, 3=system"
     )
-    content: str = Field(..., min_length=1, description="Message content")
+    content: str = Field(..., description="Message content")
     message_metadata: Optional[Dict[str, Any]] = Field(
         default_factory=dict, description="Message metadata including persona used"
     )

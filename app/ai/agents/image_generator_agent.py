@@ -62,21 +62,23 @@ class ImageGeneratorAgent(BaseAgent):
         if self.mcp_manager is None:
             await self._init_tools()
 
+        message_content = message.content or ""
+
         # Check if this invocation includes tool results
-        has_tool_results = "Tool results:" in message.content
+        has_tool_results = "Tool results:" in message_content
 
         if has_tool_results:
             # Extract the enhanced prompt from the content
-            enhanced_prompt = message.content
+            enhanced_prompt = message_content
 
             # Generate the image directly
             images, narrative = await self._generate_images(
-                enhanced_prompt, message.content
+                enhanced_prompt, message_content
             )
 
             # Generate a natural user-facing response instead of showing the enhanced prompt
             user_facing = narrative or await self._generate_user_facing_response(
-                message.content
+                message_content
             )
 
             response_metadata = {
@@ -98,7 +100,7 @@ class ImageGeneratorAgent(BaseAgent):
 
         messages = [
             {"role": "system", "content": self._get_system_prompt()},
-            {"role": "user", "content": message.content},
+            {"role": "user", "content": message_content},
         ]
 
         try:
@@ -127,12 +129,12 @@ class ImageGeneratorAgent(BaseAgent):
 
             # Now generate the image
             images, narrative = await self._generate_images(
-                enhanced_prompt, message.content
+                enhanced_prompt, message_content
             )
 
             # Generate a natural user-facing response instead of showing the enhanced prompt
             user_facing = narrative or await self._generate_user_facing_response(
-                message.content
+                message_content
             )
 
             response_metadata = {

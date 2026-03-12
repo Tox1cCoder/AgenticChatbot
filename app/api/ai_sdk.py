@@ -2,7 +2,7 @@ import json
 import asyncio
 import base64
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, AsyncGenerator
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, status, Query
@@ -14,7 +14,7 @@ from app.interfaces.message_service_interface import IMessageService
 from app.interfaces.conversation_service_interface import IConversationService
 from app.models.enums import MessageRole
 from app.schemas.conversation import ConversationCreate, ConversationUpdate, ConversationRead
-from app.schemas.message import MessageCreate, MessageRead, InterruptResumeRequest
+from app.schemas.message import MessageCreate, InterruptResumeRequest
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.schemas.pagination import ConversationPaginationParams
@@ -833,6 +833,63 @@ class EventHandlerFactory:
         return cls._handlers.get(event_type)
 
 
+def _build_ui_message_stream_response(
+    event_source_factory: Callable[[], AsyncGenerator[Dict[str, Any], None]],
+    state: StreamState,
+) -> StreamingResponse:
+    async def event_generator():
+        try:
+            yield _sse({"type": "start", "messageId": state.message_id})
+            yield _sse({"type": "start-step"})
+            yield _sse({"type": "text-start", "id": state.text_id})
+            state.text_started = True
+
+            async for event in event_source_factory():
+                event_type = event.get("type")
+                handler = EventHandlerFactory.get_handler(event_type)
+
+                if handler:
+                    async for msg in handler.handle(event, state):
+                        yield msg
+
+                    if event_type in ("interrupt", "error"):
+                        return
+
+                    if event_type == "complete":
+                        break
+
+            if state.text_started:
+                yield _sse({"type": "text-end", "id": state.text_id})
+            if state.reasoning_started:
+                yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
+            yield _sse({"type": "finish-step"})
+            yield _sse({"type": "finish"})
+            yield "data: [DONE]\n\n"
+
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            yield _sse({"type": "error", "errorText": str(exc)})
+            if state.text_started:
+                yield _sse({"type": "text-end", "id": state.text_id})
+            if state.reasoning_started:
+                yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
+            yield _sse({"type": "finish-step"})
+            yield _sse({"type": "finish"})
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "x-vercel-ai-ui-message-stream": "v1",
+        },
+    )
+
+
 @router.post(
     "/ai/conversations",
     response_model=ApiResponse[ConversationRead],
@@ -1067,102 +1124,57 @@ async def chat_ui_message_stream(
         message_id=str(bot_message_id), text_id=str(uuid4()), reasoning_id=str(uuid4())
     )
 
-    async def event_generator():
-        try:
-            # `start` must come before `start-step` so the SDK creates the
-            # assistant message object first.  Sending `start-step` before
-            # `start` makes the SDK attach the step to the *previous* message
-            # and then create a second message on `start`, causing duplication.
-            yield _sse({"type": "start", "messageId": state.message_id})
-            yield _sse({"type": "start-step"})
-            yield _sse({"type": "text-start", "id": state.text_id})
-            state.text_started = True
+    def event_source():
+        message_create = MessageCreate(
+            conversation_id=conversation_id,
+            content=user_text or "Please analyze the attached image.",
+            role=MessageRole.user,
+            attachments=user_attachments or None,
+        )
+        return message_service.create_message_stream(
+            message_create, current_user_id, bot_message_id=bot_message_id
+        )
 
-            message_create = MessageCreate(
-                conversation_id=conversation_id,
-                content=user_text or "Please analyze the attached image.",
-                role=MessageRole.user,
-                attachments=user_attachments or None,
-            )
-
-            async for event in message_service.create_message_stream(
-                message_create, current_user_id, bot_message_id=bot_message_id
-            ):
-                event_type = event.get("type")
-                handler = EventHandlerFactory.get_handler(event_type)
-
-                if handler:
-                    async for msg in handler.handle(event, state):
-                        yield msg
-
-                    # Early return for interrupt and error events
-                    if event_type in ("interrupt", "error"):
-                        return
-
-                    # Break loop for complete event
-                    if event_type == "complete":
-                        break
-
-            # Close blocks and finish.
-            if state.text_started:
-                yield _sse({"type": "text-end", "id": state.text_id})
-            if state.reasoning_started:
-                yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
-            yield _sse({"type": "finish-step"})
-            yield _sse({"type": "finish"})
-            yield "data: [DONE]\n\n"
-
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            yield _sse({"type": "error", "errorText": str(exc)})
-            if state.text_started:
-                yield _sse({"type": "text-end", "id": state.text_id})
-            if state.reasoning_started:
-                yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
-            yield _sse({"type": "finish-step"})
-            yield _sse({"type": "finish"})
-            yield "data: [DONE]\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "x-vercel-ai-ui-message-stream": "v1",
-        },
-    )
+    return _build_ui_message_stream_response(event_source, state)
 
 
 @router.post(
     "/ai/resume-interrupt",
-    response_model=ApiResponse[MessageRead],
     summary="Resume interrupt (AI SDK)",
     description=(
-        "Resume execution after the user approves or rejects a tool-call interrupt. "
-        "Functionally identical to `POST /messages/resume-interrupt` — accepts the same "
-        "`InterruptResumeRequest` body (camelCase fields: `threadId`, `conversationId`, "
-        "`interruptId`, `decisions`)."
+        "Resume execution after the user approves or rejects a tool-call interrupt and "
+        "stream the assistant continuation using the Vercel AI SDK UI Message Stream "
+        "protocol. Accepts the same `InterruptResumeRequest` body (camelCase fields: "
+        "`threadId`, `conversationId`, `interruptId`, `decisions`)."
     ),
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Vercel AI SDK UI Message Stream (SSE)",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        }
+    },
 )
 @AppAutoInjector.auto_inject()
 async def resume_interrupt_ai_sdk(
     resume_request: InterruptResumeRequest,
     message_service: IMessageService,
     current_user_id: UUID,
-) -> ApiResponse[MessageRead]:
+) -> StreamingResponse:
     """Resume execution after handling tool execution interrupts for AI SDK client."""
-    result = await message_service.resume_message_creation(
-        thread_id=resume_request.thread_id,
-        conversation_id=resume_request.conversation_id,
-        user_id=current_user_id,
-        interrupt_id=resume_request.interrupt_id,
-        decisions=resume_request.decisions,
+    bot_message_id = uuid4()
+    state = StreamState(
+        message_id=str(bot_message_id), text_id=str(uuid4()), reasoning_id=str(uuid4())
     )
-    return ApiResponse(
-        success=True,
-        message="Message creation resumed successfully",
-        data=result,
-    )
+
+    def event_source():
+        return message_service.resume_message_creation_stream(
+            thread_id=resume_request.thread_id,
+            conversation_id=resume_request.conversation_id,
+            user_id=current_user_id,
+            interrupt_id=resume_request.interrupt_id,
+            decisions=resume_request.decisions,
+            bot_message_id=bot_message_id,
+        )
+
+    return _build_ui_message_stream_response(event_source, state)

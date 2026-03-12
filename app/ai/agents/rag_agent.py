@@ -222,7 +222,7 @@ class RAGAgent(BaseAgent):
         conversation_id: Optional[str] = None,
     ) -> AgentResponse:
 
-        query = message.content
+        query = message.content or ""
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
         model_request = message.metadata.get("model_request")
@@ -544,7 +544,7 @@ class RAGAgent(BaseAgent):
         message: AgentMessage,
         conversation_id: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        query = message.content
+        query = message.content or ""
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
         history_summary = message.metadata.get("history_summary")
@@ -1664,7 +1664,7 @@ class RAGAgent(BaseAgent):
         Returns AgentResponse with tool_calls if exploration is needed,
         or a final answer if the LLM decides it has enough information.
         """
-        query = message.content
+        query = message.content or ""
         persona = message.metadata.get("persona")
         original_query = message.metadata.get("original_query", query)
         tool_context = message.metadata.get("tool_context", [])

@@ -54,6 +54,7 @@ def build_tool_artifact(
     tool_args: Any,
     output_text: Optional[str],
     error: Optional[str],
+    status: Optional[str] = None,
     max_output_chars: int = 1000,
 ) -> Dict[str, Any]:
     artifact: Dict[str, Any] = {
@@ -62,6 +63,7 @@ def build_tool_artifact(
         "args": tool_args,
         "output": None,
         "error": error,
+        "status": status or ("error" if error else "success"),
     }
 
     if output_text is not None:
@@ -72,6 +74,35 @@ def build_tool_artifact(
         )
 
     return artifact
+
+
+def build_rejected_tool_artifacts(
+    *,
+    tool_calls: List[Any],
+    rejected_feedback: Dict[str, str],
+    max_output_chars: int = 1000,
+) -> List[Dict[str, Any]]:
+    artifacts: List[Dict[str, Any]] = []
+
+    for raw_tool_call in tool_calls:
+        tool_call = normalize_tool_call(raw_tool_call)
+        tool_call_id = tool_call.get("id")
+        if not tool_call_id or tool_call_id not in rejected_feedback:
+            continue
+
+        artifacts.append(
+            build_tool_artifact(
+                tool_call_id=tool_call_id,
+                tool_name=tool_call.get("name") or "unknown",
+                tool_args=tool_call.get("args", {}),
+                output_text=rejected_feedback[tool_call_id],
+                error=None,
+                status="rejected",
+                max_output_chars=max_output_chars,
+            )
+        )
+
+    return artifacts
 
 
 async def ensure_agent_tool_map(

@@ -40,14 +40,15 @@ class SearchAgent(BaseAgent):
         # Extract conversation history
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
+        message_content = message.content or ""
 
         # Check if this invocation includes tool results (post-tool-execution)
         # This happens when the graph routes back after tool execution
-        has_tool_results = "Tool results:" in message.content
+        has_tool_results = "Tool results:" in message_content
 
         # Build prompt
         prompt = build_search_prompt(
-            message.content,
+            message_content,
             conversation_history,
             persona=persona,
             has_tool_results=has_tool_results,
@@ -105,7 +106,7 @@ class SearchAgent(BaseAgent):
 
         # Build prompt
         prompt = build_search_prompt(
-            message.content, conversation_history, persona=persona
+            message.content or "", conversation_history, persona=persona
         )
 
         # Use unified tool binding with deferred loading support

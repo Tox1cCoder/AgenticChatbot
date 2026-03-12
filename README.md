@@ -144,7 +144,7 @@ Authenticated endpoints expect a JWT access token via `Authorization: Bearer <to
 
 - `POST /messages/`
 - `POST /messages/stream` (SSE of internal events)
-- `POST /messages/resume-interrupt` (resume HITL approvals)
+- `POST /messages/resume-interrupt` (SSE of resumed HITL approvals)
 - `GET /messages/{message_id}`
 - `GET /messages/` (paginated: `page`, `limit`)
 
@@ -162,6 +162,9 @@ UI Message Stream (SSE) compatible with `@ai-sdk/react` / assistant-ui defaults:
     - `data-assistant-message` (DB-persisted assistant message)
     - `data-agent-selected` (which agent answered)
     - `data-interrupt` (HITL approval needed)
+- `POST /ai/resume-interrupt`
+  - Body: `{ "threadId": "...", "conversationId": "...", "interruptId": "...", "decisions": [...] }`
+  - Streams the resumed assistant continuation using the same AI SDK UI message stream protocol
 
 ### Documents (require authentication)
 

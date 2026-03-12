@@ -244,7 +244,7 @@ class CanvasAgent(BaseAgent):
         conversation_id: Optional[str] = None,
     ) -> AgentResponse:
         return await self.invoke_model_with_history(
-            messages=[LCHumanMessage(content=message.content)],
+            messages=[LCHumanMessage(content=message.content or "")],
             conversation_history=[],
             persona=message.metadata.get("persona"),
             conversation_id=conversation_id,

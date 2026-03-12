@@ -37,9 +37,10 @@ class ChatAgent(BaseAgent):
     ) -> AgentResponse:
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
+        message_content = message.content or ""
 
         prompt = build_chat_prompt(
-            message.content, conversation_history, persona=persona
+            message_content, conversation_history, persona=persona
         )
 
         attachments = (
@@ -116,10 +117,11 @@ class ChatAgent(BaseAgent):
         # Extract conversation history
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
+        message_content = message.content or ""
 
         # Build prompt
         prompt = build_chat_prompt(
-            message.content,
+            message_content,
             conversation_history,
             persona=persona,
         )

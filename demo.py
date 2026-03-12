@@ -1820,6 +1820,9 @@ def make_streaming_request(endpoint: str, data: Optional[Dict] = None):
             timeout=STREAM_REQUEST_TIMEOUT,
         )
         response.raise_for_status()
+        st.session_state.api_cache_version = int(
+            st.session_state.get("api_cache_version", 0)
+        ) + 1
 
         # Parse SSE stream
         for line in response.iter_lines(decode_unicode=True):
@@ -2999,10 +3002,19 @@ def render_tool_artifacts(tool_artifacts: List[Dict[str, Any]]):
 
     for idx, artifact in enumerate(tool_artifacts, start=1):
         tool_name = artifact.get("tool", "unknown_tool")
-        has_error = artifact.get("error") is not None
+        artifact_status = str(
+            artifact.get("status")
+            or ("error" if artifact.get("error") is not None else "success")
+        ).lower()
+        has_error = artifact_status == "error" or artifact.get("error") is not None
 
         # Status badge styling
-        if has_error:
+        if artifact_status == "rejected":
+            status_badge_md = ":material/block: Rejected"
+            status_badge_label = "Rejected"
+            status_icon_name = "block"
+            badge_color = COLORS["warning"]
+        elif has_error:
             status_badge_md = ":material/error: Error"
             status_badge_label = "Error"
             status_icon_name = "error"
@@ -4390,7 +4402,7 @@ def render_interrupt_approval_ui():
                             "type": "reject",
                             "task_id": task_id,
                             "action": tool_name,
-                            "args": {"message": f"User rejected execution of {tool_name}"},
+                            "args": {},
                         }
                         st.rerun()
 
@@ -4501,7 +4513,7 @@ def render_interrupt_approval_ui():
                         "type": "reject",
                         "task_id": task_id,
                         "action": req.get("action"),
-                        "args": {"message": "User cancelled all tool executions"},
+                        "args": {},
                     }
             # Submit immediately
             _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisions_key)
@@ -4522,41 +4534,47 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
     }
 
     with st.spinner("Resuming execution..."):
-        response = make_api_request(
-            "POST", "/messages/resume-interrupt", resume_payload
-        )
+        next_interrupt = None
+        resume_error = None
 
-        if response and response.get("success"):
-            response_data = response.get("data") if isinstance(response, dict) else None
-            next_interrupt = (
-                response_data.get("interrupt")
-                if isinstance(response_data, dict)
-                else None
+        for event in make_streaming_request(
+            "/messages/resume-interrupt", resume_payload
+        ):
+            event_type = event.get("type")
+
+            if event_type == "interrupt":
+                next_interrupt = event.get("interrupt")
+                break
+
+            if event_type == "error":
+                resume_error = event.get("error") or "Failed to resume execution"
+                break
+
+            if event_type == "complete":
+                break
+
+        # Clear decisions for this interrupt
+        st.session_state.pop(decisions_key, None)
+        for idx in range(len(action_requests)):
+            st.session_state.pop(f"editing_tool_{idx}", None)
+
+        if resume_error:
+            st.error(resume_error)
+            return
+
+        if next_interrupt:
+            st.session_state.pending_interrupt = next_interrupt
+            st.session_state.interrupt_conversation_id = conversation_id
+            st.toast(
+                "Additional tool approval required.", icon=":material/warning:"
             )
+            st.rerun()
 
-            # Clear decisions for this interrupt
-            st.session_state.pop(decisions_key, None)
-            for idx in range(len(action_requests)):
-                st.session_state.pop(f"editing_tool_{idx}", None)
-
-            if next_interrupt:
-                st.session_state.pending_interrupt = next_interrupt
-                st.session_state.interrupt_conversation_id = conversation_id
-                st.toast(
-                    "Additional tool approval required.", icon=":material/warning:"
-                )
-                st.rerun()
-            else:
-                # Clear interrupt state
-                st.session_state.pop("pending_interrupt", None)
-                st.session_state.pop("interrupt_conversation_id", None)
-
-                # Refresh messages
-                st.toast("Tool execution completed!", icon=":material/check_circle:")
-                st.session_state.conversation_messages_page = 0
-                st.rerun()
-        else:
-            st.error("Failed to resume execution")
+        st.session_state.pop("pending_interrupt", None)
+        st.session_state.pop("interrupt_conversation_id", None)
+        st.toast("Tool execution completed!", icon=":material/check_circle:")
+        st.session_state.conversation_messages_page = 0
+        st.rerun()
 
 
 def render_chat_view():

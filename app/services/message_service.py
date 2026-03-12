@@ -261,6 +261,7 @@ class MessageService(IMessageService):
         thread_id: Optional[str] = None,
         next_nodes: Optional[Any] = None,
         user_id: Optional[UUID] = None,
+        message_id: UUID | None = None,
     ) -> MessageRead:
         """
         Persist an assistant message that represents a paused workflow awaiting HITL approval.
@@ -294,6 +295,7 @@ class MessageService(IMessageService):
             conversation_id=conversation_id,
             content="",
             metadata=metadata,
+            message_id=message_id,
         )
 
         # Create durable lifecycle record
@@ -643,6 +645,7 @@ class MessageService(IMessageService):
                                 or str(message_create_data.conversation_id),
                                 next_nodes=event.get("next"),
                                 user_id=user_id,
+                                message_id=bot_message_id,
                             ).model_dump(mode="json"),
                         }
                         # Workflow is paused - don't create a bot message yet
@@ -701,10 +704,6 @@ class MessageService(IMessageService):
                         inflight.resolve(None)
                     registry.remove(user_message_id)
                     return
-
-                # Ensure content is valid (not empty)
-                if not bot_response_content or not bot_response_content.strip():
-                    bot_response_content = NO_RESPONSE_GENERATED
 
                 bot_response_content = fix_markdown_code_blocks(bot_response_content)
 
@@ -829,14 +828,14 @@ class MessageService(IMessageService):
                 }
                 _cancel_title_task()
 
-    async def resume_message_creation(
+    def _validate_and_claim_interrupt_resume(
         self,
+        *,
         thread_id: str,
         conversation_id: UUID,
         user_id: UUID,
-        decisions: List[InterruptDecision],
-        interrupt_id: Optional[str] = None,
-    ) -> MessageRead:
+        interrupt_id: Optional[str],
+    ) -> Any:
         from app.core.exceptions import CustomHTTPException
         from fastapi import status as http_status
         from app.models.hitl_interrupt import HITLInterruptStatus
@@ -845,12 +844,10 @@ class MessageService(IMessageService):
             user_id, conversation_id
         )
 
-        # ── Durable lifecycle validation (first-write-wins) ──────────────────────
-        # Cache the fetched record so the audit block can reuse it without a second query.
-        _fetched_interrupt_record = None
+        fetched_interrupt_record = None
         if self.hitl_interrupt_repository and interrupt_id:
             record = self.hitl_interrupt_repository.get_by_id(interrupt_id)
-            _fetched_interrupt_record = record
+            fetched_interrupt_record = record
             if record is None:
                 raise CustomHTTPException(
                     status_code=http_status.HTTP_404_NOT_FOUND,
@@ -895,7 +892,7 @@ class MessageService(IMessageService):
                     detail="This interrupt has already been resolved.",
                     error_code="INTERRUPT_ALREADY_RESOLVED",
                 )
-            # Atomically claim the interrupt (first-write-wins)
+
             won_race = self.hitl_interrupt_repository.try_transition_to_resolving(
                 interrupt_id=interrupt_id,
                 conversation_id=conversation_id,
@@ -909,7 +906,6 @@ class MessageService(IMessageService):
                 )
 
         elif self.redis_client and interrupt_id:
-            # Fallback: Redis-based expiry check (when no durable record exists)
             key = f"interrupt:{conversation_id}:{interrupt_id}"
             try:
                 stored_timestamp = self.redis_client.get(key)
@@ -937,145 +933,314 @@ class MessageService(IMessageService):
             except Exception:
                 pass
 
-        # Get the conversation to retrieve user_id and persona
-        user_id, persona = self._get_conversation_context(conversation_id, user_id)
-        sanitized_persona = sanitize_persona(persona)
+        return fetched_interrupt_record
 
-        # ── Audit logging ────────────────────────────────────────────────────────
-        if self.tool_approval_repository and user_id:
-            # Build a look-up of original args from the durable interrupt record
-            # so we record what the tool was actually called with.
-            stored_original_args: Dict[str, Any] = {}
-            if interrupt_id:
-                # Reuse the record already fetched during lifecycle validation.
-                _rec = _fetched_interrupt_record
-                try:
-                    if _rec and _rec.action_requests_json:
-                        for req in _rec.action_requests_json:
-                            if isinstance(req, dict):
-                                key = req.get("tool_call_id") or req.get("task_id")
-                                if key:
-                                    stored_original_args[key] = req.get("args") or {}
-                                action = req.get("action")
-                                if action and action not in stored_original_args:
-                                    stored_original_args[action] = req.get("args") or {}
-                except Exception:
-                    pass
+    def _audit_interrupt_resume_decisions(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: Optional[UUID],
+        decisions: List[InterruptDecision],
+        interrupt_id: Optional[str],
+        fetched_interrupt_record: Any = None,
+    ) -> None:
+        if not self.tool_approval_repository or not user_id:
+            return
 
-            decision_type_map = {
-                InterruptDecisionType.APPROVE: DecisionType.ACCEPT,
-                InterruptDecisionType.EDIT: DecisionType.EDIT,
-                InterruptDecisionType.REJECT: DecisionType.REJECT,
-            }
-            for decision in decisions:
-                try:
-                    is_edit = decision.type == InterruptDecisionType.EDIT
-                    orig_key = decision.task_id or decision.action or ""
-                    original_args = (
-                        stored_original_args.get(orig_key)
-                        or stored_original_args.get(decision.action or "")
-                        or {}
-                    )
-                    approval_data = {
-                        "conversation_id": conversation_id,
-                        "user_id": user_id,
-                        "interrupt_id": interrupt_id or "unknown",
-                        "tool_name": decision.action or "unknown",
-                        "tool_call_id": decision.task_id or "unknown",
-                        "original_args": original_args,
-                        "modified_args": decision.args if is_edit else None,
-                        "decision": decision_type_map.get(
-                            decision.type, DecisionType.REJECT
-                        ),
-                    }
-                    self.tool_approval_repository.create(approval_data)
-                except Exception as audit_exc:
-                    logging.warning(
-                        "Audit write failed for interrupt_id=%s decision=%s: %s",
-                        interrupt_id,
-                        decision.type,
-                        audit_exc,
-                        exc_info=True,
-                    )
-
-        bot_response = await self.ai_service.resume_interrupted_execution(
-            thread_id=thread_id,
-            decisions=decisions,
-        )
-
-        self._clear_redis_interrupt(conversation_id, interrupt_id)
-
-        # Nested interrupt: the resumed graph itself hit another interrupt
-        if (
-            bot_response
-            and bot_response.metadata
-            and "interrupt" in bot_response.metadata
-        ):
-            # The previous interrupt is considered resolved (we resumed it).
-            # The new interrupt will get its own lifecycle record.
-            if self.hitl_interrupt_repository and interrupt_id:
-                try:
-                    self.hitl_interrupt_repository.mark_resolved(interrupt_id)
-                except Exception:
-                    pass
-
-            interrupt_payload = bot_response.metadata["interrupt"]
-            if isinstance(interrupt_payload, dict):
-                interrupt_count = (
-                    (interrupt_payload.get("metadata") or {}).get("interrupt_count", 0) + 1
-                )
-                if not interrupt_payload.get("metadata"):
-                    interrupt_payload["metadata"] = {}
-                interrupt_payload["metadata"]["interrupt_count"] = interrupt_count
-
-                if interrupt_count > 1:
-                    interrupt_payload["metadata"][
-                        "message"
-                    ] = f"The assistant needs approval for additional tools (request {interrupt_count})"
-                else:
-                    interrupt_payload["metadata"][
-                        "message"
-                    ] = "The assistant wants to use tools that require approval"
-
-                MAX_INTERRUPT_DEPTH = 5
-                if interrupt_count > MAX_INTERRUPT_DEPTH:
-                    pass  # Could auto-reject or provide fallback
-
-                interrupt_payload = InterruptResponse.model_validate(interrupt_payload)
-
-            persisted = self._persist_interrupt_bot_message(
-                conversation_id=conversation_id,
-                interrupt_payload=interrupt_payload,
-                sanitized_persona=sanitized_persona,
-                thread_id=(
-                    interrupt_payload.thread_id
-                    if isinstance(interrupt_payload, InterruptResponse)
-                    else None
-                ),
-                user_id=user_id,
-            )
-            return persisted
-
-        # Graph completed — mark interrupt resolved
-        if self.hitl_interrupt_repository and interrupt_id:
+        stored_original_args: Dict[str, Any] = {}
+        if interrupt_id:
             try:
-                self.hitl_interrupt_repository.mark_resolved(interrupt_id)
+                if fetched_interrupt_record and fetched_interrupt_record.action_requests_json:
+                    for req in fetched_interrupt_record.action_requests_json:
+                        if isinstance(req, dict):
+                            key = req.get("tool_call_id") or req.get("task_id")
+                            if key:
+                                stored_original_args[key] = req.get("args") or {}
+                            action = req.get("action")
+                            if action and action not in stored_original_args:
+                                stored_original_args[action] = req.get("args") or {}
             except Exception:
                 pass
 
-        bot_response_content = extract_response_content(
-            bot_response, ERROR_RESPONSE_AFTER_RESUME
-        )
+        decision_type_map = {
+            InterruptDecisionType.APPROVE: DecisionType.ACCEPT,
+            InterruptDecisionType.EDIT: DecisionType.EDIT,
+            InterruptDecisionType.REJECT: DecisionType.REJECT,
+        }
+        for decision in decisions:
+            try:
+                is_edit = decision.type == InterruptDecisionType.EDIT
+                orig_key = decision.task_id or decision.action or ""
+                original_args = (
+                    stored_original_args.get(orig_key)
+                    or stored_original_args.get(decision.action or "")
+                    or {}
+                )
+                approval_data = {
+                    "conversation_id": conversation_id,
+                    "user_id": user_id,
+                    "interrupt_id": interrupt_id or "unknown",
+                    "tool_name": decision.action or "unknown",
+                    "tool_call_id": decision.task_id or "unknown",
+                    "original_args": original_args,
+                    "modified_args": decision.args if is_edit else None,
+                    "decision": decision_type_map.get(
+                        decision.type, DecisionType.REJECT
+                    ),
+                }
+                self.tool_approval_repository.create(approval_data)
+            except Exception as audit_exc:
+                logging.warning(
+                    "Audit write failed for interrupt_id=%s decision=%s: %s",
+                    interrupt_id,
+                    decision.type,
+                    audit_exc,
+                    exc_info=True,
+                )
 
-        # Create metadata for bot response
-        bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
+    def _normalize_nested_interrupt_payload(
+        self, interrupt_payload: Any
+    ) -> Any:
+        if isinstance(interrupt_payload, dict):
+            interrupt_count = (
+                (interrupt_payload.get("metadata") or {}).get("interrupt_count", 0) + 1
+            )
+            if not interrupt_payload.get("metadata"):
+                interrupt_payload["metadata"] = {}
+            interrupt_payload["metadata"]["interrupt_count"] = interrupt_count
 
-        # Create and persist bot response message
-        return self._create_bot_response_message(
+            if interrupt_count > 1:
+                interrupt_payload["metadata"][
+                    "message"
+                ] = f"The assistant needs approval for additional tools (request {interrupt_count})"
+            else:
+                interrupt_payload["metadata"][
+                    "message"
+                ] = "The assistant wants to use tools that require approval"
+
+            MAX_INTERRUPT_DEPTH = 5
+            if interrupt_count > MAX_INTERRUPT_DEPTH:
+                pass
+
+            return InterruptResponse.model_validate(interrupt_payload)
+
+        return interrupt_payload
+
+    async def resume_message_creation_stream(
+        self,
+        thread_id: str,
+        conversation_id: UUID,
+        user_id: UUID,
+        decisions: List[InterruptDecision],
+        interrupt_id: Optional[str] = None,
+        bot_message_id: UUID | None = None,
+    ):
+        fetched_interrupt_record = self._validate_and_claim_interrupt_resume(
+            thread_id=thread_id,
             conversation_id=conversation_id,
-            content=bot_response_content,
-            metadata=bot_metadata,
+            user_id=user_id,
+            interrupt_id=interrupt_id,
         )
+
+        user_id, persona = self._get_conversation_context(conversation_id, user_id)
+        sanitized_persona = sanitize_persona(persona)
+
+        self._audit_interrupt_resume_decisions(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            decisions=decisions,
+            interrupt_id=interrupt_id,
+            fetched_interrupt_record=fetched_interrupt_record,
+        )
+
+        partial_text = ""
+        bot_message_persisted = False
+
+        try:
+            async for event in self.ai_service.resume_interrupted_execution_stream(
+                thread_id=thread_id,
+                decisions=decisions,
+            ):
+                event_type = event.get("type")
+
+                if event_type == "agent_selected":
+                    yield {"type": "agent_selected", "agent": event.get("agent")}
+
+                elif event_type == "token":
+                    token_content = event.get("content", "")
+                    partial_text += token_content
+                    yield {"type": "token", "content": token_content}
+
+                elif event_type == "thinking":
+                    yield {"type": "thinking", "content": event.get("content", "")}
+
+                elif event_type == "tool":
+                    yield {
+                        "type": "tool",
+                        "name": event.get("name"),
+                        "status": event.get("status"),
+                        "tool_call_id": event.get("tool_call_id"),
+                        "args": event.get("args"),
+                        "result": event.get("result"),
+                    }
+
+                elif event_type == "continuation_start":
+                    yield event
+
+                elif event_type == "node_complete":
+                    yield event
+
+                elif event_type == "interrupt":
+                    self._clear_redis_interrupt(conversation_id, interrupt_id)
+
+                    if self.hitl_interrupt_repository and interrupt_id:
+                        try:
+                            self.hitl_interrupt_repository.mark_resolved(interrupt_id)
+                        except Exception:
+                            pass
+
+                    interrupt_response = event.get("interrupt")
+                    normalized_interrupt = self._normalize_nested_interrupt_payload(
+                        interrupt_response
+                    )
+                    next_interrupt_id = (
+                        interrupt_response.get("interrupt_id")
+                        if isinstance(interrupt_response, dict)
+                        else None
+                    )
+                    self._handle_redis_interrupt_storage(
+                        conversation_id,
+                        next_interrupt_id,
+                        interrupt_response,
+                    )
+
+                    persisted = self._persist_interrupt_bot_message(
+                        conversation_id=conversation_id,
+                        interrupt_payload=normalized_interrupt,
+                        sanitized_persona=sanitized_persona,
+                        pending_tool_calls=event.get("pending_tool_calls"),
+                        thread_id=event.get("thread_id") or thread_id,
+                        next_nodes=event.get("next"),
+                        user_id=user_id,
+                        message_id=bot_message_id,
+                    )
+                    bot_message_persisted = True
+
+                    yield {
+                        "type": "interrupt",
+                        "thread_id": event.get("thread_id") or thread_id,
+                        "next": event.get("next"),
+                        "pending_tool_calls": event.get("pending_tool_calls"),
+                        "interrupt": (
+                            normalized_interrupt.model_dump(mode="json")
+                            if isinstance(normalized_interrupt, InterruptResponse)
+                            else normalized_interrupt
+                        ),
+                        "message": persisted.model_dump(mode="json"),
+                    }
+                    return
+
+                elif event_type == "complete":
+                    bot_response = event.get("response")
+
+                    self._clear_redis_interrupt(conversation_id, interrupt_id)
+                    if self.hitl_interrupt_repository and interrupt_id:
+                        try:
+                            self.hitl_interrupt_repository.mark_resolved(interrupt_id)
+                        except Exception:
+                            pass
+
+                    bot_response_content = extract_response_content(
+                        bot_response, ERROR_RESPONSE_AFTER_RESUME
+                    )
+                    bot_response_content = fix_markdown_code_blocks(bot_response_content)
+
+                    bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
+                    bot_message = self._create_bot_response_message(
+                        conversation_id=conversation_id,
+                        content=bot_response_content,
+                        metadata=bot_metadata,
+                        message_id=bot_message_id,
+                    )
+                    bot_message_persisted = True
+
+                    yield {
+                        "type": "complete",
+                        "message": bot_message.model_dump(mode="json"),
+                    }
+                    return
+
+                elif event_type == "error":
+                    self._clear_redis_interrupt(conversation_id, interrupt_id)
+
+                    error_msg = event.get("error", UNKNOWN_ERROR)
+                    error_message = self._create_bot_response_message(
+                        conversation_id=conversation_id,
+                        content=f"Error generating response: {error_msg}",
+                        metadata={"error": error_msg},
+                        message_id=bot_message_id,
+                    )
+                    bot_message_persisted = True
+
+                    yield {
+                        "type": "error",
+                        "error": error_msg,
+                        "message": error_message.model_dump(mode="json"),
+                    }
+                    return
+
+            self._clear_redis_interrupt(conversation_id, interrupt_id)
+
+            if not bot_message_persisted:
+                fallback_message = self._create_bot_response_message(
+                    conversation_id=conversation_id,
+                    content=ERROR_RESPONSE_AFTER_RESUME,
+                    metadata={"error": ERROR_RESPONSE_AFTER_RESUME},
+                    message_id=bot_message_id,
+                )
+                yield {
+                    "type": "error",
+                    "error": ERROR_RESPONSE_AFTER_RESUME,
+                    "message": fallback_message.model_dump(mode="json"),
+                }
+
+        except (asyncio.CancelledError, GeneratorExit):
+            if bot_message_persisted:
+                return
+
+            partial = partial_text.strip()
+            if partial:
+                partial = fix_markdown_code_blocks(partial)
+                self._create_bot_response_message(
+                    conversation_id=conversation_id,
+                    content=partial,
+                    metadata={
+                        "stopped": True,
+                        "partial": True,
+                        "stop_reason": "disconnect",
+                        "persona_used": sanitized_persona,
+                    },
+                    message_id=bot_message_id,
+                )
+            return
+
+        except Exception as exc:
+            self._clear_redis_interrupt(conversation_id, interrupt_id)
+            if bot_message_persisted:
+                return
+
+            error_message = self._create_bot_response_message(
+                conversation_id=conversation_id,
+                content=f"Error generating response: {str(exc)}",
+                metadata={"error": str(exc)},
+                message_id=bot_message_id,
+            )
+
+            yield {
+                "type": "error",
+                "error": str(exc),
+                "message": error_message.model_dump(mode="json"),
+            }
 
     async def stop_message_generation(
         self,
@@ -1123,7 +1288,10 @@ class MessageService(IMessageService):
         self.message_validation_utils.validate_message_access(user_id, message_id)
         message_entity = self.repository.get_by_id(message_id)
         if hasattr(message_entity, "content"):
-            message_entity.content = normalize_message_content(message_entity.content)
+            message_entity.content = normalize_message_content(
+                message_entity.content,
+                getattr(message_entity, "message_metadata", None),
+            )
         return MessageRead.model_validate(message_entity)
 
     def get_conversation_messages(
@@ -1153,7 +1321,10 @@ class MessageService(IMessageService):
         message_reads = []
         for msg in paginated_messages.items:
             if hasattr(msg, "content"):
-                msg.content = normalize_message_content(msg.content)
+                msg.content = normalize_message_content(
+                    msg.content,
+                    getattr(msg, "message_metadata", None),
+                )
             message_reads.append(MessageRead.model_validate(msg))
 
         # Return new Paginator with converted items
@@ -1184,7 +1355,10 @@ class MessageService(IMessageService):
         message_reads = []
         for msg in paginated_messages.items:
             if hasattr(msg, "content"):
-                msg.content = normalize_message_content(msg.content)
+                msg.content = normalize_message_content(
+                    msg.content,
+                    getattr(msg, "message_metadata", None),
+                )
             message_reads.append(MessageRead.model_validate(msg))
 
         # Return new Paginator with converted items
@@ -1212,7 +1386,6 @@ class MessageService(IMessageService):
         conversation_id: UUID,
         user_id: UUID,
         user_input: Optional[str] = None,
-        rejection_messages: Optional[List] = None,
     ) -> MessageRead:
         self.conversation_validation_utils.validate_conversation_access(
             user_id, conversation_id
@@ -1222,7 +1395,6 @@ class MessageService(IMessageService):
             conversation_id=conversation_id,
             user_id=user_id,
             user_input=user_input,
-            rejection_messages=rejection_messages,
         )
 
         bot_response_content = extract_response_content(

@@ -42,6 +42,7 @@ from .tool_execution import (
     execute_tool_calls,
     invoke_tool,
     build_tool_artifact,
+    build_rejected_tool_artifacts,
     extract_images_from_tool_result,
 )
 from .hand_off_tool import MAX_DELEGATION_DEPTH
@@ -66,8 +67,6 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from ..repositories.document import DocumentRepository
 
-# Convenience alias — the canonical implementation lives in utils.py so it can
-# be unit-tested without importing the full graph module with its heavy deps.
 _apply_decisions = apply_hitl_decisions
 
 
@@ -701,24 +700,14 @@ class MultiAgentWorkflow:
         )
 
         if not human_decisions:
-            rejection_messages = [
-                ToolMessage(
-                    content="Tool execution cancelled: No approval provided",
-                    tool_call_id=tool_call.get("id"),
-                    name=tool_call.get("name"),
-                )
-                for tool_call in last_message.tool_calls
-            ]
-            state["messages"] = (
-                messages[:-1]
-                + [AIMessage(content=last_message.content)]
-                + rejection_messages
+            tool_calls_to_keep, rejected_feedback = _apply_decisions(
+                last_message.tool_calls, []
             )
-            return state
+        else:
+            tool_calls_to_keep, rejected_feedback = _apply_decisions(
+                last_message.tool_calls, human_decisions
+            )
 
-        tool_calls_to_keep, rejected_feedback = _apply_decisions(
-            last_message.tool_calls, human_decisions
-        )
         rejection_messages = [
             ToolMessage(
                 content=rejected_feedback[tc.get("id")],
@@ -728,6 +717,18 @@ class MultiAgentWorkflow:
             for tc in last_message.tool_calls
             if tc.get("id") in rejected_feedback
         ]
+
+        if rejected_feedback:
+            context = state.get("context", {})
+            existing_artifacts = context.get("tool_artifacts", [])
+            existing_artifacts.extend(
+                build_rejected_tool_artifacts(
+                    tool_calls=last_message.tool_calls,
+                    rejected_feedback=rejected_feedback,
+                )
+            )
+            context["tool_artifacts"] = existing_artifacts
+            state["context"] = context
 
         # Update the AI message with only approved tool calls
         if tool_calls_to_keep:
@@ -1089,6 +1090,7 @@ class MultiAgentWorkflow:
             tc for tc in normalized_tool_calls if tc.get("name") != "search_documents"
         ]
         non_search_outputs_by_id: Dict[str, str] = {}
+        rejected_feedback: Dict[str, str] = {}
 
         if non_search_tool_calls:
             tool_calls_to_execute = list(non_search_tool_calls)
@@ -1103,17 +1105,24 @@ class MultiAgentWorkflow:
                 )
 
                 if not human_decisions:
-                    for tc in non_search_tool_calls:
-                        non_search_outputs_by_id[tc.get("id")] = (
-                            "Tool execution cancelled: No approval provided"
-                        )
-                    tool_calls_to_execute = []
+                    tool_calls_to_execute, rejected_feedback = _apply_decisions(
+                        non_search_tool_calls, []
+                    )
                 else:
                     tool_calls_to_execute, rejected_feedback = _apply_decisions(
                         non_search_tool_calls, human_decisions
                     )
-                    for tc_id, feedback in rejected_feedback.items():
-                        non_search_outputs_by_id[tc_id] = feedback
+
+                for tc_id, feedback in rejected_feedback.items():
+                    non_search_outputs_by_id[tc_id] = feedback
+
+            if rejected_feedback:
+                tool_artifacts.extend(
+                    build_rejected_tool_artifacts(
+                        tool_calls=non_search_tool_calls,
+                        rejected_feedback=rejected_feedback,
+                    )
+                )
 
             if tool_calls_to_execute:
                 selected_agent_name = state.get("selected_agent")
@@ -1448,6 +1457,7 @@ class MultiAgentWorkflow:
 
         # --- HITL approval gate for external (non-write_todos) tool calls ---
         rejected_tool_ids: Dict[str, str] = {}  # tool_call_id -> rejection reason
+        rejected_feedback: Dict[str, str] = {}
         approved_external_calls = list(external_tool_calls)
 
         if external_tool_calls:
@@ -1461,18 +1471,16 @@ class MultiAgentWorkflow:
                 )
 
                 if not human_decisions:
-                    # All rejected — no approval provided
-                    for tc in external_tool_calls:
-                        rejected_tool_ids[tc.get("id")] = (
-                            "Tool execution cancelled: No approval provided"
-                        )
-                    approved_external_calls = []
+                    approved_external_calls, rejected_feedback = _apply_decisions(
+                        external_tool_calls, []
+                    )
                 else:
                     approved_external_calls, rejected_feedback = _apply_decisions(
                         external_tool_calls, human_decisions
                     )
-                    for tc_id, feedback in rejected_feedback.items():
-                        rejected_tool_ids[tc_id] = feedback
+
+                for tc_id, feedback in rejected_feedback.items():
+                    rejected_tool_ids[tc_id] = feedback
 
         # Emit rejection ToolMessages for rejected external calls
         for tc in external_tool_calls:
@@ -1489,6 +1497,14 @@ class MultiAgentWorkflow:
         # --- Artifact + image tracking (BP-1) ---
         tool_artifacts: List[Dict[str, Any]] = []
         all_images: List[Dict[str, str]] = []
+
+        if rejected_feedback:
+            tool_artifacts.extend(
+                build_rejected_tool_artifacts(
+                    tool_calls=external_tool_calls,
+                    rejected_feedback=rejected_feedback,
+                )
+            )
 
         # Wrap tool execution with context for deferred tool loading support
         with tool_execution_context(conversation_id, user_id, agent_key):
@@ -2114,13 +2130,17 @@ class MultiAgentWorkflow:
 
         return response
 
-    async def resume_with_decisions(
+    async def resume_with_decisions_stream(
         self,
         thread_id: str,
         decisions: List[InterruptDecision],
-    ) -> Optional[AgentResponse]:
+    ):
         if not self.checkpointer:
-            raise ValueError("Checkpointing is not enabled, cannot resume.")
+            yield {
+                "type": "error",
+                "error": "Checkpointing is not enabled, cannot resume.",
+            }
+            return
 
         config = self._build_graph_config(thread_id)
         state_snapshot = await self.graph.aget_state(config)
@@ -2142,26 +2162,505 @@ class MultiAgentWorkflow:
             for d in decisions
         ]
 
-        result = await self.graph.ainvoke(Command(resume=resume_data), config=config)
+        selected_agent = state_snapshot.values.get("selected_agent", "search_agent")
+        conversation_id = state_snapshot.values.get("conversation_id")
 
-        final_snapshot = await self.graph.aget_state(config)
-        if final_snapshot.next and len(final_snapshot.next) > 0:
-            if "approval" in final_snapshot.next:
-                interrupt_agent_response = self._build_interrupt_agent_response(
-                    final_snapshot,
-                    thread_id,
-                    final_snapshot.values.get("conversation_id"),
+        yield {"type": "agent_selected", "agent": selected_agent}
+
+        accumulated_content = ""
+        accumulated_thinking = ""
+        current_tool_calls = {}
+        emitted_tool_call_ids = set()
+
+        suppressed_nodes: set = {"image_generator_agent"}
+        suppress_tokens = selected_agent in suppressed_nodes
+        _internal_content_only: bool = True
+
+        max_rounds = (
+            settings.auto_continue_max_rounds
+            if settings.auto_continue_enabled
+            else 1
+        )
+        round_num = 1
+        continue_reason: Optional[str] = "initial"
+        total_iterations = 0
+        start_time = time.monotonic()
+        current_state: Any = Command(resume=resume_data)
+        last_state_values: Optional[Dict[str, Any]] = None
+
+        while round_num <= max_rounds:
+            if (
+                round_num > 1
+                and time.monotonic() - start_time
+                > settings.auto_continue_timeout_seconds
+            ):
+                logger.warning(
+                    "Auto-continue timeout reached after %d rounds", round_num - 1
                 )
-                if interrupt_agent_response:
-                    return interrupt_agent_response
+                break
 
-        # Extract response from result
-        response = result.get("response")
-        if not response:
-            final_state = await self.graph.aget_state(config)
-            response = final_state.values.get("response")
+            if round_num > 1 and settings.auto_continue_emit_events:
+                yield {
+                    "type": "continuation_start",
+                    "round": round_num,
+                    "max_rounds": max_rounds,
+                    "reason": continue_reason,
+                }
 
-        return response
+            should_continue = False
+            continue_reason = None
+
+            try:
+                async for chunk in self.graph.astream(
+                    current_state, config=config, stream_mode=["messages", "updates"]
+                ):
+                    if isinstance(chunk, tuple) and len(chunk) == 2:
+                        mode, data = chunk
+
+                        if mode == "messages":
+                            message_chunk, metadata = data
+
+                            if isinstance(message_chunk, ToolMessage):
+                                continue
+
+                            if (
+                                settings.suppress_internal_stream_chunks
+                                and self._is_internal_stream_chunk(metadata)
+                            ):
+                                continue
+
+                            _internal_content_only = False
+
+                            if (
+                                hasattr(message_chunk, "content_blocks")
+                                and message_chunk.content_blocks
+                            ):
+                                for block in message_chunk.content_blocks:
+                                    block_type = block.get("type")
+
+                                    if block_type == "text":
+                                        text_content = block.get("text", "")
+                                        accumulated_content, delta = (
+                                            self._consume_stream_text_chunk(
+                                                accumulated_content, text_content
+                                            )
+                                        )
+                                        if delta and not suppress_tokens:
+                                            yield {"type": "token", "content": delta}
+
+                                    elif block_type == "thinking":
+                                        thinking_content = block.get(
+                                            "thinking", ""
+                                        ) or block.get("text", "")
+                                        if thinking_content:
+                                            accumulated_thinking += thinking_content
+                                            yield {
+                                                "type": "thinking",
+                                                "content": thinking_content,
+                                            }
+
+                                    elif block_type == "reasoning":
+                                        reasoning_content = block.get(
+                                            "reasoning", ""
+                                        ) or block.get("text", "")
+                                        if reasoning_content:
+                                            accumulated_thinking += reasoning_content
+                                            yield {
+                                                "type": "thinking",
+                                                "content": reasoning_content,
+                                            }
+
+                                    elif block_type == "tool_call_chunk":
+                                        tool_index = block.get("index", 0)
+                                        tool_id = block.get("id")
+                                        tool_name = block.get("name")
+                                        tool_args = block.get("args", "")
+
+                                        if tool_index not in current_tool_calls:
+                                            current_tool_calls[tool_index] = {
+                                                "id": tool_id,
+                                                "name": tool_name,
+                                                "args": "",
+                                            }
+
+                                        if tool_args:
+                                            current_tool_calls[tool_index][
+                                                "args"
+                                            ] += tool_args
+
+                                        if (
+                                            tool_name
+                                            and not current_tool_calls[tool_index]["name"]
+                                        ):
+                                            current_tool_calls[tool_index][
+                                                "name"
+                                            ] = tool_name
+                                        if (
+                                            tool_id
+                                            and not current_tool_calls[tool_index]["id"]
+                                        ):
+                                            current_tool_calls[tool_index]["id"] = tool_id
+
+                            elif hasattr(message_chunk, "content") and isinstance(
+                                message_chunk.content, list
+                            ):
+                                for part in message_chunk.content:
+                                    if isinstance(part, dict):
+                                        part_type = part.get("type", "")
+
+                                        if part_type == "thinking":
+                                            thinking_content = part.get(
+                                                "thinking", ""
+                                            ) or part.get("text", "")
+                                            if thinking_content:
+                                                accumulated_thinking += thinking_content
+                                                yield {
+                                                    "type": "thinking",
+                                                    "content": thinking_content,
+                                                }
+                                        elif part_type == "reasoning":
+                                            reasoning_content = part.get(
+                                                "reasoning", ""
+                                            ) or part.get("text", "")
+                                            if reasoning_content:
+                                                accumulated_thinking += reasoning_content
+                                                yield {
+                                                    "type": "thinking",
+                                                    "content": reasoning_content,
+                                                }
+                                        elif part_type == "text":
+                                            text_content = part.get("text", "")
+                                            accumulated_content, delta = (
+                                                self._consume_stream_text_chunk(
+                                                    accumulated_content, text_content
+                                                )
+                                            )
+                                            if delta and not suppress_tokens:
+                                                yield {"type": "token", "content": delta}
+                                    elif isinstance(part, str) and part:
+                                        accumulated_content, delta = (
+                                            self._consume_stream_text_chunk(
+                                                accumulated_content, part
+                                            )
+                                        )
+                                        if delta and not suppress_tokens:
+                                            yield {"type": "token", "content": delta}
+
+                            elif (
+                                hasattr(message_chunk, "content")
+                                and message_chunk.content
+                                and isinstance(message_chunk.content, str)
+                            ):
+                                content = coerce_response_text(message_chunk.content)
+                                accumulated_content, delta = (
+                                    self._consume_stream_text_chunk(
+                                        accumulated_content, content
+                                    )
+                                )
+                                if delta and not suppress_tokens:
+                                    yield {"type": "token", "content": delta}
+
+                            if (
+                                hasattr(message_chunk, "chunk_position")
+                                and message_chunk.chunk_position == "last"
+                            ):
+                                for tool_call in current_tool_calls.values():
+                                    if tool_call["name"]:
+                                        tool_call_id = tool_call["id"]
+                                        if (
+                                            tool_call_id
+                                            and tool_call_id in emitted_tool_call_ids
+                                        ):
+                                            continue
+                                        if tool_call_id:
+                                            emitted_tool_call_ids.add(tool_call_id)
+
+                                        try:
+                                            args = (
+                                                json.loads(tool_call["args"])
+                                                if tool_call["args"]
+                                                else {}
+                                            )
+                                        except Exception:
+                                            args = tool_call["args"]
+
+                                        yield {
+                                            "type": "tool_start",
+                                            "name": tool_call["name"],
+                                            "tool_call_id": tool_call_id,
+                                            "args": make_json_safe(args),
+                                        }
+                                current_tool_calls = {}
+
+                        elif mode == "updates":
+                            for node_name, node_state in data.items():
+                                if isinstance(node_state, dict):
+                                    if last_state_values is None:
+                                        last_state_values = {}
+                                    last_state_values.update(node_state)
+
+                                if node_name in ("planning_agent", "planning_tools"):
+                                    node_info = {"node": node_name}
+
+                                    if (
+                                        node_name == "planning_agent"
+                                        and "messages" in node_state
+                                    ):
+                                        messages = node_state.get("messages", [])
+                                        if messages:
+                                            last_msg = (
+                                                messages[-1]
+                                                if isinstance(messages, list)
+                                                else messages
+                                            )
+                                            if (
+                                                isinstance(last_msg, AIMessage)
+                                                and hasattr(last_msg, "tool_calls")
+                                                and last_msg.tool_calls
+                                            ):
+                                                node_info["tool_calls"] = [
+                                                    {
+                                                        "name": tc.get("name"),
+                                                        "id": tc.get("id"),
+                                                        "args": make_json_safe(
+                                                            tc.get("args", {})
+                                                        ),
+                                                    }
+                                                    for tc in last_msg.tool_calls
+                                                ]
+
+                                    if node_name == "planning_tools":
+                                        todos = node_state.get("todos", [])
+                                        if todos:
+                                            node_info["todos_count"] = len(todos)
+                                            node_info["current_task_index"] = (
+                                                node_state.get("current_task_index")
+                                            )
+
+                                    yield {"type": "node_complete", **node_info}
+
+                                if "messages" in node_state:
+                                    messages = node_state["messages"]
+                                    if messages:
+                                        last_msg = (
+                                            messages[-1]
+                                            if isinstance(messages, list)
+                                            else messages
+                                        )
+
+                                        if isinstance(last_msg, AIMessage):
+                                            if (
+                                                hasattr(last_msg, "tool_calls")
+                                                and last_msg.tool_calls
+                                            ):
+                                                for tool_call in last_msg.tool_calls:
+                                                    tool_call_id = tool_call.get("id")
+                                                    if (
+                                                        tool_call_id
+                                                        and tool_call_id
+                                                        not in emitted_tool_call_ids
+                                                    ):
+                                                        emitted_tool_call_ids.add(
+                                                            tool_call_id
+                                                        )
+                                                        yield {
+                                                            "type": "tool_start",
+                                                            "name": tool_call.get(
+                                                                "name", "unknown"
+                                                            ),
+                                                            "tool_call_id": tool_call_id,
+                                                            "args": make_json_safe(
+                                                                tool_call.get("args", {})
+                                                            ),
+                                                        }
+
+                                        elif isinstance(last_msg, ToolMessage):
+                                            yield {
+                                                "type": "tool_end",
+                                                "name": getattr(
+                                                    last_msg, "name", "unknown"
+                                                ),
+                                                "tool_call_id": getattr(
+                                                    last_msg, "tool_call_id", None
+                                                ),
+                                                "result": make_json_safe(last_msg.content),
+                                            }
+                    else:
+                        logger.debug(f"Unexpected stream chunk format: {type(chunk)}")
+
+            except GraphRecursionError:
+                logger.warning(
+                    "GraphRecursionError caught in round %d — will attempt continuation",
+                    round_num,
+                )
+                should_continue = True
+                continue_reason = "recursion_limit"
+
+            except Exception as e:
+                yield {"type": "error", "error": str(e)}
+                return
+
+            if not should_continue and last_state_values:
+                ctx = (
+                    last_state_values.get("context", {})
+                    if isinstance(last_state_values, dict)
+                    else {}
+                )
+                if ctx.get("auto_continue_requested"):
+                    should_continue = True
+                    continue_reason = (
+                        ctx.get("auto_continue_requested", {}).get("reason")
+                        or "soft_budget"
+                    )
+                elif (
+                    ctx.get("max_iterations_reached")
+                    and settings.auto_continue_enabled
+                ):
+                    should_continue = True
+                    continue_reason = "max_iterations_reached"
+
+            if not should_continue:
+                break
+
+            captured = await self._capture_state_for_continuation(
+                config=config,
+                thread_id=thread_id,
+                fallback_state=last_state_values,
+            )
+            round_iterations = int(
+                (captured.get("iteration_count") or 0)
+                + (captured.get("planning_call_count") or 0)
+            )
+            total_iterations += round_iterations
+            if total_iterations >= settings.auto_continue_max_total_iterations:
+                logger.warning(
+                    "Auto-continue total iteration cap reached: %d",
+                    total_iterations,
+                )
+                break
+
+            if round_num >= max_rounds:
+                logger.info(
+                    "Auto-continue max rounds (%d) reached — returning partial result",
+                    max_rounds,
+                )
+                break
+
+            current_state = self._build_continuation_state(
+                previous_state=captured,
+                round_num=round_num + 1,
+                reason=continue_reason or "soft_budget",
+            )
+            logger.info(
+                "Auto-continue: starting round %d (reason=%s, total_iters=%d)",
+                round_num + 1,
+                continue_reason,
+                total_iterations,
+            )
+            round_num += 1
+            current_tool_calls = {}
+
+        try:
+            snapshot = await self.graph.aget_state(config)
+
+            if snapshot.next and len(snapshot.next) > 0:
+                messages = snapshot.values.get("messages", [])
+                if messages:
+                    last_msg = messages[-1]
+                    if (
+                        isinstance(last_msg, AIMessage)
+                        and hasattr(last_msg, "tool_calls")
+                        and last_msg.tool_calls
+                    ):
+                        pending_tool_calls = [
+                            normalize_tool_call(tc) for tc in last_msg.tool_calls
+                        ]
+                        interrupt_response = build_interrupt_response(
+                            {"action_requests": pending_tool_calls},
+                            thread_id,
+                            conversation_id or "",
+                        )
+                        yield {
+                            "type": "interrupt",
+                            "next": snapshot.next,
+                            "thread_id": thread_id,
+                            "pending_tool_calls": pending_tool_calls,
+                            "interrupt": interrupt_response,
+                        }
+                        return
+
+            response = snapshot.values.get("response")
+            if response:
+                if (
+                    accumulated_thinking
+                    and not _internal_content_only
+                    and not response.metadata.get("thinking_summary")
+                ):
+                    response.metadata["thinking_summary"] = accumulated_thinking
+
+                if (
+                    not suppress_tokens
+                    and not _internal_content_only
+                    and accumulated_content
+                    and not (response.message.content or "").strip()
+                ):
+                    response.message.content = accumulated_content
+
+                if selected_agent == "planning_agent":
+                    final_todos = snapshot.values.get("todos", [])
+                    if final_todos:
+                        response.metadata["todos"] = final_todos
+                    response.metadata["planning_call_count"] = snapshot.values.get(
+                        "planning_call_count", 0
+                    )
+                    context = snapshot.values.get("context", {})
+                    if context.get("all_tasks_completed"):
+                        response.metadata["all_tasks_completed"] = True
+                    if context.get("planning_budget_reached"):
+                        response.metadata["planning_budget_reached"] = True
+
+                if round_num > 1:
+                    response.metadata["continuation_rounds"] = round_num
+                    response.metadata["total_iterations"] = total_iterations
+
+                yield {"type": "complete", "response": response}
+            elif accumulated_content and not suppress_tokens and not _internal_content_only:
+                metadata_model = (
+                    settings.chat_agent_model
+                    if selected_agent == "chat_agent"
+                    else settings.search_agent_model
+                )
+                metadata = {"model": metadata_model}
+
+                if accumulated_thinking:
+                    metadata["thinking_summary"] = accumulated_thinking
+
+                if selected_agent == "planning_agent":
+                    final_todos = snapshot.values.get("todos", [])
+                    if final_todos:
+                        metadata["todos"] = final_todos
+                    metadata["planning_call_count"] = snapshot.values.get(
+                        "planning_call_count", 0
+                    )
+
+                if round_num > 1:
+                    metadata["continuation_rounds"] = round_num
+                    metadata["total_iterations"] = total_iterations
+
+                agent_type = self._get_agent_type(selected_agent)
+                response = AgentResponse(
+                    agent_type=agent_type,
+                    agent_id=selected_agent or "unknown",
+                    message=AgentMessage(
+                        role=MessageRole.ASSISTANT, content=accumulated_content
+                    ),
+                    metadata=metadata,
+                )
+                yield {"type": "complete", "response": response}
+            else:
+                yield {"type": "error", "error": NO_RESPONSE_GENERATED}
+        except Exception as e:
+            yield {"type": "error", "error": str(e)}
 
     # ------------------------------------------------------------------
     # Fast-path helpers (traditional RAG streaming)

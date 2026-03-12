@@ -21,7 +21,6 @@ from ..core.config import settings
 from ..core.response_constants import (
     ERROR_NO_RESPONSE,
     ERROR_NO_RESPONSE_RESUME,
-    ERROR_NO_RESPONSE_DECISIONS,
     UNKNOWN_ERROR,
     WORKFLOW_PAUSED_MESSAGE,
 )
@@ -182,64 +181,10 @@ class AIService:
 
         return self._build_error_response(ERROR_NO_RESPONSE_RESUME)
 
-    async def resume_interrupted_execution(
-        self,
-        thread_id: str,
-        decisions: List[InterruptDecision],
-    ) -> AgentResponse:
-        if not self.checkpointer:
-            return self._build_error_response(
-                "Cannot resume: Checkpointing not enabled"
-            )
-
-        response = await self.workflow.resume_with_decisions(
-            thread_id=thread_id,
-            decisions=decisions,
-        )
-
-        if response:
-            return response
-
-        return self._build_error_response(ERROR_NO_RESPONSE_DECISIONS)
-
-    async def generate_bot_response_stream(
-        self,
-        user_message: str,
-        conversation_id: Optional[UUID] = None,
-        user_id: Optional[UUID] = None,
-        attachments: Optional[list] = None,
-        current_task: Optional[Dict[str, Any]] = None,
-        all_tasks: Optional[List[Dict[str, Any]]] = None,
-        planning_mode_enabled: bool = False,
-        has_existing_plan: bool = False,
-        existing_tasks: Optional[List[Dict[str, Any]]] = None,
-        model_request: Optional[Dict[str, Any]] = None,
-        persona: Optional[str] = None,
-    ):
-        thread_id = (
-            str(conversation_id) if conversation_id and self.checkpointer else None
-        )
-
-        if persona is None and conversation_id:
-            persona = self._load_persona(conversation_id)
-            persona = sanitize_persona(persona)
-
+    async def _map_workflow_stream(self, workflow_stream):
         final_response = None
 
-        async for event in self.workflow.execute_stream(
-            message=user_message,
-            conversation_id=str(conversation_id) if conversation_id else None,
-            user_id=str(user_id) if user_id else None,
-            thread_id=thread_id,
-            persona=persona,
-            attachments=attachments,
-            current_task=current_task,
-            all_tasks=all_tasks,
-            planning_mode_enabled=planning_mode_enabled,
-            has_existing_plan=has_existing_plan,
-            existing_tasks=existing_tasks,
-            model_request=model_request,
-        ):
+        async for event in workflow_stream:
             event_type = event.get("type")
 
             if event_type == "agent_selected":
@@ -290,21 +235,17 @@ class AIService:
                 yield {"type": "error", "error": error_msg}
 
             elif event_type == "continuation_start":
-                # Pass through auto-continue round markers for UX/debugging
                 yield event
 
             elif event_type == "node_complete":
-                # Pass through node completion events
                 yield event
 
             elif event_type == "interrupt":
-                next_nodes = event.get("next", [])
-                pending_tool_calls = event.get("pending_tool_calls")
                 yield {
                     "type": "interrupt",
-                    "next": next_nodes,
-                    "thread_id": thread_id,
-                    "pending_tool_calls": pending_tool_calls,
+                    "next": event.get("next", []),
+                    "thread_id": event.get("thread_id"),
+                    "pending_tool_calls": event.get("pending_tool_calls"),
                     "interrupt": event.get("interrupt"),
                     "message": WORKFLOW_PAUSED_MESSAGE,
                 }
@@ -314,6 +255,63 @@ class AIService:
         else:
             error_response = self._build_error_response()
             yield {"type": "complete", "response": error_response}
+
+    async def generate_bot_response_stream(
+        self,
+        user_message: str,
+        conversation_id: Optional[UUID] = None,
+        user_id: Optional[UUID] = None,
+        attachments: Optional[list] = None,
+        current_task: Optional[Dict[str, Any]] = None,
+        all_tasks: Optional[List[Dict[str, Any]]] = None,
+        planning_mode_enabled: bool = False,
+        has_existing_plan: bool = False,
+        existing_tasks: Optional[List[Dict[str, Any]]] = None,
+        model_request: Optional[Dict[str, Any]] = None,
+        persona: Optional[str] = None,
+    ):
+        thread_id = (
+            str(conversation_id) if conversation_id and self.checkpointer else None
+        )
+
+        if persona is None and conversation_id:
+            persona = self._load_persona(conversation_id)
+            persona = sanitize_persona(persona)
+
+        async for mapped_event in self._map_workflow_stream(
+            self.workflow.execute_stream(
+                message=user_message,
+                conversation_id=str(conversation_id) if conversation_id else None,
+                user_id=str(user_id) if user_id else None,
+                thread_id=thread_id,
+                persona=persona,
+                attachments=attachments,
+                current_task=current_task,
+                all_tasks=all_tasks,
+                planning_mode_enabled=planning_mode_enabled,
+                has_existing_plan=has_existing_plan,
+                existing_tasks=existing_tasks,
+                model_request=model_request,
+            )
+        ):
+            yield mapped_event
+
+    async def resume_interrupted_execution_stream(
+        self,
+        thread_id: str,
+        decisions: List[InterruptDecision],
+    ):
+        if not self.checkpointer:
+            yield {"type": "error", "error": "Cannot resume: Checkpointing not enabled"}
+            return
+
+        async for mapped_event in self._map_workflow_stream(
+            self.workflow.resume_with_decisions_stream(
+                thread_id=thread_id,
+                decisions=decisions,
+            )
+        ):
+            yield mapped_event
 
     def get_bot_response_sync(
         self,

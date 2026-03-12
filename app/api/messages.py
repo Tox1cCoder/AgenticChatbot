@@ -1,4 +1,4 @@
-from typing import List
+from typing import AsyncGenerator, Callable, List
 from uuid import UUID
 import asyncio
 import json
@@ -19,6 +19,71 @@ logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_SECONDS = 1.0
 
 router = APIRouter(prefix="/messages", tags=["messages"])
+
+
+def _internal_event_stream_response(
+    producer_factory: Callable[[], AsyncGenerator[dict, None]],
+    request: Request,
+) -> StreamingResponse:
+    async def event_generator():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def producer():
+            try:
+                async for event in producer_factory():
+                    await queue.put(event)
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                await queue.put({"type": "error", "error": str(exc)})
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(producer())
+        try:
+            while True:
+                if await request.is_disconnected():
+                    logger.debug("Client disconnected during SSE stream")
+                    break
+
+                try:
+                    event = await asyncio.wait_for(
+                        queue.get(), timeout=HEARTBEAT_INTERVAL_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                    continue
+
+                if event is None:
+                    break
+
+                event_type = event.get("type")
+                yield f"data: {json.dumps(event)}\n\n"
+
+                if event_type in ("complete", "error", "interrupt"):
+                    break
+
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            error_event = {"type": "error", "error": str(exc)}
+            yield f"data: {json.dumps(error_event)}\n\n"
+        finally:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post(
@@ -72,74 +137,9 @@ async def create_message_stream(
     for a long tool call).  This keeps the SSE connection alive and gives
     Streamlit frequent yield-points for a responsive "Stop generating" UX.
     """
-
-    async def event_generator():
-        """Generate SSE events with heartbeat injection."""
-        queue: asyncio.Queue = asyncio.Queue()
-
-        async def producer():
-            """Drain the service-layer async generator into the queue."""
-            try:
-                async for event in message_service.create_message_stream(
-                    message_data, user_id
-                ):
-                    await queue.put(event)
-            except asyncio.CancelledError:
-                # Producer cancelled (e.g. client disconnect) – push sentinel.
-                return
-            except Exception as exc:
-                await queue.put({"type": "error", "error": str(exc)})
-            finally:
-                await queue.put(None)  # sentinel: end of stream
-
-        task = asyncio.create_task(producer())
-        try:
-            while True:
-                # Check for client disconnect
-                if await request.is_disconnected():
-                    logger.debug("Client disconnected during SSE stream")
-                    break
-
-                try:
-                    event = await asyncio.wait_for(
-                        queue.get(), timeout=HEARTBEAT_INTERVAL_SECONDS
-                    )
-                except asyncio.TimeoutError:
-                    # No event within the heartbeat window – emit keepalive
-                    yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
-                    continue
-
-                if event is None:
-                    # Sentinel: producer finished
-                    break
-
-                event_type = event.get("type")
-                yield f"data: {json.dumps(event)}\n\n"
-
-                if event_type in ("complete", "error", "interrupt"):
-                    break
-
-        except asyncio.CancelledError:
-            # Starlette/Uvicorn cancels the generator on disconnect
-            return
-        except Exception as exc:
-            error_event = {"type": "error", "error": str(exc)}
-            yield f"data: {json.dumps(error_event)}\n\n"
-        finally:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # Disable buffering in nginx
-        },
+    return _internal_event_stream_response(
+        lambda: message_service.create_message_stream(message_data, user_id),
+        request,
     )
 
 
@@ -179,29 +179,34 @@ async def stop_message_generation(
 
 @router.post(
     "/resume-interrupt",
-    response_model=ApiResponse[MessageRead],
     status_code=status.HTTP_200_OK,
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Internal SSE stream for resumed approval flow",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        }
+    },
 )
 @AppAutoInjector.auto_inject()
 async def resume_interrupt(
     resume_request: InterruptResumeRequest,
     message_service: IMessageService,
     user_id: UUID,
-) -> ApiResponse[MessageRead]:
+    request: Request,
+):
     """
-    Resume execution after handling tool execution interrupts.
+    Resume execution after handling tool execution interrupts and stream the result.
     """
-    result = await message_service.resume_message_creation(
-        thread_id=resume_request.thread_id,
-        conversation_id=resume_request.conversation_id,
-        user_id=user_id,
-        interrupt_id=resume_request.interrupt_id,
-        decisions=resume_request.decisions,
-    )
-    return ApiResponse(
-        success=True,
-        message="Message creation resumed successfully",
-        data=result,
+    return _internal_event_stream_response(
+        lambda: message_service.resume_message_creation_stream(
+            thread_id=resume_request.thread_id,
+            conversation_id=resume_request.conversation_id,
+            user_id=user_id,
+            interrupt_id=resume_request.interrupt_id,
+            decisions=resume_request.decisions,
+        ),
+        request,
     )
 
 

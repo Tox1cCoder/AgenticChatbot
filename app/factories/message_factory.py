@@ -63,9 +63,12 @@ class MessageFactory:
         }
 
     @staticmethod
-    def _normalize_content(content: str) -> str:
+    def _normalize_content(
+        content: str,
+        metadata: Dict[str, Any] | None = None,
+    ) -> str:
         """Wrapper for backward compatibility."""
-        return normalize_message_content(content)
+        return normalize_message_content(content, metadata)
 
     @staticmethod
     def create_bot_response(
@@ -80,7 +83,7 @@ class MessageFactory:
             "id": id or uuid4(),
             "conversation_id": conversation_id,
             "sender": MessageRole.assistant.value,
-            "content": MessageFactory._normalize_content(content),
+            "content": MessageFactory._normalize_content(content, metadata),
             "message_metadata": metadata,
             "created_at": TimestampUtils.now(),
         }

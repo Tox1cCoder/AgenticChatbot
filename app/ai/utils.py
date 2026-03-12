@@ -282,6 +282,72 @@ def normalize_tool_call(tool_call: Any) -> Dict[str, Any]:
     }
 
 
+def extract_rejection_reason(decision: Any) -> Optional[str]:
+    """Extract a free-form rejection reason from a HITL decision payload."""
+    if not isinstance(decision, dict):
+        return None
+
+    decision_args = decision.get("args")
+    if isinstance(decision_args, str):
+        trimmed = decision_args.strip()
+        if trimmed:
+            return trimmed
+    elif isinstance(decision_args, dict):
+        for key in ("message", "reason", "feedback", "content", "text"):
+            value = decision_args.get(key)
+            if isinstance(value, str):
+                trimmed = value.strip()
+                if trimmed:
+                    return trimmed
+
+    for key in ("message", "reason", "feedback"):
+        value = decision.get(key)
+        if isinstance(value, str):
+            trimmed = value.strip()
+            if trimmed:
+                return trimmed
+
+    return None
+
+
+def build_rejection_tool_message(
+    tool_call: Any,
+    decision: Optional[Dict[str, Any]] = None,
+    *,
+    source: str,
+) -> str:
+    """
+    Serialize rejection context so the agent can inspect the real decision data.
+    """
+    normalized_tool_call = normalize_tool_call(tool_call)
+    payload: Dict[str, Any] = {
+        "status": "rejected",
+        "source": source,
+        "tool_name": normalized_tool_call.get("name"),
+        "tool_call_id": normalized_tool_call.get("id"),
+        "tool_args": make_json_safe(normalized_tool_call.get("args", {})),
+    }
+
+    if isinstance(decision, dict):
+        decision_type = decision.get("type")
+        if decision_type:
+            payload["decision_type"] = str(decision_type)
+
+        action = decision.get("action")
+        if action:
+            payload["action"] = str(action)
+
+        decision_args = decision.get("args")
+        if decision_args not in (None, "", [], {}):
+            payload["decision_args"] = make_json_safe(decision_args)
+
+    rejection_reason = extract_rejection_reason(decision)
+    if rejection_reason:
+        payload["reason"] = rejection_reason
+
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
 def extract_agent_execution_info(agent_response: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract execution information from agent executor response.
@@ -506,8 +572,10 @@ def apply_hitl_decisions(
                 }
             )
         else:  # reject / unknown
-            feedback = (decision.get("args") or {}).get(
-                "message", "Tool execution rejected by user"
+            feedback = build_rejection_tool_message(
+                tc,
+                decision=decision if decision else None,
+                source="human_decision" if decision else "missing_decision",
             )
             if tool_call_id:
                 rejected_feedback[tool_call_id] = feedback

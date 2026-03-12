@@ -294,7 +294,8 @@ class PlanningAgent(BaseAgent):
             langchain_messages.extend(
                 self._convert_history_to_langchain_messages(conversation_history)
             )
-        langchain_messages.append(HumanMessage(content=message.content))
+        message_content = message.content or ""
+        langchain_messages.append(HumanMessage(content=message_content))
 
         raw_response = await llm.ainvoke(langchain_messages)
 
@@ -322,9 +323,7 @@ class PlanningAgent(BaseAgent):
 
         plan = self._todos_to_plan(
             todos=updated_todos,
-            overall_goal=(
-                (message.content.strip() or None) if not plan_modified else None
-            ),
+            overall_goal=((message_content.strip() or None) if not plan_modified else None),
         )
 
         response_text = self._format_plan_summary(plan, plan_modified=plan_modified)

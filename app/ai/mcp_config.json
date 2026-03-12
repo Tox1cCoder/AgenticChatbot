@@ -77,6 +77,17 @@
         "@wonderwhy-er/desktop-commander@latest"
       ],
       "enabled": true
+    },
+    "mcp-server-for-revit": {
+      "transport": "stdio",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "mcp-server-for-revit"
+      ],
+      "enabled": true
     }
   }
 }
