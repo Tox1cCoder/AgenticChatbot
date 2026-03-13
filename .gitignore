@@ -64,3 +64,7 @@ output/
 boring_servers/
 scripts/
 .agent
+.pytest_cache/
+.ruff_cache/
+.streamlit/
+.vscode/
