@@ -1018,9 +1018,8 @@ class DocumentProcessingService:
                 if "page_end" in chunk_data and chunk_data["page_end"] is not None:
                     payload["page_end"] = int(chunk_data["page_end"]) + 1
                 # Also store single page_number for compatibility
-                if "page_start" in chunk_data and chunk_data["page_start"] is not None:
-                    if chunk_data.get("page_start") == chunk_data.get("page_end"):
-                        payload["page_number"] = int(chunk_data["page_start"]) + 1
+                if "page_start" in chunk_data and chunk_data["page_start"] is not None and chunk_data.get("page_start") == chunk_data.get("page_end"):
+                    payload["page_number"] = int(chunk_data["page_start"]) + 1
 
             point = PointStruct(
                 id=safe_point_id,
@@ -1287,8 +1286,7 @@ class DocumentProcessingService:
                         images_by_chunk[chunk_id_str] = []
                     images_by_chunk[chunk_id_str].append(image)
 
-            updated_count = 0
-            for chunk_id_str, chunk_images in images_by_chunk.items():
+            for _, (chunk_id_str, chunk_images) in enumerate(images_by_chunk.items(), start=1):
                 image_ids = [str(img.id) for img in chunk_images]
                 image_paths = [img.image_path for img in chunk_images]
                 image_captions = [img.image_caption or "" for img in chunk_images]
@@ -1302,7 +1300,6 @@ class DocumentProcessingService:
                     },
                     points=[chunk_id_str],
                 )
-                updated_count += 1
 
         except Exception as e:
             logger.error(

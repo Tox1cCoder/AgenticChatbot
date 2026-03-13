@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -31,7 +32,7 @@ class MessageCreate(BaseModel):
         default=None,
         alias="modelConfig",
         description="""Optional per-message model configuration for provider/model selection.
-        
+
         Structure:
         {
           "all": {"provider": "openai", "model": "gpt-4o-mini", "temperature": 0.7},
@@ -40,7 +41,7 @@ class MessageCreate(BaseModel):
           "search": null,    # Optional per-agent override
           "planning": null   # Optional per-agent override
         }
-        
+
         If 'all' is set, applies to all agents unless per-agent override is present.
         If omitted, uses system defaults (Gemini).
         """,
@@ -68,7 +69,7 @@ class MessageRead(BaseModel):
     message_metadata: dict[str, Any] | None = Field(
         default_factory=dict,
         description="""Message metadata including persona used and RAG citations.
-        
+
         For RAG responses, includes:
         - documents_cited: List of documents referenced, grouped by source file
           [
@@ -137,14 +138,12 @@ class MessageRead(BaseModel):
         if self.interrupt is None:
             payload = self.message_metadata.get("interrupt")
             if payload:
-                try:
+                with contextlib.suppress(Exception):
                     self.interrupt = (
                         payload
                         if isinstance(payload, InterruptResponse)
                         else InterruptResponse.model_validate(payload)
                     )
-                except Exception:
-                    pass
 
         # Populate suggested_questions from metadata
         if self.suggested_questions is None:

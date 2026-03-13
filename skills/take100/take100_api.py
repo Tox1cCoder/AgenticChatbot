@@ -30,6 +30,7 @@ Entry JSON format (write to a .json file with UTF-8 encoding):
 
 import argparse
 import calendar
+import contextlib
 import json
 import re
 import sys
@@ -405,10 +406,8 @@ def main():
                 with open(args.entries_file, encoding="utf-8-sig") as f:
                     entries = json.load(f)
                 # Auto-cleanup: delete the temp file after reading so it isn't left on disk
-                try:
+                with contextlib.suppress(OSError):
                     os.remove(args.entries_file)
-                except OSError:
-                    pass
             else:
                 entries = json.loads(args.entries)
 

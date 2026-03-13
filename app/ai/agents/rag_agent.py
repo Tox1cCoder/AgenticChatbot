@@ -392,7 +392,7 @@ class RAGAgent(BaseAgent):
 
         # Build grouped citations structure (documents_cited)
         documents_cited = []
-        for doc_key, doc_info in doc_grouping.items():
+        for _, doc_info in doc_grouping.items():
             # Calculate aggregate stats for this document
             chunks = doc_info["chunks"]
             total_chunks = len(chunks)
@@ -659,7 +659,7 @@ class RAGAgent(BaseAgent):
 
         # Build grouped citations structure (documents_cited)
         documents_cited = []
-        for doc_key, doc_info in doc_grouping.items():
+        for _, doc_info in doc_grouping.items():
             chunks = doc_info["chunks"]
             total_chunks = len(chunks)
             avg_score = sum(c["score"] for c in chunks) / total_chunks if total_chunks > 0 else 0.0
@@ -916,7 +916,7 @@ class RAGAgent(BaseAgent):
 
             # Build mapping from retrieved_docs to document numbers
             doc_num_map = {}  # Maps (document_id, source) -> document_number
-            for doc_key, doc_info in doc_grouping.items():
+            for _doc_key, doc_info in doc_grouping.items():
                 doc_id = doc_info.get("document_id")
                 source = doc_info.get("source", "unknown")
                 doc_num_map[(doc_id, source)] = doc_info["document_number"]
@@ -978,7 +978,7 @@ class RAGAgent(BaseAgent):
                 try:
                     item = await loop.run_in_executor(None, lambda: chunk_queue.get(timeout=60))
                 except Exception as e:
-                    raise RuntimeError(f"Timeout waiting for Gemini stream: {e}")
+                    raise RuntimeError(f"Timeout waiting for Gemini stream: {e}") from e
 
                 msg_type, data = item
 
@@ -1228,7 +1228,7 @@ class RAGAgent(BaseAgent):
             parts = []
             media_resolution = self._get_media_resolution()
 
-            for index, image in enumerate(images, start=1):
+            for _index, image in enumerate(images, start=1):
                 image_data = base64.b64decode(image["data"])
 
                 mime_type = (image.get("mime_type") or "image/jpeg").strip()

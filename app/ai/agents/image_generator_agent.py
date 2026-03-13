@@ -204,10 +204,9 @@ Do not output anything else, just the prompt."""
         # Derive the original user request from the current turn messages.
         original_prompt = enhanced_prompt
         for msg in reversed(messages):
-            if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content.strip():
-                if isinstance(msg, LCHumanMessage):
-                    original_prompt = msg.content.strip()
-                    break
+            if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content.strip() and isinstance(msg, LCHumanMessage):
+                original_prompt = msg.content.strip()
+                break
 
         try:
             images, narrative = await self._generate_images(enhanced_prompt, original_prompt)

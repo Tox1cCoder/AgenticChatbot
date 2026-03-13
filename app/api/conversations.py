@@ -79,7 +79,7 @@ async def get_conversations(
     conversation_service: IConversationService,
     user_id: UUID,
     pagination: ConversationPaginationParams,
-    include: list[str] = Query(
+    include: list[str] = Query(  # noqa: B008
         default=[], description="Array of includes e.g. ['messages', 'feedback']"
     ),
     latest_messages: int = Query(
@@ -113,7 +113,7 @@ async def get_conversation_messages(
     message_service: IMessageService,
     user_id: UUID,
     pagination: MessagePaginationParams,
-    include: list[str] = Query(default=[], description="Array of includes e.g. ['feedback']"),
+    include: list[str] = Query(default=[], description="Array of includes e.g. ['feedback']"),  # noqa: B008
 ) -> PaginatedApiResponse[MessageRead]:
     """Get conversation's messages (requires user ownership)"""
     include_feedback = "feedback" in include

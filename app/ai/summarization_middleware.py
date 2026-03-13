@@ -133,10 +133,7 @@ def should_summarize(
 
     # Check fraction threshold
     fraction_threshold = int(config.model_context_size * config.trigger_fraction)
-    if estimated_tokens >= fraction_threshold:
-        return True
-
-    return False
+    return estimated_tokens >= fraction_threshold
 
 
 def _format_messages_for_summary(messages: list[BaseMessage]) -> str:

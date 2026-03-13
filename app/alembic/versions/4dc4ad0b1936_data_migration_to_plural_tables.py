@@ -104,8 +104,8 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO messages (id, conversation_id, sender, content, created_at, updated_at, deleted_at)
-        SELECT id, conversation_id, 
-               CASE 
+        SELECT id, conversation_id,
+               CASE
                    WHEN sender = 'user' THEN 1
                    WHEN sender = 'assistant' THEN 2
                    ELSE 1
@@ -207,8 +207,8 @@ def downgrade() -> None:
     op.execute(
         """
         INSERT INTO message (id, conversation_id, sender, content, created_at, updated_at)
-        SELECT id, conversation_id, 
-               CASE 
+        SELECT id, conversation_id,
+               CASE
                    WHEN sender = 1 THEN 'user'::message_role
                    WHEN sender = 2 THEN 'assistant'::message_role
                    ELSE 'user'::message_role

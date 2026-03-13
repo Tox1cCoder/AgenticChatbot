@@ -1,6 +1,5 @@
 import hashlib
 import json
-from functools import lru_cache
 
 from google import genai
 
@@ -35,6 +34,7 @@ class SuggestionGenerator:
         config = AGENT_CONFIG["suggestion"]
         self.model_name = model_name or config["model"]
         self.client: genai.Client | None = None
+        self._suggestion_cache: dict = {}
         self._init_client()
 
     def _init_client(self) -> None:
@@ -54,9 +54,12 @@ class SuggestionGenerator:
         content = f"{truncated_query}||{truncated_response}"
         return hashlib.md5(content.encode()).hexdigest()
 
-    @lru_cache(maxsize=100)
     def _get_cached_suggestions(self, cache_key: str, prompt: str) -> list[str] | None:
         """Internal cached method for LLM calls."""
+        _key = (cache_key, prompt)
+        if _key in self._suggestion_cache:
+            return self._suggestion_cache[_key]
+
         if not self.client:
             return None
 
@@ -86,6 +89,9 @@ class SuggestionGenerator:
             if not isinstance(suggestions, list):
                 return None
 
+            if len(self._suggestion_cache) >= 100:
+                self._suggestion_cache.pop(next(iter(self._suggestion_cache)))
+            self._suggestion_cache[_key] = suggestions
             return suggestions
 
         except (json.JSONDecodeError, Exception):

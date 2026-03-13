@@ -54,7 +54,7 @@ class AutoInjector:
             sig = inspect.signature(func)
             new_params = []
 
-            for name, param in sig.parameters.items():
+            for _name, param in sig.parameters.items():
                 ann = param.annotation
                 if ann in cls.wiring_map and (
                     param.default == inspect.Parameter.empty or param.default is None

@@ -293,10 +293,7 @@ class McpToolCatalog:
             List of ToolDescriptor objects, ranked by relevance
         """
         # Start with all tools or server-filtered tools
-        if server_name:
-            candidates = self._tools_by_server.get(server_name, [])
-        else:
-            candidates = self._tools
+        candidates = self._tools_by_server.get(server_name, []) if server_name else self._tools
 
         # Apply allowlist filtering
         if allowlist:

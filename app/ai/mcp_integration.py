@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -295,9 +296,8 @@ class MCPManager:
         if isinstance(schema, dict):
             cleaned: dict[str, Any] = {}
             for key, value in schema.items():
-                if key == "enum" and isinstance(value, list):
-                    if any(not isinstance(item, str) for item in value):
-                        continue
+                if key == "enum" and isinstance(value, list) and any(not isinstance(item, str) for item in value):
+                    continue
                 cleaned[key] = self._remove_non_string_enums(value)
             return cleaned
         if isinstance(schema, list):
@@ -369,14 +369,12 @@ class MCPManager:
 
         if isinstance(schema, dict):
             result_schema = schema
-        elif PydanticBaseModel is not None:
-            if (
-                isinstance(schema, type)
-                and issubclass(schema, PydanticBaseModel)
-                or isinstance(schema, PydanticBaseModel)
-            ):
-                if hasattr(schema, "model_json_schema"):
-                    result_schema = schema.model_json_schema()
+        elif PydanticBaseModel is not None and (
+            isinstance(schema, type)
+            and issubclass(schema, PydanticBaseModel)
+            or isinstance(schema, PydanticBaseModel)
+        ) and hasattr(schema, "model_json_schema"):
+            result_schema = schema.model_json_schema()
 
         if not result_schema:
             for attr_name in ("model_json_schema", "json_schema", "schema"):
@@ -608,10 +606,8 @@ class MCPManager:
         # 1. Tear down old session context
         old = self._session_contexts.pop(server_name, None)
         if old:
-            try:
+            with contextlib.suppress(Exception):
                 await asyncio.shield(old["context"].__aexit__(None, None, None))
-            except Exception:
-                pass  # best-effort cleanup
 
         # 2. Drop cached tools so get_server_tools re-creates everything
         removed_tools = self._server_tools.pop(server_name, [])

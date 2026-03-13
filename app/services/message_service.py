@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
@@ -326,10 +327,8 @@ class MessageService(IMessageService):
             return
 
         key = f"interrupt:{conversation_id}:{interrupt_id}"
-        try:
+        with contextlib.suppress(Exception):
             self.redis_client.delete(key)
-        except Exception:
-            pass
 
     def _persist_interrupt_bot_message(
         self,
@@ -496,7 +495,7 @@ class MessageService(IMessageService):
 
                 # Persist an assistant "approval required" message so clients can
                 # recover pending approvals from message history (not just SSE).
-                try:
+                with contextlib.suppress(Exception):
                     self._persist_interrupt_bot_message(
                         conversation_id=message_create_data.conversation_id,
                         interrupt_payload=interrupt_payload,
@@ -512,8 +511,6 @@ class MessageService(IMessageService):
                         ),
                         user_id=user_id,
                     )
-                except Exception:
-                    pass
 
                 return user_message_read
 
@@ -921,10 +918,8 @@ class MessageService(IMessageService):
                 record.status == HITLInterruptStatus.PENDING and record.expires_at <= now
             ):
                 if record.status == HITLInterruptStatus.PENDING:
-                    try:
+                    with contextlib.suppress(Exception):
                         self.hitl_interrupt_repository.mark_expired(interrupt_id)
-                    except Exception:
-                        pass
                 raise CustomHTTPException(
                     status_code=http_status.HTTP_410_GONE,
                     detail=(
@@ -1125,10 +1120,8 @@ class MessageService(IMessageService):
                     self._clear_redis_interrupt(conversation_id, interrupt_id)
 
                     if self.hitl_interrupt_repository and interrupt_id:
-                        try:
+                        with contextlib.suppress(Exception):
                             self.hitl_interrupt_repository.mark_resolved(interrupt_id)
-                        except Exception:
-                            pass
 
                     interrupt_response = event.get("interrupt")
                     normalized_interrupt = self._normalize_nested_interrupt_payload(
@@ -1181,10 +1174,8 @@ class MessageService(IMessageService):
 
                     self._clear_redis_interrupt(conversation_id, interrupt_id)
                     if self.hitl_interrupt_repository and interrupt_id:
-                        try:
+                        with contextlib.suppress(Exception):
                             self.hitl_interrupt_repository.mark_resolved(interrupt_id)
-                        except Exception:
-                            pass
 
                     bot_response_content = extract_response_content(
                         bot_response, ERROR_RESPONSE_AFTER_RESUME

@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Callable
@@ -614,10 +615,8 @@ class ToolEventHandler(EventHandler):
     ) -> AsyncGenerator[str, None]:
         """Handle tool end event."""
         if tool_call_id in state.pending_tool_call_ids:
-            try:
+            with contextlib.suppress(ValueError):
                 state.pending_tool_call_ids.remove(tool_call_id)
-            except ValueError:
-                pass
 
         output = event.get("result")
         yield _sse(

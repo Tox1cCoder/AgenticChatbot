@@ -14,7 +14,7 @@ router = APIRouter(prefix="/users", tags=["users"])
 @AppAutoInjector.auto_inject()
 async def get_user(
     user_service: IUserService,
-    user_id: UUID = Path(...),
+    user_id: UUID = Path(...),  # noqa: B008
 ) -> ApiResponse[UserRead]:
     """Get user by ID"""
     result = user_service.get_by_id(user_id)

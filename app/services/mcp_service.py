@@ -102,9 +102,8 @@ class MCPService:
         if transport == "stdio":
             if not server_config.get("command"):
                 raise ServerConfigurationError("Command is required for stdio transport")
-        elif transport in ["http", "sse", "streamable_http"]:
-            if not server_config.get("url"):
-                raise ServerConfigurationError("URL is required for HTTP transport")
+        elif transport in ["http", "sse", "streamable_http"] and not server_config.get("url"):
+            raise ServerConfigurationError("URL is required for HTTP transport")
 
         config_copy = dict(server_config)
         name = config_copy.pop("name")
@@ -177,7 +176,7 @@ class MCPService:
             logger.error("Failed to add server from URL: %s", str(e))
             raise ServerConfigurationError(
                 detail=f"Failed to parse URL: {str(e)}", error_code="URL_PARSING_ERROR"
-            )
+            ) from e
 
     async def remove_server(self, server_name: str) -> dict[str, str]:
         """

@@ -1,3 +1,4 @@
+import contextlib
 import logging
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -104,10 +105,8 @@ class CheckpointManager:
 
                 # Close existing pool if present
                 if self._pool:
-                    try:
+                    with contextlib.suppress(Exception):
                         await self._pool.close()
-                    except Exception:
-                        pass
                     self._pool = None
 
                 # Reset state

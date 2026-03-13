@@ -41,8 +41,8 @@ class SkillsService:
         """Returns full detail for one skill, raises SkillNotFoundError."""
         try:
             skill = self.registry.get_skill(name)
-        except KeyError:
-            raise SkillNotFoundError(name)
+        except KeyError as e:
+            raise SkillNotFoundError(name) from e
 
         return {
             "name": skill.name,
@@ -56,8 +56,8 @@ class SkillsService:
         """Enable or disable a skill. Returns confirmation message."""
         try:
             self.registry.toggle_skill(name, enabled)
-        except KeyError:
-            raise SkillNotFoundError(name)
+        except KeyError as e:
+            raise SkillNotFoundError(name) from e
 
         action = "enabled" if enabled else "disabled"
         return {"message": f"Skill '{name}' {action}"}

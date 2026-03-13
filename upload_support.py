@@ -325,10 +325,9 @@ def render_document_list():
                                 icon=":material/delete:",
                                 key=f"del_{doc.get('id')}",
                                 help="Delete document",
-                            ):
-                                if delete_document(doc.get("id")):
-                                    st.cache_data.clear()
-                                    st.rerun()
+                            ) and delete_document(doc.get("id")):
+                                st.cache_data.clear()
+                                st.rerun()
 
                         st.divider()
                 else:

@@ -92,7 +92,7 @@ APP_STYLE = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,200..700,0..1,-50..200');
-    
+
     html, body, [class*="css"] {
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
@@ -107,18 +107,18 @@ APP_STYLE = """
         line-height: 1;
         vertical-align: middle;
     }
-    
+
     /* Hide Streamlit branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    
+
     /* Main container */
     .main .block-container {
         max-width: 1400px;
         padding-top: 2rem;
         padding-bottom: 2rem;
     }
-    
+
     .message-bubble {
         border-radius: 16px;
         padding: 14px 18px;
@@ -130,11 +130,11 @@ APP_STYLE = """
         box-shadow: 0 2px 8px rgba(0,0,0,0.06);
         animation: slideIn 0.2s ease-out;
     }
-    
+
     .message-bubble-short {
         max-width: 40%;
     }
-    
+
     @keyframes slideIn {
         from {
             opacity: 0;
@@ -145,14 +145,14 @@ APP_STYLE = """
             transform: translateY(0);
         }
     }
-    
+
     .user-bubble {
         background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
         color: white;
         margin-left: auto;
         border-bottom-right-radius: 4px;
     }
-    
+
     .assistant-bubble {
         background: #ffffff;
         color: #1f2937;
@@ -160,7 +160,7 @@ APP_STYLE = """
         margin-right: auto;
         border-bottom-left-radius: 4px;
     }
-    
+
     .message-header {
         display: flex;
         align-items: center;
@@ -169,7 +169,7 @@ APP_STYLE = """
         font-size: 0.85rem;
         opacity: 0.9;
     }
-    
+
     .message-avatar {
         width: 28px;
         height: 28px;
@@ -180,47 +180,47 @@ APP_STYLE = """
         font-weight: 600;
         font-size: 13px;
     }
-    
+
     .user-avatar {
         background: white;
         color: #3b82f6;
         border: 2px solid #3b82f6;
     }
-    
+
     .assistant-avatar {
         background: linear-gradient(135deg, #10b981 0%, #059669 100%);
         color: white;
     }
-    
+
     .message-time {
         font-size: 0.75rem;
         opacity: 0.7;
         margin-left: auto;
     }
-    
+
     /* Message content wrapper - contains the markdown rendered content */
     .message-content-wrapper {
         line-height: 1.6;
     }
-    
+
     .message-content-wrapper > div[data-testid="stMarkdownContainer"] {
         margin: 0;
         padding: 0;
     }
-    
+
     .message-content-wrapper p {
         margin: 0.5em 0;
         line-height: 1.6;
     }
-    
+
     .message-content-wrapper p:first-child {
         margin-top: 0;
     }
-    
+
     .message-content-wrapper p:last-child {
         margin-bottom: 0;
     }
-    
+
     /* Code blocks */
     .message-bubble code {
         background: rgba(0,0,0,0.05);
@@ -228,51 +228,51 @@ APP_STYLE = """
         border-radius: 4px;
         font-size: 0.9em;
     }
-    
+
     .user-bubble code {
         background: rgba(255,255,255,0.2);
     }
-    
+
     /* Paragraphs and Lists */
     .message-bubble p {
         margin: 0.5em 0;
         line-height: 1.6;
     }
-    
+
     .message-bubble p:first-child {
         margin-top: 0;
     }
-    
+
     .message-bubble p:last-child {
         margin-bottom: 0;
     }
-    
+
     .message-bubble ul,
     .message-bubble ol {
         margin: 0.75em 0;
         padding-left: 1.5em;
         line-height: 1.6;
     }
-    
+
     .message-bubble ul:first-child,
     .message-bubble ol:first-child {
         margin-top: 0;
     }
-    
+
     .message-bubble ul:last-child,
     .message-bubble ol:last-child {
         margin-bottom: 0;
     }
-    
+
     .message-bubble li {
         margin: 0.35em 0;
         line-height: 1.6;
     }
-    
+
     .message-bubble li > p {
         margin: 0.25em 0;
     }
-    
+
     .message-bubble pre {
         background: rgba(0,0,0,0.05);
         padding: 12px;
@@ -281,28 +281,28 @@ APP_STYLE = """
         margin: 0.75em 0;
         line-height: 1.5;
     }
-    
+
     .user-bubble pre {
         background: rgba(255,255,255,0.15);
     }
-    
+
     .message-bubble pre code {
         background: transparent;
         padding: 0;
     }
-    
+
     .message-bubble blockquote {
         border-left: 3px solid #cbd5e1;
         padding-left: 1em;
         margin: 0.75em 0;
         color: #64748b;
     }
-    
+
     .user-bubble blockquote {
         border-left-color: rgba(255,255,255,0.5);
         color: rgba(255,255,255,0.9);
     }
-    
+
     /* Links */
     .message-bubble a {
         color: #2563eb;
@@ -310,45 +310,45 @@ APP_STYLE = """
         font-weight: 500;
         transition: color 0.2s ease;
     }
-    
+
     .message-bubble a:hover {
         color: #1d4ed8;
         text-decoration: underline;
     }
-    
+
     .user-bubble a {
         color: #e0f2fe;
         text-decoration: underline;
     }
-    
+
     .user-bubble a:hover {
         color: #ffffff;
     }
-    
+
     /* Attachments */
     .message-attachments-wrapper {
         display: flex;
         max-width: 75%;
         margin: 4px 0 12px;
     }
-    
+
     .message-attachments-wrapper.align-right {
         margin-left: auto;
         justify-content: flex-end;
     }
-    
+
     .message-attachments-wrapper.align-left {
         margin-right: auto;
         justify-content: flex-start;
     }
-    
+
     .message-attachments {
         display: flex;
         gap: 8px;
         flex-wrap: wrap;
         margin: 0;
     }
-    
+
     .message-attachments .attachment-thumb {
         width: 72px;
         height: 72px;
@@ -360,37 +360,37 @@ APP_STYLE = """
         cursor: pointer;
         transition: transform 0.15s ease, box-shadow 0.15s ease;
     }
-    
+
     .message-attachments .attachment-thumb:hover {
         transform: scale(1.05);
         box-shadow: 0 6px 18px rgba(15, 23, 42, 0.2);
     }
-    
+
     .message-attachments .attachment-thumb-link {
         display: inline-flex;
         border-radius: 12px;
         text-decoration: none;
     }
-    
+
     .message-attachments .attachment-thumb-link:focus-visible {
         outline: 2px solid #38bdf8;
         outline-offset: 2px;
     }
-    
+
     .message-attachments .attachment-thumb img {
         width: 100%;
         height: 100%;
         object-fit: cover;
         display: block;
     }
-    
+
     .attachment-grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
         gap: 8px;
         margin-top: 12px;
     }
-    
+
     .attachment-item {
         position: relative;
         border-radius: 8px;
@@ -400,17 +400,17 @@ APP_STYLE = """
         transition: transform 0.2s;
         border: 2px solid rgba(0,0,0,0.1);
     }
-    
+
     .attachment-item:hover {
         transform: scale(1.05);
     }
-    
+
     .attachment-item img {
         width: 100%;
         height: 100%;
         object-fit: cover;
     }
-    
+
     /* Input area */
     .stTextArea textarea {
         border-radius: 12px !important;
@@ -418,68 +418,68 @@ APP_STYLE = """
         padding: 12px !important;
         font-size: 0.95rem !important;
     }
-    
+
     .stTextArea textarea:focus {
         border-color: #3b82f6 !important;
         box-shadow: 0 0 0 3px rgba(59,130,246,0.1) !important;
     }
-    
+
     /* Buttons */
     .stButton button {
         border-radius: 8px;
         font-weight: 500;
         transition: all 0.2s;
     }
-    
+
     .stButton button[kind="primary"] {
         background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
     }
-    
+
     .stButton button[kind="primary"]:hover {
         transform: translateY(-2px);
         box-shadow: 0 4px 12px rgba(59,130,246,0.3);
     }
-    
+
     /* Sidebar */
     [data-testid="stSidebar"] {
         background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
     }
-    
+
     [data-testid="stSidebar"] .stButton button {
         width: 100%;
         text-align: left;
     }
-    
+
     /* Tabs */
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
         border-bottom: 2px solid #e2e8f0;
     }
-    
+
     .stTabs [data-baseweb="tab"] {
         border-radius: 8px 8px 0 0;
         padding: 12px 24px;
         font-weight: 500;
     }
-    
+
     .stTabs [aria-selected="true"] {
         background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
         color: white !important;
     }
-    
+
     /* Metrics */
     [data-testid="stMetricValue"] {
         font-size: 1.5rem;
         font-weight: 600;
     }
-    
+
     /* Expanders */
     .streamlit-expanderHeader {
         border-radius: 8px;
         background: #f8fafc;
         font-weight: 500;
     }
-    
+
     /* Status indicators */
     .status-badge {
         display: inline-flex;
@@ -490,41 +490,41 @@ APP_STYLE = """
         font-size: 0.8rem;
         font-weight: 500;
     }
-    
+
     .status-processing {
         background: #fef3c7;
         color: #92400e;
     }
-    
+
     .status-ready {
         background: #d1fae5;
         color: #065f46;
     }
-    
+
     .status-failed {
         background: #fee2e2;
         color: #991b1b;
     }
-    
+
     /* Scrollbar */
     ::-webkit-scrollbar {
         width: 8px;
         height: 8px;
     }
-    
+
     ::-webkit-scrollbar-track {
         background: #f1f5f9;
     }
-    
+
     ::-webkit-scrollbar-thumb {
         background: #cbd5e1;
         border-radius: 4px;
     }
-    
+
     ::-webkit-scrollbar-thumb:hover {
         background: #94a3b8;
     }
-    
+
     /* Citation styling */
     .citation-document {
         margin-bottom: 12px;
@@ -533,7 +533,7 @@ APP_STYLE = """
         background-color: rgba(59, 130, 246, 0.1);
         border: 2px solid rgba(59, 130, 246, 0.3);
     }
-    
+
     .citation-chunk {
         margin-left: 20px;
         margin-bottom: 6px;
@@ -541,31 +541,31 @@ APP_STYLE = """
         border-radius: 4px;
         font-size: 0.9em;
     }
-    
+
     .citation-score-high {
         color: #22c55e;
     }
-    
+
     .citation-score-medium {
         color: #f59e0b;
     }
-    
+
     .citation-score-low {
         color: #ef4444;
     }
-    
+
     /* Clickable citation button styles */
     .stButton button[data-testid*="cite_"] {
         padding: 4px 8px;
         font-size: 0.85em;
         min-height: 32px;
     }
-    
+
     .stButton button[data-testid*="cite_"]:hover {
         transform: scale(1.05);
         transition: transform 0.2s ease-in-out;
     }
-    
+
     /* Image thumbnail styles in citations */
     .citation-image-thumb {
         width: 100%;
@@ -573,12 +573,12 @@ APP_STYLE = """
         cursor: pointer;
         transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
     }
-    
+
     .citation-image-thumb:hover {
         transform: scale(1.05);
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     }
-    
+
     /* Thinking/Reasoning UI Styles - Modern blue design */
     .thinking-container {
         border-left: 3px solid #3b82f6;
@@ -590,7 +590,7 @@ APP_STYLE = """
         color: #4b5563;
         box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
     }
-    
+
     .thinking-header {
         display: flex;
         align-items: center;
@@ -599,18 +599,18 @@ APP_STYLE = """
         color: #3b82f6;
         margin-bottom: 8px;
     }
-    
+
     .thinking-indicator {
         display: inline-flex;
         align-items: center;
         gap: 6px;
     }
-    
+
     .thinking-dots {
         display: inline-flex;
         gap: 4px;
     }
-    
+
     .thinking-dot {
         width: 6px;
         height: 6px;
@@ -618,11 +618,11 @@ APP_STYLE = """
         background-color: #3b82f6;
         animation: thinking-pulse 1.4s infinite ease-in-out;
     }
-    
+
     .thinking-dot:nth-child(1) { animation-delay: -0.32s; }
     .thinking-dot:nth-child(2) { animation-delay: -0.16s; }
     .thinking-dot:nth-child(3) { animation-delay: 0s; }
-    
+
     @keyframes thinking-pulse {
         0%, 80%, 100% {
             transform: scale(0.6);
@@ -633,7 +633,7 @@ APP_STYLE = """
             opacity: 1;
         }
     }
-    
+
     .thinking-content {
         line-height: 1.65;
         white-space: pre-wrap;
@@ -659,13 +659,13 @@ APP_STYLE = """
     .thinking-content-rendered p:last-child {
         margin-bottom: 0;
     }
-    
+
     .thinking-content strong,
     .thinking-content-rendered strong {
         font-weight: 600;
         color: #1f2937;
     }
-    
+
     /* Collapsed thinking expander styles */
     .thinking-expander-header {
         display: flex;
@@ -676,11 +676,11 @@ APP_STYLE = """
         cursor: pointer;
         transition: color 0.2s ease;
     }
-    
+
     .thinking-expander-header:hover {
         color: #1d4ed8;
     }
-    
+
     /* Image Lightbox Modal */
     .image-lightbox-overlay {
         display: none;
@@ -695,11 +695,11 @@ APP_STYLE = """
         align-items: center;
         cursor: zoom-out;
     }
-    
+
     .image-lightbox-overlay.active {
         display: flex;
     }
-    
+
     .image-lightbox-content {
         max-width: 90%;
         max-height: 90%;
@@ -707,7 +707,7 @@ APP_STYLE = """
         border-radius: 8px;
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
     }
-    
+
     .image-lightbox-close {
         position: absolute;
         top: 20px;
@@ -718,23 +718,23 @@ APP_STYLE = """
         cursor: pointer;
         z-index: 10000;
     }
-    
+
     .image-lightbox-close:hover {
         color: #f87171;
     }
-    
+
     /* Image thumbnail hover effects */
     .img-thumb {
         transition: transform 0.2s ease, box-shadow 0.2s ease, filter 0.2s ease;
         cursor: pointer;
     }
-    
+
     .img-thumb:hover {
         transform: scale(1.08);
         box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
         filter: brightness(1.05);
     }
-    
+
     /* Follow-up suggestion buttons */
     .suggestion-container {
         display: flex;
@@ -743,7 +743,7 @@ APP_STYLE = """
         margin-top: 12px;
         margin-bottom: 8px;
     }
-    
+
     .suggestion-btn {
         background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
         border: 1px solid #bae6fd;
@@ -756,14 +756,14 @@ APP_STYLE = """
         text-align: left;
         max-width: 280px;
     }
-    
+
     .suggestion-btn:hover {
         background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 100%);
         border-color: #7dd3fc;
         transform: translateY(-1px);
         box-shadow: 0 2px 8px rgba(3, 105, 161, 0.15);
     }
-    
+
     .suggestion-btn:active {
         transform: translateY(0);
     }
@@ -828,7 +828,7 @@ IMAGE_LIGHTBOX_JS = """
     // Ensure we only initialize once
     if (window._lightboxInitialized) return;
     window._lightboxInitialized = true;
-    
+
     function openImageLightbox(src) {
         var lightbox = document.getElementById('imageLightbox');
         var img = document.getElementById('lightboxImage');
@@ -838,7 +838,7 @@ IMAGE_LIGHTBOX_JS = """
             document.body.style.overflow = 'hidden';
         }
     }
-    
+
     function closeImageLightbox() {
         var lightbox = document.getElementById('imageLightbox');
         if (lightbox) {
@@ -846,15 +846,15 @@ IMAGE_LIGHTBOX_JS = """
             document.body.style.overflow = 'auto';
         }
     }
-    
+
     // Make functions globally available
     window.openImageLightbox = openImageLightbox;
     window.closeImageLightbox = closeImageLightbox;
-    
+
     // Event delegation for image thumbnails - handles dynamically added elements
     document.addEventListener('click', function(e) {
         var target = e.target;
-        
+
         // Check if clicked on an img-thumb image
         if (target.classList.contains('img-thumb')) {
             e.preventDefault();
@@ -862,17 +862,17 @@ IMAGE_LIGHTBOX_JS = """
             openImageLightbox(target.src);
             return;
         }
-        
+
         // Check if clicked on lightbox overlay or close button
         var lightbox = document.getElementById('imageLightbox');
         if (lightbox && lightbox.classList.contains('active')) {
-            if (target.classList.contains('image-lightbox-overlay') || 
+            if (target.classList.contains('image-lightbox-overlay') ||
                 target.classList.contains('image-lightbox-close')) {
                 closeImageLightbox();
             }
         }
     }, true);
-    
+
     // Escape key to close
     document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape') closeImageLightbox();
@@ -1039,15 +1039,14 @@ def render_conversation_button(
         key=f"conv_{conversation['id']}",
         width="stretch",
         type=button_type,
-    ):
-        if conversation["id"] != st.session_state.current_conversation_id:
-            st.session_state.current_conversation_id = conversation["id"]
-            st.session_state.active_view = "chat"
-            close_conversation_manager()
-            reset_conversation_state()
-            if on_click_callback:
-                on_click_callback()
-            st.rerun()
+    ) and conversation["id"] != st.session_state.current_conversation_id:
+        st.session_state.current_conversation_id = conversation["id"]
+        st.session_state.active_view = "chat"
+        close_conversation_manager()
+        reset_conversation_state()
+        if on_click_callback:
+            on_click_callback()
+        st.rerun()
 
 
 def group_conversations_by_date(
@@ -1335,9 +1334,8 @@ def sanitize_message_content(content: str) -> str:
 
         # Insert blank line when transitioning to a list from non-list content
         # or when list type changes
-        if current_line_type in ("unordered", "ordered"):
-            if prev_line_type not in (None, "blank", current_line_type):
-                processed_lines.append("")
+        if current_line_type in ("unordered", "ordered") and prev_line_type not in (None, "blank", current_line_type):
+            processed_lines.append("")
 
         processed_lines.append(line)
         prev_line_type = current_line_type
@@ -1408,9 +1406,10 @@ initialize_session_state()
 
 # ── localStorage session-persistence bridge ──────────────────────────────────
 # Allows the auth token to survive F5 / browser refresh without extra packages.
-import json as _json
+import contextlib  # noqa: E402
+import json as _json  # noqa: E402
 
-import streamlit.components.v1 as _stc_ls
+import streamlit.components.v1 as _stc_ls  # noqa: E402
 
 # Step 1: flush any pending localStorage write/clear from the previous run.
 _ls_op = st.session_state.get("_ls_op")
@@ -1807,23 +1806,22 @@ def make_streaming_request(endpoint: str, data: dict | None = None):
 
         # Parse SSE stream
         for line in response.iter_lines(decode_unicode=True):
-            if line:
+            if line and line.startswith("data: "):
                 # SSE format: "data: {json}"
-                if line.startswith("data: "):
-                    event_data = line[6:]  # Remove "data: " prefix
-                    try:
-                        event = json.loads(event_data)
-                        event_type = event.get("type")
+                event_data = line[6:]  # Remove "data: " prefix
+                try:
+                    event = json.loads(event_data)
+                    event_type = event.get("type")
 
-                        # Silently consume heartbeat events (keep-alive)
-                        if event_type == "heartbeat":
-                            continue
-
-                        yield event
-                        if event_type in ["complete", "error", "interrupt"]:
-                            stream_completed = True
-                    except json.JSONDecodeError:
+                    # Silently consume heartbeat events (keep-alive)
+                    if event_type == "heartbeat":
                         continue
+
+                    yield event
+                    if event_type in ["complete", "error", "interrupt"]:
+                        stream_completed = True
+                except json.JSONDecodeError:
+                    continue
 
     except requests.exceptions.HTTPError as http_error:
         st.toast(f"HTTP error {http_error.response.status_code}", icon=":material/cancel:")
@@ -1841,10 +1839,8 @@ def make_streaming_request(endpoint: str, data: dict | None = None):
     finally:
         # Ensure the response connection is closed to avoid resource leaks
         if response is not None:
-            try:
+            with contextlib.suppress(Exception):
                 response.close()
-            except Exception:
-                pass
 
 
 def get_user(user_id: str) -> dict[str, Any]:
@@ -2736,7 +2732,7 @@ def render_agent_images(message_metadata: dict):
 
     # Collect image sources for the JS-based lightbox
     thumb_entries: list[dict[str, str]] = []
-    for idx, item in enumerate(image_items):
+    for _, item in enumerate(image_items):
         caption = item.get("name") or ""
         if item.get("url"):
             src = item["url"]
@@ -4270,37 +4266,34 @@ def render_interrupt_approval_ui():
             col1, col2, col3 = st.columns(3)
 
             with col1:
-                if "approve" in allowed_decisions:
-                    if st.button(
-                        "Approve",
-                        key=f"approve_{idx}",
-                        width="stretch",
-                        type="primary",
-                    ):
-                        st.session_state[decisions_key][task_id] = {
-                            "type": "approve",
-                            "task_id": task_id,
-                            "action": tool_name,
-                            "args": None,
-                        }
-                        st.rerun()
+                if "approve" in allowed_decisions and st.button(
+                    "Approve",
+                    key=f"approve_{idx}",
+                    width="stretch",
+                    type="primary",
+                ):
+                    st.session_state[decisions_key][task_id] = {
+                        "type": "approve",
+                        "task_id": task_id,
+                        "action": tool_name,
+                        "args": None,
+                    }
+                    st.rerun()
 
             with col2:
-                if "edit" in allowed_decisions:
-                    if st.button("Edit Args", key=f"edit_{idx}", width="stretch"):
-                        st.session_state[f"editing_tool_{idx}"] = True
-                        st.rerun()
+                if "edit" in allowed_decisions and st.button("Edit Args", key=f"edit_{idx}", width="stretch"):
+                    st.session_state[f"editing_tool_{idx}"] = True
+                    st.rerun()
 
             with col3:
-                if "reject" in allowed_decisions:
-                    if st.button("Reject", key=f"reject_{idx}", width="stretch"):
-                        st.session_state[decisions_key][task_id] = {
-                            "type": "reject",
-                            "task_id": task_id,
-                            "action": tool_name,
-                            "args": {},
-                        }
-                        st.rerun()
+                if "reject" in allowed_decisions and st.button("Reject", key=f"reject_{idx}", width="stretch"):
+                    st.session_state[decisions_key][task_id] = {
+                        "type": "reject",
+                        "task_id": task_id,
+                        "action": tool_name,
+                        "args": {},
+                    }
+                    st.rerun()
 
             # Show edit form if editing
             if st.session_state.get(f"editing_tool_{idx}"):
@@ -4511,16 +4504,10 @@ def render_chat_view():
                         if not isinstance(att, dict):
                             continue
                         data_b64 = att.get("data")
-                        if isinstance(data_b64, str):
-                            data_b64 = data_b64.strip()
-                        else:
-                            data_b64 = None
+                        data_b64 = data_b64.strip() if isinstance(data_b64, str) else None
 
                         url_value = att.get("url")
-                        if isinstance(url_value, str):
-                            url_value = url_value.strip()
-                        else:
-                            url_value = None
+                        url_value = url_value.strip() if isinstance(url_value, str) else None
 
                         if not data_b64 and not url_value:
                             continue
@@ -4699,11 +4686,9 @@ def render_chat_view():
         return
 
     # Load more button
-    if conversation_id and conversation_id != "pending_new":
-        if st.session_state.has_more_messages:
-            if st.button("Load older messages", width="stretch"):
-                next_page = st.session_state.conversation_messages_page + 1
-                load_messages_page(next_page, show_spinner=True)
+    if conversation_id and conversation_id != "pending_new" and st.session_state.has_more_messages and st.button("Load older messages", width="stretch"):
+        next_page = st.session_state.conversation_messages_page + 1
+        load_messages_page(next_page, show_spinner=True)
 
     st.divider()
 
@@ -4719,10 +4704,9 @@ def render_chat_view():
     last_assistant_msg_id = None
     for msg in reversed(messages_to_display):
         sender_value = msg.get("sender")
-        if sender_value not in (1, "user", "USER", "User"):
-            if not get_message_metadata(msg).get("paused"):
-                last_assistant_msg_id = msg.get("id")
-                break
+        if sender_value not in (1, "user", "USER", "User") and not get_message_metadata(msg).get("paused"):
+            last_assistant_msg_id = msg.get("id")
+            break
 
     for msg in messages_to_display:
         sender_value = msg.get("sender")
@@ -5848,48 +5832,45 @@ def render_planning_tab():
                 col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
 
                 with col1:
-                    if task_status == "pending":  # Pending
-                        if st.button(
-                            "Start",
-                            icon=":material/play_arrow:",
-                            key=f"start_{task_id}",
-                            width="stretch",
-                        ):
-                            result = update_task_plan(task_id, {"status": "in_progress"})
-                            if result:
-                                st.toast("Task started!", icon=":material/refresh:")
-                                st.rerun()
+                    if task_status == "pending" and st.button(  # Pending
+                        "Start",
+                        icon=":material/play_arrow:",
+                        key=f"start_{task_id}",
+                        width="stretch",
+                    ):
+                        result = update_task_plan(task_id, {"status": "in_progress"})
+                        if result:
+                            st.toast("Task started!", icon=":material/refresh:")
+                            st.rerun()
 
                 with col2:
                     if task_status in (
                         "pending",
                         "in_progress",
-                    ):  # Pending or In Progress
-                        if st.button(
-                            "Complete",
-                            key=f"complete_{task_id}",
-                            width="stretch",
-                        ):
-                            result = complete_task_plan(task_id)
-                            if result:
-                                st.toast("Task completed!", icon=":material/check_circle:")
-                                st.rerun()
+                    ) and st.button(  # Pending or In Progress
+                        "Complete",
+                        key=f"complete_{task_id}",
+                        width="stretch",
+                    ):
+                        result = complete_task_plan(task_id)
+                        if result:
+                            st.toast("Task completed!", icon=":material/check_circle:")
+                            st.rerun()
 
                 with col3:
                     if task_status in (
                         "pending",
                         "in_progress",
-                    ):  # Pending or In Progress
-                        if st.button(
-                            "Skip",
-                            icon=":material/skip_next:",
-                            key=f"skip_{task_id}",
-                            width="stretch",
-                        ):
-                            result = update_task_plan(task_id, {"status": "skipped"})
-                            if result:
-                                st.toast("Task skipped!", icon=":material/skip_next:")
-                                st.rerun()
+                    ) and st.button(  # Pending or In Progress
+                        "Skip",
+                        icon=":material/skip_next:",
+                        key=f"skip_{task_id}",
+                        width="stretch",
+                    ):
+                        result = update_task_plan(task_id, {"status": "skipped"})
+                        if result:
+                            st.toast("Task skipped!", icon=":material/skip_next:")
+                            st.rerun()
 
                 with col4:
                     if st.button("Delete", key=f"delete_{task_id}", width="stretch"):
@@ -6100,14 +6081,13 @@ def render_models_view() -> None:
             "Delete OpenAI key",
             width="stretch",
             disabled=openai_provider is None,
-        ):
-            if delete_provider("openai"):
-                st.session_state.openai_models = []
-                st.session_state.openai_models_last_fetch = None
-                st.session_state.openai_models_fetch_attempted = False
-                st.session_state.openai_models_fetch_error = None
-                st.toast("OpenAI key deleted", icon=":material/delete:")
-                st.rerun()
+        ) and delete_provider("openai"):
+            st.session_state.openai_models = []
+            st.session_state.openai_models_last_fetch = None
+            st.session_state.openai_models_fetch_attempted = False
+            st.session_state.openai_models_fetch_error = None
+            st.toast("OpenAI key deleted", icon=":material/delete:")
+            st.rerun()
 
     st.subheader("Available OpenAI models")
 

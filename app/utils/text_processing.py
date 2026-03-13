@@ -10,8 +10,8 @@ import re
 
 logger = logging.getLogger(__name__)
 
-import tiktoken
-from nltk.tokenize import sent_tokenize
+import tiktoken  # noqa: E402
+from nltk.tokenize import sent_tokenize  # noqa: E402
 
 
 def estimate_tokens(text: str) -> int:

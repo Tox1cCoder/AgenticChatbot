@@ -416,13 +416,14 @@ def extract_agent_execution_info(agent_response: dict[str, Any]) -> dict[str, An
                     tool_id = tool_call.get("id", "")
                     tool_result = None
                     for result_msg in messages:
-                        if hasattr(result_msg, "type") and result_msg.type == "tool":
-                            if (
-                                hasattr(result_msg, "tool_call_id")
-                                and result_msg.tool_call_id == tool_id
-                            ):
-                                tool_result = result_msg.content
-                                break
+                        if (
+                            hasattr(result_msg, "type")
+                            and result_msg.type == "tool"
+                            and hasattr(result_msg, "tool_call_id")
+                            and result_msg.tool_call_id == tool_id
+                        ):
+                            tool_result = result_msg.content
+                            break
 
                     result["tool_artifacts"].append(
                         {
@@ -523,9 +524,8 @@ def extract_content_from_result(result: Any) -> Any:
             return cleaned[0]
         return cleaned
 
-    if isinstance(result, dict):
-        if "type" in result and result.get("type") == "text" and "text" in result:
-            return result["text"]
+    if isinstance(result, dict) and "type" in result and result.get("type") == "text" and "text" in result:
+        return result["text"]
 
     return result
 

@@ -53,7 +53,7 @@ class ModelConfigUpdateRequest(RootModel[dict[str, AgentModelConfigPatch]]):
 @AppAutoInjector.auto_inject()
 async def get_model_config(
     model_config_service: ModelConfigService,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),  # noqa: B008
 ) -> ApiResponse[dict[str, dict[str, Any]]]:
     try:
         config = model_config_service.get_effective_model_config(current_user.id)
@@ -66,7 +66,7 @@ async def get_model_config(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve model config: {str(e)}",
-        )
+        ) from e
 
 
 @router.patch("", response_model=ApiResponse[dict[str, dict[str, Any]]])
@@ -74,7 +74,7 @@ async def get_model_config(
 async def patch_model_config(
     request: ModelConfigUpdateRequest,
     model_config_service: ModelConfigService,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),  # noqa: B008
 ) -> ApiResponse[dict[str, dict[str, Any]]]:
     try:
         updates = {
@@ -91,19 +91,19 @@ async def patch_model_config(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
-        )
+        ) from e
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update model config: {str(e)}",
-        )
+        ) from e
 
 
 @router.post("/reset", response_model=ApiResponse[dict[str, dict[str, Any]]])
 @AppAutoInjector.auto_inject()
 async def reset_model_config(
     model_config_service: ModelConfigService,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),  # noqa: B008
 ) -> ApiResponse[dict[str, dict[str, Any]]]:
     try:
         model_config_service.reset_configs(current_user.id)
@@ -117,4 +117,4 @@ async def reset_model_config(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to reset model config: {str(e)}",
-        )
+        ) from e

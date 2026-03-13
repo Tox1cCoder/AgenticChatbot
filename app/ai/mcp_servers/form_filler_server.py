@@ -7,10 +7,10 @@ current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from google import genai
-from mcp.server.fastmcp import FastMCP
+from google import genai  # noqa: E402
+from mcp.server.fastmcp import FastMCP  # noqa: E402
 
-from app.core.config import settings
+from app.core.config import settings  # noqa: E402
 
 mcp = FastMCP("FormFiller")
 

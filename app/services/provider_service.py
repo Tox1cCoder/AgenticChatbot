@@ -53,7 +53,7 @@ class ProviderService:
         except Exception as e:
             raise ValueError(
                 f"Invalid MODEL_ENCRYPTION_KEY format. Must be 32 url-safe base64-encoded bytes. Error: {e}"
-            )
+            ) from e
 
     def _encrypt_key(self, api_key: str) -> str:
         """
@@ -70,7 +70,7 @@ class ProviderService:
             return encrypted.decode()
         except Exception as e:
             logger.error(f"Failed to encrypt API key: {e}")
-            raise ValueError("Failed to encrypt API key")
+            raise ValueError("Failed to encrypt API key") from e
 
     def _decrypt_key(self, encrypted_key: str) -> str:
         """
@@ -88,12 +88,12 @@ class ProviderService:
         try:
             decrypted = self.cipher.decrypt(encrypted_key.encode())
             return decrypted.decode()
-        except InvalidToken:
+        except InvalidToken as e:
             logger.error("Failed to decrypt API key: Invalid encryption key or corrupted data")
-            raise ValueError("Failed to decrypt API key: Invalid encryption")
+            raise ValueError("Failed to decrypt API key: Invalid encryption") from e
         except Exception as e:
             logger.error(f"Failed to decrypt API key: {e}")
-            raise ValueError("Failed to decrypt API key")
+            raise ValueError("Failed to decrypt API key") from e
 
     def add_provider(
         self,
@@ -328,4 +328,4 @@ class ProviderService:
 
         except Exception as e:
             logger.error(f"Failed to fetch OpenAI models: {e}")
-            raise ValueError(f"Failed to fetch OpenAI models: {e}")
+            raise ValueError(f"Failed to fetch OpenAI models: {e}") from e

@@ -68,7 +68,7 @@ class ProviderValidationResponse(BaseModel):
 async def add_provider(
     request: ProviderAddRequest,
     provider_service: ProviderService,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),  # noqa: B008
 ) -> ApiResponse[ProviderResponse]:
     """
     Add or update an AI provider configuration.
@@ -107,19 +107,19 @@ async def add_provider(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
-        )
+        ) from e
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to add provider: {str(e)}",
-        )
+        ) from e
 
 
 @router.get("", response_model=ApiResponse[list[ProviderResponse]])
 @AppAutoInjector.auto_inject()
 async def list_providers(
     provider_service: ProviderService,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),  # noqa: B008
 ) -> ApiResponse[list[ProviderResponse]]:
     """
     List all provider configurations for the current user.
@@ -154,7 +154,7 @@ async def list_providers(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to list providers: {str(e)}",
-        )
+        ) from e
 
 
 @router.get("/{provider_type}", response_model=ApiResponse[ProviderResponse])
@@ -162,7 +162,7 @@ async def list_providers(
 async def get_provider(
     provider_type: str,
     provider_service: ProviderService,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),  # noqa: B008
 ) -> ApiResponse[ProviderResponse]:
     """
     Get a specific provider configuration.
@@ -201,7 +201,7 @@ async def get_provider(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get provider: {str(e)}",
-        )
+        ) from e
 
 
 @router.delete("/{provider_type}", response_model=ApiResponse[dict[str, str]])
@@ -209,7 +209,7 @@ async def get_provider(
 async def delete_provider(
     provider_type: str,
     provider_service: ProviderService,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),  # noqa: B008
 ) -> ApiResponse[dict[str, str]]:
     """
     Delete a provider configuration.
@@ -239,7 +239,7 @@ async def delete_provider(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete provider: {str(e)}",
-        )
+        ) from e
 
 
 @router.post("/{provider_type}/validate", response_model=ApiResponse[ProviderValidationResponse])
@@ -247,7 +247,7 @@ async def delete_provider(
 async def validate_provider(
     provider_type: str,
     provider_service: ProviderService,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),  # noqa: B008
 ) -> ApiResponse[ProviderValidationResponse]:
     """
     Validate provider credentials and fetch available models.
@@ -277,7 +277,7 @@ async def validate_provider(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to validate provider: {str(e)}",
-        )
+        ) from e
 
 
 @router.get("/{provider_type}/models", response_model=ApiResponse[list[dict[str, Any]]])
@@ -285,7 +285,7 @@ async def validate_provider(
 async def list_provider_models(
     provider_type: str,
     provider_service: ProviderService,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),  # noqa: B008
 ) -> ApiResponse[list[dict[str, Any]]]:
     """
     List available models from a provider.
@@ -318,4 +318,4 @@ async def list_provider_models(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to list models: {str(e)}",
-        )
+        ) from e

@@ -166,7 +166,7 @@ def process_document_task(
                 f"Retrying task {task_id} for document {document_id} "
                 f"(attempt {self.request.retries + 1}/{self.max_retries}) in {retry_delay}s"
             )
-            raise self.retry(exc=exc, countdown=retry_delay)
+            raise self.retry(exc=exc, countdown=retry_delay) from exc
 
         logger.error(
             f"Document {document_id} ('{filename}') failed after {self.max_retries} attempts"

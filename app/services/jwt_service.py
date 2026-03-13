@@ -54,13 +54,13 @@ class JwtService:
         try:
             payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
             return payload
-        except jwt.ExpiredSignatureError:
-            raise TokenExpiredException()
-        except jwt.InvalidTokenError:
+        except jwt.ExpiredSignatureError as e:
+            raise TokenExpiredException() from e
+        except jwt.InvalidTokenError as e:
             raise AuthenticationException(
                 detail="Invalid authentication credentials",
                 error_code="INVALID_CREDENTIALS",
-            )
+            ) from e
 
     def verify_refresh_token(self, token: str) -> dict:
         """Verify refresh token and ensure correct type"""

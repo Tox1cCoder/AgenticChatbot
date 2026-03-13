@@ -1,448 +1,540 @@
-# Planning Stack Remediation Plan
+# Deferred MCP Tool Discovery Overhaul Plan
+
+Date: 2026-03-13
+Status: Reviewed and adjusted — confirmed against codebase
 
 ## Summary
 
-This plan reflects the current codebase after removing the legacy plan-persistence path and dead execution flags from the planning stack.
+This plan overhauls the deferred MCP tool loading and `tool_search` flow so it is production-ready for large MCP inventories, stable under tool-name collisions, cheaper in tokens, and reliable at producing a final answer instead of looping on discovery.
 
-The system now uses canonical todo payloads as the primary representation for plan state. Manual task creation appends correctly, active-task lookup prefers `in_progress`, conversational todo sync no longer writes directly through the repository, and the lossy `Plan(Task(description))` persistence path has been removed.
+The redesign covers all relevant code paths:
 
-The remaining work is focused on production hardening: explicit lifecycle state, database invariants, race safety, tests, and a few non-planning security/performance gaps that were uncovered during review.
+- MCP manager and registry
+- MCP API/service schemas
+- tool catalog and search
+- deferred tool state and binding
+- tool execution
+- agent prompts and binding
+- LangGraph orchestration and terminal recovery
+- test coverage and telemetry
 
-## Scope
+## Goals
 
-In scope:
+1. Make tool identity unambiguous across servers, even when many servers expose the same tool name.
+2. Make `tool_search` useful for large MCP servers with dozens of tools.
+3. Reduce model-facing token cost of tool discovery responses.
+4. Prevent repeated `tool_search` loops from exhausting the budget without a user-facing answer.
+5. Remove legacy and redundant code paths that no longer match the main runtime flow.
+6. Keep the resulting design deterministic, debuggable, and safe to roll out.
 
-- planning agent prompts, routing, todo state, and execution semantics
-- task plan service, repository, schemas, and persistence invariants
-- message-service planning integration and HITL resume consistency
-- planning-related API semantics
-- Streamlit planning UI alignment in `demo.py`
-- targeted security/performance fixes discovered during review when they directly affect planning workflows
+## Non-Goals
 
-Out of scope:
+- Introducing embedding-based semantic search for tools in the first pass.
+- Redesigning unrelated agent behaviors outside MCP discovery/execution integration.
+- UI polish beyond changes required to support the new MCP identity and discovery model.
 
-- multi-plan support per conversation
-- rich dependency graphs between tasks
-- drag-and-drop task ordering UI
-- replacing the single-string task description with a structured schema
+## Current-State Problems
 
-## Current State
+### 1. Tool identity is name-only in the runtime
 
-### Completed in the current branch
+Current runtime state, binding, and execution collapse tools to bare `tool_name`. This causes collisions, replacements, and ambiguity across servers.
 
-1. Manual task creation now appends instead of restarting at `task_order = 0`.
-2. Active-task lookup now prefers `in_progress`, then `pending`.
-3. The dead `auto_execute_plan` flag has been removed.
-4. Streamed assistant responses no longer auto-complete tasks without an explicit planning action.
-5. Conversational plan sync and API-driven plan sync now converge on canonical todos instead of the old lossy `plan` payload.
-6. Direct repository writes from `MessageService` to task plans have been removed.
-7. The legacy `TaskPlanFactory` and `Plan` / `Task` planning payload layer have been removed.
-8. `SET_TODOS` no longer blindly resets the active index to zero; it now respects `in_progress`.
-9. HITL resume now resyncs todo state when the resumed planning turn completes with updated todos.
-10. The document task-status endpoint no longer returns raw Celery result payloads or tracebacks.
-11. CORS configuration now respects configured origins and avoids wildcard-plus-credentials misconfiguration.
+`ConversationToolSet.loaded` in `deferred_tool_state.py` is a `dict[str, LoadedTool]` keyed by bare `tool_name` with explicit replacement semantics: adding a tool silently overwrites any prior binding for that name. `mcp_integration.py` strips `server:` prefixes at load time (via `tool.name.split(":", 1)[-1]`), so the server identity is permanently discarded from the tool object name.
 
-### Remaining Findings
+Collision detection already partially exists: `mcp_tool_catalog.py` tracks `_colliding_names` and `catalog.is_ambiguous(tool_name)` is guarded in `tool_search_tool.py` to skip autoloading ambiguous tools. The gap is at the **execution layer** — `tool_execution.py` builds `{t.name: t for t in tools}` with no ambiguity check; it silently picks whichever tool landed in the map last.
 
-#### R1. Plan lifecycle is still implicit instead of persisted
+Impacted areas:
 
-Evidence:
+- `app/ai/deferred_tool_state.py`
+- `app/ai/deferred_tool_binding.py`
+- `app/ai/tool_execution.py`
+- `app/ai/agents/base_agent.py`
+- `app/ai/mcp_integration.py`
+- `app/services/mcp_service.py`
+- `app/api/mcp.py`
 
-- conversation state still only stores `planning_mode_enabled`
-- there is still no persisted distinction between draft review, ready-to-execute, executing, paused, and completed
+### 2. `tool_search` is too verbose and partly redundant
 
-Impact:
+The current output includes fields that are either derivable or debug-oriented for the model:
 
-- review-before-execute remains convention-driven rather than state-driven
-- routing and UI behavior still depend on prompt heuristics instead of explicit lifecycle state
+- `display_name` is derivable from `server_name` + `tool_name`
+- `call_as` duplicates `tool_name`
+- `generation`, `latency_ms`, and `unavailable_servers` are runtime/debug metadata
+- pretty-printed JSON wastes tokens: both `tool_search_tool.py:259` (module-level tool) and `:302` (inside `create_tool_search_tool`) call `json.dumps(result, indent=2)` — both must be changed to compact separators
 
-#### R2. Database invariants are still incomplete
+### 3. Large MCP servers are not browseable
 
-Evidence:
+The current interface supports only:
 
-- `task_plans` still has only a non-unique index on `(conversation_id, task_order)`
-- no migration exists to resequence duplicate `task_order` rows
+- `query`
+- `top_k`
+- `server_name`
 
-Impact:
+It does not support:
 
-- concurrent writes can still create duplicate visible ordering
-- correctness depends on service behavior rather than an enforced database invariant
+- pagination
+- server exploration mode
+- server summaries or capability grouping
+- stable cursors for large result sets
 
-#### R3. `create_task_plan` / `modify_task_plan` race safety is still missing
+### 4. Search ranking is too shallow
 
-Evidence:
+Catalog ranking is mostly exact match, substring match, and token overlap. It does not account for:
 
-- `create_task_plan()` still checks for existing tasks before deciding whether to call `modify_task_plan()`
-- the existence check and subsequent write are not protected by a database constraint or lock
+- server-level capabilities
+- tool aliasing
+- fuzzy near-matches
+- ambiguity-aware expansion
+- large inventory navigation
 
-Impact:
+### 5. Autoloading is too aggressive
 
-- two concurrent create requests can still both conclude that no plan exists and proceed independently
+With defaults of `top_k=5`, `autoload_top_k=5`, and `max_loaded_tools_per_conversation=8`, a few exploratory searches can churn the loaded set before the model even executes a tool.
 
-#### R4. Detailed task descriptions are still prompt-guided, not enforced
+### 6. Orchestration can end without a final answer
 
-Evidence:
+The graph can hit iteration limits after many `tool_search` calls and terminate with a tool-call-only state or an empty assistant message rather than forcing one last synthesis pass.
 
-- the planning prompt asks for actionable tasks, but there is no validator or regeneration gate for terse output
+### 7. There are divergent and likely legacy search-agent paths
 
-Impact:
+The graph’s main runtime uses `BaseAgent.invoke_model_with_history`, while `SearchAgent` still has its own older prompt-building and streaming paths that are not aligned with the primary execution path.
 
-- task quality still depends too heavily on model behavior
-- low-detail plans remain possible in production
+## Target Architecture
 
-#### R5. Test coverage is still effectively absent
+## 1. Canonical Tool Identity
 
-Evidence:
+Introduce a canonical MCP tool reference used everywhere in runtime logic.
 
-- there is still no `tests/` directory in the repository
-- `python -m py_compile` succeeds for touched files, but there is no regression suite
+Proposed model:
 
-Impact:
+```text
+QualifiedToolRef
+- server_name: str
+- tool_name: str
+- qualified_id: str            # canonical storage key, e.g. "github::search_issues"
+- callable_name: str           # bound tool name exposed to the model
+- schema_fingerprint: str
+```
 
-- planning changes are still not release-safe
-- concurrency, routing, HITL, and ordering regressions are likely to recur
+Note: `ToolReference(tool_name, server_name)` already exists in `mcp_tool_catalog.py` and is imported by `deferred_tool_state.py` and `tool_search_tool.py`. `QualifiedToolRef` replaces it — it is not a new parallel type. All import sites (`deferred_tool_state.py`, `tool_search_tool.py`, `deferred_tool_binding.py`, `tool_execution.py`) must be updated together.
 
-#### R6. Document upload remains memory- and broker-heavy
+Note: `schema_fingerprint` is already computed in `ToolDescriptor` (sha256[:16] of description + schema JSON). Lift it from `ToolDescriptor` into `QualifiedToolRef` — do not introduce a second computation.
 
-Evidence:
+### Decisions
 
-- upload requests still read the full file into memory before validation
-- the API still sends raw file bytes through Celery instead of handing off a staged file path or object-store reference
+- Storage, loading, and execution should key by `qualified_id`, not bare `tool_name`.
+- Bound tools should expose a unique `callable_name` to the model.
+- Bare-name lookup should only be allowed when the name is globally unique.
+- Ambiguous bare-name lookup should fail fast rather than silently picking the first match.
+- Phase 1 collision work is scoped to the **execution layer**: the catalog already detects collisions via `_colliding_names` and `is_ambiguous()`. The remaining gap is `tool_execution.py` silently building `{t.name: t}` maps with no ambiguity guard.
 
-Impact:
+### Recommended callable-name strategy
 
-- large uploads multiply memory pressure across the API process, Redis broker, and worker
-- this is avoidable operational risk
+Use deterministic, model-safe qualified names for bound MCP tools:
 
-#### R7. Task-status ownership is still only partially hardened
+```text
+mcp__{server_name}__{tool_name}
+```
 
-Evidence:
+This removes runtime ambiguity and lets the model call the discovered tool directly.
 
-- `/documents/task/{task_id}` now requires authentication and returns sanitized output
-- however, there is still no persisted mapping from Celery task ID to document ownership
+The `"::"` separator is already in use as the **config-layer qualifier** for pinned tool specs (e.g. `"github::search_issues"` in `mcp_tool_search_pinned_tools`). These two formats serve distinct purposes and must coexist:
 
-Impact:
+- `qualified_id` = internal storage key: `"server::tool_name"` (aligns with existing config convention)
+- `callable_name` = model-visible bound name: `"mcp__server__tool_name"` (double underscore, safe for all model providers)
 
-- authenticated users can no longer see tracebacks or raw internal payloads
-- but the endpoint still cannot prove that a given task ID belongs to the caller
+Do not conflate the two. Do not change the config format.
 
-## Product Requirements
+### Required code changes
 
-### Functional requirements
+- Define `QualifiedToolRef` as the shared identity type. It should live in `app/ai/mcp_tool_catalog.py` (same module as the existing `ToolReference` it replaces) or a dedicated `app/ai/mcp_types.py` if cross-module cleanliness is preferred. Choose one location and update all importers.
+- Replace `ToolReference` with `QualifiedToolRef` at all import sites.
+- Replace name-only maps and sets in deferred loading state and binding.
+- Add a lightweight bound-tool adapter that wraps the real MCP tool while exposing `callable_name`.
+- Update MCP manager and service methods to accept qualified references.
 
-1. Creating a plan yields ordered tasks with detailed descriptions.
-2. Modifying a plan preserves existing task identity and status unless the user explicitly changes them.
-3. Manual task creation on an existing plan appends to the end.
-4. Users can review and edit a plan before execution begins.
-5. Explicit execution requests route deterministically to the planning agent when a plan exists.
-6. Execution continues task-by-task until completion or a valid pause condition.
-7. The active task is always the first `in_progress` task, otherwise the first `pending` task.
-8. Task completion is driven only by explicit planning actions.
-9. UI and API behavior are consistent.
+## 2. Catalog and Discovery Redesign
 
-### Non-functional requirements
+Keep a single discovery tool, but make it support both search and exploration. This minimizes schema count while making large inventories navigable.
 
-1. Ordering and plan updates are transactionally safe.
-2. Task IDs remain stable across ordinary plan edits.
-3. Database constraints enforce core ordering invariants.
-4. Observability exists for plan creation, mutation, execution, pause reasons, and sync errors.
-5. New behavior is covered by unit, service, API, and HITL tests.
-6. Large document uploads do not require duplicating full payloads through broker memory.
+### New `tool_search` modes
 
-## Proposed Design
+Recommended input model:
 
-### 1. Persist explicit plan lifecycle state
+- `mode="search"`: ranked tool retrieval for a natural-language task
+- `mode="browse"`: paginated listing of tools, optionally scoped to a server
+- `mode="servers"`: list server summaries and capability hints
 
-Add a conversation-level plan lifecycle field with values such as:
+Additional inputs:
 
-- `draft`
-- `ready`
-- `executing`
-- `paused`
-- `completed`
+- `query: str | None`
+- `server_name: str | None`
+- `cursor: str | None`
+- `limit: int | None`
 
-Why:
+### Catalog improvements
 
-- `planning_mode_enabled` is too coarse
-- lifecycle should drive routing, UI, and execution entry
-- review-before-execute should be encoded in state, not only in prompt wording
+Augment the catalog with:
 
-### 2. Enforce database ordering invariants
+- server description and transport metadata
+- tool args keywords
+- normalized aliases and token variants
+- collision metadata
+- optional per-server capability summaries
 
-Add:
+Improve ranking with:
 
-- a unique constraint on `(conversation_id, task_order)`
-- a migration that resequences existing duplicates deterministically using `task_order`, `created_at`, then `id`
+- exact callable-name match
+- exact tool-name match
+- server-name and server-description boosts
+- token overlap over name, description, args, and server summary
+- lightweight fuzzy match for near spellings
+- ambiguity-aware expansion when top results are close
 
-Why:
+### Browse behavior
 
-- the service layer should not be the only protection against duplicate ordering
-- the current append/sync logic should be backed by hard database guarantees
+`browse` mode should support:
 
-### 3. Make create/modify race-safe
+- stable cursor-based pagination
+- browsing all tools within a server
+- browsing all servers with counts
+- query-within-server behavior
 
-Implement one of:
+This is the minimum needed to make a 50-tool MCP server usable.
 
-- a database lock scoped to conversation plan writes
-- an upsert-style plan-state row that serializes plan creation
-- a uniqueness-backed retry strategy
+## 3. Compact Model-Facing Search Response
 
-Why:
+Replace the current verbose pretty JSON with a compact schema designed for the model.
 
-- the current existence-check pattern is still vulnerable to concurrent creates
+### Proposed response shape
 
-### 4. Add a task-description quality gate
+```json
+{
+  "mode": "search",
+  "query": "github issues",
+  "server": null,
+  "results": [
+    {
+      "name": "mcp__github__search_issues",
+      "server": "github",
+      "origin": "search_issues",
+      "summary": "Search issues in a repository",
+      "args": "repo*, state, labels",
+      "loaded": true,
+      "confidence": "high"
+    }
+  ],
+  "more": true,
+  "next_cursor": "..."
+}
+```
 
-Keep the single `description` field, but require each generated task to include:
+### Response rules
 
-- the action to perform
-- the scope or target area
-- the expected deliverable or verification signal
+- `name` is the exact callable tool name.
+- Drop `display_name`.
+- Drop `call_as`.
+- Keep `origin` only if the callable name is qualified and differs from the source tool name.
+- Replace `autoloaded` with per-result `loaded`.
+- Remove debug-only fields from model-facing output.
+- Serialize with compact JSON separators instead of pretty indentation.
 
-Implementation:
+### Token budget targets
 
-- strengthen planning prompts with concrete examples
-- validate generated tasks for minimum detail
-- regenerate or reject overly terse tasks
+- 5-result response should stay under roughly 250 model tokens in a representative case.
+- Server browsing responses should return only what is needed to choose the next action.
 
-### 5. Finish ownership hardening for background document tasks
+## 4. Smarter `top_k` and Autoload Policy
 
-Add a persisted `processing_task_id` (or equivalent) to `Document`, then:
+Do not treat `top_k=5` as a fixed system behavior. Use it as a default display size, not as a hard-coded strategy.
 
-- store the Celery task ID at enqueue time
-- resolve `/documents/task/{task_id}` back to a document
-- enforce document ownership before returning status
+### Recommended policy
 
-Why:
+- Default result count: 5
+- High-confidence exact match: allow returning 1 to 3 results
+- Ambiguous or flat score distribution: return up to 8 to 10 results
+- Browse mode: page size default 10
 
-- authentication alone is not enough for object-level authorization
+### Autoload policy
 
-### 6. Rework upload handoff for large files
+- Autoload at most 1 to 2 tools by default
+- Autoload only when confidence is above a threshold
+- Do not autoload broad browse responses
+- Never autoload all top 5 by default
 
-Replace the current raw-bytes queue payload with:
+### Deferred state policy
 
-- staged temp-file handoff on shared storage, or
-- object-store upload plus worker-side retrieval
+- Increase loaded-tool capacity only if needed after alias-based identity is in place
+- Eviction should operate on qualified IDs
+- Prefer preserving actually executed tools over merely autoloaded tools
 
-Why:
+## 5. Deferred Binding and Execution Redesign
 
-- this removes redundant copies of large files
-- it reduces pressure on the API process and Redis
+### Binding changes
 
----
+- Bind internal tools as today
+- Bind `tool_search`
+- Bind pinned MCP tools through qualified aliases
+- Bind loaded deferred tools through qualified aliases
 
-## Implementation Progress
+### Execution changes
 
-### Workstream A — Plan lifecycle state & routing ✅
+- Tool maps must use `callable_name`, not bare `tool.name`
+- Deferred loaded-tool state must store `qualified_id`
+- MCP execution should resolve by qualified reference
+- Ambiguous legacy lookups should return explicit errors
 
-**Status:** COMPLETE (migrations applied, DB at `h8i9j0k1l2m3`)
+### API changes
 
-Files modified:
-- `app/models/enums.py` — added `PlanLifecycle` enum (`draft|ready|executing|paused|completed`) and `PlanLifecycleType = String(20)` (plain VARCHAR, not a PG enum type)
-- `app/models/conversation.py` — added `plan_lifecycle` column
-- `app/schemas/conversation.py` — added `plan_lifecycle` field to `ConversationUpdate`, `ConversationRead`, `ConversationInDB`
-- `app/schemas/task_plan.py` — added `plan_lifecycle` field to `PlanningStatusResponse`
-- `app/services/task_plan_service.py` — added `_transition_lifecycle()`, updated `create_task_plan`, `modify_task_plan`, `sync_todos_from_agent` (opt-in lifecycle param), and `get_planning_status`
-- `app/ai/schemas.py` — added `plan_lifecycle: NotRequired[Optional[str]]` to `GraphState`
-- `app/ai/graph.py` — `_build_initial_state` sets `planning_phase = "executing"` when `plan_lifecycle == "executing"`, propagated through `execute` / `execute_stream`
-- `app/services/ai_service.py` — `plan_lifecycle` propagated through `process_message`, `generate_bot_response`, `generate_bot_response_stream`
-- `app/services/message_service.py` — `plan_lifecycle` extracted from conversation, propagated through `create_message`, `create_message_stream`, `_prepare_planning_context`, `_run_plan_execution_loop`
-- `app/alembic/versions/g7h8i9j0k1l2_add_plan_lifecycle_to_conversations.py` — migration: `plan_lifecycle VARCHAR(20) NULL`
+The MCP API surface is currently ambiguous for tool details and execution.
 
-**Design decisions:**
-- Plain `VARCHAR(20)` instead of a PostgreSQL `ENUM` type — avoids a new PG type object and allows future enum extension without DDL changes.
-- `sync_todos_from_agent` lifecycle parameter is opt-in (`None` = don't change). A streaming mid-execution sync cannot accidentally overwrite `executing → draft`.
-- `plan_lifecycle == "executing"` is the trigger that forces `planning_phase = "executing"` in `_build_initial_state`, skipping the LLM planning loop entirely.
+Replace or extend current endpoints so they support qualified lookup:
 
----
+- `GET /mcp/tools/{qualified_id}` or
+- `GET /mcp/servers/{server_name}/tools/{tool_name}`
+- `POST /mcp/tools/{qualified_id}/execute` or
+- `POST /mcp/servers/{server_name}/tools/{tool_name}/execute`
 
-### Workstream B — DB hardening ✅
+The service layer must mirror the same identity model.
 
-**Status:** COMPLETE (migrations applied, DB at `h8i9j0k1l2m3`)
+## 6. Orchestration Safeguards
 
-Files modified:
-- `app/models/task_plan.py` — replaced `Index("idx_task_plan_conversation_order", ...)` with `UniqueConstraint("conversation_id", "task_order", name="uq_task_plan_conversation_order", deferrable=True, initially="DEFERRED")`
-- `app/services/task_plan_service.py` — added `SELECT FOR UPDATE` lock on `Conversation` row at the start of `_sync_todo_snapshot` to serialise concurrent writes per conversation
-- `app/alembic/versions/h8i9j0k1l2m3_task_plan_unique_order.py` — migration: dedup-resequences duplicate `task_order` rows using `ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY task_order, created_at, id)`, drops old non-unique index, adds unique constraint
+The graph must stop discovery loops from ending in silence.
 
-**Design decisions:**
-- `DEFERRABLE INITIALLY DEFERRED` constraint is used so in-flight bulk upserts within a single transaction can temporarily violate ordering without hitting the constraint mid-transaction.
-- Row-level `SELECT FOR UPDATE` on `Conversation` (rather than a PostgreSQL advisory lock) is used because it requires no additional schema and works within the existing SQLAlchemy session pattern.
+### New controls
 
----
+- track consecutive `tool_search` calls per turn
+- track duplicate `tool_search` query fingerprints per turn
+- detect repeated search with no new loaded tools and no better results
+- cap consecutive empty or duplicate searches
 
-### Workstream C — Task quality ✅
+### Forced finalization path
 
-**Status:** COMPLETE
+Add a final-answer path for budget exhaustion and discovery failure:
 
-Files modified:
-- `app/ai/agents/planning_agent.py` — added `_MIN_DESC_LEN = 20`, `_ACTION_VERB_RE` (regex for ~50 common action verbs), `_validate_task_descriptions()` returning `(index, reason)` pairs for under-specified tasks; added quality gate in `_generate_or_modify_plan` that rejects tasks failing the validator before persisting
-- `app/ai/prompts.py` — strengthened `PLANNING_EXECUTION_PROMPT` with explicit 20-character minimum, action-verb requirement, and bad/good examples
-- `app/ai/graph.py` — `_approval_node` and the planning-tools HITL gate both set `context["pause_reason"] = "awaiting_approval"` before the `interrupt()` call; `execute()` extracts `pause_reason` from final context and surfaces it in `agent_response.metadata`
+- route to a dedicated finalization node instead of raw `end`
+- invoke the selected agent one last time with tools disabled
+- require it to either:
+  - answer from gathered evidence, or
+  - explicitly say no suitable tool was found / more detail is needed
 
-**Design decisions:**
-- Quality validation runs on the canonicalised list after `_canonicalize_todos`, so the validator sees the same data the DB will receive.
-- `pause_reason` is surfaced in `metadata` rather than a dedicated response field, keeping the `AgentResponse` schema backwards-compatible.
+### Budget tuning
 
----
+Add dedicated search/discovery controls instead of relying only on the global ReAct limit:
 
-### Workstream D — Document task ownership ✅
+- `search_agent_max_iterations`
+- `max_tool_search_calls_per_turn`
+- `max_duplicate_tool_search_calls`
+- `max_empty_tool_search_results`
 
-**Status:** COMPLETE (migration applied, DB at `i9j0k1l2m3n4`)
+Keep global `react_agent_max_iterations` as a final guardrail.
 
-Files modified:
-- `app/models/document.py` — added `processing_task_id = Column(String(255), nullable=True)` with index `idx_document_processing_task_id`
-- `app/schemas/document.py` — added `processing_task_id: Optional[str] = None` to `DocumentUpdate`
-- `app/repositories/document.py` — added `get_by_processing_task_id(task_id)` query method
-- `app/services/document_processing_service.py` — `start_processing_task` writes the file to a deterministic temp path via `_staged_temp_path()` before enqueuing; passes the path string (not bytes) to Celery
-- `app/workers/document_processor.py` — `process_document_task` accepts `temp_file_path: str` instead of `file_content: bytes`; reads from the pre-staged path; cleans it up in `finally`
-- `app/api/documents.py` — `/documents/upload` persists `processing_task_id` after task enqueue; `/documents/task/{task_id}` looks up document by task_id and enforces ownership via `DocumentValidationUtils`
-- `app/alembic/versions/i9j0k1l2m3n4_document_processing_task_id.py` — migration: `processing_task_id VARCHAR(255) NULL` + index
+## 7. Cleanup of Legacy and Redundant Code
 
-**Design decisions:**
-- Staged file handoff (service writes → worker reads path) removes large byte payloads from the Redis task queue and prevents memory spikes on the message broker.
-- Ownership check on `/documents/task/{task_id}` is a best-effort guard: if the task_id is unknown (race between enqueue and DB write), the endpoint falls through gracefully rather than 403-ing.
+### Remove or consolidate
 
----
+- legacy `SearchAgent` prompt/build methods if graph no longer uses them
+- `build_search_prompt` if it becomes unused after unification
+- redundant `tool_search` output fields
+- name-based dedupe helpers that break qualified identity
+- compatibility branches that silently pick the first matching tool
 
-### Workstream E — Test coverage ✅
+### Cleanup criteria
 
-**Status:** COMPLETE (39/39 tests passing)
+- one discovery path
+- one tool identity model
+- one binding model
+- one execution resolution path
+- no silent ambiguity resolution
 
-Test files created:
-- `tests/conftest.py` — shared fixtures (async event loop, mock database session)
-- `tests/ai/test_todo_actions.py` — 17 tests for `handle_todo_action`: set/add/complete/start/update/remove/unknown actions
-- `tests/api/test_documents.py` — 5 tests: upload persists `processing_task_id`, task-status ownership enforcement, unknown task_id graceful handling, staged file write
-- `tests/api/test_task_plans.py` — 4 tests: `PlanningStatusResponse` includes `plan_lifecycle`, `None` for new conversations, all lifecycle enum values valid, `create_task_plan` transitions to `draft`
-- `tests/services/test_task_plan_service.py` — 10 tests: `_transition_lifecycle` persists & swallows errors, `sync_todos_from_agent` lifecycle opt-in, `get_planning_status` lifecycle field, `_sync_todo_snapshot` upsert/delete/dedup semantics
-- `tests/services/test_message_service.py` — 3 tests: `_prepare_planning_context` propagates `plan_lifecycle`, `_run_plan_execution_loop` forwards lifecycle to AI service
+## Implementation Phases
 
-**Design decisions:**
-- All tests are pure unit tests with no live DB or network: all external dependencies are mocked.
-- `TaskPlanRead.model_validate` with `alias_generator=to_camel` accesses attributes via camelCase aliases on mock objects; end-of-snapshot re-fetch is mocked to return `[]` to avoid pydantic validation of `MagicMock` fields.
-- `pytest-asyncio` with `asyncio_mode=auto` handles all `async def` tests.
+## Phase 1: Foundation and Identity
 
+Deliverables:
 
-## Implementation Workstreams
+- add `QualifiedToolRef` and deterministic callable aliasing
+- replace existing `ToolReference` with `QualifiedToolRef` and update all import sites (`deferred_tool_state.py`, `tool_search_tool.py`, `deferred_tool_binding.py`, `tool_execution.py`)
+- update MCP manager lookup and execution to support qualified refs
+- add execution-layer ambiguity guard in `tool_execution.py` (bare-name lookup fails loudly when multiple servers expose the same tool name)
+- update service and API schemas for qualified lookup
+- add bound-tool adapter abstraction
 
-### Workstream A: Lifecycle state and routing
+Files expected to change:
 
-Files:
+- `app/ai/mcp_integration.py`
+- `app/ai/mcp_tool_catalog.py` (or new `app/ai/mcp_types.py` if `QualifiedToolRef` is extracted to a shared types module)
+- `app/ai/deferred_tool_state.py`
+- `app/ai/deferred_tool_binding.py`
+- `app/ai/tool_execution.py`
+- `app/ai/tool_search_tool.py`
+- `app/services/mcp_service.py`
+- `app/schemas/mcp.py`
+- `app/api/mcp.py`
 
-- `app/models/conversation.py`
-- `app/schemas/conversation.py`
-- `app/ai/prompts.py`
+## Phase 2: Catalog and Search Tool V2
+
+Deliverables:
+
+- redesign `tool_search` input modes and output schema
+- add server summaries and browse pagination
+- improve ranking and ambiguity handling
+- compact JSON serialization — change `json.dumps(result, indent=2)` at `tool_search_tool.py:259` (module-level `tool_search`) **and** `:302` (inside `create_tool_search_tool`) to `json.dumps(result, separators=(",", ":"))`
+- dynamic result count and conservative autoloading
+
+Files expected to change:
+
+- `app/ai/tool_search_tool.py`
+- `app/ai/mcp_tool_catalog.py`
+- `app/core/config.py`
+
+## Phase 3: Deferred Runtime and Orchestration Hardening
+
+Deliverables:
+
+- qualified-ID deferred state
+- duplicate search suppression
+- consecutive search loop guardrails
+- dedicated finalization node / forced synthesis path — this is a **new LangGraph node** added to the `StateGraph` in `graph.py`, not an extension of the existing `auto_continue` Python loop. The `auto_continue` loop re-invokes the whole graph on `GraphRecursionError` (up to 5 rounds); the finalization node is a within-graph terminal path that forces a synthesis pass when discovery budget is exhausted mid-turn, before the recursion limit is hit.
+- terminal recovery fixes for empty content + unresolved tool-call states
+
+Files expected to change:
+
+- `app/ai/deferred_tool_state.py`
+- `app/ai/deferred_tool_binding.py`
+- `app/ai/tool_execution.py`
 - `app/ai/graph.py`
-- `app/services/message_service.py`
+- `app/ai/prompts.py`
+- `app/ai/agents/base_agent.py`
+
+## Phase 4: Cleanup and Compatibility Removal
+
+Deliverables:
+
+- remove obsolete search-agent methods if unused
+- remove deprecated bare-name-only code paths
+- remove redundant tool-search response fields and helpers
+- update `demo.py` MCP API calls that break on qualified endpoint changes — `demo.py` is a pure Streamlit REST client (no direct backend imports) calling endpoints including `GET /mcp/tools/{tool_name}` and `POST /mcp/tools/{tool_name}/execute`. If Phase 1 introduces qualified path segments (`GET /mcp/servers/{server}/tools/{tool_name}` and `POST /mcp/servers/{server}/tools/{tool_name}/execute`), these call sites in `demo.py` must be updated. Audit all `make_api_request` calls in `demo.py` that include a tool name in the path.
+
+Files expected to change:
+
+- `app/ai/agents/search_agent.py`
+- `app/ai/prompts.py`
 - `demo.py`
+- any now-unused compatibility helpers found during implementation
 
-Tasks:
+## Acceptance Criteria
 
-1. Add persisted plan lifecycle state.
-2. Route execution based on lifecycle state rather than prompt-only inference.
-3. Reflect lifecycle state in planning status APIs and UI.
+1. Two tools with the same original name from different servers can be discovered, loaded, and executed in the same conversation without collision.
+2. A server with 50 tools can be explored through paginated browsing and/or server overview without relying on lucky query wording.
+3. `tool_search` no longer emits redundant response fields for the model.
+4. Repeated identical `tool_search` calls are suppressed or explicitly surfaced as duplicates.
+5. The workflow produces a final user-facing answer when discovery exhausts the budget.
+6. Discovery responses remain compact enough to avoid becoming the new token bottleneck.
+7. Legacy ambiguous bare-name execution paths are removed or fail loudly.
 
-Acceptance criteria:
+## Test Plan
 
-- execution entry is deterministic when a plan exists
-- UI can distinguish draft, ready, executing, paused, and completed
+No tests were run in this planning pass.
 
-### Workstream B: Database hardening
+### Unit tests
 
-Files:
+- catalog ranking and pagination
+- qualified-ID parsing and normalization
+- collision detection and ambiguous-lookup failure
+- deferred state keyed by qualified ID
+- autoload threshold and churn behavior
+- compact response serialization
 
-- `app/models/task_plan.py`
-- `app/alembic/versions/...`
-- `app/services/task_plan_service.py`
+### Integration tests
 
-Tasks:
+- `tool_search` search mode with autoload
+- `tool_search` browse mode with cursor paging
+- execution of two same-name tools from different servers
+- MCP API details/execute by qualified identity
+- graph forced finalization after repeated discovery loops
+- terminal recovery when the last assistant message contains tool calls but no text
 
-1. Add the unique constraint on `(conversation_id, task_order)`.
-2. Write the deterministic backfill migration.
-3. Add race-safe create semantics for plans.
+### Regression tests
 
-Acceptance criteria:
+- large single-server inventory with 50+ fake tools
+- repeated duplicate `tool_search` loop
+- no-result search loop
+- pinned tool behavior under qualified aliases
+- non-deferred mode behavior if still supported
 
-- duplicate task orders cannot be inserted after migration
-- concurrent create requests for the same conversation do not produce duplicate plans
+## Telemetry and Observability
 
-### Workstream C: Task quality and execution polish
+Add counters and structured logs for:
 
-Files:
+- `tool_search_calls_per_turn`
+- `duplicate_tool_search_calls`
+- `tool_search_zero_result_count`
+- `tool_search_autoload_count`
+- `loaded_tool_evictions`
+- `finalization_forced`
+- `ambiguous_bare_name_lookup_attempts`
+- average response token size for `tool_search`
 
-- `app/ai/agents/planning_agent.py`
-- `app/ai/prompts.py`
-- `app/ai/graph.py`
+These metrics are needed to verify the redesign actually reduces loops and token cost.
 
-Tasks:
+## Rollout Strategy
 
-1. Add a task-description quality validator.
-2. Regenerate or reject under-specified tasks.
-3. Surface explicit pause reasons for clarification, approval, failure, and budget stops.
+Recommended production rollout:
 
-Acceptance criteria:
+1. Land the qualified identity layer behind a feature flag.
+2. Land the new `tool_search` contract and orchestration safeguards behind the same flag.
+3. Run compatibility logging for ambiguous bare-name lookups and old endpoint usage.
+4. Switch the new flow to default once the tests and telemetry are clean.
+5. Remove legacy code and old response handling in a follow-up cleanup pass.
 
-- generated tasks are consistently detailed
-- execution stop reasons are visible and machine-readable
+Suggested temporary flags:
 
-### Workstream D: Document task ownership and upload performance
+- `mcp_tool_search_v2_enabled`
+- `mcp_qualified_tool_identity_enabled`
+- `mcp_tool_search_duplicate_guard_enabled`
 
-Files:
+## Risks and Mitigations
 
-- `app/models/document.py`
-- `app/schemas/document.py`
-- `app/repositories/document.py`
-- `app/api/documents.py`
-- `app/services/document_processing_service.py`
-- `app/workers/document_processor.py`
-- `app/alembic/versions/...`
+### Risk: alias renaming breaks assumptions in downstream code
 
-Tasks:
+Mitigation:
 
-1. Persist background task IDs on documents.
-2. Enforce ownership on task-status lookup.
-3. Replace raw-byte Celery payloads with staged file handoff.
+- isolate aliasing in a wrapper adapter
+- keep source tool metadata available on the wrapper
+- migrate all runtime maps together in one phase
 
-Acceptance criteria:
+### Risk: response schema change breaks consumers
 
-- task-status lookups are ownership-safe
-- uploads do not serialize full document payloads through Redis
+Mitigation:
 
-### Workstream E: Test coverage
+- version the response contract during rollout
+- update demo/admin clients in the same branch
 
-Files:
+### Risk: browse mode increases tool complexity
 
-- `tests/ai/test_todo_actions.py`
-- `tests/services/test_task_plan_service.py`
-- `tests/services/test_message_service.py`
-- `tests/api/test_task_plans.py`
-- `tests/api/test_documents.py`
+Mitigation:
 
-Tasks:
+- keep one discovery tool with explicit modes
+- keep output compact and cursor-driven
 
-1. Add unit tests for todo state transitions.
-2. Add service tests for append, diff sync, active-task semantics, and concurrent create protection.
-3. Add API tests for planning status, manual append, and document task-status authorization.
-4. Add HITL resume tests for planning-state consistency.
+### Risk: orchestration guardrails become too restrictive
 
-Acceptance criteria:
+Mitigation:
 
-- planning regressions are covered at unit, service, and API levels
-- document task-status authorization is covered by tests
+- make thresholds configurable
+- emit telemetry for suppressed searches and forced finalization
 
-## Release Gates
+## Recommended First Implementation Order
 
-- migration succeeds on production-like data
-- no duplicate `task_order` rows remain
-- concurrent create is race-safe
-- lifecycle state is reflected consistently in API and UI
-- no task completes implicitly
-- background task-status lookup is ownership-safe
-- large uploads no longer queue raw file bytes through Redis
-- regression tests pass
+1. Introduce qualified tool identity and alias-wrapped binding.
+2. Fix ambiguous MCP API/service/manager lookup paths.
+3. Redesign `tool_search` output to remove redundant fields and minify payloads.
+4. Add server overview and browse pagination.
+5. Reduce autoload aggressiveness and make result count dynamic.
+6. Add duplicate search guards and forced finalization.
+7. Remove old search-agent and bare-name compatibility code.
 
-## Notes
+## Deliverable Definition of Done
 
-- Keep the single-string task `description`; improve quality via validation rather than schema expansion.
-- Preserve incremental todo-sync semantics; avoid reintroducing lossy plan wrappers.
-- Do not reintroduce dead execution flags or duplicate persistence paths.
+The overhaul is complete when the runtime can reliably discover and call tools from large multi-server MCP installations, the model-facing discovery payload is compact and unambiguous, repeated search loops are controlled, and the system always returns a meaningful final assistant response even when tool discovery fails.

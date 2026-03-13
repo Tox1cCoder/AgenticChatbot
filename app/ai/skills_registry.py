@@ -10,6 +10,7 @@ This module provides the core SkillsRegistry that:
 Skills are additive Markdown instruction sets appended to agent system prompts.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -289,10 +290,8 @@ class SkillsRegistry:
         except Exception as exc:
             logger.error("Failed to write skills config: %s", exc)
             # Clean up temp file if it exists
-            try:
+            with contextlib.suppress(Exception):
                 tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
 
 
 # ------------------------------------------------------------------

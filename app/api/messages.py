@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import AsyncGenerator, Callable
@@ -74,10 +75,8 @@ def _internal_event_stream_response(
             yield f"data: {json.dumps(error_event)}\n\n"
         finally:
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
-            except (asyncio.CancelledError, Exception):
-                pass
 
     return StreamingResponse(
         event_generator(),
@@ -230,7 +229,7 @@ async def get_user_messages(
     message_service: IMessageService,
     user_id: UUID,
     pagination: MessagePaginationParams,
-    include: list[str] = Query(default=[], description="Array of includes e.g. ['feedback']"),
+    include: list[str] = Query(default=[], description="Array of includes e.g. ['feedback']"),  # noqa: B008
 ) -> PaginatedApiResponse[MessageRead]:
     """Get all messages for authenticated user with pagination"""
     include_feedback = "feedback" in include

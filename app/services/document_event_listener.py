@@ -1,3 +1,4 @@
+import contextlib
 import logging
 
 from app.core.events import DocumentEvent, DocumentEventData, EventListener
@@ -47,7 +48,5 @@ class DocumentEventLogger(EventListener):
                     extra={"event": str(event_type), **msg_ctx},
                 )
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 self.logger.exception("Failed while logging document event")
-            except Exception:
-                pass

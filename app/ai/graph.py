@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -159,9 +160,7 @@ class MultiAgentWorkflow:
             return True
 
         # Hard-coded fallback: always suppress the summarize node regardless of tags.
-        if metadata.get("langgraph_node") == "summarize":
-            return True
-        return False
+        return metadata.get("langgraph_node") == "summarize"
 
     @staticmethod
     def _consume_stream_text_chunk(
@@ -511,7 +510,7 @@ class MultiAgentWorkflow:
 
         # Dynamic tool routing map based on agent registry
         # Include ALL agents (including rag_agent) so hand_off delegation works.
-        tool_routing_map = {agent_name: agent_name for agent_name in self.agents.keys()}
+        tool_routing_map = {agent_name: agent_name for agent_name in self.agents}
         tool_routing_map["end"] = END
 
         workflow.add_conditional_edges(
@@ -2172,15 +2171,14 @@ class MultiAgentWorkflow:
 
         # Check for further interrupts
         final_snapshot = await self.graph.aget_state(config)
-        if final_snapshot.next and len(final_snapshot.next) > 0:
-            if "approval" in final_snapshot.next:
-                interrupt_response = self._build_interrupt_agent_response(
-                    final_snapshot,
-                    thread_id,
-                    final_snapshot.values.get("conversation_id"),
-                )
-                if interrupt_response:
-                    return interrupt_response
+        if final_snapshot.next and len(final_snapshot.next) > 0 and "approval" in final_snapshot.next:
+            interrupt_response = self._build_interrupt_agent_response(
+                final_snapshot,
+                thread_id,
+                final_snapshot.values.get("conversation_id"),
+            )
+            if interrupt_response:
+                return interrupt_response
 
         response = self._recover_terminal_response(result)
         if not response:
@@ -3139,7 +3137,7 @@ class MultiAgentWorkflow:
                                                 if tool_call["args"]
                                                 else {}
                                             )
-                                        except:
+                                        except Exception:
                                             args = tool_call["args"]
 
                                         yield {
@@ -3454,10 +3452,8 @@ class MultiAgentWorkflow:
     async def cleanup(self):
         for agent in self._cleanup_agents:
             if hasattr(agent, "cleanup"):
-                try:
+                with contextlib.suppress(Exception):
                     await agent.cleanup()
-                except Exception:
-                    pass
 
 
 def create_workflow(

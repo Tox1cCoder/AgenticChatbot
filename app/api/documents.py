@@ -1,3 +1,4 @@
+import contextlib
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -36,8 +37,8 @@ async def upload_document(
     document_service: IDocumentService,
     document_processing_service: DocumentProcessingService,
     current_user_id: UUID,
-    file: UploadFile = File(...),
-    conversation_id: UUID = Form(...),
+    file: UploadFile = File(...),  # noqa: B008
+    conversation_id: UUID = Form(...),  # noqa: B008
 ) -> ApiResponse[dict[str, Any]]:
     """Upload a document and start background processing.
 
@@ -81,7 +82,7 @@ async def upload_document(
     if task_id:
         await document_service.set_processing_task_id(document.id, task_id)
 
-    try:
+    with contextlib.suppress(Exception):
         await get_event_bus().emit(
             DocumentEvent.UPLOAD_STARTED,
             DocumentEventData(
@@ -93,8 +94,6 @@ async def upload_document(
                 metadata={"task_id": task_info.get("task_id")},
             ),
         )
-    except Exception:
-        pass
 
     return ApiResponse(
         success=True,

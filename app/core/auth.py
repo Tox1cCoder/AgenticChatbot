@@ -33,8 +33,8 @@ def get_user_service():
 
 
 async def get_current_user_id(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    jwt_service: JwtService = Depends(get_jwt_service),
+    credentials: HTTPAuthorizationCredentials = Depends(security),  # noqa: B008
+    jwt_service: JwtService = Depends(get_jwt_service),  # noqa: B008
 ) -> UUID:
     """
     Dependency to get current authenticated user ID from JWT token
@@ -43,18 +43,18 @@ async def get_current_user_id(
     try:
         user_id_str = get_user_id_from_token(token, jwt_service)
         return UUID(user_id_str)
-    except jwt.ExpiredSignatureError:
-        raise TokenExpiredException()
-    except ValueError:
+    except jwt.ExpiredSignatureError as e:
+        raise TokenExpiredException() from e
+    except ValueError as e:
         raise AuthenticationException(
             detail="Invalid user ID format in token",
             error_code="INVALID_USER_ID_FORMAT",
-        )
+        ) from e
 
 
 async def get_refresh_token_user_id(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    jwt_service: JwtService = Depends(get_jwt_service),
+    credentials: HTTPAuthorizationCredentials = Depends(security),  # noqa: B008
+    jwt_service: JwtService = Depends(get_jwt_service),  # noqa: B008
 ) -> UUID:
     """
     Dependency to get user ID from refresh token
@@ -72,13 +72,13 @@ async def get_refresh_token_user_id(
             )
 
         return UUID(user_id_str)
-    except jwt.ExpiredSignatureError:
-        raise TokenExpiredException()
-    except ValueError:
+    except jwt.ExpiredSignatureError as e:
+        raise TokenExpiredException() from e
+    except ValueError as e:
         raise AuthenticationException(
             detail="Invalid user ID format in refresh token",
             error_code="INVALID_USER_ID_FORMAT",
-        )
+        ) from e
 
 
 def require_user_ownership(resource_user_id: UUID, authenticated_user_id: UUID) -> None:
@@ -93,8 +93,8 @@ def require_user_ownership(resource_user_id: UUID, authenticated_user_id: UUID) 
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    jwt_service: JwtService = Depends(get_jwt_service),
+    credentials: HTTPAuthorizationCredentials = Depends(security),  # noqa: B008
+    jwt_service: JwtService = Depends(get_jwt_service),  # noqa: B008
 ) -> User:
     """
     Dependency to get current authenticated User object from JWT token.
@@ -132,10 +132,10 @@ async def get_current_user(
         )
         return user
 
-    except jwt.ExpiredSignatureError:
-        raise TokenExpiredException()
-    except ValueError:
+    except jwt.ExpiredSignatureError as e:
+        raise TokenExpiredException() from e
+    except ValueError as e:
         raise AuthenticationException(
             detail="Invalid user ID format in token",
             error_code="INVALID_USER_ID_FORMAT",
-        )
+        ) from e

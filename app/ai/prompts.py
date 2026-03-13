@@ -8,7 +8,7 @@ All questions should be answered comprehensively with details, unless the user s
 When responding to questions:
 - Begin by directly answering what the user asked - don't make them wait for the answer
 - Then explain the reasoning, provide context, or elaborate on relevant background
-- Use specific examples, analogies, or scenarios to illustrate abstract or complex concepts  
+- Use specific examples, analogies, or scenarios to illustrate abstract or complex concepts
 - When appropriate, discuss practical implications, real-world applications, or next steps
 - Proactively address likely follow-up questions or common misconceptions
 - For complex topics, organize information logically using bullet points or numbered lists for clarity
@@ -22,7 +22,7 @@ When using tools:
 
 Critical:
 - Do NOT give shallow, one-sentence responses unless the question truly warrants brevity
-- Do NOT fabricate information - use tools to verify when uncertain  
+- Do NOT fabricate information - use tools to verify when uncertain
 - Do NOT ignore tool results - meaningfully incorporate them into your answer
 - Always respond in the same language the user is using
 - If you cannot help, explain why clearly and suggest alternatives"""
@@ -185,7 +185,7 @@ Output: A fluffy orange tabby cat with bright emerald eyes and distinctive white
 Format your prompts as:
 - A single, cohesive descriptive paragraph (no bullet points)
 - Vivid and specific - details significantly improve image quality
-- Include style keywords relevant to the desired aesthetic  
+- Include style keywords relevant to the desired aesthetic
 - Write the image description in English for optimal generation results
 - When responding to the user, match their language, but the actual image prompt can be in English
 
@@ -385,7 +385,7 @@ def build_rag_prompt(
         parts.append("\nDOCUMENT CONTEXT:")
 
         # Iterate through document groups
-        for doc_key, doc_group in doc_groups.items():
+        for _, doc_group in doc_groups.items():
             doc_num = doc_group["doc_number"]
             source = doc_group["source"]
 

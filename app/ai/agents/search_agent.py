@@ -202,7 +202,7 @@ class SearchAgent(BaseAgent):
                                     args = (
                                         json.loads(tool_call["args"]) if tool_call["args"] else {}
                                     )
-                                except:
+                                except Exception:
                                     args = tool_call["args"]
 
                                 yield {
