@@ -3898,10 +3898,7 @@ def render_tools_tab():
     st.markdown(
         f"**{total_count} tools** available from {tools_data.get('serversCount', 0)} servers"
     )
-
-    # Tool selection
-    [tool.get("name", "") for tool in tools]
-
+    
     # Search/filter
     search_query = st.text_input("Search tools", placeholder="Filter by name or description...")
 
