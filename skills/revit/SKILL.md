@@ -1,10 +1,9 @@
 ---
-skill: AutoCAD TNF Layout
+name: AutoCAD TNF Layout
 description: |
   Draw TNF grids, foundations, columns, and beams in AutoCAD using MCP tool calls.
   This file is written as an "agentic" Claude skill: it defines tool behavior, strict
   action formats, and required agent constraints.
-version: 1.0
 ---
 
 # AutoCAD TNF Layout Skill (Agentic)

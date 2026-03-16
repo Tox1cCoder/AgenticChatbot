@@ -9,6 +9,9 @@
     "playwright-cli": {
       "enabled": true
     },
+    "AutoCAD TNF Layout": {
+      "enabled": true
+    },
     "take100-timesheet": {
       "enabled": true
     }
