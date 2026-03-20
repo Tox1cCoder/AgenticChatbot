@@ -65,7 +65,7 @@
       "enabled": true
     },
     "mcp": {
-      "enabled": true,
+      "enabled": false,
       "transport": "streamable_http",
       "url": "http://192.168.2.182:8100/mcp"
     },

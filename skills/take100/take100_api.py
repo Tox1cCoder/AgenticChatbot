@@ -32,6 +32,7 @@ import argparse
 import calendar
 import contextlib
 import json
+import os
 import re
 import sys
 import urllib.parse
@@ -47,8 +48,7 @@ if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
 
 
 BASE_URL = "https://take100dot.com"
-EMAIL = "thaind@v-takeuchi.vn"
-PASSWORD = "Gm123123@"
+SKILL_MD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SKILL.md")
 
 # Default shift work
 DEFAULT_SHIFT_WORK_ID = "C001"  # 08:00-17:00
@@ -59,8 +59,10 @@ DEFAULT_TIME_OUT = "17:00"
 class Take100Client:
     """HTTP client for take100dot.com with session-based authentication."""
 
-    def __init__(self):
+    def __init__(self, email: str, password: str):
         self.session = requests.Session()
+        self.email = email
+        self.password = password
         self._authenticated = False
 
     def login(self) -> bool:
@@ -76,8 +78,8 @@ class Take100Client:
             csrf_token = token_match.group(1)
             login_data = {
                 "_token": csrf_token,
-                "email": EMAIL,
-                "password": PASSWORD,
+                "email": self.email,
+                "password": self.password,
                 "remember": "on",
             }
 
@@ -335,6 +337,24 @@ class Take100Client:
         return r.json()
 
 
+def load_credentials_from_skill_md(path: str = SKILL_MD_PATH) -> tuple[str | None, str | None]:
+    """Read credentials from SKILL.md 'Credentials' line if present."""
+    with contextlib.suppress(OSError, UnicodeDecodeError):
+        with open(path, encoding="utf-8") as f:
+            md = f.read()
+
+        # Expected format in SKILL.md:
+        # - Email: `user@example.com` | Password: `secret`
+        m = re.search(
+            r"Email:\s*`?([^`|\r\n]+)`?\s*\|\s*Password:\s*`?([^`\r\n]+)`?",
+            md,
+        )
+        if m:
+            return m.group(1).strip(), m.group(2).strip()
+
+    return None, None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Take100 Timesheet API Client")
     parser.add_argument(
@@ -355,6 +375,16 @@ def main():
     parser.add_argument("--application-id", type=int, help="Application ID (for delete)")
     parser.add_argument("--message", default="", help="Optional message")
     parser.add_argument(
+        "--email",
+        default=None,
+        help="Login email. Precedence: --email > TAKE100_EMAIL env > SKILL.md Credentials.",
+    )
+    parser.add_argument(
+        "--password",
+        default=None,
+        help="Login password. Precedence: --password > TAKE100_PASSWORD env > SKILL.md Credentials.",
+    )
+    parser.add_argument(
         "--time-in",
         default=None,
         help="Override time_in, e.g. '08:06' when late (default: 08:00)",
@@ -367,7 +397,27 @@ def main():
 
     args = parser.parse_args()
 
-    client = Take100Client()
+    email = args.email or os.getenv("TAKE100_EMAIL")
+    password = args.password or os.getenv("TAKE100_PASSWORD")
+
+    if not email or not password:
+        skill_email, skill_password = load_credentials_from_skill_md()
+        email = email or skill_email
+        password = password or skill_password
+
+    if not email or not password:
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "error": "Missing credentials. Provide --email/--password, "
+                    "set TAKE100_EMAIL/TAKE100_PASSWORD, or update skills/take100/SKILL.md Credentials.",
+                }
+            )
+        )
+        sys.exit(1)
+
+    client = Take100Client(email=email, password=password)
 
     # Login
     if not client.login():
@@ -401,8 +451,6 @@ def main():
             if args.entries_file:
                 # Read entries from file — avoids Windows terminal encoding issues with Unicode
                 # utf-8-sig strips the BOM that PowerShell's Set-Content -Encoding utf8 adds
-                import os
-
                 with open(args.entries_file, encoding="utf-8-sig") as f:
                     entries = json.load(f)
                 # Auto-cleanup: delete the temp file after reading so it isn't left on disk

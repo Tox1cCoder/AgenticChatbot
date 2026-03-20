@@ -7,6 +7,8 @@ description: Automates entering daily working time schedules on take100dot.com v
 
 ## Credentials
 - Email: `thaind@v-takeuchi.vn` | Password: `Gm123123@`
+- `take100_api.py` reads this line automatically if `--email/--password` and env vars are not provided.
+- Credential precedence: `--email/--password` > `TAKE100_EMAIL`/`TAKE100_PASSWORD` > this `Credentials` line.
 
 ## Default Rules
 - **Morning warm-up** (08:00–08:05): `"Tập thể dục, báo cáo buổi sáng"`, project=**K202201**, work_item_id=**122**
