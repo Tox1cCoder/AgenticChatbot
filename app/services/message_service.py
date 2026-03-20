@@ -675,14 +675,7 @@ class MessageService(IMessageService):
 
                     elif event_type == "tool":
                         inflight.touch()
-                        yield {
-                            "type": "tool",
-                            "name": event.get("name"),
-                            "status": event.get("status"),
-                            "tool_call_id": event.get("tool_call_id"),
-                            "args": event.get("args"),
-                            "result": event.get("result"),
-                        }
+                        yield dict(event)
 
                     elif event_type == "interrupt":
                         # Yield interrupt event - workflow paused for human approval
@@ -1104,14 +1097,7 @@ class MessageService(IMessageService):
                     yield {"type": "thinking", "content": event.get("content", "")}
 
                 elif event_type == "tool":
-                    yield {
-                        "type": "tool",
-                        "name": event.get("name"),
-                        "status": event.get("status"),
-                        "tool_call_id": event.get("tool_call_id"),
-                        "args": event.get("args"),
-                        "result": event.get("result"),
-                    }
+                    yield dict(event)
 
                 elif event_type == "continuation_start" or event_type == "node_complete":
                     yield event

@@ -1,4 +1,5 @@
 import asyncio
+from time import perf_counter
 from typing import Any
 from uuid import UUID
 
@@ -24,6 +25,7 @@ from ..core.response_constants import (
 from ..repositories.conversation import ConversationRepository
 from ..repositories.document import DocumentRepository
 from ..utils.text_processing import sanitize_persona
+from .stream_events import build_canonical_tool_event
 
 
 class AIService:
@@ -182,6 +184,7 @@ class AIService:
 
     async def _map_workflow_stream(self, workflow_stream):
         final_response = None
+        tool_started_at: dict[str, float] = {}
 
         async for event in workflow_stream:
             event_type = event.get("type")
@@ -206,25 +209,31 @@ class AIService:
                 tool_name = event.get("name", "unknown")
                 tool_call_id = event.get("tool_call_id")
                 tool_args = event.get("args")
-                yield {
-                    "type": "tool",
-                    "name": tool_name,
-                    "status": "start",
-                    "tool_call_id": tool_call_id,
-                    "args": make_json_safe(tool_args),
-                }
+                if tool_call_id is not None:
+                    tool_started_at[str(tool_call_id)] = perf_counter()
+                yield build_canonical_tool_event(
+                    phase="start",
+                    name=tool_name,
+                    tool_call_id=tool_call_id,
+                    args=make_json_safe(tool_args),
+                )
 
             elif event_type == "tool_end":
                 tool_name = event.get("name", "unknown")
                 tool_call_id = event.get("tool_call_id")
-                result = event.get("result")
-                yield {
-                    "type": "tool",
-                    "name": tool_name,
-                    "status": "end",
-                    "tool_call_id": tool_call_id,
-                    "result": make_json_safe(result),
-                }
+                result = make_json_safe(event.get("result"))
+                duration_ms = None
+                if tool_call_id is not None:
+                    started_at = tool_started_at.pop(str(tool_call_id), None)
+                    if started_at is not None:
+                        duration_ms = int((perf_counter() - started_at) * 1000)
+                yield build_canonical_tool_event(
+                    phase="end",
+                    name=tool_name,
+                    tool_call_id=tool_call_id,
+                    result=result,
+                    duration_ms=duration_ms,
+                )
 
             elif event_type == "complete":
                 final_response = event.get("response")

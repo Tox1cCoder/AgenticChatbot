@@ -16,6 +16,7 @@ from dateutil import parser
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from app.services.stream_events import infer_tool_state, normalize_tool_phase
 from upload_support import delete_document, get_uploaded_documents, upload_document
 
 API_BASE_URL = "http://localhost:8000"
@@ -24,6 +25,7 @@ STREAM_REQUEST_TIMEOUT = (10, 900)
 
 _MAX_PERSONA_LENGTH = 8000
 _MAX_IMAGE_ATTACHMENTS = 4
+TRACE_PREVIEW_CHAR_LIMIT = 500
 _PLACEHOLDER_CONVERSATION_TITLES = {
     "",
     "new conversation",
@@ -666,6 +668,121 @@ APP_STYLE = """
         color: #1f2937;
     }
 
+    .trace-section-title {
+        margin: 0.35rem 0 0.75rem 0;
+        color: #1d4ed8;
+        font-size: 0.76rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .trace-text-label {
+        margin-bottom: 0.4rem;
+        color: #1e3a8a;
+        font-size: 0.82rem;
+        font-weight: 600;
+    }
+
+    .trace-tool-card {
+        margin: 0.8rem 0 1rem 0;
+        padding: 0.85rem 0.95rem;
+        border: 1px solid #dbeafe;
+        border-radius: 14px;
+        background:
+            radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 42%),
+            linear-gradient(180deg, rgba(248, 250, 252, 0.95), rgba(239, 246, 255, 0.9));
+    }
+
+    .trace-tool-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+    }
+
+    .trace-tool-title {
+        color: #0f172a;
+        font-size: 0.96rem;
+        font-weight: 600;
+    }
+
+    .trace-status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        border-radius: 999px;
+        padding: 0.28rem 0.65rem;
+        border: 1px solid transparent;
+        font-size: 0.76rem;
+        font-weight: 700;
+        line-height: 1;
+        white-space: nowrap;
+    }
+
+    .trace-status-running {
+        color: #1d4ed8;
+        background: rgba(59, 130, 246, 0.12);
+        border-color: rgba(59, 130, 246, 0.22);
+    }
+
+    .trace-status-completed {
+        color: #047857;
+        background: rgba(16, 185, 129, 0.12);
+        border-color: rgba(16, 185, 129, 0.24);
+    }
+
+    .trace-status-error {
+        color: #b91c1c;
+        background: rgba(239, 68, 68, 0.12);
+        border-color: rgba(239, 68, 68, 0.24);
+    }
+
+    .trace-status-rejected {
+        color: #b45309;
+        background: rgba(245, 158, 11, 0.15);
+        border-color: rgba(245, 158, 11, 0.28);
+    }
+
+    .trace-status-unknown {
+        color: #475569;
+        background: rgba(148, 163, 184, 0.16);
+        border-color: rgba(148, 163, 184, 0.28);
+    }
+
+    .trace-preview-label {
+        margin: 0.8rem 0 0.35rem 0;
+        color: #64748b;
+        font-size: 0.74rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .trace-preview {
+        padding: 0.7rem 0.8rem;
+        border: 1px solid #dbeafe;
+        border-radius: 10px;
+        background: rgba(239, 246, 255, 0.9);
+    }
+
+    .trace-preview pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: #1e293b;
+        font-size: 0.84rem;
+        line-height: 1.55;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+
+    .trace-note {
+        margin-top: 0.7rem;
+        color: #475569;
+        font-size: 0.84rem;
+    }
+
     /* Collapsed thinking expander styles */
     .thinking-expander-header {
         display: flex;
@@ -1133,6 +1250,9 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "tool_execution_result": lambda: None,
     "selected_chunk_info": lambda: None,
     "chunk_preview_dialog_key": lambda: False,
+    "stream_trace_items": list,
+    "stream_tool_index": dict,
+    "stream_trace_expanded": lambda: False,
     # Provider/model UI state
     "openai_models": list,
     "openai_models_last_fetch": lambda: None,
@@ -1479,6 +1599,9 @@ def _clear_inflight_state() -> None:
     st.session_state.stream_partial_text = ""
     st.session_state.stream_partial_thinking = ""
     st.session_state.stream_selected_agent = None
+    st.session_state.stream_trace_items = []
+    st.session_state.stream_tool_index = {}
+    st.session_state.stream_trace_expanded = False
 
 
 def _handle_stop_rerun(conversation_id: str) -> None:
@@ -2931,6 +3054,506 @@ def extract_interrupt_message(interrupt_payload: Any) -> str | None:
     return None
 
 
+def _ensure_stream_trace_state() -> None:
+    st.session_state.setdefault("stream_trace_items", [])
+    st.session_state.setdefault("stream_tool_index", {})
+    st.session_state.setdefault("stream_trace_expanded", False)
+
+
+def _reset_stream_trace_state(expanded: bool = True) -> None:
+    _ensure_stream_trace_state()
+    st.session_state.stream_trace_items = []
+    st.session_state.stream_tool_index = {}
+    st.session_state.stream_trace_expanded = expanded
+
+
+def _rebuild_stream_tool_index(trace_items: list[dict[str, Any]]) -> dict[str, int]:
+    tool_index: dict[str, int] = {}
+    for index, item in enumerate(trace_items):
+        if item.get("kind") != "tool":
+            continue
+        tool_call_id = item.get("tool_call_id")
+        if tool_call_id:
+            tool_index[str(tool_call_id)] = index
+    return tool_index
+
+
+def _payload_contains_data_url(payload: Any) -> bool:
+    pending = [payload]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, dict):
+            pending.extend(current.values())
+            continue
+        if isinstance(current, list):
+            pending.extend(current)
+            continue
+        if isinstance(current, (bytes, bytearray)):
+            try:
+                candidate = current[:128].decode("utf-8", errors="replace").strip()
+            except Exception:
+                candidate = ""
+            if candidate.startswith("data:") and ";base64," in candidate:
+                return True
+            continue
+        if isinstance(current, str):
+            stripped = current.strip()
+            if stripped.startswith("data:") and ";base64," in stripped:
+                return True
+    return False
+
+
+def _truncate_text_preview(text: str, max_chars: int) -> tuple[str, bool]:
+    if len(text) <= max_chars:
+        return text, False
+    return f"{text[:max_chars].rstrip()}...", True
+
+
+def _build_json_preview(payload: Any, max_chars: int) -> tuple[str, bool]:
+    encoder = json.JSONEncoder(indent=2, ensure_ascii=False, default=str)
+    pieces: list[str] = []
+    collected = 0
+
+    for fragment in encoder.iterencode(payload):
+        remaining = max_chars - collected
+        if remaining <= 0:
+            return "".join(pieces).rstrip() + "...", True
+        if len(fragment) > remaining:
+            pieces.append(fragment[:remaining])
+            return "".join(pieces).rstrip() + "...", True
+        pieces.append(fragment)
+        collected += len(fragment)
+
+    return "".join(pieces), False
+
+
+def _build_trace_payload_display(
+    payload: Any,
+    max_chars: int = TRACE_PREVIEW_CHAR_LIMIT,
+) -> dict[str, Any]:
+    if payload is None:
+        return {
+            "preview": "",
+            "language": "text",
+            "truncated": False,
+            "omitted": False,
+        }
+
+    if _payload_contains_data_url(payload):
+        return {
+            "preview": "Binary/data payload omitted from preview.",
+            "language": "text",
+            "truncated": False,
+            "omitted": True,
+        }
+
+    if isinstance(payload, (dict, list)):
+        preview, truncated = _build_json_preview(payload, max_chars)
+        language = "json"
+    elif isinstance(payload, (bytes, bytearray)):
+        preview, truncated = _truncate_text_preview(
+            payload[: max_chars + 1].decode("utf-8", errors="replace"),
+            max_chars,
+        )
+        language = "text"
+    else:
+        preview, truncated = _truncate_text_preview(str(payload), max_chars)
+        language = "text"
+
+    return {
+        "preview": preview,
+        "language": language,
+        "truncated": truncated,
+        "omitted": False,
+    }
+
+
+def _render_trace_preview_block(label: str, payload: Any, full_label: str) -> None:
+    display = _build_trace_payload_display(payload)
+    preview = display.get("preview")
+    if not isinstance(preview, str) or not preview:
+        return
+
+    st.markdown(
+        f'<div class="trace-preview-label">{html.escape(label)}</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div class="trace-preview"><pre>{html.escape(preview)}</pre></div>',
+        unsafe_allow_html=True,
+    )
+
+    if display.get("omitted"):
+        st.caption("Full payload omitted from the UI because it appears to be a binary/data URL.")
+        return
+
+    if display.get("truncated"):
+        with st.expander(full_label, expanded=False):
+            if isinstance(payload, (dict, list)):
+                render_tool_result_payload(payload, use_expander=False)
+            else:
+                full_text = (
+                    payload.decode("utf-8", errors="replace")
+                    if isinstance(payload, (bytes, bytearray))
+                    else str(payload)
+                )
+                st.code(full_text, language=str(display["language"]))
+
+
+def _trace_status_meta(state: str | None) -> tuple[str, str, str]:
+    normalized = str(state or "unknown").strip().lower()
+    if normalized == "running":
+        return "Running", "hourglass_top", "running"
+    if normalized == "error":
+        return "Error", "error", "error"
+    if normalized == "rejected":
+        return "Rejected", "block", "rejected"
+    if normalized == "completed":
+        return "Completed", "check_circle", "completed"
+    return "Unknown", "help", "unknown"
+
+
+def _render_trace_text_block(
+    content: str | None,
+    *,
+    label: str | None = None,
+    live: bool = False,
+) -> None:
+    if not isinstance(content, str) or not content.strip():
+        return
+
+    header_html = ""
+    if live:
+        header_html = """
+        <div class="thinking-header">
+            <span class="thinking-indicator">
+                Thinking
+                <span class="thinking-dots">
+                    <span class="thinking-dot"></span>
+                    <span class="thinking-dot"></span>
+                    <span class="thinking-dot"></span>
+                </span>
+            </span>
+        </div>
+        """
+        rendered_content = re.sub(
+            r"\*\*(.*?)\*\*",
+            r"<strong>\1</strong>",
+            html.escape(content),
+        )
+        body_html = f'<div class="thinking-content">{rendered_content}</div>'
+    elif label:
+        header_html = f'<div class="trace-text-label">{html.escape(label)}</div>'
+        body_html = (
+            '<div class="thinking-content-rendered">'
+            f"{sanitize_message_content(content)}"
+            "</div>"
+        )
+    else:
+        body_html = (
+            '<div class="thinking-content-rendered">'
+            f"{sanitize_message_content(content)}"
+            "</div>"
+        )
+
+    st.markdown(
+        f'<div class="thinking-container">{header_html}'
+        f"{body_html}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _build_tool_trace_items_from_artifacts(
+    tool_artifacts: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(tool_artifacts, list):
+        return []
+
+    trace_items: list[dict[str, Any]] = []
+    for index, artifact in enumerate(tool_artifacts, start=1):
+        if not isinstance(artifact, dict):
+            continue
+
+        raw_status = str(artifact.get("status") or "").strip().lower()
+        if raw_status == "rejected":
+            state = "rejected"
+        elif raw_status in {"error", "failed"} or artifact.get("error") not in (None, ""):
+            state = "error"
+        elif raw_status in {"success", "completed"}:
+            state = "completed"
+        elif raw_status == "running":
+            state = "running"
+        else:
+            state = "unknown"
+
+        execution_time = artifact.get("execution_time")
+        duration_ms = (
+            int(float(execution_time) * 1000)
+            if isinstance(execution_time, (int, float)) and execution_time >= 0
+            else None
+        )
+
+        trace_items.append(
+            {
+                "kind": "tool",
+                "tool_call_id": artifact.get("tool_call_id") or f"artifact_{index}",
+                "name": artifact.get("tool", "unknown_tool"),
+                "phase": "end" if state != "running" else "start",
+                "state": state,
+                "args": artifact.get("args"),
+                "result": artifact.get("output"),
+                "error": artifact.get("error"),
+                "hint": artifact.get("hint"),
+                "duration_ms": duration_ms,
+            }
+        )
+
+    return trace_items
+
+
+def _render_trace_tool_card(tool_item: dict[str, Any], index: int) -> None:
+    tool_name = str(tool_item.get("name") or "unknown_tool")
+    badge_label, icon_name, badge_class = _trace_status_meta(tool_item.get("state"))
+
+    st.markdown(
+        f"""
+        <div class="trace-tool-card">
+            <div class="trace-tool-header">
+                <div class="trace-tool-title">[{index}] {html.escape(tool_name)}</div>
+                <span class="trace-status-pill trace-status-{badge_class}">
+                    <span class="material-symbols-outlined" aria-hidden="true">{icon_name}</span>
+                    {html.escape(badge_label)}
+                </span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    duration_ms = tool_item.get("duration_ms")
+    if isinstance(duration_ms, (int, float)) and duration_ms >= 0:
+        st.caption(f"Execution time: {float(duration_ms) / 1000:.2f}s")
+
+    args = tool_item.get("args")
+    if args not in (None, {}, []):
+        _render_trace_preview_block(
+            "Input Preview",
+            args,
+            f"Full input for {tool_name}",
+        )
+
+    result = tool_item.get("result")
+    if result not in (None, ""):
+        _render_trace_preview_block(
+            "Result Preview",
+            result,
+            f"Full output for {tool_name}",
+        )
+    elif str(tool_item.get("state") or "").lower() == "running":
+        st.markdown(
+            '<div class="trace-note">Waiting for tool output...</div>',
+            unsafe_allow_html=True,
+        )
+
+    error_message = tool_item.get("error")
+    if isinstance(error_message, str) and error_message.strip():
+        st.error(error_message.strip())
+
+    hint = tool_item.get("hint")
+    if isinstance(hint, str) and hint.strip():
+        st.info(hint.strip())
+
+
+def render_trace_panel(
+    *,
+    thinking_content: str | None = None,
+    reasoning_summary: str | None = None,
+    tool_items: list[dict[str, Any]] | None = None,
+    expanded: bool = False,
+    live: bool = False,
+) -> None:
+    normalized_tools = [item for item in tool_items or [] if isinstance(item, dict)]
+    if not any(
+        [
+            isinstance(thinking_content, str) and thinking_content.strip(),
+            isinstance(reasoning_summary, str) and reasoning_summary.strip(),
+            normalized_tools,
+        ]
+    ):
+        return
+
+    with st.expander("Thought Process", expanded=expanded):
+        if isinstance(reasoning_summary, str) and reasoning_summary.strip() or (
+            isinstance(thinking_content, str) and thinking_content.strip()
+        ):
+            st.markdown('<div class="trace-section-title">Thinking</div>', unsafe_allow_html=True)
+            if isinstance(reasoning_summary, str) and reasoning_summary.strip():
+                _render_trace_text_block(reasoning_summary, label="Reasoning Summary")
+            if isinstance(thinking_content, str) and thinking_content.strip():
+                thinking_label = None if live else "Thinking Summary"
+                _render_trace_text_block(
+                    thinking_content,
+                    label=thinking_label,
+                    live=live,
+                )
+
+        if normalized_tools:
+            st.markdown(
+                '<div class="trace-section-title">Tool Activity</div>',
+                unsafe_allow_html=True,
+            )
+            for index, tool_item in enumerate(normalized_tools, start=1):
+                _render_trace_tool_card(tool_item, index)
+
+
+def render_message_trace(message_metadata: dict[str, Any], expanded: bool = False) -> None:
+    if not isinstance(message_metadata, dict):
+        return
+
+    render_trace_panel(
+        thinking_content=message_metadata.get("thinking_summary"),
+        reasoning_summary=message_metadata.get("reasoning_summary"),
+        tool_items=_build_tool_trace_items_from_artifacts(message_metadata.get("tool_artifacts")),
+        expanded=expanded,
+        live=False,
+    )
+
+
+def _upsert_stream_thinking_trace(content: str) -> None:
+    _ensure_stream_trace_state()
+    trace_items = list(st.session_state.get("stream_trace_items") or [])
+    thinking_index = next(
+        (index for index, item in enumerate(trace_items) if item.get("kind") == "thinking"),
+        None,
+    )
+
+    thinking_item = {"kind": "thinking", "content": content}
+    if thinking_index is None:
+        trace_items.insert(0, thinking_item)
+    else:
+        trace_items[thinking_index] = thinking_item
+
+    st.session_state.stream_trace_items = trace_items
+    st.session_state.stream_tool_index = _rebuild_stream_tool_index(trace_items)
+
+
+def _resolve_stream_tool_trace_id(tool_event: dict[str, Any]) -> str:
+    explicit_id = tool_event.get("tool_call_id")
+    if explicit_id:
+        return str(explicit_id)
+
+    phase = normalize_tool_phase(tool_event.get("phase") or tool_event.get("status"))
+    trace_items = st.session_state.get("stream_trace_items") or []
+
+    if phase == "end":
+        for item in trace_items:
+            if item.get("kind") == "tool" and str(item.get("state")).lower() == "running":
+                fallback_id = item.get("tool_call_id")
+                if fallback_id:
+                    return str(fallback_id)
+
+    next_index = sum(1 for item in trace_items if item.get("kind") == "tool") + 1
+    return f"tool_{next_index}"
+
+
+def _upsert_stream_tool_trace(tool_event: dict[str, Any]) -> None:
+    _ensure_stream_trace_state()
+    trace_items = list(st.session_state.get("stream_trace_items") or [])
+    tool_index = dict(st.session_state.get("stream_tool_index") or {})
+
+    phase = normalize_tool_phase(tool_event.get("phase") or tool_event.get("status")) or "unknown"
+    tool_trace_id = _resolve_stream_tool_trace_id(tool_event)
+    item_index = tool_index.get(tool_trace_id)
+    if item_index is not None and (
+        item_index >= len(trace_items)
+        or trace_items[item_index].get("kind") != "tool"
+        or str(trace_items[item_index].get("tool_call_id")) != tool_trace_id
+    ):
+        item_index = None
+    if item_index is None:
+        item_index = next(
+            (
+                index
+                for index, item in enumerate(trace_items)
+                if item.get("kind") == "tool" and str(item.get("tool_call_id")) == tool_trace_id
+            ),
+            None,
+        )
+    now_ts = datetime.now(timezone.utc).timestamp()
+
+    if item_index is None:
+        item = {
+            "kind": "tool",
+            "tool_call_id": tool_trace_id,
+            "name": tool_event.get("name", "unknown"),
+            "phase": phase,
+            "state": tool_event.get("state") or infer_tool_state(phase=phase),
+            "args": None,
+            "result": None,
+            "started_at": None,
+            "ended_at": None,
+            "duration_ms": None,
+        }
+        trace_items.append(item)
+        item_index = len(trace_items) - 1
+        tool_index[tool_trace_id] = item_index
+    else:
+        item = dict(trace_items[item_index])
+
+    item["name"] = tool_event.get("name") or item.get("name") or "unknown"
+    item["phase"] = phase
+
+    if tool_event.get("args") is not None:
+        item["args"] = tool_event.get("args")
+
+    if tool_event.get("result") is not None:
+        item["result"] = tool_event.get("result")
+
+    if phase == "start" and item.get("started_at") is None:
+        item["started_at"] = now_ts
+
+    if phase == "end":
+        item["ended_at"] = now_ts
+        duration_ms = tool_event.get("duration_ms")
+        if isinstance(duration_ms, (int, float)) and duration_ms >= 0:
+            item["duration_ms"] = int(duration_ms)
+        elif isinstance(item.get("started_at"), (int, float)):
+            item["duration_ms"] = int((now_ts - float(item["started_at"])) * 1000)
+
+    item["state"] = tool_event.get("state") or infer_tool_state(
+        phase=item.get("phase"),
+        result=item.get("result"),
+    )
+
+    trace_items[item_index] = item
+    st.session_state.stream_trace_items = trace_items
+    st.session_state.stream_tool_index = _rebuild_stream_tool_index(trace_items)
+
+
+def render_live_trace_panel(trace_placeholder: Any) -> None:
+    _ensure_stream_trace_state()
+    trace_items = [
+        item for item in (st.session_state.get("stream_trace_items") or []) if isinstance(item, dict)
+    ]
+    thinking_item = next(
+        (item for item in trace_items if item.get("kind") == "thinking"),
+        None,
+    )
+    tool_items = [item for item in trace_items if item.get("kind") == "tool"]
+
+    if thinking_item is None and not tool_items:
+        trace_placeholder.empty()
+        return
+
+    with trace_placeholder.container():
+        render_trace_panel(
+            thinking_content=thinking_item.get("content") if thinking_item else None,
+            tool_items=tool_items,
+            expanded=bool(st.session_state.get("stream_trace_expanded", True)),
+            live=True,
+        )
+
+
 def render_tool_artifacts(tool_artifacts: list[dict[str, Any]]):
     """
     Render tool execution artifacts as collapsible sections.
@@ -3302,8 +3925,7 @@ def render_message_bubble(msg: dict[str, Any], is_user: bool):
 
         # Show thinking summary first for assistant messages
         if not is_user:
-            render_reasoning_summary(message_metadata)
-            render_thinking_summary(message_metadata)
+            render_message_trace(message_metadata, expanded=False)
 
             provider = message_metadata.get("provider")
             model = message_metadata.get("model")
@@ -3347,13 +3969,6 @@ def render_message_bubble(msg: dict[str, Any], is_user: bool):
     # Show canvas artifact for assistant messages (HTML/SVG live preview)
     if not is_user:
         render_canvas_artifact(get_message_metadata(msg))
-
-    # Show tool artifacts for assistant messages
-    if not is_user:
-        message_metadata = get_message_metadata(msg)
-        tool_artifacts = message_metadata.get("tool_artifacts")
-        if tool_artifacts:
-            render_tool_artifacts(tool_artifacts)
 
     # Show citations for assistant messages
     if not is_user:
@@ -4352,6 +4967,9 @@ def render_interrupt_approval_ui():
     st.progress(len(decided_task_ids) / max(len(all_task_ids), 1))
     st.caption(f"Decided: {len(decided_task_ids)} / {len(all_task_ids)} tools")
 
+    resume_stream_container = st.container()
+    submit_resume = False
+
     # Submit button — disabled until all tools have a decision
     col_submit, col_approve_all, col_cancel = st.columns(3)
 
@@ -4362,7 +4980,7 @@ def render_interrupt_approval_ui():
             type="primary",
             disabled=not all_decided,
         ):
-            _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisions_key)
+            submit_resume = True
 
     with col_approve_all:
         if st.button("Approve All", width="stretch"):
@@ -4382,8 +5000,7 @@ def render_interrupt_approval_ui():
                         "action": req.get("action"),
                         "args": None,
                     }
-            # Submit immediately
-            _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisions_key)
+            submit_resume = True
 
     with col_cancel:
         if st.button("Cancel All", width="stretch"):
@@ -4403,7 +5020,10 @@ def render_interrupt_approval_ui():
                         "action": req.get("action"),
                         "args": {},
                     }
-            # Submit immediately
+            submit_resume = True
+
+    if submit_resume:
+        with resume_stream_container:
             _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisions_key)
 
 
@@ -4421,23 +5041,74 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
         "decisions": decisions,
     }
 
-    with st.spinner("Resuming execution..."):
+    with st.status("Resuming execution...", expanded=True) as status:
         next_interrupt = None
         resume_error = None
+        trace_placeholder = st.empty()
+        response_placeholder = st.empty()
+        accumulated_content = ""
+        accumulated_thinking = ""
+
+        _reset_stream_trace_state(expanded=True)
 
         for event in make_streaming_request("/messages/resume-interrupt", resume_payload):
             event_type = event.get("type")
 
+            if event_type == "agent_selected":
+                agent_name = event.get("agent", "unknown")
+                status.update(
+                    label=f"{agent_name.replace('_', ' ').title()} is processing...",
+                    state="running",
+                )
+                continue
+
+            if event_type == "thinking":
+                content = event.get("content", "")
+                accumulated_thinking += content
+                _upsert_stream_thinking_trace(accumulated_thinking)
+                st.session_state.stream_trace_expanded = True
+                render_live_trace_panel(trace_placeholder)
+                status.update(label="Thinking...", state="running")
+                continue
+
+            if event_type == "tool":
+                _upsert_stream_tool_trace(event)
+                render_live_trace_panel(trace_placeholder)
+                tool_name = event.get("name", "unknown")
+                tool_phase = event.get("phase") or event.get("status") or "unknown"
+                status.update(
+                    label=f"Tool: {tool_name} ({tool_phase})",
+                    state="running",
+                )
+                continue
+
+            if event_type == "token":
+                content = event.get("content", "")
+                accumulated_content += content
+                if st.session_state.get("stream_trace_items"):
+                    st.session_state.stream_trace_expanded = False
+                    render_live_trace_panel(trace_placeholder)
+                response_placeholder.markdown(accumulated_content)
+                status.update(label="Resuming response...", state="running")
+                continue
+
             if event_type == "interrupt":
                 next_interrupt = event.get("interrupt")
+                interrupt_message = extract_interrupt_message(next_interrupt)
+                if interrupt_message:
+                    status.update(label=interrupt_message, state="running")
                 break
 
             if event_type == "error":
                 resume_error = event.get("error") or "Failed to resume execution"
+                status.update(label=f"Error: {resume_error}", state="error")
                 break
 
             if event_type == "complete":
+                status.update(label="Resume completed", state="complete")
                 break
+
+        _clear_inflight_state()
 
         # Clear decisions for this interrupt
         st.session_state.pop(decisions_key, None)
@@ -4876,8 +5547,8 @@ def render_chat_view():
                 # Use streaming endpoint for real-time response
                 with st.status("Sending message...", expanded=True) as status:
                     # Create placeholder for streaming response
+                    trace_placeholder = st.empty()
                     response_placeholder = st.empty()
-                    thinking_placeholder = st.empty()
                     accumulated_content = ""  # Initialize empty for accumulation
                     accumulated_thinking = ""  # Accumulate thinking content
                     final_message = None
@@ -4891,6 +5562,7 @@ def render_chat_view():
                     st.session_state.stream_partial_text = ""
                     st.session_state.stream_partial_thinking = ""
                     st.session_state.stream_selected_agent = None
+                    _reset_stream_trace_state(expanded=True)
 
                     # Render stop button into the placeholder that lives
                     # OUTSIDE the form.  Clicking it triggers a Streamlit
@@ -4923,68 +5595,29 @@ def render_chat_view():
                             )
 
                         elif event_type == "thinking":
-                            # Accumulate and display thinking content with animated indicator
                             content = event.get("content", "")
                             accumulated_thinking += content
                             st.session_state.stream_partial_thinking = accumulated_thinking
-                            with thinking_placeholder.container():
-                                # Animated thinking header with dots
-                                st.markdown(
-                                    """<div class="thinking-container">
-                                        <div class="thinking-header">
-                                            <span class="thinking-indicator">
-                                                Thinking
-                                                <span class="thinking-dots">
-                                                    <span class="thinking-dot"></span>
-                                                    <span class="thinking-dot"></span>
-                                                    <span class="thinking-dot"></span>
-                                                </span>
-                                            </span>
-                                        </div>
-                                        <div class="thinking-content">"""
-                                    + re.sub(
-                                        r"\*\*(.*?)\*\*",
-                                        r"<strong>\1</strong>",
-                                        html.escape(accumulated_thinking),
-                                    )
-                                    + """</div>
-                                    </div>""",
-                                    unsafe_allow_html=True,
-                                )
+                            _upsert_stream_thinking_trace(accumulated_thinking)
+                            st.session_state.stream_trace_expanded = True
+                            render_live_trace_panel(trace_placeholder)
                             status.update(label="Thinking...", state="running")
 
                         elif event_type == "token":
-                            # Accumulate and display tokens in real-time
                             content = event.get("content", "")
                             accumulated_content += content  # Append each token chunk
                             st.session_state.stream_partial_text = accumulated_content
-                            # Collapse thinking when answer starts - just show summary
-                            if accumulated_thinking and accumulated_content:
-                                _bold_pattern = r"\*\*(.*?)\*\*"
-                                _bold_repl = r"<strong>\1</strong>"
-                                _thinking_html = re.sub(
-                                    _bold_pattern,
-                                    _bold_repl,
-                                    html.escape(accumulated_thinking),
-                                )
-                                thinking_placeholder.markdown(
-                                    f"""<details>
-                                        <summary style="cursor: pointer; font-weight: bold; padding: 8px; background: #f0f2f6; border-radius: 4px; margin-bottom: 8px;">
-                                            <span class="material-symbols-outlined" aria-hidden="true" style="margin-right: 6px;">psychology</span> Thought Process
-                                        </summary>
-                                        <div class="thinking-container" style="padding: 8px;">
-                                            <div class="thinking-content">{_thinking_html}</div>
-                                        </div>
-                                    </details>""",
-                                    unsafe_allow_html=True,
-                                )
+                            if st.session_state.get("stream_trace_items"):
+                                st.session_state.stream_trace_expanded = False
+                                render_live_trace_panel(trace_placeholder)
                             # Display with native markdown for LaTeX support
                             response_placeholder.markdown(accumulated_content)
 
                         elif event_type == "tool":
-                            # Show tool execution
+                            _upsert_stream_tool_trace(event)
+                            render_live_trace_panel(trace_placeholder)
                             tool_name = event.get("name", "unknown")
-                            tool_status = event.get("status", "running")
+                            tool_status = event.get("phase") or event.get("status") or "running"
                             status.update(
                                 label=f"Tool: {tool_name} ({tool_status})",
                                 state="running",

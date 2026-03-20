@@ -15,6 +15,7 @@ from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.conversation_service_interface import IConversationService
 from app.interfaces.message_service_interface import IMessageService
 from app.models.enums import MessageRole
+from app.services.stream_events import normalize_tool_phase
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationRead,
@@ -561,23 +562,23 @@ class ToolEventHandler(EventHandler):
 
     async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
         tool_name = event.get("name") or "unknown"
-        status = event.get("status")
-        tool_call_id = self._get_tool_call_id(event, status, state)
+        phase = normalize_tool_phase(event.get("phase") or event.get("status"))
+        tool_call_id = self._get_tool_call_id(event, phase, state)
 
-        if status == "start":
+        if phase == "start":
             async for msg in self._handle_tool_start(event, tool_call_id, tool_name, state):
                 yield msg
-        elif status == "end":
+        elif phase == "end":
             async for msg in self._handle_tool_end(event, tool_call_id, state):
                 yield msg
 
-    def _get_tool_call_id(self, event: dict[str, Any], status: str, state: StreamState) -> str:
+    def _get_tool_call_id(self, event: dict[str, Any], phase: str | None, state: StreamState) -> str:
         """Get or generate tool call ID."""
         tool_call_id = event.get("tool_call_id")
         if tool_call_id:
             return str(tool_call_id)
 
-        if status == "end" and state.pending_tool_call_ids:
+        if phase == "end" and state.pending_tool_call_ids:
             return state.pending_tool_call_ids.pop(0)
 
         state.tool_seq += 1
@@ -591,7 +592,8 @@ class ToolEventHandler(EventHandler):
         state: StreamState,
     ) -> AsyncGenerator[str, None]:
         """Handle tool start event."""
-        state.pending_tool_call_ids.append(tool_call_id)
+        if tool_call_id not in state.pending_tool_call_ids:
+            state.pending_tool_call_ids.append(tool_call_id)
         yield _sse(
             {
                 "type": "tool-input-start",
