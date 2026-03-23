@@ -42,6 +42,7 @@ from ..utils import (
     extract_agent_execution_info,
     get_error_recovery_hint,
 )
+from ...services.model_config_service import ResolvedRuntimeModelConfig
 from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -191,13 +192,13 @@ class RAGAgent(BaseAgent):
                     len(self.tools),
                 )
 
-    def _create_agent_executor(self, tools: list[BaseTool], system_prompt: str):
+    def _create_agent_executor(self, llm: Any, tools: list[BaseTool], system_prompt: str):
 
         tool_choice = settings.tool_choice_mode if hasattr(settings, "tool_choice_mode") else "auto"
 
         # Configure model with tool binding
         llm_with_tools = ModelFactory.bind_tools_to_model(
-            self.langchain_model,
+            llm,
             tools,
             tool_choice=tool_choice,
         )
@@ -226,7 +227,7 @@ class RAGAgent(BaseAgent):
         # === Agentic Mode Path ===
         # If agentic mode is enabled, use the LLM with search_documents tool
         # The graph will handle the tool execution and loop back
-        if self.agentic_mode and self.langchain_model:
+        if self.agentic_mode:
             return await self._process_message_agentic(message, conversation_id)
 
         # === Traditional RAG Path ===
@@ -277,102 +278,65 @@ class RAGAgent(BaseAgent):
         # Append active skills to the prompt
         prompt = self._get_full_system_prompt(prompt)
 
-        tools_for_binding = (
-            self._get_tools_for_binding(conversation_id=conversation_id)
-            if self.langchain_model
-            else []
-        )
-        has_tool_binding = bool(tools_for_binding and self.langchain_model)
+        tools_for_binding = self._get_tools_for_binding(conversation_id=conversation_id)
+        has_tool_binding = bool(tools_for_binding)
 
         response_text: str = ""
         tools_used: list[str] = []
         tool_artifacts: list[dict[str, Any]] = []
         error_message: str | None = None
-
-        resolved_request = self._resolve_model_request(model_request)
-        provider = "gemini"
-        effective_model_name = self.model_name
-        effective_temperature = self._coerce_temperature(
-            (resolved_request or {}).get("temperature"),
-            AGENT_CONFIG.get("rag", {}).get("temperature", 1.0),
-        )
-
-        if resolved_request and isinstance(resolved_request, dict):
-            requested_provider = str(resolved_request.get("provider") or "").strip().lower()
-            requested_model = resolved_request.get("model")
-            if requested_provider in {"openai", "gemini"}:
-                provider = requested_provider
-            if (
-                provider == "openai"
-                and isinstance(requested_model, str)
-                and requested_model.strip()
-            ):
-                effective_model_name = requested_model.strip()
+        runtime_config = self._resolve_runtime_model_config(request_user_id, model_request)
 
         try:
-            if provider == "openai":
-                api_key = self._get_openai_api_key(request_user_id)
-                if not api_key:
-                    provider = "gemini"
-                    effective_model_name = self.model_name
+            if images and has_tool_binding:
+                (
+                    tool_response_text,
+                    tools_used,
+                    tool_artifacts,
+                    runtime_config,
+                ) = await self._generate_with_tools(
+                    prompt,
+                    runtime_config=runtime_config,
+                    user_id=request_user_id,
+                    conversation_id=conversation_id,
+                    tools_to_bind=tools_for_binding,
+                )
 
-                if provider == "openai" and images:
-                    provider = "gemini"
-                    effective_model_name = self.model_name
-
-                if provider == "openai":
-                    llm = ModelFactory.create_model(
-                        provider="openai",
-                        model=effective_model_name,
-                        api_key=api_key,
-                        temperature=effective_temperature,
-                        timeout=settings.openai_request_timeout_seconds,
-                        streaming=True,
-                    )
-                    try:
-                        response = await self._ainvoke_with_retries(llm, prompt)
-                        response_text = coerce_response_text(getattr(response, "content", ""))
-                    except Exception:
-                        provider = "gemini"
-                        effective_model_name = self.model_name
-                        response_text = await self._generate(prompt)
-                else:
-                    # Fall back to Gemini path below
-                    response_text = await self._generate(prompt)
-
-            # Only process with images/tools if OpenAI wasn't used (to prevent overwriting OpenAI response)
-            if provider != "openai":
-                if images and has_tool_binding:
-                    (
-                        tool_response_text,
-                        tools_used,
-                        tool_artifacts,
-                    ) = await self._generate_with_tools(
-                        prompt,
-                        conversation_id=conversation_id,
-                        tools_to_bind=tools_for_binding,
-                    )
-
-                    multimodal_prompt = self._augment_prompt_with_tool_context(
-                        prompt, tool_response_text, tool_artifacts
-                    )
-                    response_text = await self._generate_with_vision(multimodal_prompt, images)
-                elif images:
-                    response_text = await self._generate_with_vision(prompt, images)
-                elif has_tool_binding:
-                    # Use tools without images
-                    (
-                        response_text,
-                        tools_used,
-                        tool_artifacts,
-                    ) = await self._generate_with_tools(
-                        prompt,
-                        conversation_id=conversation_id,
-                        tools_to_bind=tools_for_binding,
-                    )
-                else:
-                    # Regular text-only generation
-                    response_text = await self._generate(prompt)
+                multimodal_prompt = self._augment_prompt_with_tool_context(
+                    prompt, tool_response_text, tool_artifacts
+                )
+                response_text, runtime_config = await self._generate_with_vision(
+                    multimodal_prompt,
+                    images,
+                    runtime_config=runtime_config,
+                    user_id=request_user_id,
+                )
+            elif images:
+                response_text, runtime_config = await self._generate_with_vision(
+                    prompt,
+                    images,
+                    runtime_config=runtime_config,
+                    user_id=request_user_id,
+                )
+            elif has_tool_binding:
+                (
+                    response_text,
+                    tools_used,
+                    tool_artifacts,
+                    runtime_config,
+                ) = await self._generate_with_tools(
+                    prompt,
+                    runtime_config=runtime_config,
+                    user_id=request_user_id,
+                    conversation_id=conversation_id,
+                    tools_to_bind=tools_for_binding,
+                )
+            else:
+                response_text, runtime_config = await self._generate(
+                    prompt,
+                    runtime_config=runtime_config,
+                    user_id=request_user_id,
+                )
         except Exception as exc:
             logger.error("Error generating RAG response: %s", exc, exc_info=True)
             error_message = f"{type(exc).__name__}: {exc}"
@@ -447,8 +411,6 @@ class RAGAgent(BaseAgent):
 
         # Build metadata
         metadata = {
-            "model": effective_model_name,
-            "provider": provider,
             "conversation_id": conversation_id,
             "documents_found": len(doc_grouping),  # Number of unique documents
             "chunks_retrieved": len(retrieved_docs),  # Total number of chunks
@@ -465,6 +427,7 @@ class RAGAgent(BaseAgent):
             "has_images": bool(images),
             "images_count": len(images) if images else 0,
         }
+        self._apply_runtime_metadata(metadata, runtime_config)
 
         # Add image data to metadata for frontend display
         if images:
@@ -516,263 +479,36 @@ class RAGAgent(BaseAgent):
         message: AgentMessage,
         conversation_id: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        query = message.content or ""
-        conversation_history = message.metadata.get("history", [])
-        persona = message.metadata.get("persona")
-        history_summary = message.metadata.get("history_summary")
+        response = await self.process_message(message, conversation_id)
 
-        if self.mcp_manager is None:
-            await self._init_tools()
+        for artifact in response.tool_artifacts or []:
+            tool_name = artifact.get("tool_name") or artifact.get("tool") or "unknown_tool"
+            tool_args = artifact.get("tool_input") or artifact.get("args")
+            tool_output = artifact.get("tool_output")
+            if tool_output is None:
+                tool_output = artifact.get("result")
+            if tool_output is None and artifact.get("error"):
+                tool_output = artifact["error"]
 
-        if self.agentic_mode and self.langchain_model:
-            response = await self._process_message_agentic(message, conversation_id)
-            yield {"type": "token", "content": response.message.content}
-            yield {"type": "complete", "response": response}
-            return
-
-        retrieved_docs = await self._search(query, conversation_id=conversation_id)
-
-        doc_grouping = {}
-        next_doc_num = 1
-
-        for doc in retrieved_docs:
-            # Normalize empty strings to None to prevent duplicate grouping
-            raw_doc_id = doc.get("document_id")
-            doc_key = raw_doc_id if raw_doc_id else doc.get("source", "unknown")
-
-            if doc_key not in doc_grouping:
-                doc_grouping[doc_key] = {
-                    "document_id": doc.get("document_id"),
-                    "source": doc.get("source", "unknown"),
-                    "document_number": next_doc_num,
-                    "chunks": [],
-                }
-                next_doc_num += 1
-
-            chunk_details = {
-                "chunk_index": doc.get("chunk_index", 0),
-                "score": doc.get("score", 0.0),
-                "character_count": len(doc.get("content", "")),
-                "content": doc.get("content", ""),
-                "page_number": doc.get("page_number"),
+            yield {
+                "type": "tool_start",
+                "name": tool_name,
+                "tool_call_id": None,
+                "args": tool_args,
             }
-            doc_grouping[doc_key]["chunks"].append(chunk_details)
-
-        has_images = any(doc.get("image_ids") for doc in retrieved_docs)
-        images = []
-        if has_images:
-            images = await self._fetch_images_for_chunks(retrieved_docs)
-
-        prompt = build_rag_prompt(
-            query,
-            retrieved_docs,
-            conversation_history,
-            persona=persona,
-            has_images=bool(images),
-            history_summary=history_summary,
-        )
-
-        # Append active skills to the prompt
-        prompt = self._get_full_system_prompt(prompt)
-
-        tools_for_binding = (
-            self._get_tools_for_binding(conversation_id=conversation_id)
-            if self.langchain_model
-            else []
-        )
-        has_tool_binding = bool(tools_for_binding and self.langchain_model)
-
-        accumulated_content = ""
-        accumulated_thinking = ""  # Accumulate thinking content for metadata
-        tools_used: list[str] = []
-        tool_artifacts: list[dict[str, Any]] = []
-        error_message: str | None = None
-
-        try:
-            if images and has_tool_binding:
-                # Complex case: images + tools - use non-streaming fallback
-                (
-                    tool_response_text,
-                    tools_used,
-                    tool_artifacts,
-                ) = await self._generate_with_tools(
-                    prompt,
-                    conversation_id=conversation_id,
-                    tools_to_bind=tools_for_binding,
-                )
-
-                multimodal_prompt = self._augment_prompt_with_tool_context(
-                    prompt, tool_response_text, tool_artifacts
-                )
-                response_text = await self._generate_with_vision(multimodal_prompt, images)
-                # Yield as single token
-                yield {"type": "token", "content": response_text}
-                accumulated_content = response_text
-            elif images:
-                # Vision only - non-streaming
-                response_text = await self._generate_with_vision(prompt, images)
-                yield {"type": "token", "content": response_text}
-                accumulated_content = response_text
-            elif has_tool_binding:
-                # Tools only - stream
-                async for event in self._generate_with_tools_stream(
-                    prompt,
-                    conversation_id=conversation_id,
-                    tools_to_bind=tools_for_binding,
-                ):
-                    if event["type"] == "token":
-                        accumulated_content += event["content"]
-                        yield event
-                    elif event["type"] in ["tool_start", "tool_end"]:
-                        yield event
-                    elif event["type"] == "result":
-                        accumulated_content = event["response_text"]
-                        tools_used = event["tools_used"]
-                        tool_artifacts = event["tool_artifacts"]
-            else:
-                # Text only - stream with thinking support
-                async for event in self._generate_stream(prompt):
-                    if event["type"] == "thinking":
-                        # Accumulate thinking content and forward to client
-                        accumulated_thinking += event["content"]
-                        yield event
-                    elif event["type"] == "token":
-                        accumulated_content += event["content"]
-                        yield event
-
-        except Exception as exc:
-            logger.error("Error streaming RAG response: %s", exc, exc_info=True)
-            error_message = f"{type(exc).__name__}: {exc}"
-            tools_used = []
-            tool_artifacts = [
-                {
-                    "tool": "rag_agent",
-                    "args": {},
-                    "error": error_message,
-                    "hint": get_error_recovery_hint(exc, "rag_agent", {}),
-                }
-            ]
-
-        accumulated_content = coerce_response_text(accumulated_content)
-
-        response_message = AgentMessage(role=MessageRole.ASSISTANT, content=accumulated_content)
-
-        # Build grouped citations structure (documents_cited)
-        documents_cited = []
-        for _, doc_info in doc_grouping.items():
-            chunks = doc_info["chunks"]
-            total_chunks = len(chunks)
-            avg_score = sum(c["score"] for c in chunks) / total_chunks if total_chunks > 0 else 0.0
-
-            document_entry = {
-                "document_id": doc_info["document_id"],
-                "source": doc_info["source"],
-                "document_number": doc_info["document_number"],
-                "chunks": chunks,
-                "total_chunks": total_chunks,
-                "avg_score": avg_score,
+            yield {
+                "type": "tool_end",
+                "name": tool_name,
+                "tool_call_id": None,
+                "result": tool_output,
             }
-            documents_cited.append(document_entry)
 
-        documents_cited.sort(key=lambda x: x["document_number"])
+        thinking_summary = str(response.metadata.get("thinking_summary") or "").strip()
+        if thinking_summary:
+            yield {"type": "thinking", "content": thinking_summary}
 
-        # Build legacy flat citations
-        all_citations = [
-            {
-                "source": doc.get("source", "unknown"),
-                "score": doc.get("score", 0.0),
-                "chunk_index": doc.get("chunk_index", 0),
-                "character_count": len(doc.get("content", "")),
-            }
-            for doc in retrieved_docs
-        ]
-
-        citations = all_citations
-        citation_verification_enabled = False
-        citation_coverage = 100.0
-
-        if self.settings.enable_citation_verification and retrieved_docs:
-            verified_citations = self._verify_citations(
-                accumulated_content, retrieved_docs, all_citations, doc_grouping
-            )
-            if verified_citations is not None:
-                citations = verified_citations
-                citation_verification_enabled = True
-                citation_coverage = (
-                    (len(citations) / len(all_citations) * 100) if all_citations else 0.0
-                )
-
-        avg_score = (
-            sum(doc.get("score", 0.0) for doc in retrieved_docs) / len(retrieved_docs)
-            if retrieved_docs
-            else 0.0
-        )
-
-        # Build metadata
-        metadata = {
-            "model": self.model_name,
-            "conversation_id": conversation_id,
-            "documents_found": len(doc_grouping),
-            "chunks_retrieved": len(retrieved_docs),
-            "documents_cited": documents_cited,
-            "citations": citations,
-            "context_messages": len(conversation_history),
-            "retrieval_stats": {
-                "total_retrieved": len(retrieved_docs),
-                "avg_score": avg_score,
-            },
-            "persona_used": persona,
-            "citation_verification_enabled": citation_verification_enabled,
-            "citation_coverage": citation_coverage,
-            "has_images": bool(images),
-            "images_count": len(images) if images else 0,
-        }
-
-        # Add image data to metadata for frontend display
-        if images:
-            metadata["images"] = [
-                {
-                    "data": img["data"],
-                    "mime": img["mime_type"],
-                    "name": img.get("caption")
-                    or f"Document Image (Page {img.get('page_number', '?')})",
-                    "page_number": img.get("page_number"),
-                    "caption": img.get("caption"),
-                }
-                for img in images
-            ]
-
-        if tools_used:
-            metadata["tools_used"] = tools_used
-            metadata["tool_calls_count"] = len(tools_used)
-        if tool_artifacts:
-            metadata["tool_artifacts"] = tool_artifacts
-            if not error_message:
-                error_entries = [
-                    artifact.get("error") for artifact in tool_artifacts if artifact.get("error")
-                ]
-                if error_entries:
-                    error_message = error_entries[0]
-                    metadata["error"] = error_message
-        elif error_message:
-            metadata["error"] = error_message
-
-        # Include thinking summary in metadata if accumulated during streaming
-        if accumulated_thinking:
-            metadata["thinking_summary"] = accumulated_thinking
-
-        # Yield complete event
-        yield {
-            "type": "complete",
-            "response": AgentResponse(
-                agent_type=AgentType.RAG,
-                agent_id="rag_agent",
-                message=response_message,
-                metadata=metadata,
-                tool_artifacts=tool_artifacts if tool_artifacts else None,
-                error=error_message,
-            ),
-        }
+        yield {"type": "token", "content": response.message.content or ""}
+        yield {"type": "complete", "response": response}
 
     async def _generate_with_tools_stream(
         self,
@@ -793,7 +529,9 @@ class RAGAgent(BaseAgent):
                 return
 
             # Create agent executor
-            agent_executor = self._create_agent_executor(tools, prompt)
+            if self.langchain_model is None:
+                return
+            agent_executor = self._create_agent_executor(self.langchain_model, tools, prompt)
 
             accumulated_text = ""
             tools_used = []
@@ -1017,38 +755,51 @@ class RAGAgent(BaseAgent):
     async def _generate_with_tools(
         self,
         prompt: str,
-        streaming_callback=None,
+        *,
+        runtime_config: ResolvedRuntimeModelConfig,
+        user_id: str | None = None,
         conversation_id: str | None = None,
         tools_to_bind: list[BaseTool] | None = None,
-    ) -> tuple[str, list[str], list[dict[str, Any]]]:
-        try:
-            tools = tools_to_bind
-            if tools is None:
-                tools = self._get_tools_for_binding(conversation_id=conversation_id)
+    ) -> tuple[str, list[str], list[dict[str, Any]], ResolvedRuntimeModelConfig]:
+        tools = tools_to_bind
+        if tools is None:
+            tools = self._get_tools_for_binding(conversation_id=conversation_id)
 
-            if not tools:
-                return "", [], []
+        if not tools:
+            return "", [], [], runtime_config
 
-            # Create agent executor
-            agent_executor = self._create_agent_executor(tools, prompt)
+        current_runtime = runtime_config
 
-            # Invoke agent with the user message
-            agent_response = await agent_executor.ainvoke(
-                {"messages": [HumanMessage(content=prompt)]}
-            )
+        while True:
+            try:
+                llm, _ = self._create_langchain_model_from_runtime(
+                    current_runtime,
+                    user_id=user_id,
+                    enable_reasoning_summary=False,
+                )
+                agent_executor = self._create_agent_executor(llm, tools, prompt)
+                agent_response = await agent_executor.ainvoke(
+                    {"messages": [HumanMessage(content=prompt)]}
+                )
+                execution_info = extract_agent_execution_info(agent_response)
 
-            # Extract execution info
-            execution_info = extract_agent_execution_info(agent_response)
-
-            response_text = execution_info["response_text"]
-            tools_used = execution_info["tools_used"]
-            tool_artifacts = execution_info["tool_artifacts"]
-
-            return response_text, tools_used, tool_artifacts
-
-        except Exception as exc:
-            logger.error("Error in RAGAgent tool calling flow: %s", exc, exc_info=True)
-            raise
+                return (
+                    execution_info["response_text"],
+                    execution_info["tools_used"],
+                    execution_info["tool_artifacts"],
+                    current_runtime,
+                )
+            except Exception as exc:
+                logger.error("Error in RAGAgent tool calling flow: %s", exc, exc_info=True)
+                fallback_runtime = self._create_fallback_runtime_config(
+                    current_runtime.fallback_config,
+                    reason="provider_error",
+                    from_provider=current_runtime.provider,
+                    inherited_warnings=current_runtime.warnings,
+                )
+                if not fallback_runtime or fallback_runtime.provider == current_runtime.provider:
+                    raise
+                current_runtime = fallback_runtime
 
     def _augment_prompt_with_tool_context(
         self,
@@ -1223,79 +974,168 @@ class RAGAgent(BaseAgent):
         config_value = self.settings.media_resolution
         return resolution_map.get(config_value, types.MediaResolution.MEDIA_RESOLUTION_HIGH)
 
-    async def _generate_with_vision(self, prompt: str, images: list[dict[str, Any]]) -> str:
-        try:
-            parts = []
-            media_resolution = self._get_media_resolution()
+    async def _generate_with_vision(
+        self,
+        prompt: str,
+        images: list[dict[str, Any]],
+        *,
+        runtime_config: ResolvedRuntimeModelConfig,
+        user_id: str | None = None,
+    ) -> tuple[str, ResolvedRuntimeModelConfig]:
+        current_runtime = runtime_config
 
-            for _index, image in enumerate(images, start=1):
-                image_data = base64.b64decode(image["data"])
+        if not current_runtime.capabilities.get("supports_vision", False):
+            fallback_runtime = self._create_fallback_runtime_config(
+                current_runtime.fallback_config,
+                reason="vision_not_supported",
+                from_provider=current_runtime.provider,
+                inherited_warnings=current_runtime.warnings,
+            )
+            if fallback_runtime:
+                current_runtime = fallback_runtime
 
-                mime_type = (image.get("mime_type") or "image/jpeg").strip()
-                if mime_type.lower() == "image/jpg":
-                    mime_type = "image/jpeg"
-                parts.append(
-                    types.Part.from_bytes(
-                        data=image_data,
-                        mime_type=mime_type,
-                        media_resolution=media_resolution,
+        while True:
+            try:
+                if current_runtime.provider == "openai":
+                    llm, _ = self._create_langchain_model_from_runtime(
+                        current_runtime,
+                        user_id=user_id,
+                        enable_reasoning_summary=False,
                     )
+                    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+                    for image in images:
+                        raw_data = str(image.get("data") or "").strip()
+                        mime_type = str(image.get("mime_type") or "image/jpeg").strip()
+                        if not raw_data:
+                            continue
+                        image_url = (
+                            raw_data
+                            if raw_data.startswith("data:")
+                            else f"data:{mime_type};base64,{raw_data}"
+                        )
+                        content.append({"type": "image_url", "image_url": {"url": image_url}})
+
+                    response = await self._ainvoke_with_retries(
+                        llm,
+                        [HumanMessage(content=content)],
+                    )
+                    return coerce_response_text(response.content), current_runtime
+
+                parts = []
+                media_resolution = self._get_media_resolution()
+
+                for image in images:
+                    image_data = base64.b64decode(image["data"])
+                    mime_type = (image.get("mime_type") or "image/jpeg").strip()
+                    if mime_type.lower() == "image/jpg":
+                        mime_type = "image/jpeg"
+                    parts.append(
+                        types.Part.from_bytes(
+                            data=image_data,
+                            mime_type=mime_type,
+                            media_resolution=media_resolution,
+                        )
+                    )
+
+                parts.append(types.Part(text=prompt))
+                gemini_client = self._create_gemini_client_from_runtime(current_runtime)
+                if gemini_client is None:
+                    raise RuntimeError("Gemini client is not available for multimodal generation")
+
+                config = build_gemini_generate_config(
+                    model_name=current_runtime.model,
+                    include_thinking=True,
+                )
+                response = gemini_client.models.generate_content(
+                    model=current_runtime.model,
+                    contents=parts,
+                    config=config,
                 )
 
-            parts.append(types.Part(text=prompt))
-            config = build_gemini_generate_config(
-                model_name=self.model_name,
-                include_thinking=True,
-            )
-            response = self.gemini_client.models.generate_content(
-                model=self.model_name,
-                contents=parts,
-                config=config,
-            )
+                return response.text if hasattr(response, "text") else str(response), current_runtime
+            except Exception as exc:
+                logger.error("Error in vision generation: %s", exc, exc_info=True)
+                fallback_runtime = self._create_fallback_runtime_config(
+                    current_runtime.fallback_config,
+                    reason="provider_error",
+                    from_provider=current_runtime.provider,
+                    inherited_warnings=current_runtime.warnings,
+                )
+                if not fallback_runtime or fallback_runtime.provider == current_runtime.provider:
+                    raise
+                current_runtime = fallback_runtime
 
-            return response.text if hasattr(response, "text") else str(response)
+    async def _generate(
+        self,
+        prompt: str,
+        *,
+        runtime_config: ResolvedRuntimeModelConfig,
+        user_id: str | None = None,
+    ) -> tuple[str, ResolvedRuntimeModelConfig]:
+        current_runtime = runtime_config
+        self._last_thinking_summary = None
 
-        except Exception as exc:
-            logger.error(f"Error in vision generation: {exc}", exc_info=True)
-            raise
+        while True:
+            try:
+                if current_runtime.provider == "openai":
+                    llm, _ = self._create_langchain_model_from_runtime(
+                        current_runtime,
+                        user_id=user_id,
+                        enable_reasoning_summary=False,
+                    )
+                    response = await self._ainvoke_with_retries(
+                        llm,
+                        [HumanMessage(content=prompt)],
+                    )
+                    return coerce_response_text(response.content), current_runtime
 
-    async def _generate(self, prompt: str) -> str:
-        try:
-            config = build_gemini_generate_config(
-                model_name=self.model_name,
-                include_thinking=True,
-            )
+                gemini_client = self._create_gemini_client_from_runtime(current_runtime)
+                if gemini_client is None:
+                    raise RuntimeError("Gemini client is not available for generation")
 
-            response = self.gemini_client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=config,
-            )
-
-            # Extract thinking and answer parts if thinking is enabled
-            if settings.enable_thinking and settings.include_thoughts_in_response:
-                thinking_parts = []
-                answer_parts = []
-
-                if hasattr(response, "candidates") and response.candidates:
-                    for part in response.candidates[0].content.parts:
-                        if hasattr(part, "text") and part.text:
-                            if hasattr(part, "thought") and part.thought:
-                                thinking_parts.append(part.text)
-                            else:
-                                answer_parts.append(part.text)
-
-                # Store thinking in class attribute for later retrieval
-                self._last_thinking_summary = "\n".join(thinking_parts) if thinking_parts else None
-                return (
-                    "".join(answer_parts)
-                    if answer_parts
-                    else (response.text if hasattr(response, "text") else str(response))
+                config = build_gemini_generate_config(
+                    model_name=current_runtime.model,
+                    include_thinking=True,
                 )
 
-            return response.text if hasattr(response, "text") else str(response)
-        except Exception as exc:
-            raise RuntimeError(f"Gemini API error: {exc}") from exc
+                response = gemini_client.models.generate_content(
+                    model=current_runtime.model,
+                    contents=prompt,
+                    config=config,
+                )
+
+                if settings.enable_thinking and settings.include_thoughts_in_response:
+                    thinking_parts = []
+                    answer_parts = []
+
+                    if hasattr(response, "candidates") and response.candidates:
+                        for part in response.candidates[0].content.parts:
+                            if hasattr(part, "text") and part.text:
+                                if hasattr(part, "thought") and part.thought:
+                                    thinking_parts.append(part.text)
+                                else:
+                                    answer_parts.append(part.text)
+
+                    self._last_thinking_summary = "\n".join(thinking_parts) if thinking_parts else None
+                    return (
+                        "".join(answer_parts)
+                        if answer_parts
+                        else (response.text if hasattr(response, "text") else str(response)),
+                        current_runtime,
+                    )
+
+                return response.text if hasattr(response, "text") else str(response), current_runtime
+            except Exception as exc:
+                logger.error("Error in text generation: %s", exc, exc_info=True)
+                fallback_runtime = self._create_fallback_runtime_config(
+                    current_runtime.fallback_config,
+                    reason="provider_error",
+                    from_provider=current_runtime.provider,
+                    inherited_warnings=current_runtime.warnings,
+                )
+                if not fallback_runtime or fallback_runtime.provider == current_runtime.provider:
+                    raise RuntimeError(f"{current_runtime.provider.capitalize()} API error: {exc}") from exc
+                current_runtime = fallback_runtime
 
     async def initialize(self):
         return True
@@ -1633,66 +1473,10 @@ class RAGAgent(BaseAgent):
         if not self.tools:
             await self._init_tools()
 
-        resolved_request = self._resolve_model_request(model_request)
-        provider = "gemini"
-        effective_model_name = self.model_name
-        effective_temperature = self._coerce_temperature(
-            (resolved_request or {}).get("temperature"),
-            AGENT_CONFIG.get("rag", {}).get("temperature", 1.0),
-        )
-        used_fallback = False
-
-        llm = self.langchain_model
-        if resolved_request and isinstance(resolved_request, dict):
-            requested_provider = str(resolved_request.get("provider") or "").strip().lower()
-            requested_model = resolved_request.get("model")
-            if requested_provider in {"openai", "gemini"}:
-                provider = requested_provider
-            if (
-                provider == "openai"
-                and isinstance(requested_model, str)
-                and requested_model.strip()
-            ):
-                effective_model_name = requested_model.strip()
-
-        if provider == "openai":
-            api_key = self._get_openai_api_key(request_user_id)
-            if api_key:
-                from ..model_factory import ModelFactory
-
-                llm = ModelFactory.create_model(
-                    provider="openai",
-                    model=effective_model_name,
-                    api_key=api_key,
-                    temperature=effective_temperature,
-                    timeout=settings.openai_request_timeout_seconds,
-                    streaming=True,
-                )
-            else:
-                used_fallback = True
-                provider = "gemini"
-                effective_model_name = self.model_name
-                llm = create_langchain_model(agent_type="rag")
-
-        if provider == "gemini" and effective_model_name != self.model_name:
-            llm = create_langchain_model(
-                agent_type="rag",
-                model_override=effective_model_name,
-                temperature_override=effective_temperature,
-            )
-
-        from ..model_factory import ModelFactory
-
         # Get tools for binding - supports deferred loading when enabled
         tools_to_bind = self._get_tools_for_binding(
             conversation_id=conversation_id,
             internal_tools=[create_search_documents_tool()],
-        )
-
-        llm_with_tools = ModelFactory.bind_tools_to_model(
-            llm,
-            tools_to_bind,
-            tool_choice=getattr(settings, "tool_choice_mode", "auto"),
         )
 
         # Build messages list with conversation history
@@ -1751,28 +1535,50 @@ class RAGAgent(BaseAgent):
         else:
             messages.append(HumanMessage(content="\n".join(context_parts)))
 
+        runtime_config = self._resolve_runtime_model_config(request_user_id, model_request)
+        if agentic_images and not runtime_config.capabilities.get("supports_vision", False):
+            fallback_runtime = self._create_fallback_runtime_config(
+                runtime_config.fallback_config,
+                reason="vision_not_supported",
+                from_provider=runtime_config.provider,
+                inherited_warnings=runtime_config.warnings,
+            )
+            if fallback_runtime:
+                runtime_config = fallback_runtime
+
         try:
-            if provider == "openai" and not used_fallback:
+            current_runtime = runtime_config
+
+            while True:
                 try:
-                    response = await self._ainvoke_with_retries(llm_with_tools, messages)
-                except Exception:
-                    used_fallback = True
-                    provider = "gemini"
-                    effective_model_name = self.model_name
-                    llm = create_langchain_model(agent_type="rag")
-                    # Use deferred tool binding on fallback too
-                    tools_to_bind = self._get_tools_for_binding(
-                        conversation_id=conversation_id,
-                        internal_tools=[create_search_documents_tool()],
+                    llm, _ = self._create_langchain_model_from_runtime(
+                        current_runtime,
+                        user_id=request_user_id,
+                        enable_reasoning_summary=False,
                     )
                     llm_with_tools = ModelFactory.bind_tools_to_model(
                         llm,
                         tools_to_bind,
                         tool_choice=getattr(settings, "tool_choice_mode", "auto"),
                     )
-                    response = await llm_with_tools.ainvoke(messages)
-            else:
-                response = await llm_with_tools.ainvoke(messages)
+                    response = await self._ainvoke_with_retries(llm_with_tools, messages)
+                    runtime_config = current_runtime
+                    break
+                except Exception as exc:
+                    logger.warning(
+                        "Agentic RAG provider call failed for %s: %s",
+                        current_runtime.provider,
+                        exc,
+                    )
+                    fallback_runtime = self._create_fallback_runtime_config(
+                        current_runtime.fallback_config,
+                        reason="provider_error",
+                        from_provider=current_runtime.provider,
+                        inherited_warnings=current_runtime.warnings,
+                    )
+                    if not fallback_runtime or fallback_runtime.provider == current_runtime.provider:
+                        raise
+                    current_runtime = fallback_runtime
 
             # Extract content and tool calls
             response_text = coerce_response_text(response.content or "")
@@ -1791,21 +1597,29 @@ class RAGAgent(BaseAgent):
                 tool_calls=tool_calls,
             )
 
+            metadata = {
+                **({"agentic_images_count": len(agentic_images)} if agentic_images else {}),
+                "conversation_id": conversation_id,
+                "agentic_mode": True,
+                "has_tool_calls": bool(tool_calls),
+            }
+            self._apply_runtime_metadata(metadata, runtime_config)
+
             return AgentResponse(
                 agent_type=AgentType.RAG,
                 agent_id="rag_agent",
                 message=response_message,
-                metadata={
-                    "model": effective_model_name,
-                    "provider": provider,
-                    "conversation_id": conversation_id,
-                    "agentic_mode": True,
-                    "has_tool_calls": bool(tool_calls),
-                },
+                metadata=metadata,
             )
 
         except Exception as e:
             logger.error(f"Error in agentic RAG processing: {e}", exc_info=True)
+            error_metadata = {
+                "conversation_id": conversation_id,
+                "agentic_mode": True,
+                "error": str(e),
+            }
+            self._apply_runtime_metadata(error_metadata, runtime_config)
             return AgentResponse(
                 agent_type=AgentType.RAG,
                 agent_id="rag_agent",
@@ -1813,11 +1627,6 @@ class RAGAgent(BaseAgent):
                     role=MessageRole.ASSISTANT,
                     content=f"Error during document exploration: {e}",
                 ),
-                metadata={
-                    "model": self.model_name,
-                    "conversation_id": conversation_id,
-                    "agentic_mode": True,
-                    "error": str(e),
-                },
+                metadata=error_metadata,
                 error=str(e),
             )

@@ -2,6 +2,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
+from uuid import UUID
 
 from langchain_core.messages import (
     AIMessage,
@@ -30,6 +31,10 @@ from ..utils import (
     coerce_response_text,
     extract_openai_reasoning_summary,
     extract_openai_reasoning_tokens,
+)
+from ...services.model_config_service import (
+    ResolvedRuntimeModelConfig,
+    RuntimeFallbackConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,8 +74,13 @@ class BaseAgent(ABC):
                 f"Initialized Gemini client and LangChain model with model: {self.model_name}"
             )
         except Exception as e:
-            logger.error(f"Error initializing Gemini client: {e}")
-            raise
+            logger.warning(
+                "Default Gemini initialization unavailable for %s: %s",
+                self.agent_id,
+                e,
+            )
+            self.gemini_client = None
+            self.langchain_model = None
 
     async def _init_tools(self) -> None:
         """
@@ -306,24 +316,169 @@ class BaseAgent(ABC):
             tool_choice=tool_choice,
         )
 
-    def _get_openai_api_key(self, user_id: str | None) -> str | None:
+    def _parse_user_uuid(self, user_id: str | None) -> UUID | None:
         if not user_id:
             return None
 
         try:
-            from uuid import UUID
-
-            user_uuid = UUID(str(user_id))
+            return UUID(str(user_id))
         except Exception:
             return None
 
+    def _get_model_config_service(self):
         try:
             from app.core.container import container
 
-            provider_service = container.provider_service()
-            return provider_service.get_decrypted_api_key(user_uuid, "openai")
+            return container.model_config_service()
         except Exception:
             return None
+
+    def _resolve_runtime_model_config(
+        self,
+        user_id: str | None,
+        model_request: dict[str, Any] | None = None,
+    ) -> ResolvedRuntimeModelConfig:
+        request_override = self._resolve_model_request(model_request)
+        user_uuid = self._parse_user_uuid(user_id)
+        service = self._get_model_config_service()
+
+        if service and user_uuid and self.agent_config_key in _MODEL_REQUEST_SUPPORTED_AGENT_KEYS:
+            return service.resolve_runtime_config(user_uuid, self.agent_config_key, request_override)
+
+        warnings: list[str] = []
+        if request_override:
+            warnings.append(
+                "Runtime model override could not be fully resolved from backend state; using default Gemini configuration."
+            )
+
+        return ResolvedRuntimeModelConfig(
+            agent_key=self.agent_config_key,
+            provider="gemini",
+            model=self.model_name,
+            temperature=float(AGENT_CONFIG.get(self.agent_config_key, {}).get("temperature", 1.0)),
+            api_key=None,
+            key_source="none",
+            source="default",
+            warnings=warnings,
+            capabilities={
+                "supports_vision": True,
+                "supports_tool_calling": True,
+                "supports_streaming": True,
+                "supports_reasoning": True,
+            },
+        )
+
+    def _create_fallback_runtime_config(
+        self,
+        fallback: RuntimeFallbackConfig | None,
+        *,
+        reason: str,
+        from_provider: str,
+        inherited_warnings: list[str] | None = None,
+    ) -> ResolvedRuntimeModelConfig | None:
+        if fallback is None:
+            return None
+
+        warnings = list(inherited_warnings or [])
+        warnings.append(
+            f"Provider fallback applied: {from_provider} -> {fallback.provider} ({reason})."
+        )
+
+        return ResolvedRuntimeModelConfig(
+            agent_key=self.agent_config_key,
+            provider=fallback.provider,
+            model=fallback.model,
+            temperature=fallback.temperature,
+            api_key=fallback.api_key,
+            key_source=fallback.key_source,
+            source="fallback",
+            warnings=warnings,
+            capabilities={
+                "supports_vision": True,
+                "supports_tool_calling": True,
+                "supports_streaming": True,
+                "supports_reasoning": True,
+            },
+            provider_fallback={
+                "from": from_provider,
+                "to": fallback.provider,
+                "reason": reason,
+            },
+        )
+
+    def _create_langchain_model_from_runtime(
+        self,
+        runtime_config: ResolvedRuntimeModelConfig,
+        *,
+        user_id: str | None = None,
+        enable_reasoning_summary: bool = True,
+    ) -> tuple[Any, bool]:
+        if runtime_config.provider == "gemini":
+            if not runtime_config.api_key:
+                if self.langchain_model is not None and runtime_config.model == self.model_name:
+                    return self.langchain_model, False
+                raise ValueError("Gemini runtime config is missing an API key")
+
+            llm = create_langchain_model(
+                agent_type=self.agent_config_key,
+                model_override=runtime_config.model,
+                temperature_override=runtime_config.temperature,
+                api_key_override=runtime_config.api_key,
+            )
+            return llm, False
+
+        from ..model_factory import ModelFactory
+
+        include_reasoning_summary = enable_reasoning_summary
+        user_key = str(user_id).strip() if user_id else ""
+        if user_key and user_key in _OPENAI_REASONING_SUMMARY_DISABLED_USERS:
+            include_reasoning_summary = False
+
+        openai_kwargs: dict[str, Any] = {
+            "provider": "openai",
+            "model": runtime_config.model,
+            "api_key": runtime_config.api_key,
+            "temperature": runtime_config.temperature,
+            "timeout": settings.openai_request_timeout_seconds,
+            "streaming": True,
+        }
+
+        model_lower = runtime_config.model.lower()
+        if include_reasoning_summary:
+            if "o1" in model_lower or "o3" in model_lower:
+                openai_kwargs["reasoning"] = {"effort": "medium"}
+            else:
+                openai_kwargs["reasoning"] = {"summary": "auto"}
+
+        llm = ModelFactory.create_model(**openai_kwargs)
+        return llm, include_reasoning_summary
+
+    def _create_gemini_client_from_runtime(
+        self, runtime_config: ResolvedRuntimeModelConfig
+    ) -> Any | None:
+        if runtime_config.provider != "gemini":
+            return None
+        if not runtime_config.api_key:
+            return self.gemini_client
+
+        return create_gemini_client(api_key_override=runtime_config.api_key)
+
+    def _apply_runtime_metadata(
+        self,
+        metadata: dict[str, Any],
+        runtime_config: ResolvedRuntimeModelConfig,
+    ) -> None:
+        metadata["provider"] = runtime_config.provider
+        metadata["model"] = runtime_config.model
+        metadata["key_source"] = runtime_config.key_source
+        metadata["config_source"] = runtime_config.source
+
+        if runtime_config.warnings:
+            metadata["config_warnings"] = list(runtime_config.warnings)
+        if runtime_config.is_custom_model:
+            metadata["custom_model_override"] = True
+        if runtime_config.provider_fallback:
+            metadata["provider_fallback"] = runtime_config.provider_fallback
 
     async def _ainvoke_with_retries(self, llm_with_tools: Any, messages: list[BaseMessage]) -> Any:
         attempts = getattr(settings, "provider_retry_attempts", 3) or 3
@@ -402,93 +557,14 @@ class BaseAgent(ABC):
         **system_prompt_kwargs: Any,
     ) -> AgentResponse:
         try:
-            # Always check for tool refresh (handles disabled servers, etc.)
-            # _init_tools now checks generation version and only refreshes if needed
             await self._init_tools()
-
-            resolved_request = self._resolve_model_request(model_request)
-
-            provider = "gemini"
-            effective_model_name = self.model_name
-            effective_temperature = AGENT_CONFIG.get(self.agent_config_key, {}).get(
-                "temperature", 1.0
+            runtime_config = self._resolve_runtime_model_config(user_id, model_request)
+            llm, openai_reasoning_summary_requested = self._create_langchain_model_from_runtime(
+                runtime_config,
+                user_id=user_id,
             )
-            used_fallback = False
-            openai_api_key: str | None = None
-            openai_reasoning_summary_requested = False
-
-            llm = self.langchain_model
-            if resolved_request and isinstance(resolved_request, dict):
-                requested_provider = str(resolved_request.get("provider") or "").strip().lower()
-                requested_model = resolved_request.get("model")
-                requested_temp = resolved_request.get("temperature")
-
-                if requested_provider in {"openai", "gemini"}:
-                    provider = requested_provider
-
-                if isinstance(requested_model, str) and requested_model.strip():
-                    effective_model_name = requested_model.strip()
-                if isinstance(requested_temp, (int, float)):
-                    effective_temperature = float(requested_temp)
-
-                if provider == "openai":
-                    api_key = self._get_openai_api_key(user_id)
-                    if api_key:
-                        from ..model_factory import ModelFactory
-
-                        openai_api_key = api_key
-                        include_reasoning_summary = True
-                        user_key = str(user_id).strip() if user_id else ""
-                        if user_key and user_key in _OPENAI_REASONING_SUMMARY_DISABLED_USERS:
-                            include_reasoning_summary = False
-
-                        openai_kwargs: dict[str, Any] = {
-                            "provider": "openai",
-                            "model": effective_model_name,
-                            "api_key": api_key,
-                            "temperature": effective_temperature,
-                            "timeout": settings.openai_request_timeout_seconds,
-                            "streaming": True,
-                        }
-
-                        # Configure reasoning based on model type
-                        model_lower = effective_model_name.lower()
-                        if include_reasoning_summary:
-                            # For o1/o3 models, use effort-based reasoning
-                            if "o1" in model_lower or "o3" in model_lower:
-                                # o1/o3 models support extended thinking with effort levels
-                                openai_kwargs["reasoning"] = {"effort": "medium"}
-                            else:
-                                # For other models, request reasoning summary
-                                openai_kwargs["reasoning"] = {"summary": "auto"}
-
-                        llm = ModelFactory.create_model(**openai_kwargs)
-                        openai_reasoning_summary_requested = include_reasoning_summary
-                    else:
-                        used_fallback = True
-                        provider = "gemini"
-                        effective_model_name = self.model_name
-                        effective_temperature = AGENT_CONFIG.get(self.agent_config_key, {}).get(
-                            "temperature", 1.0
-                        )
-                        llm = create_langchain_model(
-                            agent_type=self.agent_config_key,
-                            model_override=effective_model_name,
-                            temperature_override=effective_temperature,
-                        )
-
-                elif provider == "gemini":
-                    llm = create_langchain_model(
-                        agent_type=self.agent_config_key,
-                        model_override=effective_model_name,
-                        temperature_override=effective_temperature,
-                    )
-
             llm_with_tools = self._get_llm_with_tools(llm, conversation_id=conversation_id)
-
-            # Get the tools that are actually bound (for accurate token counting)
             bound_tools = self._get_tools_for_binding(conversation_id=conversation_id)
-
             has_tool_context = any(
                 isinstance(msg, ToolMessage)
                 or (hasattr(msg, "tool_calls") and msg.tool_calls)
@@ -527,72 +603,72 @@ class BaseAgent(ABC):
                 tools=bound_tools if bound_tools else None,
             )
 
-            # This ensures it runs ONCE per request, not on every agent iteration
-            if provider == "openai" and not used_fallback:
-                try:
-                    response = await self._ainvoke_with_retries(llm_with_tools, langchain_messages)
-                except Exception:
-                    if openai_api_key and openai_reasoning_summary_requested:
-                        user_key = str(user_id).strip() if user_id else ""
-                        if user_key:
-                            _OPENAI_REASONING_SUMMARY_DISABLED_USERS.add(user_key)
+            try:
+                response = await self._ainvoke_with_retries(llm_with_tools, langchain_messages)
+            except Exception:
+                if (
+                    runtime_config.provider == "openai"
+                    and openai_reasoning_summary_requested
+                    and runtime_config.api_key
+                ):
+                    user_key = str(user_id).strip() if user_id else ""
+                    if user_key:
+                        _OPENAI_REASONING_SUMMARY_DISABLED_USERS.add(user_key)
 
-                        try:
-                            from ..model_factory import ModelFactory
-
-                            llm = ModelFactory.create_model(
-                                provider="openai",
-                                model=effective_model_name,
-                                api_key=openai_api_key,
-                                temperature=effective_temperature,
-                                timeout=settings.openai_request_timeout_seconds,
-                                streaming=True,
-                            )
-                            llm_with_tools = self._get_llm_with_tools(
-                                llm, conversation_id=conversation_id
-                            )
-                            openai_reasoning_summary_requested = False
-                            response = await self._ainvoke_with_retries(
-                                llm_with_tools, langchain_messages
-                            )
-                        except Exception:
-                            # Retry exhausted or provider error: fall back to Gemini defaults.
-                            used_fallback = True
-                            provider = "gemini"
-                            effective_model_name = self.model_name
-                            effective_temperature = AGENT_CONFIG.get(self.agent_config_key, {}).get(
-                                "temperature", 1.0
-                            )
-                            llm = create_langchain_model(
-                                agent_type=self.agent_config_key,
-                                model_override=effective_model_name,
-                                temperature_override=effective_temperature,
-                            )
-                            llm_with_tools = self._get_llm_with_tools(
-                                llm, conversation_id=conversation_id
-                            )
-                            response = await llm_with_tools.ainvoke(langchain_messages)
-                    else:
-                        # Retry exhausted or provider error: fall back to Gemini defaults.
-                        used_fallback = True
-                        provider = "gemini"
-                        effective_model_name = self.model_name
-                        effective_temperature = AGENT_CONFIG.get(self.agent_config_key, {}).get(
-                            "temperature", 1.0
-                        )
-                        llm = create_langchain_model(
-                            agent_type=self.agent_config_key,
-                            model_override=effective_model_name,
-                            temperature_override=effective_temperature,
+                    try:
+                        llm, _ = self._create_langchain_model_from_runtime(
+                            runtime_config,
+                            user_id=user_id,
+                            enable_reasoning_summary=False,
                         )
                         llm_with_tools = self._get_llm_with_tools(
-                            llm, conversation_id=conversation_id
+                            llm,
+                            conversation_id=conversation_id,
                         )
-                        response = await llm_with_tools.ainvoke(langchain_messages)
-            else:
-                response = await llm_with_tools.ainvoke(langchain_messages)
+                        response = await self._ainvoke_with_retries(llm_with_tools, langchain_messages)
+                    except Exception:
+                        fallback_runtime = self._create_fallback_runtime_config(
+                            runtime_config.fallback_config,
+                            reason="provider_error",
+                            from_provider=runtime_config.provider,
+                            inherited_warnings=runtime_config.warnings,
+                        )
+                        if not fallback_runtime or not fallback_runtime.api_key:
+                            raise
 
-            # === Extract and log actual token usage ===
+                        runtime_config = fallback_runtime
+                        llm, _ = self._create_langchain_model_from_runtime(
+                            runtime_config,
+                            user_id=user_id,
+                            enable_reasoning_summary=False,
+                        )
+                        llm_with_tools = self._get_llm_with_tools(
+                            llm,
+                            conversation_id=conversation_id,
+                        )
+                        response = await self._ainvoke_with_retries(llm_with_tools, langchain_messages)
+                else:
+                    fallback_runtime = self._create_fallback_runtime_config(
+                        runtime_config.fallback_config,
+                        reason="provider_error",
+                        from_provider=runtime_config.provider,
+                        inherited_warnings=runtime_config.warnings,
+                    )
+                    if not fallback_runtime or not fallback_runtime.api_key:
+                        raise
+
+                    runtime_config = fallback_runtime
+                    llm, _ = self._create_langchain_model_from_runtime(
+                        runtime_config,
+                        user_id=user_id,
+                        enable_reasoning_summary=False,
+                    )
+                    llm_with_tools = self._get_llm_with_tools(
+                        llm,
+                        conversation_id=conversation_id,
+                    )
+                    response = await self._ainvoke_with_retries(llm_with_tools, langchain_messages)
+
             actual_usage = extract_actual_usage(response)
             if actual_usage.get("input_tokens") is not None:
                 token_breakdown.actual_input_tokens = actual_usage["input_tokens"]
@@ -617,17 +693,16 @@ class BaseAgent(ABC):
 
             reasoning_summary = None
             reasoning_tokens = None
-            if provider == "openai" and not used_fallback:
+            if runtime_config.provider == "openai":
                 reasoning_summary = extract_openai_reasoning_summary(response.content)
                 reasoning_tokens = extract_openai_reasoning_tokens(response)
 
             metadata = {
-                "model": effective_model_name,
-                "provider": provider,
                 "conversation_id": conversation_id,
                 "has_tool_calls": tool_calls is not None,
                 "token_breakdown": token_breakdown.to_dict(),
             }
+            self._apply_runtime_metadata(metadata, runtime_config)
 
             if thinking:
                 metadata["thinking"] = thinking

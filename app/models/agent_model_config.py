@@ -6,7 +6,7 @@ Stores persistent per-agent provider/model selection per user.
 
 import uuid
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Text, func
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Index, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -32,6 +32,7 @@ class AgentModelConfig(Base):
     agent_key = Column(Text, nullable=False)  # 'chat'|'rag'|'search'|'planning'
     provider_type = Column(Text, nullable=False)  # 'gemini'|'openai' (for now)
     model = Column(Text, nullable=False)
+    allow_custom_model = Column(Boolean, default=False, nullable=False)
     temperature = Column(Float, nullable=True)
 
     user = relationship("User", back_populates="agent_model_configs")
@@ -44,5 +45,6 @@ class AgentModelConfig(Base):
     def __repr__(self) -> str:
         return (
             f"<AgentModelConfig(id={self.id}, user_id={self.user_id}, "
-            f"agent_key={self.agent_key}, provider_type={self.provider_type}, model={self.model})>"
+            f"agent_key={self.agent_key}, provider_type={self.provider_type}, model={self.model}, "
+            f"allow_custom_model={self.allow_custom_model})>"
         )

@@ -7,19 +7,25 @@ Handles CRUD operations for user-specific AI provider configurations with encryp
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.auth import get_current_user
 from app.core.dependency_injection import AppAutoInjector
 from app.models.user import User
 from app.schemas.responses import ApiResponse
+from app.services.model_config_service import ModelConfigService
 from app.services.provider_service import ProviderService
+from app.utils.case_conversion import to_camel_case as to_camel
 
 router = APIRouter(prefix="/providers", tags=["providers"])
 
 
 # Request/Response Schemas
-class ProviderAddRequest(BaseModel):
+class CamelModel(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class ProviderAddRequest(CamelModel):
     """Request to add or update a provider."""
 
     provider_type: str = Field(
@@ -37,7 +43,7 @@ class ProviderAddRequest(BaseModel):
     )
 
 
-class ProviderResponse(BaseModel):
+class ProviderResponse(CamelModel):
     """Provider configuration response (without API key)."""
 
     id: str
@@ -50,11 +56,22 @@ class ProviderResponse(BaseModel):
     )
 
 
-class ProviderValidationResponse(BaseModel):
+class ProviderModelOption(CamelModel):
+    id: str
+    display_name: str
+    provider_type: str
+    supports_vision: bool = False
+    supports_tool_calling: bool = False
+    supports_streaming: bool = False
+    supports_reasoning: bool = False
+    recommended: bool = False
+
+
+class ProviderValidationResponse(CamelModel):
     """Provider validation result."""
 
     valid: bool
-    models: list[dict[str, Any]] = Field(default_factory=list)
+    models: list[ProviderModelOption] = Field(default_factory=list)
     message: str = Field(default="")
     error: str = Field(default="")
 
@@ -204,13 +221,14 @@ async def get_provider(
         ) from e
 
 
-@router.delete("/{provider_type}", response_model=ApiResponse[dict[str, str]])
+@router.delete("/{provider_type}", response_model=ApiResponse[dict[str, Any]])
 @AppAutoInjector.auto_inject()
 async def delete_provider(
     provider_type: str,
     provider_service: ProviderService,
+    model_config_service: ModelConfigService,
     current_user: User = Depends(get_current_user),  # noqa: B008
-) -> ApiResponse[dict[str, str]]:
+) -> ApiResponse[dict[str, Any]]:
     """
     Delete a provider configuration.
 
@@ -228,10 +246,18 @@ async def delete_provider(
                 detail=f"{provider_type} provider not found",
             )
 
+        reset_agent_keys = model_config_service.cleanup_configs_for_provider(
+            current_user.id,
+            provider_type,
+        )
+
         return ApiResponse(
             success=True,
             message=f"{provider_type} provider deleted successfully",
-            data={"provider_type": provider_type},
+            data={
+                "provider_type": provider_type,
+                "reset_agent_keys": reset_agent_keys,
+            },
         )
     except HTTPException:
         raise
@@ -263,7 +289,7 @@ async def validate_provider(
 
         response_data = ProviderValidationResponse(
             valid=result.get("valid", False),
-            models=result.get("models", []),
+            models=[ProviderModelOption.model_validate(model) for model in result.get("models", [])],
             message=result.get("message", ""),
             error=result.get("error", ""),
         )
@@ -280,7 +306,7 @@ async def validate_provider(
         ) from e
 
 
-@router.get("/{provider_type}/models", response_model=ApiResponse[list[dict[str, Any]]])
+@router.get("/{provider_type}/models", response_model=ApiResponse[list[ProviderModelOption]])
 @AppAutoInjector.auto_inject()
 async def list_provider_models(
     provider_type: str,
@@ -290,22 +316,24 @@ async def list_provider_models(
     """
     List available models from a provider.
 
-    Fetches the list of models available from the provider's API using
-    the stored API key.
+    Forces a catalog sync and returns normalized model metadata.
     """
     try:
-        result = await provider_service.validate_provider(
+        result = await provider_service.sync_provider_models(
             user_id=current_user.id,
             provider_type=provider_type,
+            force_refresh=True,
         )
 
-        if not result.get("valid"):
+        if result.get("sync_status") != "ready":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=result.get("error", "Provider validation failed"),
+                detail=result.get("sync_error", "Provider validation failed"),
             )
 
-        models = result.get("models", [])
+        models = [
+            ProviderModelOption.model_validate(model) for model in result.get("models", [])
+        ]
 
         return ApiResponse(
             success=True,

@@ -63,9 +63,9 @@ AGENT_CONFIG = {
 }
 
 
-def get_api_key() -> str:
+def get_api_key(api_key_override: str | None = None) -> str:
     """Get and normalize the Gemini API key."""
-    api_key = settings.gemini_api_key
+    api_key = api_key_override or settings.gemini_api_key
     if not api_key:
         raise ValueError("GEMINI_API_KEY is not set")
 
@@ -76,14 +76,14 @@ def get_api_key() -> str:
     return api_key
 
 
-def create_gemini_client() -> genai.Client:
+def create_gemini_client(api_key_override: str | None = None) -> genai.Client:
     """
     Create a raw GenAI Client instance.
 
     Returns:
         genai.Client: Initialized Gemini client
     """
-    api_key = get_api_key()
+    api_key = get_api_key(api_key_override=api_key_override)
     return genai.Client(api_key=api_key)
 
 
@@ -150,6 +150,7 @@ def create_langchain_model(
     model_override: str | None = None,
     temperature_override: float | None = None,
     include_thinking: bool = True,
+    api_key_override: str | None = None,
 ) -> ChatGoogleGenerativeAI:
     """
     Create a ChatGoogleGenerativeAI instance with proper configuration.
@@ -169,7 +170,7 @@ def create_langchain_model(
         )
 
     config = AGENT_CONFIG[agent_type]
-    api_key = get_api_key()
+    api_key = get_api_key(api_key_override=api_key_override)
 
     model_name = model_override or config["model"]
     temperature = (

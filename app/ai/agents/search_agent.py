@@ -1,4 +1,3 @@
-import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -6,8 +5,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from ..prompts import SEARCH_SYSTEM_PROMPT, build_search_prompt
-from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..utils import coerce_response_text
+from ..schemas import AgentMessage, AgentResponse, AgentType
 from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -41,6 +39,9 @@ class SearchAgent(BaseAgent):
         conversation_history = message.metadata.get("history", [])
         persona = message.metadata.get("persona")
         message_content = message.content or ""
+        request_user_id = message.metadata.get("user_id")
+        model_request = message.metadata.get("model_request")
+        history_summary = message.metadata.get("history_summary")
 
         # Check if this invocation includes tool results (post-tool-execution)
         # This happens when the graph routes back after tool execution
@@ -54,35 +55,20 @@ class SearchAgent(BaseAgent):
             has_tool_results=has_tool_results,
         )
 
-        # Configure tool calling; allow follow-up tool planning when needed
-        llm_with_tools = self._get_llm_with_tools(conversation_id=conversation_id)
-
-        # Invoke model
-        response = await llm_with_tools.ainvoke([HumanMessage(content=prompt)])
-
-        tool_calls = []
-        if hasattr(response, "tool_calls") and response.tool_calls:
-            tool_calls = response.tool_calls
-
-        # Create response metadata
-        search_metadata = {
-            "model": self.model_name,
-            "conversation_id": conversation_id,
-            "context_messages": len(conversation_history),
-            "agent_type": "tool_calling",
-            "persona_used": persona,
-        }
-
-        return AgentResponse(
-            agent_type=AgentType.SEARCH,
-            agent_id="search_agent",
-            message=AgentMessage(
-                role=MessageRole.ASSISTANT,
-                content=coerce_response_text(response.content),
-                tool_calls=tool_calls if tool_calls else None,
-            ),
-            metadata=search_metadata,
+        response = await self.invoke_model_with_history(
+            [HumanMessage(content=prompt)],
+            conversation_history,
+            persona,
+            conversation_id,
+            user_id=request_user_id,
+            model_request=model_request,
+            history_summary=history_summary,
         )
+        response.metadata["conversation_id"] = conversation_id
+        response.metadata["context_messages"] = len(conversation_history)
+        response.metadata["agent_type"] = "tool_calling"
+        response.metadata["persona_used"] = persona
+        return response
 
     async def process_message(
         self,
@@ -96,137 +82,22 @@ class SearchAgent(BaseAgent):
         message: AgentMessage,
         conversation_id: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        # Initialize MCP tools if needed
-        if self.mcp_manager is None:
-            await self._init_tools()
+        response = await self.invoke_model(message, conversation_id)
 
-        # Extract conversation history
-        conversation_history = message.metadata.get("history", [])
-        persona = message.metadata.get("persona")
+        for tool_call in response.message.tool_calls or []:
+            yield {
+                "type": "tool_start",
+                "name": tool_call.get("name", "unknown"),
+                "tool_call_id": tool_call.get("id"),
+                "args": tool_call.get("args"),
+            }
 
-        # Build prompt
-        prompt = build_search_prompt(message.content or "", conversation_history, persona=persona)
+        thinking_summary = str(response.metadata.get("thinking_summary") or "").strip()
+        if thinking_summary:
+            yield {"type": "thinking", "content": thinking_summary}
 
-        # Use unified tool binding with deferred loading support
-        llm_with_tools = self._get_llm_with_tools(conversation_id=conversation_id)
-        accumulated_content = ""
-        accumulated_thinking = ""
-        current_tool_calls = {}  # Track tool call chunks
-
-        try:
-            # Use astream_events for LangChain model streaming
-
-            async for event in llm_with_tools.astream_events(
-                [HumanMessage(content=prompt)], version="v2"
-            ):
-                event_type = event.get("event")
-
-                # Handle LLM token streaming
-                if event_type == "on_chat_model_stream":
-                    chunk = event.get("data", {}).get("chunk")
-                    if not chunk:
-                        continue
-
-                    if hasattr(chunk, "content_blocks") and chunk.content_blocks:
-                        for block in chunk.content_blocks:
-                            block_type = block.get("type")
-
-                            if block_type == "text":
-                                token = block.get("text", "")
-                                if not token:
-                                    continue
-
-                                # Check for thinking/reasoning markers
-                                additional_kwargs = getattr(chunk, "additional_kwargs", {})
-                                is_thinking = additional_kwargs.get(
-                                    "thought"
-                                ) or additional_kwargs.get("thinking")
-
-                                if is_thinking:
-                                    accumulated_thinking += token
-                                    yield {"type": "thinking", "content": token}
-                                else:
-                                    accumulated_content += token
-                                    yield {"type": "token", "content": token}
-
-                            # Handle explicit thinking block type
-                            elif block_type == "thinking":
-                                thinking_content = block.get("thinking", "")
-                                if thinking_content:
-                                    accumulated_thinking += thinking_content
-                                    yield {
-                                        "type": "thinking",
-                                        "content": thinking_content,
-                                    }
-
-                            elif block_type == "tool_call_chunk":
-                                # Accumulate tool call chunks
-                                tool_index = block.get("index", 0)
-                                if tool_index not in current_tool_calls:
-                                    current_tool_calls[tool_index] = {
-                                        "id": block.get("id"),
-                                        "name": block.get("name"),
-                                        "args": "",
-                                    }
-                                if block.get("args"):
-                                    current_tool_calls[tool_index]["args"] += block.get("args")
-                                if block.get("name") and not current_tool_calls[tool_index]["name"]:
-                                    current_tool_calls[tool_index]["name"] = block.get("name")
-                                if block.get("id") and not current_tool_calls[tool_index]["id"]:
-                                    current_tool_calls[tool_index]["id"] = block.get("id")
-
-                    elif hasattr(chunk, "content"):
-                        token = coerce_response_text(chunk.content)
-                        if not token:
-                            continue
-
-                        # Check for thinking/reasoning markers
-                        additional_kwargs = getattr(chunk, "additional_kwargs", {})
-                        is_thinking = additional_kwargs.get("thought") or additional_kwargs.get(
-                            "thinking"
-                        )
-
-                        if is_thinking:
-                            accumulated_thinking += token
-                            yield {"type": "thinking", "content": token}
-                        else:
-                            accumulated_content += token
-                            yield {"type": "token", "content": token}
-
-                    # Check for chunk completion
-                    if hasattr(chunk, "chunk_position") and chunk.chunk_position == "last":
-                        # Emit accumulated tool calls
-                        for tool_call in current_tool_calls.values():
-                            if tool_call["name"]:
-                                try:
-                                    args = (
-                                        json.loads(tool_call["args"]) if tool_call["args"] else {}
-                                    )
-                                except Exception:
-                                    args = tool_call["args"]
-
-                                yield {
-                                    "type": "tool_start",
-                                    "name": tool_call["name"],
-                                    "tool_call_id": tool_call["id"],
-                                    "args": args,
-                                }
-                        current_tool_calls = {}
-
-                # Handle tool execution events
-                elif event_type == "on_tool_end":
-                    tool_name = event.get("name", "unknown")
-                    tool_output = event.get("data", {}).get("output")
-                    tool_call_id = event.get("run_id")
-                    yield {
-                        "type": "tool_end",
-                        "name": tool_name,
-                        "tool_call_id": str(tool_call_id) if tool_call_id else None,
-                        "result": tool_output,
-                    }
-
-        except Exception as e:
-            yield {"type": "error", "error": str(e)}
+        yield {"type": "token", "content": response.message.content or ""}
+        yield {"type": "complete", "response": response}
 
     async def cleanup(self):
         await super().cleanup()

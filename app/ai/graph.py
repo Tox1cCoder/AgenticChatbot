@@ -961,6 +961,8 @@ class MultiAgentWorkflow:
                     "persona": state.get("persona"),
                     "history": conversation_history,
                     "history_summary": state.get("history_summary"),
+                    "model_request": state.get("model_request"),
+                    "user_id": user_id,
                 },
                 attachments=attachments,
             )

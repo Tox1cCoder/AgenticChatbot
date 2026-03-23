@@ -1254,14 +1254,9 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "stream_tool_index": dict,
     "stream_trace_expanded": lambda: False,
     # Provider/model UI state
-    "openai_models": list,
-    "openai_models_last_fetch": lambda: None,
-    "openai_models_fetch_attempted": lambda: False,
-    "openai_models_fetch_error": lambda: None,
-    # Persistent per-agent model config UI state
-    "agent_model_config_cache": dict,
-    "agent_model_config_last_fetch": lambda: None,
-    "agent_model_config_fetch_error": lambda: None,
+    "model_config_options_cache": dict,
+    "model_config_options_last_fetch": lambda: None,
+    "model_config_options_error": lambda: None,
     # Planning mode state
     "planning_status": lambda: None,
     "task_plans_list": list,
@@ -2078,13 +2073,6 @@ def get_messages(
     return response
 
 
-def get_providers() -> list[dict[str, Any]]:
-    """List configured providers for the current user (API key never returned)."""
-    response = make_api_request("GET", "/providers")
-    data = response.get("data", []) if response else []
-    return data if isinstance(data, list) else []
-
-
 def upsert_provider(
     provider_type: str,
     api_key: str,
@@ -2107,15 +2095,27 @@ def delete_provider(provider_type: str) -> bool:
     return bool(response)
 
 
-def fetch_provider_models(provider_type: str) -> list[dict[str, Any]]:
-    response = make_api_request("GET", f"/providers/{provider_type}/models")
-    data = response.get("data", []) if response else []
+def _cache_bust_query(force_refresh: bool = False) -> str:
+    if not force_refresh:
+        return ""
+    return f"?_ts={uuid.uuid4().hex}"
+
+
+def fetch_provider_models(
+    provider_type: str, *, force_refresh: bool = False
+) -> list[dict[str, Any]] | None:
+    response = make_api_request(
+        "GET",
+        f"/providers/{provider_type}/models{_cache_bust_query(force_refresh)}",
+    )
+    if not response:
+        return None
+    data = response.get("data", [])
     return data if isinstance(data, list) else []
 
 
-def get_model_config() -> dict[str, Any]:
-    """Get persisted per-agent model config (defaults + overrides)."""
-    response = make_api_request("GET", "/model-config")
+def get_model_config_options(*, force_refresh: bool = False) -> dict[str, Any]:
+    response = make_api_request("GET", f"/model-config/options{_cache_bust_query(force_refresh)}")
     data = response.get("data", {}) if response else {}
     return data if isinstance(data, dict) else {}
 
@@ -2132,6 +2132,91 @@ def reset_model_config() -> dict[str, Any]:
     response = make_api_request("POST", "/model-config/reset", {})
     data = response.get("data", {}) if response else {}
     return data if isinstance(data, dict) else {}
+
+
+def _normalize_provider_type(value: Any) -> str:
+    provider_type = str(value or "").strip().lower()
+    return provider_type if provider_type else "gemini"
+
+
+def _provider_display_name(provider_type: str) -> str:
+    names = {
+        "gemini": "Gemini",
+        "openai": "OpenAI",
+    }
+    return names.get(provider_type, provider_type.replace("_", " ").title())
+
+
+def _snapshot_provider_list(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    providers = snapshot.get("providers", [])
+    return providers if isinstance(providers, list) else []
+
+
+def _snapshot_provider_map(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        _normalize_provider_type(
+            provider.get("providerType") or provider.get("provider_type")
+        ): provider
+        for provider in _snapshot_provider_list(snapshot)
+        if isinstance(provider, dict)
+    }
+
+
+def _snapshot_agent_config(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    config = snapshot.get("agentConfig") or snapshot.get("agent_config") or {}
+    return config if isinstance(config, dict) else {}
+
+
+def _provider_models(provider_snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    models = provider_snapshot.get("models", [])
+    return models if isinstance(models, list) else []
+
+
+def _provider_model_ids(provider_snapshot: dict[str, Any]) -> list[str]:
+    model_ids: list[str] = []
+    for model in _provider_models(provider_snapshot):
+        model_id = str(model.get("id") or "").strip()
+        if model_id and model_id not in model_ids:
+            model_ids.append(model_id)
+    return model_ids
+
+
+def _sync_model_config_form_state(snapshot: dict[str, Any]) -> None:
+    provider_map = _snapshot_provider_map(snapshot)
+    agent_config = _snapshot_agent_config(snapshot)
+
+    for agent_key in ("chat", "rag", "search", "planning"):
+        cfg = agent_config.get(agent_key, {}) if isinstance(agent_config, dict) else {}
+        provider = _normalize_provider_type(cfg.get("provider"))
+        provider_snapshot = provider_map.get(provider, {})
+        catalog_ids = _provider_model_ids(provider_snapshot)
+        current_model = str(cfg.get("model") or "").strip()
+        current_temperature = cfg.get("temperature", 1.0)
+        is_custom_model = bool(cfg.get("isCustomModel") or cfg.get("is_custom_model"))
+
+        selected_model = current_model if current_model in catalog_ids else (catalog_ids[0] if catalog_ids else current_model)
+        custom_model = current_model if is_custom_model else ""
+
+        st.session_state[f"model_cfg_provider_{agent_key}"] = provider
+        st.session_state[f"model_cfg_model_select_{agent_key}"] = selected_model
+        st.session_state[f"model_cfg_model_custom_{agent_key}"] = custom_model
+        st.session_state[f"model_cfg_allow_custom_{agent_key}"] = is_custom_model
+        st.session_state[f"model_cfg_temperature_{agent_key}"] = (
+            float(current_temperature) if isinstance(current_temperature, (int, float)) else 1.0
+        )
+
+
+def refresh_model_config_options_cache(*, force_refresh: bool = False) -> dict[str, Any]:
+    snapshot = get_model_config_options(force_refresh=force_refresh)
+    if snapshot:
+        st.session_state.model_config_options_cache = snapshot
+        st.session_state.model_config_options_last_fetch = datetime.now(timezone.utc).isoformat()
+        st.session_state.model_config_options_error = None
+        _sync_model_config_form_state(snapshot)
+        return snapshot
+
+    st.session_state.model_config_options_error = "Failed to load model configuration options."
+    return st.session_state.get("model_config_options_cache") or {}
 
 
 def normalize_persona_input(raw: str) -> str:
@@ -6644,146 +6729,194 @@ def render_settings_view():
 
 
 def render_models_view() -> None:
-    """Model/provider settings (keys + persistent per-agent model selection)."""
+    """Model/provider settings rendered from the backend-owned options snapshot."""
     st.markdown("# Models")
-
-    providers = get_providers()
-    openai_provider = next(
-        (p for p in providers if str(p.get("provider_type", "")).strip().lower() == "openai"),
-        None,
+    st.caption(
+        "Provider status, synced catalogs, and effective agent selections are loaded from one backend snapshot."
     )
 
-    st.subheader("OpenAI API Key (stored in DB)")
-    if openai_provider:
-        created_at = openai_provider.get("created_at") or openai_provider.get("createdAt")
-        key_preview = openai_provider.get("key_preview") or openai_provider.get("keyPreview")
-        st.success(f"Configured ({key_preview or '***'})")
-        if created_at:
-            st.caption(f"Added: {created_at}")
-    else:
-        st.info("No OpenAI key saved for this user yet.")
-
-    with st.form("openai_provider_form", clear_on_submit=True):
-        api_key = st.text_input("OpenAI API key", type="password", placeholder="sk-...")
-        submitted = st.form_submit_button(
-            "Save / Update OpenAI Key",
-            width="stretch",
-            type="primary",
-        )
-        if submitted:
-            api_key = api_key.strip()
-            if not api_key:
-                st.toast("Please enter an API key", icon=":material/warning:")
-            else:
-                result = upsert_provider("openai", api_key, is_default=False)
-                if result:
-                    st.session_state.openai_models = []
-                    st.session_state.openai_models_last_fetch = None
-                    st.session_state.openai_models_fetch_attempted = False
-                    st.session_state.openai_models_fetch_error = None
-                    st.toast("OpenAI key saved", icon=":material/check_circle:")
-                    st.rerun()
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if st.button(
-            "Refresh OpenAI model list",
-            width="stretch",
-        ):
-            with st.spinner("Fetching models from OpenAI..."):
-                models = fetch_provider_models("openai")
-
-            st.session_state.openai_models_fetch_attempted = True
-            if models:
-                st.session_state.openai_models = models
-                st.session_state.openai_models_last_fetch = datetime.now(timezone.utc).isoformat()
-                st.session_state.openai_models_fetch_error = None
-                st.toast(f"Loaded {len(models)} models", icon=":material/check_circle:")
-            else:
-                st.session_state.openai_models_fetch_error = (
-                    "No models returned. Check your OpenAI key."
-                )
-            st.rerun()
-
-    with col2:
-        if st.button(
-            "Delete OpenAI key",
-            width="stretch",
-            disabled=openai_provider is None,
-        ) and delete_provider("openai"):
-            st.session_state.openai_models = []
-            st.session_state.openai_models_last_fetch = None
-            st.session_state.openai_models_fetch_attempted = False
-            st.session_state.openai_models_fetch_error = None
-            st.toast("OpenAI key deleted", icon=":material/delete:")
-            st.rerun()
-
-    st.subheader("Available OpenAI models")
-
-    last_fetch = st.session_state.get("openai_models_last_fetch")
-    if last_fetch:
-        st.caption(f"Last fetched: {last_fetch}")
-
-    models = st.session_state.get("openai_models") or []
-    if models:
-        st.dataframe(models, width="stretch", hide_index=True)
-    else:
-        st.info("Click “Refresh OpenAI model list” to load available models.")
-
-    st.divider()
-
-    st.subheader("Agent model configuration (persistent)")
-
-    if not st.session_state.get("agent_model_config_cache"):
+    if not st.session_state.get("model_config_options_cache"):
         with st.spinner("Loading model configuration..."):
-            st.session_state.agent_model_config_cache = get_model_config()
-            st.session_state.agent_model_config_last_fetch = datetime.now(timezone.utc).isoformat()
-            st.session_state.agent_model_config_fetch_error = None
+            refresh_model_config_options_cache()
 
-    config = st.session_state.get("agent_model_config_cache") or {}
+    snapshot = st.session_state.get("model_config_options_cache") or {}
+    if not snapshot:
+        error_message = st.session_state.get("model_config_options_error")
+        if error_message:
+            st.error(error_message)
+        else:
+            st.info("No model configuration data is available yet.")
+        return
+
+    provider_map = _snapshot_provider_map(snapshot)
+    agent_config = _snapshot_agent_config(snapshot)
+
+    provider_order: list[str] = []
+    for provider in _snapshot_provider_list(snapshot):
+        provider_type = _normalize_provider_type(
+            provider.get("providerType") or provider.get("provider_type")
+        )
+        if provider_type not in provider_order:
+            provider_order.append(provider_type)
+    for provider_type in ("gemini", "openai"):
+        if provider_type not in provider_order:
+            provider_order.append(provider_type)
 
     controls_col1, controls_col2, controls_col3 = st.columns([1.2, 1.2, 3])
     with controls_col1:
-        if st.button("Reload from server", width="stretch"):
+        if st.button("Reload snapshot", width="stretch"):
             with st.spinner("Loading model configuration..."):
-                st.session_state.agent_model_config_cache = get_model_config()
-                st.session_state.agent_model_config_last_fetch = datetime.now(
-                    timezone.utc
-                ).isoformat()
-                st.session_state.agent_model_config_fetch_error = None
-            st.toast("Model config reloaded", icon=":material/refresh:")
+                refreshed = refresh_model_config_options_cache(force_refresh=True)
+            if refreshed:
+                st.toast("Model snapshot reloaded", icon=":material/refresh:")
             st.rerun()
 
     with controls_col2:
-        if st.button("Reset to defaults", width="stretch"):
+        if st.button("Reset agent defaults", width="stretch"):
             with st.spinner("Resetting..."):
-                st.session_state.agent_model_config_cache = reset_model_config()
-                st.session_state.agent_model_config_last_fetch = datetime.now(
-                    timezone.utc
-                ).isoformat()
-                st.session_state.agent_model_config_fetch_error = None
-            st.toast("Model config reset", icon=":material/cleaning_services:")
+                reset_model_config()
+                refreshed = refresh_model_config_options_cache(force_refresh=True)
+            if refreshed:
+                st.toast("Agent model settings reset", icon=":material/cleaning_services:")
             st.rerun()
 
     with controls_col3:
-        fetched_at = st.session_state.get("agent_model_config_last_fetch")
+        fetched_at = st.session_state.get("model_config_options_last_fetch")
         if fetched_at:
             st.caption(f"Last loaded: {fetched_at}")
-        st.caption("These settings apply automatically to new messages.")
+        error_message = st.session_state.get("model_config_options_error")
+        if error_message:
+            st.caption(error_message)
+        else:
+            st.caption("Mutations refresh this snapshot automatically.")
 
-    gemini_model_options = [
-        "gemini-3-flash-preview",
-        "gemini-3.1-pro-preview",
-        "gemini-2.5-flash-latest",
-        "gemini-2.5-pro",
-    ]
+    st.divider()
+    st.subheader("Provider configuration")
 
-    openai_model_ids = [
-        str(m.get("id") or m.get("name") or "").strip()
-        for m in (st.session_state.get("openai_models") or [])
-        if isinstance(m, dict) and str(m.get("id") or m.get("name") or "").strip()
-    ]
+    for provider_type in provider_order:
+        provider = provider_map.get(provider_type, {})
+        provider_name = _provider_display_name(provider_type)
+        configured = bool(provider.get("configured"))
+        key_source = str(provider.get("keySource") or provider.get("key_source") or "none")
+        sync_status = str(provider.get("syncStatus") or provider.get("sync_status") or "unknown")
+        last_synced_at = provider.get("lastSyncedAt") or provider.get("last_synced_at")
+        sync_error = str(provider.get("syncError") or provider.get("sync_error") or "").strip()
+        warnings = provider.get("warnings") or []
+        models = _provider_models(provider)
+
+        st.markdown(f"### {provider_name}")
+        status_cols = st.columns(4)
+        with status_cols[0]:
+            st.metric("Configured", "Yes" if configured else "No")
+        with status_cols[1]:
+            st.metric("Key Source", key_source.upper())
+        with status_cols[2]:
+            st.metric("Sync Status", sync_status.replace("_", " ").title())
+        with status_cols[3]:
+            st.metric("Catalog Models", len(models))
+
+        if key_source == "env":
+            st.info(
+                f"{provider_name} is currently using the server environment fallback. "
+                "Save a DB key here if you want a user-specific override."
+            )
+        if sync_error:
+            st.error(sync_error)
+        for warning in warnings:
+            if isinstance(warning, str) and warning.strip():
+                st.warning(warning.strip())
+        if last_synced_at:
+            st.caption(f"Last synced: {last_synced_at}")
+
+        with st.form(f"provider_form_{provider_type}", clear_on_submit=True):
+            placeholder = "sk-..." if provider_type == "openai" else "AIza..."
+            api_key = st.text_input(
+                f"{provider_name} API key",
+                type="password",
+                placeholder=placeholder,
+            )
+            save_submitted = st.form_submit_button(
+                f"Save / Update {provider_name} Key",
+                width="stretch",
+                type="primary",
+            )
+            if save_submitted:
+                api_key = api_key.strip()
+                if not api_key:
+                    st.toast("Please enter an API key", icon=":material/warning:")
+                else:
+                    with st.spinner(f"Saving {provider_name} key..."):
+                        result = upsert_provider(provider_type, api_key, is_default=False)
+                        refreshed = refresh_model_config_options_cache(force_refresh=True)
+                    if result and refreshed:
+                        st.toast(f"{provider_name} key saved", icon=":material/check_circle:")
+                    st.rerun()
+
+        action_cols = st.columns(3)
+        with action_cols[0]:
+            if st.button(
+                f"Sync {provider_name} models",
+                key=f"sync_provider_{provider_type}",
+                width="stretch",
+                disabled=not configured,
+            ):
+                with st.spinner(f"Syncing {provider_name} models..."):
+                    synced_models = fetch_provider_models(provider_type, force_refresh=True)
+                    refreshed = (
+                        refresh_model_config_options_cache(force_refresh=True)
+                        if synced_models is not None
+                        else {}
+                    )
+                if synced_models is not None and refreshed:
+                    st.toast(
+                        f"Synced {len(synced_models)} {provider_name} models",
+                        icon=":material/sync:",
+                    )
+                    st.rerun()
+
+        with action_cols[1]:
+            if st.button(
+                f"Delete {provider_name} key",
+                key=f"delete_provider_{provider_type}",
+                width="stretch",
+                disabled=key_source != "db",
+            ):
+                if delete_provider(provider_type):
+                    refresh_model_config_options_cache(force_refresh=True)
+                    st.toast(f"{provider_name} key deleted", icon=":material/delete:")
+                st.rerun()
+
+        with action_cols[2]:
+            if key_source == "db":
+                st.caption("Deleting removes the DB key and resets dependent agent configs.")
+            elif key_source == "env":
+                st.caption("Environment fallback is active; there is no DB key to delete.")
+            else:
+                st.caption("Save a key to enable sync and per-user model selection.")
+
+        if models:
+            model_rows = [
+                {
+                    "ID": str(model.get("id") or "").strip(),
+                    "Name": str(model.get("displayName") or model.get("display_name") or "").strip(),
+                    "Recommended": "Yes" if model.get("recommended") else "",
+                    "Vision": "Yes" if model.get("supportsVision") or model.get("supports_vision") else "",
+                    "Tools": "Yes" if model.get("supportsToolCalling") or model.get("supports_tool_calling") else "",
+                    "Streaming": "Yes" if model.get("supportsStreaming") or model.get("supports_streaming") else "",
+                    "Reasoning": "Yes" if model.get("supportsReasoning") or model.get("supports_reasoning") else "",
+                }
+                for model in models
+            ]
+            st.dataframe(model_rows, width="stretch", hide_index=True)
+        elif configured:
+            st.info(f"No synced {provider_name} models yet. Use the sync action above.")
+        else:
+            st.info(f"Configure {provider_name} above to load its model catalog.")
+
+        st.divider()
+
+    st.subheader("Agent model configuration")
+    st.caption("These settings apply automatically to new messages.")
 
     agents: list[tuple[str, str]] = [
         ("chat", "Chat"),
@@ -6792,119 +6925,114 @@ def render_models_view() -> None:
         ("planning", "Planning"),
     ]
 
-    # Initialize provider selections in session state if not present
-    for agent_key, _ in agents:
-        cfg = config.get(agent_key, {}) if isinstance(config, dict) else {}
-        current_provider = str(cfg.get("provider") or "gemini").strip().lower()
-        if current_provider not in ("gemini", "openai"):
-            current_provider = "gemini"
-
-        if f"temp_provider_{agent_key}" not in st.session_state:
-            st.session_state[f"temp_provider_{agent_key}"] = current_provider
-
-    def _build_model_options(current: str, candidates: list[str], placeholder: str) -> list[str]:
-        options: list[str] = []
-        if current and current not in options:
-            options.append(current)
-        for item in candidates:
-            if item and item not in options:
-                options.append(item)
-        return options or [placeholder]
-
-    # Provider selection outside form for reactivity
-    st.subheader("Select providers for each agent")
+    st.markdown("#### Select providers for each agent")
     provider_cols = st.columns(len(agents))
     for idx, (agent_key, label) in enumerate(agents):
         with provider_cols[idx]:
-            cfg = config.get(agent_key, {}) if isinstance(config, dict) else {}
-            current_provider = str(cfg.get("provider") or "gemini").strip().lower()
-            if current_provider not in ("gemini", "openai"):
-                current_provider = "gemini"
+            current_provider = _normalize_provider_type(
+                st.session_state.get(f"model_cfg_provider_{agent_key}")
+            )
+            if current_provider not in provider_order:
+                current_provider = provider_order[0]
 
             selected_provider = st.selectbox(
                 label,
-                options=["gemini", "openai"],
-                index=(
-                    0
-                    if st.session_state.get(f"temp_provider_{agent_key}", current_provider)
-                    == "gemini"
-                    else 1
-                ),
-                key=f"provider_selector_{agent_key}",
-                format_func=lambda value: "Gemini" if value == "gemini" else "OpenAI",
+                options=provider_order,
+                index=provider_order.index(current_provider),
+                key=f"model_cfg_provider_{agent_key}",
+                format_func=_provider_display_name,
             )
-            st.session_state[f"temp_provider_{agent_key}"] = selected_provider
+            provider_snapshot = provider_map.get(selected_provider, {})
+            provider_state = "Configured" if provider_snapshot.get("configured") else "Not configured"
+            st.caption(provider_state)
 
     st.divider()
     st.subheader("Configure models and parameters")
 
     with st.form("agent_model_config_form"):
         for agent_key, label in agents:
-            cfg = config.get(agent_key, {}) if isinstance(config, dict) else {}
-            current_provider = str(cfg.get("provider") or "gemini").strip().lower()
-            if current_provider not in ("gemini", "openai"):
-                current_provider = "gemini"
-
-            current_model = str(cfg.get("model") or "").strip()
-            current_temp = cfg.get("temperature", 1.0)
-            if not isinstance(current_temp, (int, float)):
-                current_temp = 1.0
+            cfg = agent_config.get(agent_key, {}) if isinstance(agent_config, dict) else {}
+            selected_provider = _normalize_provider_type(
+                st.session_state.get(f"model_cfg_provider_{agent_key}")
+            )
+            provider_snapshot = provider_map.get(selected_provider, {})
+            catalog_ids = _provider_model_ids(provider_snapshot)
+            configured = bool(provider_snapshot.get("configured"))
+            key_source = str(
+                provider_snapshot.get("keySource") or provider_snapshot.get("key_source") or "none"
+            )
+            sync_status = str(
+                provider_snapshot.get("syncStatus") or provider_snapshot.get("sync_status") or "unknown"
+            )
+            current_selection = str(
+                st.session_state.get(f"model_cfg_model_select_{agent_key}") or ""
+            ).strip()
+            allow_custom_default = bool(
+                st.session_state.get(
+                    f"model_cfg_allow_custom_{agent_key}",
+                    cfg.get("isCustomModel") or cfg.get("is_custom_model") or False,
+                )
+            )
+            custom_value_default = str(
+                st.session_state.get(f"model_cfg_model_custom_{agent_key}") or ""
+            ).strip()
+            model_options = list(catalog_ids)
+            if current_selection and current_selection not in model_options:
+                model_options.insert(0, current_selection)
+            if not model_options:
+                model_options = ["(sync models first)"]
 
             st.markdown(f"**{label}**")
-            col_model, col_temp = st.columns([3, 1.2])
+            st.caption(
+                f"Provider: {_provider_display_name(selected_provider)}"
+                f" • Key source: {key_source.upper()}"
+                f" • Sync: {sync_status.replace('_', ' ').title()}"
+            )
 
-            # Get the provider from the selector outside the form
-            selected_provider = st.session_state.get(f"temp_provider_{agent_key}", current_provider)
+            field_cols = st.columns([2.2, 1.4, 1.2])
+            with field_cols[0]:
+                st.selectbox(
+                    "Catalog model",
+                    options=model_options,
+                    index=0,
+                    key=f"model_cfg_model_select_{agent_key}",
+                    disabled=not configured or not catalog_ids,
+                )
+                st.text_input(
+                    "Custom model ID",
+                    key=f"model_cfg_model_custom_{agent_key}",
+                    value=custom_value_default,
+                    placeholder="Enter a provider-specific model ID",
+                    disabled=not configured,
+                    help="Only used when custom override is enabled below.",
+                )
 
-            with col_model:
-                if selected_provider == "openai":
-                    model_options = _build_model_options(
-                        current=current_model if current_provider == "openai" else "",
-                        candidates=openai_model_ids,
-                        placeholder="(load OpenAI models above)",
-                    )
-                    st.selectbox(
-                        "Model",
-                        options=model_options,
-                        index=0,
-                        key=f"agent_cfg_model_select_{agent_key}",
-                    )
-                    st.text_input(
-                        "Custom model (optional)",
-                        placeholder="gpt-4o-mini",
-                        key=f"agent_cfg_model_custom_{agent_key}",
-                        value="",
-                        help="If set, overrides the dropdown selection.",
-                    )
-                else:
-                    model_options = _build_model_options(
-                        current=current_model if current_provider == "gemini" else "",
-                        candidates=gemini_model_options,
-                        placeholder="gemini-3-flash-preview",
-                    )
-                    st.selectbox(
-                        "Model",
-                        options=model_options,
-                        index=0,
-                        key=f"agent_cfg_model_select_{agent_key}",
-                    )
-                    st.text_input(
-                        "Custom model (optional)",
-                        placeholder="gemini-3-flash-preview",
-                        key=f"agent_cfg_model_custom_{agent_key}",
-                        value="",
-                        help="If set, overrides the dropdown selection.",
-                    )
+            with field_cols[1]:
+                st.checkbox(
+                    "Allow custom model override",
+                    key=f"model_cfg_allow_custom_{agent_key}",
+                    value=allow_custom_default,
+                    disabled=not configured,
+                )
 
-            with col_temp:
+            with field_cols[2]:
                 st.slider(
                     "Temperature",
                     min_value=0.0,
                     max_value=2.0,
-                    value=float(current_temp),
+                    value=float(
+                        st.session_state.get(
+                            f"model_cfg_temperature_{agent_key}",
+                            cfg.get("temperature", 1.0),
+                        )
+                    ),
                     step=0.05,
-                    key=f"agent_cfg_temperature_{agent_key}",
+                    key=f"model_cfg_temperature_{agent_key}",
                 )
+
+            for warning in cfg.get("warnings") or []:
+                if isinstance(warning, str) and warning.strip():
+                    st.warning(warning.strip())
 
         submitted = st.form_submit_button(
             "Save agent model settings",
@@ -6914,42 +7042,65 @@ def render_models_view() -> None:
 
         if submitted:
             payload: dict[str, Any] = {}
-            for agent_key, _ in agents:
-                # Use the provider from the selector outside the form
-                provider = (
-                    str(st.session_state.get(f"temp_provider_{agent_key}") or "gemini")
-                    .strip()
-                    .lower()
+            validation_errors: list[str] = []
+
+            for agent_key, label in agents:
+                selected_provider = _normalize_provider_type(
+                    st.session_state.get(f"model_cfg_provider_{agent_key}")
                 )
-                selected = str(
-                    st.session_state.get(f"agent_cfg_model_select_{agent_key}") or ""
+                provider_snapshot = provider_map.get(selected_provider, {})
+                configured = bool(provider_snapshot.get("configured"))
+                selected_model = str(
+                    st.session_state.get(f"model_cfg_model_select_{agent_key}") or ""
                 ).strip()
-                custom = str(
-                    st.session_state.get(f"agent_cfg_model_custom_{agent_key}") or ""
+                custom_model = str(
+                    st.session_state.get(f"model_cfg_model_custom_{agent_key}") or ""
                 ).strip()
-                model = custom or selected
-                temperature = st.session_state.get(f"agent_cfg_temperature_{agent_key}", 1.0)
+                allow_custom_model = bool(
+                    st.session_state.get(f"model_cfg_allow_custom_{agent_key}")
+                )
+                temperature = st.session_state.get(f"model_cfg_temperature_{agent_key}", 1.0)
                 if not isinstance(temperature, (int, float)):
                     temperature = 1.0
 
-                if model and not model.startswith("("):
-                    payload[agent_key] = {
-                        "provider": provider,
-                        "model": model,
-                        "temperature": float(temperature),
-                    }
+                if not configured:
+                    validation_errors.append(
+                        f"{label}: configure {_provider_display_name(selected_provider)} before saving."
+                    )
+                    continue
 
-            with st.spinner("Saving model settings..."):
-                updated = patch_model_config(payload)
+                model = custom_model if allow_custom_model else selected_model
+                if allow_custom_model and not custom_model:
+                    validation_errors.append(
+                        f"{label}: enter a custom model ID or disable the custom override."
+                    )
+                    continue
+                if not allow_custom_model and (
+                    not selected_model or selected_model.startswith("(")
+                ):
+                    validation_errors.append(
+                        f"{label}: sync {_provider_display_name(selected_provider)} models before saving."
+                    )
+                    continue
 
-            if updated:
-                st.session_state.agent_model_config_cache = updated
-                st.session_state.agent_model_config_last_fetch = datetime.now(
-                    timezone.utc
-                ).isoformat()
-                st.toast("Saved model settings", icon=":material/check_circle:")
-                st.rerun()
+                payload[agent_key] = {
+                    "provider": selected_provider,
+                    "model": model,
+                    "temperature": float(temperature),
+                    "allow_custom_model": allow_custom_model,
+                }
+
+            if validation_errors:
+                for error in validation_errors:
+                    st.toast(error, icon=":material/warning:")
             else:
+                with st.spinner("Saving model settings..."):
+                    updated = patch_model_config(payload)
+                    refreshed = refresh_model_config_options_cache(force_refresh=True)
+
+                if updated and refreshed:
+                    st.toast("Saved model settings", icon=":material/check_circle:")
+                    st.rerun()
                 st.toast("Failed to save model settings", icon=":material/cancel:")
 
 

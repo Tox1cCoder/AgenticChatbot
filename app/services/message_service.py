@@ -70,23 +70,6 @@ class MessageService(IMessageService):
         self.task_plan_service = task_plan_service
         self.redis_client = self._init_redis_client()
 
-    def _resolve_persistent_model_request(self, user_id: UUID | None) -> dict[str, Any] | None:
-        if not self.model_config_service or not user_id:
-            return None
-
-        try:
-            model_request = self.model_config_service.get_effective_model_request(user_id)
-        except Exception as exc:
-            logging.warning(
-                "Failed to load persistent model config for user %s: %s",
-                user_id,
-                type(exc).__name__,
-                exc_info=True,
-            )
-            return None
-
-        return model_request if isinstance(model_request, dict) else None
-
     def _init_redis_client(self):
         redis_url = getattr(settings, "redis_url", "") or ""
         if not redis_url.strip():
@@ -465,7 +448,7 @@ class MessageService(IMessageService):
                     and isinstance(message_create_data.model_config_field, dict)
                     and message_create_data.model_config_field
                 )
-                else self._resolve_persistent_model_request(user_id)
+                else None
             )
 
             (
@@ -624,7 +607,7 @@ class MessageService(IMessageService):
                     and isinstance(message_create_data.model_config_field, dict)
                     and message_create_data.model_config_field
                 )
-                else self._resolve_persistent_model_request(user_id)
+                else None
             )
 
             # Stream bot response generation

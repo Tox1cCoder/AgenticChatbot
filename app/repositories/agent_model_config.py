@@ -49,6 +49,7 @@ class AgentModelConfigRepository:
         agent_key: str,
         provider_type: str,
         model: str,
+        allow_custom_model: bool = False,
         temperature: float | None = None,
     ) -> AgentModelConfig:
         with self.session_factory() as session:
@@ -66,6 +67,7 @@ class AgentModelConfigRepository:
             if existing:
                 existing.provider_type = provider_type
                 existing.model = model
+                existing.allow_custom_model = allow_custom_model
                 existing.temperature = temperature
                 session.commit()
                 session.refresh(existing)
@@ -76,6 +78,7 @@ class AgentModelConfigRepository:
                 agent_key=agent_key,
                 provider_type=provider_type,
                 model=model,
+                allow_custom_model=allow_custom_model,
                 temperature=temperature,
             )
             session.add(entity)
@@ -107,3 +110,23 @@ class AgentModelConfigRepository:
             )
             session.commit()
             return bool(deleted)
+
+    def delete_by_user_and_provider_type(self, user_id: UUID, provider_type: str) -> list[str]:
+        with self.session_factory() as session:
+            rows = (
+                session.query(AgentModelConfig)
+                .filter(
+                    and_(
+                        AgentModelConfig.user_id == user_id,
+                        AgentModelConfig.provider_type == provider_type,
+                    )
+                )
+                .all()
+            )
+
+            affected_agent_keys = [str(row.agent_key) for row in rows if getattr(row, "agent_key", None)]
+            for row in rows:
+                session.delete(row)
+
+            session.commit()
+            return affected_agent_keys

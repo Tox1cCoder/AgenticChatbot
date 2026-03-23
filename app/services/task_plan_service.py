@@ -334,7 +334,7 @@ class TaskPlanService(ITaskPlanService):
         agent_message = AgentMessage(
             role=MessageRole.USER,
             content=user_message,
-            metadata={},
+            metadata={"user_id": str(user_id)},
         )
 
         response = await self.planning_agent.generate_plan(
@@ -379,7 +379,10 @@ class TaskPlanService(ITaskPlanService):
         agent_message = AgentMessage(
             role=MessageRole.USER,
             content=user_message,
-            metadata={"existing_tasks": existing_tasks_dict},
+            metadata={
+                "existing_tasks": existing_tasks_dict,
+                "user_id": str(user_id),
+            },
         )
 
         response = await self.planning_agent.modify_plan(

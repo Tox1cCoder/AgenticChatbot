@@ -28,6 +28,7 @@ from app.core.container import (
     get_container,
     setup_auto_injection,
 )
+from app.database.migrations import upgrade_database
 from app.core.events import DocumentEvent, get_event_bus
 from app.database.session import get_engine
 from app.services.document_event_listener import DocumentEventLogger
@@ -35,6 +36,11 @@ from app.utils.exception_handler import register_exception_handlers
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
+
+
+async def init_database_migrations():
+    """Apply pending Alembic migrations before serving requests."""
+    await asyncio.to_thread(upgrade_database)
 
 
 async def init_checkpoint_tables():
@@ -77,6 +83,7 @@ async def init_skills():
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
     # Startup
+    await init_database_migrations()
     await init_checkpoint_tables()
     await init_agents()
     await init_skills()

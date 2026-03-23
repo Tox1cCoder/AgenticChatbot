@@ -237,14 +237,11 @@ class PlanningAgent(BaseAgent):
         conversation_id: str | None,
         plan_modified: bool,
     ) -> AgentResponse:
-        if not self.langchain_model:
-            return self._build_error_response(
-                "Planning service is not properly configured.",
-                conversation_id,
-            )
-
         persona = message.metadata.get("persona")
         conversation_history = message.metadata.get("history", [])
+        request_user_id = message.metadata.get("user_id")
+        model_request = message.metadata.get("model_request")
+        history_summary = message.metadata.get("history_summary")
 
         # Convert existing tasks into todo-like dicts for prompt context.
         todos: list[dict[str, Any]] = []
@@ -275,15 +272,11 @@ class PlanningAgent(BaseAgent):
             todos=todos or None,
             current_task_index=current_task_index,
             planning_phase="planning",
+            history_summary=history_summary,
         )
 
         # Force a tool call so we can reliably extract a machine-readable plan.
         write_todos_tool = create_write_todos_tool()
-        llm = ModelFactory.bind_tools_to_model(
-            self.langchain_model,
-            [write_todos_tool],
-            tool_choice="write_todos",
-        )
 
         langchain_messages = [SystemMessage(content=system_prompt)]
         if conversation_history:
@@ -293,7 +286,35 @@ class PlanningAgent(BaseAgent):
         message_content = message.content or ""
         langchain_messages.append(HumanMessage(content=message_content))
 
-        raw_response = await llm.ainvoke(langchain_messages)
+        runtime_config = self._resolve_runtime_model_config(request_user_id, model_request)
+
+        while True:
+            try:
+                llm, _ = self._create_langchain_model_from_runtime(
+                    runtime_config,
+                    user_id=request_user_id,
+                    enable_reasoning_summary=False,
+                )
+                bound_llm = ModelFactory.bind_tools_to_model(
+                    llm,
+                    [write_todos_tool],
+                    tool_choice="write_todos",
+                )
+                raw_response = await self._ainvoke_with_retries(bound_llm, langchain_messages)
+                break
+            except Exception:
+                fallback_runtime = self._create_fallback_runtime_config(
+                    runtime_config.fallback_config,
+                    reason="provider_error",
+                    from_provider=runtime_config.provider,
+                    inherited_warnings=runtime_config.warnings,
+                )
+                if not fallback_runtime or fallback_runtime.provider == runtime_config.provider:
+                    return self._build_error_response(
+                        "Planning service is not properly configured.",
+                        conversation_id,
+                    )
+                runtime_config = fallback_runtime
 
         tool_calls = getattr(raw_response, "tool_calls", None) or []
         updated_todos = self._apply_write_todos_calls(base_todos=todos, tool_calls=tool_calls)
@@ -337,11 +358,11 @@ class PlanningAgent(BaseAgent):
         )
 
         metadata: dict[str, Any] = {
-            "model": self.model_name,
             "conversation_id": conversation_id,
             "task_count": len(canonical_todos),
             "todos": canonical_todos,
         }
+        self._apply_runtime_metadata(metadata, runtime_config)
         if plan_modified:
             metadata["plan_modified"] = True
 

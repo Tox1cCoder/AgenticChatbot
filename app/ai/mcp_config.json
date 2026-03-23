@@ -87,6 +87,18 @@
         "-y",
         "mcp-server-for-revit"
       ],
+      "enabled": false
+    },
+    "openbrowser": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "openbrowser-ai",
+        "--mcp"
+      ],
+      "env": {
+        "OPENBROWSER_HEADLESS": "true"
+      },
       "enabled": true
     }
   }

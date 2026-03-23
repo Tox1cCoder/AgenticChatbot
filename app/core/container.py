@@ -250,9 +250,15 @@ class Container(containers.DeclarativeContainer):
         conversation_repository=conversation_repository,
     )
 
+    provider_service = providers.Factory(
+        ProviderService,
+        provider_repository=model_provider_repository,
+    )
+
     model_config_service = providers.Factory(
         ModelConfigService,
         repository=agent_model_config_repository,
+        provider_service=provider_service,
     )
 
     message_service: providers.Provider[IMessageService] = providers.Factory(
@@ -315,12 +321,6 @@ class Container(containers.DeclarativeContainer):
         SkillsService,
         registry=skills_registry,
     )
-
-    provider_service = providers.Factory(
-        ProviderService,
-        provider_repository=model_provider_repository,
-    )
-
 
 # Initialize auto-injection wiring map before container instantiation
 def setup_auto_injection(container_ref: Container | type[Container] | None = None):
