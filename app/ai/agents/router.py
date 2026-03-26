@@ -8,7 +8,7 @@ from ...core.config import settings
 from ..agent_config import build_gemini_generate_config
 from ..prompts import ROUTER_SYSTEM_PROMPT
 from ..schemas import AgentMessage
-from ..skills_registry import get_skills_registry
+from ..skills_tool import get_available_skill_summaries
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,8 @@ class Router:
         content = (message.content or "").strip()
         metadata = message.metadata or {}
         persona = metadata.get("persona")
+        request_user_id = metadata.get("user_id")
+        request_device_id = metadata.get("device_id")
 
         prompt = self._build_prompt(
             content=content,
@@ -62,6 +64,8 @@ class Router:
             has_documents=has_documents,
             planning_mode_enabled=planning_mode_enabled,
             has_existing_plan=has_existing_plan,
+            user_id=request_user_id,
+            device_id=request_device_id,
         )
 
         selected_agent = await self._call_llm(prompt, available_agents)
@@ -98,6 +102,8 @@ class Router:
         has_documents: bool,
         planning_mode_enabled: bool,
         has_existing_plan: bool,
+        user_id: str | None,
+        device_id: str | None,
     ) -> str:
         prompt_parts: list[str] = []
 
@@ -121,12 +127,18 @@ class Router:
         prompt_parts.append(f"Available agents for this request: {', '.join(available_agents)}")
         prompt_parts.append(ROUTER_SYSTEM_PROMPT)
 
-        registry = get_skills_registry()
-        active_skills = registry.get_active_skills()
+        active_skills = get_available_skill_summaries(user_id=user_id, device_id=device_id)
         if active_skills:
-            skills_context = "\n".join(f"- **{s.name}**: {s.description}" for s in active_skills)
+            skills_context = "\n".join(
+                (
+                    f"- **{skill.get('lookup_name') or skill.get('name')}** "
+                    f"[{skill.get('source') or 'server'}]: "
+                    f"{skill.get('description') or ''}"
+                )
+                for skill in active_skills
+            )
             prompt_parts.append(
-                f"\nActive skills (capabilities currently loaded into all agents):\n{skills_context}"
+                f"\nActive skills available for this request:\n{skills_context}"
             )
 
         prompt_parts.append(f"\n\nUser message: {content}")

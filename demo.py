@@ -1151,12 +1151,15 @@ def render_conversation_button(
     title = format_conversation_title(conversation.get("title", "New Conversation"))
     button_type = "primary" if is_active else "secondary"
 
-    if st.button(
-        title,
-        key=f"conv_{conversation['id']}",
-        width="stretch",
-        type=button_type,
-    ) and conversation["id"] != st.session_state.current_conversation_id:
+    if (
+        st.button(
+            title,
+            key=f"conv_{conversation['id']}",
+            width="stretch",
+            type=button_type,
+        )
+        and conversation["id"] != st.session_state.current_conversation_id
+    ):
         st.session_state.current_conversation_id = conversation["id"]
         st.session_state.active_view = "chat"
         close_conversation_manager()
@@ -1257,6 +1260,7 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "model_config_options_cache": dict,
     "model_config_options_last_fetch": lambda: None,
     "model_config_options_error": lambda: None,
+    "model_config_options_needs_form_sync": lambda: False,
     # Planning mode state
     "planning_status": lambda: None,
     "task_plans_list": list,
@@ -1449,7 +1453,11 @@ def sanitize_message_content(content: str) -> str:
 
         # Insert blank line when transitioning to a list from non-list content
         # or when list type changes
-        if current_line_type in ("unordered", "ordered") and prev_line_type not in (None, "blank", current_line_type):
+        if current_line_type in ("unordered", "ordered") and prev_line_type not in (
+            None,
+            "blank",
+            current_line_type,
+        ):
             processed_lines.append("")
 
         processed_lines.append(line)
@@ -2194,7 +2202,11 @@ def _sync_model_config_form_state(snapshot: dict[str, Any]) -> None:
         current_temperature = cfg.get("temperature", 1.0)
         is_custom_model = bool(cfg.get("isCustomModel") or cfg.get("is_custom_model"))
 
-        selected_model = current_model if current_model in catalog_ids else (catalog_ids[0] if catalog_ids else current_model)
+        selected_model = (
+            current_model
+            if current_model in catalog_ids
+            else (catalog_ids[0] if catalog_ids else current_model)
+        )
         custom_model = current_model if is_custom_model else ""
 
         st.session_state[f"model_cfg_provider_{agent_key}"] = provider
@@ -2206,13 +2218,19 @@ def _sync_model_config_form_state(snapshot: dict[str, Any]) -> None:
         )
 
 
-def refresh_model_config_options_cache(*, force_refresh: bool = False) -> dict[str, Any]:
+def refresh_model_config_options_cache(
+    *, force_refresh: bool = False, defer_form_state_sync: bool = False
+) -> dict[str, Any]:
     snapshot = get_model_config_options(force_refresh=force_refresh)
     if snapshot:
         st.session_state.model_config_options_cache = snapshot
         st.session_state.model_config_options_last_fetch = datetime.now(timezone.utc).isoformat()
         st.session_state.model_config_options_error = None
-        _sync_model_config_form_state(snapshot)
+        if defer_form_state_sync:
+            st.session_state.model_config_options_needs_form_sync = True
+        else:
+            _sync_model_config_form_state(snapshot)
+            st.session_state.model_config_options_needs_form_sync = False
         return snapshot
 
     st.session_state.model_config_options_error = "Failed to load model configuration options."
@@ -3330,20 +3348,15 @@ def _render_trace_text_block(
     elif label:
         header_html = f'<div class="trace-text-label">{html.escape(label)}</div>'
         body_html = (
-            '<div class="thinking-content-rendered">'
-            f"{sanitize_message_content(content)}"
-            "</div>"
+            f'<div class="thinking-content-rendered">{sanitize_message_content(content)}</div>'
         )
     else:
         body_html = (
-            '<div class="thinking-content-rendered">'
-            f"{sanitize_message_content(content)}"
-            "</div>"
+            f'<div class="thinking-content-rendered">{sanitize_message_content(content)}</div>'
         )
 
     st.markdown(
-        f'<div class="thinking-container">{header_html}'
-        f"{body_html}</div>",
+        f'<div class="thinking-container">{header_html}{body_html}</div>',
         unsafe_allow_html=True,
     )
 
@@ -3468,8 +3481,10 @@ def render_trace_panel(
         return
 
     with st.expander("Thought Process", expanded=expanded):
-        if isinstance(reasoning_summary, str) and reasoning_summary.strip() or (
-            isinstance(thinking_content, str) and thinking_content.strip()
+        if (
+            isinstance(reasoning_summary, str)
+            and reasoning_summary.strip()
+            or (isinstance(thinking_content, str) and thinking_content.strip())
         ):
             st.markdown('<div class="trace-section-title">Thinking</div>', unsafe_allow_html=True)
             if isinstance(reasoning_summary, str) and reasoning_summary.strip():
@@ -3618,7 +3633,9 @@ def _upsert_stream_tool_trace(tool_event: dict[str, Any]) -> None:
 def render_live_trace_panel(trace_placeholder: Any) -> None:
     _ensure_stream_trace_state()
     trace_items = [
-        item for item in (st.session_state.get("stream_trace_items") or []) if isinstance(item, dict)
+        item
+        for item in (st.session_state.get("stream_trace_items") or [])
+        if isinstance(item, dict)
     ]
     thinking_item = next(
         (item for item in trace_items if item.get("kind") == "thinking"),
@@ -4598,7 +4615,7 @@ def render_tools_tab():
     st.markdown(
         f"**{total_count} tools** available from {tools_data.get('serversCount', 0)} servers"
     )
-    
+
     # Search/filter
     search_query = st.text_input("Search tools", placeholder="Filter by name or description...")
 
@@ -4978,12 +4995,16 @@ def render_interrupt_approval_ui():
                     st.rerun()
 
             with col2:
-                if "edit" in allowed_decisions and st.button("Edit Args", key=f"edit_{idx}", width="stretch"):
+                if "edit" in allowed_decisions and st.button(
+                    "Edit Args", key=f"edit_{idx}", width="stretch"
+                ):
                     st.session_state[f"editing_tool_{idx}"] = True
                     st.rerun()
 
             with col3:
-                if "reject" in allowed_decisions and st.button("Reject", key=f"reject_{idx}", width="stretch"):
+                if "reject" in allowed_decisions and st.button(
+                    "Reject", key=f"reject_{idx}", width="stretch"
+                ):
                     st.session_state[decisions_key][task_id] = {
                         "type": "reject",
                         "task_id": task_id,
@@ -5439,7 +5460,12 @@ def render_chat_view():
         return
 
     # Load more button
-    if conversation_id and conversation_id != "pending_new" and st.session_state.has_more_messages and st.button("Load older messages", width="stretch"):
+    if (
+        conversation_id
+        and conversation_id != "pending_new"
+        and st.session_state.has_more_messages
+        and st.button("Load older messages", width="stretch")
+    ):
         next_page = st.session_state.conversation_messages_page + 1
         load_messages_page(next_page, show_spinner=True)
 
@@ -5457,7 +5483,9 @@ def render_chat_view():
     last_assistant_msg_id = None
     for msg in reversed(messages_to_display):
         sender_value = msg.get("sender")
-        if sender_value not in (1, "user", "USER", "User") and not get_message_metadata(msg).get("paused"):
+        if sender_value not in (1, "user", "USER", "User") and not get_message_metadata(msg).get(
+            "paused"
+        ):
             last_assistant_msg_id = msg.get("id")
             break
 
@@ -6747,6 +6775,9 @@ def render_models_view() -> None:
         else:
             st.info("No model configuration data is available yet.")
         return
+    if st.session_state.get("model_config_options_needs_form_sync"):
+        _sync_model_config_form_state(snapshot)
+        st.session_state.model_config_options_needs_form_sync = False
 
     provider_map = _snapshot_provider_map(snapshot)
     agent_config = _snapshot_agent_config(snapshot)
@@ -6898,12 +6929,22 @@ def render_models_view() -> None:
             model_rows = [
                 {
                     "ID": str(model.get("id") or "").strip(),
-                    "Name": str(model.get("displayName") or model.get("display_name") or "").strip(),
+                    "Name": str(
+                        model.get("displayName") or model.get("display_name") or ""
+                    ).strip(),
                     "Recommended": "Yes" if model.get("recommended") else "",
-                    "Vision": "Yes" if model.get("supportsVision") or model.get("supports_vision") else "",
-                    "Tools": "Yes" if model.get("supportsToolCalling") or model.get("supports_tool_calling") else "",
-                    "Streaming": "Yes" if model.get("supportsStreaming") or model.get("supports_streaming") else "",
-                    "Reasoning": "Yes" if model.get("supportsReasoning") or model.get("supports_reasoning") else "",
+                    "Vision": "Yes"
+                    if model.get("supportsVision") or model.get("supports_vision")
+                    else "",
+                    "Tools": "Yes"
+                    if model.get("supportsToolCalling") or model.get("supports_tool_calling")
+                    else "",
+                    "Streaming": "Yes"
+                    if model.get("supportsStreaming") or model.get("supports_streaming")
+                    else "",
+                    "Reasoning": "Yes"
+                    if model.get("supportsReasoning") or model.get("supports_reasoning")
+                    else "",
                 }
                 for model in models
             ]
@@ -6943,7 +6984,9 @@ def render_models_view() -> None:
                 format_func=_provider_display_name,
             )
             provider_snapshot = provider_map.get(selected_provider, {})
-            provider_state = "Configured" if provider_snapshot.get("configured") else "Not configured"
+            provider_state = (
+                "Configured" if provider_snapshot.get("configured") else "Not configured"
+            )
             st.caption(provider_state)
 
     st.divider()
@@ -6962,7 +7005,9 @@ def render_models_view() -> None:
                 provider_snapshot.get("keySource") or provider_snapshot.get("key_source") or "none"
             )
             sync_status = str(
-                provider_snapshot.get("syncStatus") or provider_snapshot.get("sync_status") or "unknown"
+                provider_snapshot.get("syncStatus")
+                or provider_snapshot.get("sync_status")
+                or "unknown"
             )
             current_selection = str(
                 st.session_state.get(f"model_cfg_model_select_{agent_key}") or ""
@@ -7096,7 +7141,14 @@ def render_models_view() -> None:
             else:
                 with st.spinner("Saving model settings..."):
                     updated = patch_model_config(payload)
-                    refreshed = refresh_model_config_options_cache(force_refresh=True)
+                    refreshed = (
+                        refresh_model_config_options_cache(
+                            force_refresh=True,
+                            defer_form_state_sync=True,
+                        )
+                        if updated
+                        else {}
+                    )
 
                 if updated and refreshed:
                     st.toast("Saved model settings", icon=":material/check_circle:")

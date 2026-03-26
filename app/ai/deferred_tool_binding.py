@@ -111,7 +111,10 @@ def get_deferred_tools_for_binding(
         # Fallback: search through all_tools (may not find the right server version)
         if tool is None:
             for t in all_tools:
-                if t.name == loaded.tool_name and mcp_manager.get_server_for_tool(t) == loaded.server_name:
+                if (
+                    t.name == loaded.tool_name
+                    and mcp_manager.get_server_for_tool(t) == loaded.server_name
+                ):
                     tool = t
                     break
 

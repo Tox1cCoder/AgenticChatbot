@@ -213,6 +213,35 @@ def make_json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _decode_tool_args(args: Any) -> Any:
+    """
+    Best-effort decode for tool-call arguments returned as JSON strings.
+
+    Some model/tool-calling adapters return argument payloads as serialized JSON
+    text. Decoding them here ensures tools receive structured arguments and
+    Unicode escapes such as ``\\u00e1`` are converted back to normal text.
+    """
+    if not isinstance(args, str):
+        return args
+
+    stripped = args.strip()
+    if not stripped:
+        return {}
+
+    looks_like_json = (
+        (stripped.startswith("{") and stripped.endswith("}"))
+        or (stripped.startswith("[") and stripped.endswith("]"))
+        or (stripped.startswith('"') and stripped.endswith('"'))
+    )
+    if not looks_like_json:
+        return args
+
+    try:
+        return json.loads(stripped)
+    except (json.JSONDecodeError, TypeError):
+        return args
+
+
 def normalize_tool_call(tool_call: Any) -> dict[str, Any]:
     """
     Normalize tool call data to a consistent dictionary format.
@@ -267,6 +296,8 @@ def normalize_tool_call(tool_call: Any) -> dict[str, Any]:
             or getattr(tool_call, "task_id", None)
             or ""
         )
+
+    args = _decode_tool_args(args)
 
     return {
         "name": name,
@@ -524,7 +555,12 @@ def extract_content_from_result(result: Any) -> Any:
             return cleaned[0]
         return cleaned
 
-    if isinstance(result, dict) and "type" in result and result.get("type") == "text" and "text" in result:
+    if (
+        isinstance(result, dict)
+        and "type" in result
+        and result.get("type") == "text"
+        and "text" in result
+    ):
         return result["text"]
 
     return result

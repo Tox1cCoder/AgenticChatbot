@@ -33,7 +33,9 @@ def upgrade() -> None:
             server_default=sa.text("'{}'::jsonb"),
         ),
     )
-    op.create_index(op.f("ix_hitl_interrupts_device_id"), "hitl_interrupts", ["device_id"], unique=False)
+    op.create_index(
+        op.f("ix_hitl_interrupts_device_id"), "hitl_interrupts", ["device_id"], unique=False
+    )
     op.create_foreign_key(
         "fk_hitl_interrupts_device_id_client_devices",
         "hitl_interrupts",
@@ -54,7 +56,9 @@ def upgrade() -> None:
         "tool_approvals",
         sa.Column("server_name", sa.String(length=255), nullable=True),
     )
-    op.create_index(op.f("ix_tool_approvals_device_id"), "tool_approvals", ["device_id"], unique=False)
+    op.create_index(
+        op.f("ix_tool_approvals_device_id"), "tool_approvals", ["device_id"], unique=False
+    )
     op.create_index(
         op.f("ix_tool_approvals_tool_origin"),
         "tool_approvals",

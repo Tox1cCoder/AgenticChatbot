@@ -1018,7 +1018,11 @@ class DocumentProcessingService:
                 if "page_end" in chunk_data and chunk_data["page_end"] is not None:
                     payload["page_end"] = int(chunk_data["page_end"]) + 1
                 # Also store single page_number for compatibility
-                if "page_start" in chunk_data and chunk_data["page_start"] is not None and chunk_data.get("page_start") == chunk_data.get("page_end"):
+                if (
+                    "page_start" in chunk_data
+                    and chunk_data["page_start"] is not None
+                    and chunk_data.get("page_start") == chunk_data.get("page_end")
+                ):
                     payload["page_number"] = int(chunk_data["page_start"]) + 1
 
             point = PointStruct(

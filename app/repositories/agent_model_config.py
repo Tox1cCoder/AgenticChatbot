@@ -124,7 +124,9 @@ class AgentModelConfigRepository:
                 .all()
             )
 
-            affected_agent_keys = [str(row.agent_key) for row in rows if getattr(row, "agent_key", None)]
+            affected_agent_keys = [
+                str(row.agent_key) for row in rows if getattr(row, "agent_key", None)
+            ]
             for row in rows:
                 session.delete(row)
 

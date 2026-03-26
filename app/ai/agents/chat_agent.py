@@ -39,6 +39,7 @@ class ChatAgent(BaseAgent):
         model_request = message.metadata.get("model_request")
         request_user_id = message.metadata.get("user_id")
         message_content = message.content or ""
+        request_device_id = message.metadata.get("device_id")
 
         prompt = build_chat_prompt(message_content, conversation_history, persona=persona)
 
@@ -53,6 +54,7 @@ class ChatAgent(BaseAgent):
                     attachments,
                     conversation_id=conversation_id,
                     user_id=request_user_id,
+                    device_id=request_device_id,
                     model_request=model_request,
                 )
 
@@ -90,6 +92,7 @@ class ChatAgent(BaseAgent):
         persona = message.metadata.get("persona")
         message_content = message.content or ""
         request_user_id = message.metadata.get("user_id")
+        request_device_id = message.metadata.get("device_id")
         model_request = message.metadata.get("model_request")
         history_summary = message.metadata.get("history_summary")
 
@@ -105,6 +108,7 @@ class ChatAgent(BaseAgent):
             persona,
             conversation_id,
             user_id=request_user_id,
+            device_id=request_device_id,
             model_request=model_request,
             history_summary=history_summary,
         )
@@ -143,6 +147,7 @@ class ChatAgent(BaseAgent):
         *,
         conversation_id: str | None = None,
         user_id: str | None = None,
+        device_id: str | None = None,
         model_request: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         runtime_config = self._resolve_runtime_model_config(user_id, model_request)
@@ -178,14 +183,17 @@ class ChatAgent(BaseAgent):
                         else:
                             image_url = f"data:{mime_type};base64,{raw_data}"
                         if raw_data:
-                            content.append(
-                                {"type": "image_url", "image_url": {"url": image_url}}
-                            )
+                            content.append({"type": "image_url", "image_url": {"url": image_url}})
 
                     response = await self._ainvoke_with_retries(
                         llm,
                         [
-                            SystemMessage(content=self._get_full_system_prompt()),
+                            SystemMessage(
+                                content=self._get_full_system_prompt(
+                                    user_id=user_id,
+                                    device_id=device_id,
+                                )
+                            ),
                             HumanMessage(content=content),
                         ],
                     )
@@ -215,7 +223,10 @@ class ChatAgent(BaseAgent):
                 if gemini_client is None:
                     raise RuntimeError("Gemini client is not available for multimodal generation")
 
-                system_prompt = self._get_full_system_prompt()
+                system_prompt = self._get_full_system_prompt(
+                    user_id=user_id,
+                    device_id=device_id,
+                )
                 generation_config = build_gemini_generate_config(
                     model_name=runtime_config.model,
                     include_thinking=True,

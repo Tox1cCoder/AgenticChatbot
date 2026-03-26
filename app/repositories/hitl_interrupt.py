@@ -30,6 +30,8 @@ class HITLInterruptRepository:
         expires_at: datetime,
         action_requests_json: list,
         assistant_message_id: UUID | None = None,
+        device_id: UUID | None = None,
+        interrupt_metadata_json: dict | None = None,
     ) -> HITLInterrupt:
         """Persist a new interrupt session in PENDING state."""
         record = HITLInterrupt(
@@ -41,6 +43,8 @@ class HITLInterruptRepository:
             status=HITLInterruptStatus.PENDING,
             expires_at=expires_at,
             action_requests_json=action_requests_json,
+            device_id=device_id,
+            interrupt_metadata_json=interrupt_metadata_json or {},
         )
         with self.session_factory() as db:
             db.add(record)

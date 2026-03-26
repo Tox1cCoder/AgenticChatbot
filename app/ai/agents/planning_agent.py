@@ -48,6 +48,8 @@ class PlanningAgent(BaseAgent):
         model: Any = None,
         conversation_id: str | None = None,
         internal_tools: list[BaseTool] | None = None,
+        user_id: str | None = None,
+        device_id: str | None = None,
     ) -> Any:
         """
         Override to ensure write_todos is always included as an internal tool.
@@ -68,12 +70,16 @@ class PlanningAgent(BaseAgent):
             model=model,
             conversation_id=conversation_id,
             internal_tools=combined_internal,
+            user_id=user_id,
+            device_id=device_id,
         )
 
     def _get_tools_for_binding(
         self,
         conversation_id: str | None = None,
         internal_tools: list[BaseTool] | None = None,
+        user_id: str | None = None,
+        device_id: str | None = None,
     ) -> list[BaseTool]:
         """
         Ensure write_todos is always present in both binding and execution maps.
@@ -89,6 +95,8 @@ class PlanningAgent(BaseAgent):
         return super()._get_tools_for_binding(
             conversation_id=conversation_id,
             internal_tools=combined_internal,
+            user_id=user_id,
+            device_id=device_id,
         )
 
     async def _init_tools(self):

@@ -104,6 +104,12 @@ python -m app.workers.start_worker
 - API Docs: `http://localhost:8000/docs`
 - ReDoc: `http://localhost:8000/redoc`
 
+### Client Backend
+
+The local `client_backend` runtime can now be distributed separately from the
+server. For the client-only bundle and startup flow, see
+`README.client_backend.md`.
+
 ---
 
 ## Authentication

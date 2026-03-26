@@ -296,7 +296,11 @@ class MCPManager:
         if isinstance(schema, dict):
             cleaned: dict[str, Any] = {}
             for key, value in schema.items():
-                if key == "enum" and isinstance(value, list) and any(not isinstance(item, str) for item in value):
+                if (
+                    key == "enum"
+                    and isinstance(value, list)
+                    and any(not isinstance(item, str) for item in value)
+                ):
                     continue
                 cleaned[key] = self._remove_non_string_enums(value)
             return cleaned
@@ -369,11 +373,15 @@ class MCPManager:
 
         if isinstance(schema, dict):
             result_schema = schema
-        elif PydanticBaseModel is not None and (
-            isinstance(schema, type)
-            and issubclass(schema, PydanticBaseModel)
-            or isinstance(schema, PydanticBaseModel)
-        ) and hasattr(schema, "model_json_schema"):
+        elif (
+            PydanticBaseModel is not None
+            and (
+                isinstance(schema, type)
+                and issubclass(schema, PydanticBaseModel)
+                or isinstance(schema, PydanticBaseModel)
+            )
+            and hasattr(schema, "model_json_schema")
+        ):
             result_schema = schema.model_json_schema()
 
         if not result_schema:

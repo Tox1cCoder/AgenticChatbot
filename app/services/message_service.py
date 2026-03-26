@@ -338,6 +338,17 @@ class MessageService(IMessageService):
         else:
             interrupt_dict = {"raw": str(interrupt_payload)}
 
+        interrupt_metadata = (
+            interrupt_dict.get("metadata")
+            if isinstance(interrupt_dict.get("metadata"), dict)
+            else {}
+        )
+        raw_device_id = interrupt_metadata.get("device_id")
+        interrupt_device_id: UUID | None = None
+        if raw_device_id:
+            with contextlib.suppress(Exception):
+                interrupt_device_id = UUID(str(raw_device_id))
+
         metadata: dict[str, Any] = {
             "interrupt": interrupt_dict,
             "paused": True,
@@ -377,6 +388,8 @@ class MessageService(IMessageService):
                         expires_at=expires_at,
                         action_requests_json=action_requests,
                         assistant_message_id=bot_message.id,
+                        device_id=interrupt_device_id,
+                        interrupt_metadata_json=interrupt_metadata,
                     )
                 except Exception as exc:
                     logging.warning(
@@ -459,6 +472,7 @@ class MessageService(IMessageService):
                 message_content=message_create_data.content,
                 conversation_id=message_create_data.conversation_id,
                 user_id=user_id,
+                device_id=message_create_data.device_id,
                 sanitized_persona=sanitized_persona,
                 planning_mode_enabled=planning_mode_enabled,
                 has_existing_plan=has_existing_plan,
@@ -620,6 +634,7 @@ class MessageService(IMessageService):
                     user_message=message_create_data.content,
                     conversation_id=message_create_data.conversation_id,
                     user_id=user_id,
+                    device_id=message_create_data.device_id,
                     attachments=attachments,
                     current_task=current_task_context,
                     planning_mode_enabled=planning_mode_enabled,
@@ -966,6 +981,7 @@ class MessageService(IMessageService):
             return
 
         stored_original_args: dict[str, Any] = {}
+        stored_provenance: dict[str, dict[str, Any]] = {}
         if interrupt_id:
             try:
                 if fetched_interrupt_record and fetched_interrupt_record.action_requests_json:
@@ -977,6 +993,15 @@ class MessageService(IMessageService):
                             action = req.get("action")
                             if action and action not in stored_original_args:
                                 stored_original_args[action] = req.get("args") or {}
+                metadata_json = getattr(fetched_interrupt_record, "interrupt_metadata_json", None)
+                if isinstance(metadata_json, dict):
+                    raw_provenance = metadata_json.get("tool_provenance")
+                    if isinstance(raw_provenance, dict):
+                        stored_provenance = {
+                            str(key): value
+                            for key, value in raw_provenance.items()
+                            if isinstance(value, dict)
+                        }
             except Exception:
                 pass
 
@@ -994,6 +1019,16 @@ class MessageService(IMessageService):
                     or stored_original_args.get(decision.action or "")
                     or {}
                 )
+                provenance = (
+                    stored_provenance.get(orig_key)
+                    or stored_provenance.get(decision.action or "")
+                    or {}
+                )
+                approval_device_id = None
+                raw_device_id = provenance.get("device_id")
+                if raw_device_id:
+                    with contextlib.suppress(Exception):
+                        approval_device_id = UUID(str(raw_device_id))
                 approval_data = {
                     "conversation_id": conversation_id,
                     "user_id": user_id,
@@ -1003,6 +1038,10 @@ class MessageService(IMessageService):
                     "original_args": original_args,
                     "modified_args": decision.args if is_edit else None,
                     "decision": decision_type_map.get(decision.type, DecisionType.REJECT),
+                    "device_id": approval_device_id,
+                    "tool_origin": provenance.get("tool_origin"),
+                    "server_name": provenance.get("server_name"),
+                    "qualified_tool_id": provenance.get("qualified_tool_id"),
                 }
                 self.tool_approval_repository.create(approval_data)
             except Exception as audit_exc:
@@ -1500,6 +1539,7 @@ class MessageService(IMessageService):
         message_content: str,
         conversation_id: UUID,
         user_id: UUID | None,
+        device_id: UUID | None,
         sanitized_persona: str | None,
         planning_mode_enabled: bool,
         has_existing_plan: bool,
@@ -1529,6 +1569,7 @@ class MessageService(IMessageService):
             user_message=message_content,
             conversation_id=conversation_id,
             user_id=user_id,
+            device_id=device_id,
             attachments=attachments,
             current_task=current_task_context,
             all_tasks=existing_tasks_dict,

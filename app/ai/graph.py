@@ -317,6 +317,7 @@ class MultiAgentWorkflow:
         message: str,
         conversation_id: str | None = None,
         user_id: str | None = None,
+        device_id: str | None = None,
         persona: str | None = None,
         attachments: list | None = None,
         model_request: dict[str, Any] | None = None,
@@ -336,6 +337,8 @@ class MultiAgentWorkflow:
             initial_state["conversation_id"] = conversation_id
         if user_id is not None:
             initial_state["user_id"] = user_id
+        if device_id is not None:
+            initial_state["device_id"] = device_id
         if model_request is not None:
             initial_state["model_request"] = model_request
         initial_state["selected_agent"] = None
@@ -564,7 +567,12 @@ class MultiAgentWorkflow:
             )
             return state
 
-        tool_map = await ensure_agent_tool_map(agent, conversation_id=state.get("conversation_id"))
+        tool_map = await ensure_agent_tool_map(
+            agent,
+            conversation_id=state.get("conversation_id"),
+            user_id=state.get("user_id"),
+            device_id=state.get("device_id"),
+        )
         if not tool_map:
             return state
 
@@ -574,7 +582,12 @@ class MultiAgentWorkflow:
         agent_key = getattr(agent, "agent_config_key", None) or selected_agent_name
 
         # Execute tools with context set for deferred tool loading support
-        with tool_execution_context(conversation_id, user_id, agent_key):
+        with tool_execution_context(
+            conversation_id,
+            user_id,
+            agent_key,
+            state.get("device_id"),
+        ):
             tool_outputs, tool_artifacts, all_images = await execute_tool_calls(
                 tool_calls=tool_calls_pending,
                 tool_map=tool_map,
@@ -696,6 +709,88 @@ class MultiAgentWorkflow:
         state["delegation_count"] = delegation_count + 1
         return state
 
+    @staticmethod
+    def _get_interrupt_payload_from_state(
+        state_values: dict[str, Any],
+        fallback_tool_calls: list[Any],
+    ) -> dict[str, Any]:
+        """Recover the pending interrupt payload from checkpoint state."""
+        context = state_values.get("context", {}) if isinstance(state_values, dict) else {}
+        action_requests = context.get("pending_action_requests")
+        if not isinstance(action_requests, list):
+            action_requests = [normalize_tool_call(tool_call) for tool_call in fallback_tool_calls]
+
+        payload: dict[str, Any] = {"action_requests": action_requests}
+
+        interrupt_metadata = context.get("interrupt_metadata")
+        if isinstance(interrupt_metadata, dict) and interrupt_metadata:
+            payload["metadata"] = interrupt_metadata
+
+        return payload
+
+    async def _prepare_interrupt_payload(
+        self,
+        state: GraphState,
+        *,
+        tool_calls: list[Any],
+        agent: Any | None,
+        tool_map: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Attach device/runtime provenance to pending tool approvals."""
+        normalized_calls = [normalize_tool_call(tool_call) for tool_call in tool_calls]
+        if tool_map is None and agent is not None:
+            tool_map = await ensure_agent_tool_map(
+                agent,
+                conversation_id=state.get("conversation_id"),
+                user_id=state.get("user_id"),
+                device_id=state.get("device_id"),
+            )
+
+        device_id = state.get("device_id")
+        provenance: dict[str, dict[str, Any]] = {}
+        enriched_calls: list[dict[str, Any]] = []
+
+        for tool_call in normalized_calls:
+            enriched_call = dict(tool_call)
+            tool_call_id = enriched_call.get("id") or enriched_call.get("tool_call_id")
+            if tool_call_id and "tool_call_id" not in enriched_call:
+                enriched_call["tool_call_id"] = tool_call_id
+
+            tool_name = enriched_call.get("name")
+            tool = tool_map.get(tool_name) if tool_map and tool_name else None
+            tool_metadata = getattr(tool, "metadata", None) if tool is not None else None
+
+            provenance_entry: dict[str, Any] = {}
+            if device_id:
+                provenance_entry["device_id"] = device_id
+            if isinstance(tool_metadata, dict):
+                for field_name in ("tool_origin", "server_name", "qualified_tool_id"):
+                    if tool_metadata.get(field_name):
+                        provenance_entry[field_name] = tool_metadata[field_name]
+
+            if provenance_entry:
+                provenance_key = str(tool_call_id or tool_name or len(provenance))
+                provenance[provenance_key] = provenance_entry
+
+            enriched_calls.append(enriched_call)
+
+        interrupt_metadata: dict[str, Any] = {}
+        if device_id:
+            interrupt_metadata["device_id"] = device_id
+        if provenance:
+            interrupt_metadata["tool_provenance"] = provenance
+
+        context = dict(state.get("context") or {})
+        context["pending_action_requests"] = enriched_calls
+        if interrupt_metadata:
+            context["interrupt_metadata"] = interrupt_metadata
+        state["context"] = context
+
+        payload: dict[str, Any] = {"action_requests": enriched_calls}
+        if interrupt_metadata:
+            payload["metadata"] = interrupt_metadata
+        return payload
+
     async def _approval_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
         if not messages:
@@ -705,7 +800,14 @@ class MultiAgentWorkflow:
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return state
 
-        action_requests = [normalize_tool_call(tool_call) for tool_call in last_message.tool_calls]
+        selected_agent_name = state.get("selected_agent")
+        agent = self.agents.get(selected_agent_name) if selected_agent_name else None
+        interrupt_payload = await self._prepare_interrupt_payload(
+            state,
+            tool_calls=last_message.tool_calls,
+            agent=agent,
+        )
+        interrupt_payload["action_requests"]
 
         # Label the stop reason before yielding to the human so callers can
         # distinguish approval-gate pauses from budget/error pauses.
@@ -713,11 +815,7 @@ class MultiAgentWorkflow:
         context["pause_reason"] = "awaiting_approval"
         state["context"] = context
 
-        human_decisions = interrupt(
-            {
-                "action_requests": action_requests,
-            }
-        )
+        human_decisions = interrupt(interrupt_payload)
 
         if not human_decisions:
             _, rejected_feedback = _apply_decisions(last_message.tool_calls, [])
@@ -826,14 +924,12 @@ class MultiAgentWorkflow:
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return None
 
-        action_requests = [normalize_tool_call(tool_call) for tool_call in last_message.tool_calls]
-
         conversation_id = values.get("conversation_id") or fallback_conversation_id or ""
-        interrupt_response = build_interrupt_response(
-            {"action_requests": action_requests},
-            thread_id,
-            conversation_id,
+        interrupt_payload = self._get_interrupt_payload_from_state(
+            values,
+            last_message.tool_calls,
         )
+        interrupt_response = build_interrupt_response(interrupt_payload, thread_id, conversation_id)
 
         selected_agent = values.get("selected_agent", "search_agent")
 
@@ -892,7 +988,11 @@ class MultiAgentWorkflow:
         agent_msg = AgentMessage(
             role=MessageRole.USER,
             content=content,
-            metadata={"persona": state.get("persona")},
+            metadata={
+                "persona": state.get("persona"),
+                "user_id": state.get("user_id"),
+                "device_id": state.get("device_id"),
+            },
         )
 
         available_agents = list(self.agents.keys())
@@ -943,6 +1043,7 @@ class MultiAgentWorkflow:
         )
 
         attachments = context.get("attachments") or []
+        device_id = state.get("device_id")
         if attachments:
             # Use attachment-aware chat flow for multimodal requests.
             last_human_idx = self._find_last_human_message_index(messages)
@@ -963,6 +1064,7 @@ class MultiAgentWorkflow:
                     "history_summary": state.get("history_summary"),
                     "model_request": state.get("model_request"),
                     "user_id": user_id,
+                    "device_id": device_id,
                 },
                 attachments=attachments,
             )
@@ -975,6 +1077,7 @@ class MultiAgentWorkflow:
                 state.get("persona"),
                 conversation_id,
                 user_id=user_id,
+                device_id=device_id,
                 model_request=state.get("model_request"),
                 history_summary=state.get("history_summary"),
             )
@@ -995,6 +1098,7 @@ class MultiAgentWorkflow:
         conversation_history = await self._get_conversation_history(
             conversation_id, user_id, agent_key="rag"
         )
+        device_id = state.get("device_id")
 
         context = state.get("context", {})
 
@@ -1015,6 +1119,7 @@ class MultiAgentWorkflow:
             "agentic_images": context.get("agentic_images", []),  # Pass images for multimodal LLM
             "model_request": state.get("model_request"),
             "user_id": user_id,
+            "device_id": device_id,
             "history_summary": state.get("history_summary"),
         }
 
@@ -1054,6 +1159,7 @@ class MultiAgentWorkflow:
             return state
 
         conversation_id = state.get("conversation_id")
+        user_id = state.get("user_id")
         tool_outputs = []
         context = state.get("context", {})
         tool_artifacts: list[dict[str, Any]] = []
@@ -1073,17 +1179,20 @@ class MultiAgentWorkflow:
         ]
         non_search_outputs_by_id: dict[str, str] = {}
         rejected_feedback: dict[str, str] = {}
+        selected_agent_name = state.get("selected_agent")
+        agent = self.agents.get(selected_agent_name) if selected_agent_name else None
 
         if non_search_tool_calls:
             tool_calls_to_execute = list(non_search_tool_calls)
 
             tool_names = [tc.get("name") for tc in non_search_tool_calls]
             if requires_human_approval(tool_names):
-                human_decisions = interrupt(
-                    {
-                        "action_requests": non_search_tool_calls,
-                    }
+                interrupt_payload = await self._prepare_interrupt_payload(
+                    state,
+                    tool_calls=non_search_tool_calls,
+                    agent=agent,
                 )
+                human_decisions = interrupt(interrupt_payload)
 
                 if not human_decisions:
                     tool_calls_to_execute, rejected_feedback = _apply_decisions(
@@ -1106,10 +1215,13 @@ class MultiAgentWorkflow:
                 )
 
             if tool_calls_to_execute:
-                selected_agent_name = state.get("selected_agent")
-                agent = self.agents.get(selected_agent_name) if selected_agent_name else None
                 tool_map = (
-                    await ensure_agent_tool_map(agent, conversation_id=conversation_id)
+                    await ensure_agent_tool_map(
+                        agent,
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        device_id=state.get("device_id"),
+                    )
                     if agent
                     else {}
                 )
@@ -1119,7 +1231,12 @@ class MultiAgentWorkflow:
                 agent_key = getattr(agent, "agent_config_key", None) if agent else "rag"
 
                 # Execute tools with context set for deferred tool loading support
-                with tool_execution_context(conversation_id, user_id, agent_key):
+                with tool_execution_context(
+                    conversation_id,
+                    user_id,
+                    agent_key,
+                    state.get("device_id"),
+                ):
                     outputs, artifacts, images = await execute_tool_calls(
                         tool_calls=tool_calls_to_execute,
                         tool_map=tool_map,
@@ -1242,6 +1359,7 @@ class MultiAgentWorkflow:
             state.get("persona"),
             conversation_id,
             user_id=user_id,
+            device_id=state.get("device_id"),
             model_request=state.get("model_request"),
             history_summary=state.get("history_summary"),
         )
@@ -1270,6 +1388,7 @@ class MultiAgentWorkflow:
             state.get("persona"),
             conversation_id,
             user_id=user_id,
+            device_id=state.get("device_id"),
             model_request=state.get("model_request"),
             history_summary=state.get("history_summary"),
         )
@@ -1297,6 +1416,7 @@ class MultiAgentWorkflow:
             state.get("persona"),
             conversation_id,
             user_id=user_id,
+            device_id=state.get("device_id"),
             model_request=state.get("model_request"),
             history_summary=state.get("history_summary"),
         )
@@ -1360,6 +1480,7 @@ class MultiAgentWorkflow:
             persona=persona,
             conversation_id=conversation_id,
             user_id=user_id,
+            device_id=state.get("device_id"),
             model_request=state.get("model_request"),
             history_summary=state.get("history_summary"),
             todos=todos,
@@ -1412,7 +1533,12 @@ class MultiAgentWorkflow:
         user_id = state.get("user_id")
         agent_key = getattr(self.planning_agent, "agent_config_key", "planning")
 
-        tool_map = await ensure_agent_tool_map(self.planning_agent, conversation_id=conversation_id)
+        tool_map = await ensure_agent_tool_map(
+            self.planning_agent,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            device_id=state.get("device_id"),
+        )
 
         # Separate write_todos calls from external/MCP tool calls
         normalized_calls = [normalize_tool_call(tc) for tc in last_message.tool_calls]
@@ -1435,11 +1561,13 @@ class MultiAgentWorkflow:
                 _ctx["pause_reason"] = "awaiting_approval"
                 state["context"] = _ctx
 
-                human_decisions = interrupt(
-                    {
-                        "action_requests": external_tool_calls,
-                    }
+                interrupt_payload = await self._prepare_interrupt_payload(
+                    state,
+                    tool_calls=external_tool_calls,
+                    agent=self.planning_agent,
+                    tool_map=tool_map,
                 )
+                human_decisions = interrupt(interrupt_payload)
 
                 if not human_decisions:
                     approved_external_calls, rejected_feedback = _apply_decisions(
@@ -1478,7 +1606,12 @@ class MultiAgentWorkflow:
             )
 
         # Wrap tool execution with context for deferred tool loading support
-        with tool_execution_context(conversation_id, user_id, agent_key):
+        with tool_execution_context(
+            conversation_id,
+            user_id,
+            agent_key,
+            state.get("device_id"),
+        ):
             # Execute approved external tool calls
             for tool_call_data in approved_external_calls:
                 tool_name = tool_call_data.get("name")
@@ -1948,6 +2081,7 @@ class MultiAgentWorkflow:
         message: str,
         conversation_id: str | None = None,
         user_id: str | None = None,
+        device_id: str | None = None,
         thread_id: str | None = None,
         persona: str | None = None,
         attachments: list | None = None,
@@ -1964,6 +2098,7 @@ class MultiAgentWorkflow:
             message=message,
             conversation_id=conversation_id,
             user_id=user_id,
+            device_id=device_id,
             persona=persona,
             attachments=attachments,
             model_request=model_request,
@@ -2173,7 +2308,11 @@ class MultiAgentWorkflow:
 
         # Check for further interrupts
         final_snapshot = await self.graph.aget_state(config)
-        if final_snapshot.next and len(final_snapshot.next) > 0 and "approval" in final_snapshot.next:
+        if (
+            final_snapshot.next
+            and len(final_snapshot.next) > 0
+            and "approval" in final_snapshot.next
+        ):
             interrupt_response = self._build_interrupt_agent_response(
                 final_snapshot,
                 thread_id,
@@ -2455,11 +2594,16 @@ class MultiAgentWorkflow:
                                             ):
                                                 node_info["tool_calls"] = [
                                                     {
-                                                        "name": tc.get("name"),
-                                                        "id": tc.get("id"),
-                                                        "args": make_json_safe(tc.get("args", {})),
+                                                        "name": normalized_tc.get("name"),
+                                                        "id": normalized_tc.get("id"),
+                                                        "args": make_json_safe(
+                                                            normalized_tc.get("args", {})
+                                                        ),
                                                     }
-                                                    for tc in last_msg.tool_calls
+                                                    for normalized_tc in (
+                                                        normalize_tool_call(tc)
+                                                        for tc in last_msg.tool_calls
+                                                    )
                                                 ]
 
                                     if node_name == "planning_tools":
@@ -2485,7 +2629,10 @@ class MultiAgentWorkflow:
                                                 and last_msg.tool_calls
                                             ):
                                                 for tool_call in last_msg.tool_calls:
-                                                    tool_call_id = tool_call.get("id")
+                                                    normalized_tool_call = normalize_tool_call(
+                                                        tool_call
+                                                    )
+                                                    tool_call_id = normalized_tool_call.get("id")
                                                     if (
                                                         tool_call_id
                                                         and tool_call_id
@@ -2494,12 +2641,12 @@ class MultiAgentWorkflow:
                                                         emitted_tool_call_ids.add(tool_call_id)
                                                         yield {
                                                             "type": "tool_start",
-                                                            "name": tool_call.get(
+                                                            "name": normalized_tool_call.get(
                                                                 "name", "unknown"
                                                             ),
                                                             "tool_call_id": tool_call_id,
                                                             "args": make_json_safe(
-                                                                tool_call.get("args", {})
+                                                                normalized_tool_call.get("args", {})
                                                             ),
                                                         }
 
@@ -2594,9 +2741,13 @@ class MultiAgentWorkflow:
                         and hasattr(last_msg, "tool_calls")
                         and last_msg.tool_calls
                     ):
-                        pending_tool_calls = [normalize_tool_call(tc) for tc in last_msg.tool_calls]
+                        interrupt_payload = self._get_interrupt_payload_from_state(
+                            snapshot.values,
+                            last_msg.tool_calls,
+                        )
+                        pending_tool_calls = interrupt_payload["action_requests"]
                         interrupt_response = build_interrupt_response(
-                            {"action_requests": pending_tool_calls},
+                            interrupt_payload,
                             thread_id,
                             conversation_id or "",
                         )
@@ -2795,6 +2946,7 @@ class MultiAgentWorkflow:
         message: str,
         conversation_id: str | None = None,
         user_id: str | None = None,
+        device_id: str | None = None,
         thread_id: str | None = None,
         persona: str | None = None,
         attachments: list | None = None,
@@ -2810,6 +2962,7 @@ class MultiAgentWorkflow:
             message=message,
             conversation_id=conversation_id,
             user_id=user_id,
+            device_id=device_id,
             persona=persona,
             attachments=attachments,
             model_request=model_request,
@@ -3181,11 +3334,16 @@ class MultiAgentWorkflow:
                                             ):
                                                 node_info["tool_calls"] = [
                                                     {
-                                                        "name": tc.get("name"),
-                                                        "id": tc.get("id"),
-                                                        "args": make_json_safe(tc.get("args", {})),
+                                                        "name": normalized_tc.get("name"),
+                                                        "id": normalized_tc.get("id"),
+                                                        "args": make_json_safe(
+                                                            normalized_tc.get("args", {})
+                                                        ),
                                                     }
-                                                    for tc in last_msg.tool_calls
+                                                    for normalized_tc in (
+                                                        normalize_tool_call(tc)
+                                                        for tc in last_msg.tool_calls
+                                                    )
                                                 ]
 
                                     # For planning_tools, include execution results
@@ -3214,7 +3372,10 @@ class MultiAgentWorkflow:
                                                 and last_msg.tool_calls
                                             ):
                                                 for tool_call in last_msg.tool_calls:
-                                                    tool_call_id = tool_call.get("id")
+                                                    normalized_tool_call = normalize_tool_call(
+                                                        tool_call
+                                                    )
+                                                    tool_call_id = normalized_tool_call.get("id")
                                                     # Only emit if not already emitted from messages mode
                                                     if (
                                                         tool_call_id
@@ -3224,12 +3385,12 @@ class MultiAgentWorkflow:
                                                         emitted_tool_call_ids.add(tool_call_id)
                                                         yield {
                                                             "type": "tool_start",
-                                                            "name": tool_call.get(
+                                                            "name": normalized_tool_call.get(
                                                                 "name", "unknown"
                                                             ),
                                                             "tool_call_id": tool_call_id,
                                                             "args": make_json_safe(
-                                                                tool_call.get("args", {})
+                                                                normalized_tool_call.get("args", {})
                                                             ),
                                                         }
 
@@ -3332,11 +3493,13 @@ class MultiAgentWorkflow:
                             and hasattr(last_msg, "tool_calls")
                             and last_msg.tool_calls
                         ):
-                            pending_tool_calls = [
-                                normalize_tool_call(tc) for tc in last_msg.tool_calls
-                            ]
+                            interrupt_payload = self._get_interrupt_payload_from_state(
+                                snapshot.values,
+                                last_msg.tool_calls,
+                            )
+                            pending_tool_calls = interrupt_payload["action_requests"]
                             interrupt_response = build_interrupt_response(
-                                {"action_requests": pending_tool_calls},
+                                interrupt_payload,
                                 thread_id,
                                 conversation_id or "",
                             )

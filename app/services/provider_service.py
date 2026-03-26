@@ -104,12 +104,16 @@ class ProviderService:
             logger.error("Failed to decrypt API key: %s", e)
             raise ValueError("Failed to decrypt API key") from e
 
-    def _get_public_provider_metadata(self, provider_metadata: dict[str, Any] | None) -> dict[str, Any]:
+    def _get_public_provider_metadata(
+        self, provider_metadata: dict[str, Any] | None
+    ) -> dict[str, Any]:
         metadata = deepcopy(provider_metadata or {})
         metadata.pop(CATALOG_METADATA_KEY, None)
         return metadata
 
-    def _normalize_catalog_metadata(self, provider_metadata: dict[str, Any] | None) -> dict[str, Any]:
+    def _normalize_catalog_metadata(
+        self, provider_metadata: dict[str, Any] | None
+    ) -> dict[str, Any]:
         raw_catalog = (provider_metadata or {}).get(CATALOG_METADATA_KEY, {})
         if not isinstance(raw_catalog, dict):
             raw_catalog = {}
@@ -218,7 +222,9 @@ class ProviderService:
             provider_metadata=merged_metadata,
         )
 
-        logger.info("Added/updated %s provider for user %s (id=%s)", provider_type, user_id, provider.id)
+        logger.info(
+            "Added/updated %s provider for user %s (id=%s)", provider_type, user_id, provider.id
+        )
         return provider
 
     def get_provider_config(
@@ -560,10 +566,7 @@ class ProviderService:
         if any(fragment in model_lower for fragment in excluded_fragments):
             return False
 
-        if supported_actions and "generateContent" not in supported_actions:
-            return False
-
-        return True
+        return not (supported_actions and "generateContent" not in supported_actions)
 
     def _normalize_gemini_model(
         self,
@@ -592,7 +595,9 @@ class ProviderService:
         self, provider_type: str, models: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         preferred_order = (
-            OPENAI_PREFERRED_MODEL_ORDER if provider_type == "openai" else GEMINI_PREFERRED_MODEL_ORDER
+            OPENAI_PREFERRED_MODEL_ORDER
+            if provider_type == "openai"
+            else GEMINI_PREFERRED_MODEL_ORDER
         )
         model_map = {str(model.get("id") or ""): model for model in models}
 

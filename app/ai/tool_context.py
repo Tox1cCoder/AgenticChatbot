@@ -29,10 +29,11 @@ class ToolContext:
     conversation_id: str | None = None
     user_id: str | None = None
     agent_key: str | None = None
+    device_id: str | None = None
 
     def __bool__(self) -> bool:
         """Return True if any context field is set."""
-        return bool(self.conversation_id or self.user_id or self.agent_key)
+        return bool(self.conversation_id or self.user_id or self.agent_key or self.device_id)
 
 
 # Context variable for the current tool execution context
@@ -85,6 +86,7 @@ def tool_execution_context(
     conversation_id: str | None = None,
     user_id: str | None = None,
     agent_key: str | None = None,
+    device_id: str | None = None,
 ):
     """
     Context manager that sets tool execution context for the duration of a block.
@@ -109,6 +111,7 @@ def tool_execution_context(
         conversation_id=conversation_id,
         user_id=user_id,
         agent_key=agent_key,
+        device_id=device_id,
     )
 
     # Save previous context (for nested contexts, though unlikely)

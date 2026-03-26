@@ -322,6 +322,7 @@ class Container(containers.DeclarativeContainer):
         registry=skills_registry,
     )
 
+
 # Initialize auto-injection wiring map before container instantiation
 def setup_auto_injection(container_ref: Container | type[Container] | None = None):
     """Setup auto-injection wiring maps."""

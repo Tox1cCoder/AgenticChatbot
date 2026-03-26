@@ -289,7 +289,9 @@ async def validate_provider(
 
         response_data = ProviderValidationResponse(
             valid=result.get("valid", False),
-            models=[ProviderModelOption.model_validate(model) for model in result.get("models", [])],
+            models=[
+                ProviderModelOption.model_validate(model) for model in result.get("models", [])
+            ],
             message=result.get("message", ""),
             error=result.get("error", ""),
         )
@@ -331,9 +333,7 @@ async def list_provider_models(
                 detail=result.get("sync_error", "Provider validation failed"),
             )
 
-        models = [
-            ProviderModelOption.model_validate(model) for model in result.get("models", [])
-        ]
+        models = [ProviderModelOption.model_validate(model) for model in result.get("models", [])]
 
         return ApiResponse(
             success=True,

@@ -17,6 +17,8 @@ from app.api import (
 )
 from app.api.ai_sdk import router as ai_sdk_router
 from app.api.auth import router as auth_router
+from app.api.client_devices import router as client_devices_router
+from app.api.device_runtime import router as device_runtime_router
 from app.api.documents import router as documents_router
 from app.api.mcp import router as mcp_router
 from app.api.model_config import router as model_config_router
@@ -28,8 +30,8 @@ from app.core.container import (
     get_container,
     setup_auto_injection,
 )
-from app.database.migrations import upgrade_database
 from app.core.events import DocumentEvent, get_event_bus
+from app.database.migrations import upgrade_database
 from app.database.session import get_engine
 from app.services.document_event_listener import DocumentEventLogger
 from app.utils.exception_handler import register_exception_handlers
@@ -121,6 +123,8 @@ def create_app() -> FastAPI:
             "app.api.providers",
             "app.api.model_config",
             "app.api.skills",
+            "app.api.client_devices",
+            "app.api.device_runtime",
         ]
     )
 
@@ -172,6 +176,8 @@ def create_app() -> FastAPI:
     app.include_router(providers_router)
     app.include_router(model_config_router)
     app.include_router(skills_router)
+    app.include_router(client_devices_router)
+    app.include_router(device_runtime_router)
 
     # Initialize and register event listeners
     event_bus = get_event_bus()

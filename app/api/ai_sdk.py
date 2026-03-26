@@ -15,7 +15,6 @@ from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.conversation_service_interface import IConversationService
 from app.interfaces.message_service_interface import IMessageService
 from app.models.enums import MessageRole
-from app.services.stream_events import normalize_tool_phase
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationRead,
@@ -25,6 +24,7 @@ from app.schemas.message import InterruptResumeRequest, MessageCreate
 from app.schemas.pagination import ConversationPaginationParams
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
+from app.services.stream_events import normalize_tool_phase
 
 router = APIRouter(tags=["ai-sdk"])
 
@@ -572,7 +572,9 @@ class ToolEventHandler(EventHandler):
             async for msg in self._handle_tool_end(event, tool_call_id, state):
                 yield msg
 
-    def _get_tool_call_id(self, event: dict[str, Any], phase: str | None, state: StreamState) -> str:
+    def _get_tool_call_id(
+        self, event: dict[str, Any], phase: str | None, state: StreamState
+    ) -> str:
         """Get or generate tool call ID."""
         tool_call_id = event.get("tool_call_id")
         if tool_call_id:
@@ -1080,11 +1082,13 @@ async def chat_ui_message_stream(
     )
 
     def event_source():
+        extra = getattr(payload, "model_extra", {}) or {}
         message_create = MessageCreate(
             conversation_id=conversation_id,
             content=user_text or "Please analyze the attached image.",
             role=MessageRole.user,
             attachments=user_attachments or None,
+            device_id=extra.get("device_id") or extra.get("deviceId"),
         )
         return message_service.create_message_stream(
             message_create, current_user_id, bot_message_id=bot_message_id

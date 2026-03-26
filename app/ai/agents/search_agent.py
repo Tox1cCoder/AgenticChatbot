@@ -6,6 +6,7 @@ from langchain_core.messages import HumanMessage
 
 from ..prompts import SEARCH_SYSTEM_PROMPT, build_search_prompt
 from ..schemas import AgentMessage, AgentResponse, AgentType
+from ..utils import normalize_tool_call
 from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class SearchAgent(BaseAgent):
         persona = message.metadata.get("persona")
         message_content = message.content or ""
         request_user_id = message.metadata.get("user_id")
+        request_device_id = message.metadata.get("device_id")
         model_request = message.metadata.get("model_request")
         history_summary = message.metadata.get("history_summary")
 
@@ -61,6 +63,7 @@ class SearchAgent(BaseAgent):
             persona,
             conversation_id,
             user_id=request_user_id,
+            device_id=request_device_id,
             model_request=model_request,
             history_summary=history_summary,
         )
@@ -85,11 +88,12 @@ class SearchAgent(BaseAgent):
         response = await self.invoke_model(message, conversation_id)
 
         for tool_call in response.message.tool_calls or []:
+            normalized_tool_call = normalize_tool_call(tool_call)
             yield {
                 "type": "tool_start",
-                "name": tool_call.get("name", "unknown"),
-                "tool_call_id": tool_call.get("id"),
-                "args": tool_call.get("args"),
+                "name": normalized_tool_call.get("name", "unknown"),
+                "tool_call_id": normalized_tool_call.get("id"),
+                "args": normalized_tool_call.get("args"),
             }
 
         thinking_summary = str(response.metadata.get("thinking_summary") or "").strip()

@@ -105,6 +105,8 @@ def build_rejected_tool_artifacts(
 async def ensure_agent_tool_map(
     agent: Any,
     conversation_id: str | None = None,
+    user_id: str | None = None,
+    device_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Build a tool map for executing tool calls.
@@ -133,11 +135,15 @@ async def ensure_agent_tool_map(
 
     tools = initialized_tools
 
-    # In deferred mode, keep execution permissions aligned with the tools that
-    # were actually exposed to the model for this turn.
-    if settings.mcp_tool_search_enabled and hasattr(agent, "_get_tools_for_binding"):
+    # Keep execution permissions aligned with the tools that were actually
+    # exposed to the model for this turn.
+    if hasattr(agent, "_get_tools_for_binding"):
         try:
-            tools = agent._get_tools_for_binding(conversation_id=conversation_id)
+            tools = agent._get_tools_for_binding(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                device_id=device_id,
+            )
         except TypeError:
             # Backward-compat fallback for non-keyword signatures.
             tools = agent._get_tools_for_binding(conversation_id)
@@ -152,6 +158,17 @@ async def ensure_agent_tool_map(
         tools = list(initialized_tools)
         if not any(getattr(t, "name", None) == tool_search.name for t in tools):
             tools.append(tool_search)
+
+    if hasattr(agent, "_get_client_runtime_tools"):
+        try:
+            remote_tools = agent._get_client_runtime_tools(user_id=user_id, device_id=device_id)
+        except TypeError:
+            remote_tools = agent._get_client_runtime_tools(user_id=user_id, device_id=device_id)
+        existing_names = {getattr(t, "name", None) for t in tools}
+        for tool in remote_tools:
+            if getattr(tool, "name", None) not in existing_names:
+                tools.append(tool)
+                existing_names.add(getattr(tool, "name", None))
 
     tool_map = {t.name: t for t in tools if getattr(t, "name", None)}
 

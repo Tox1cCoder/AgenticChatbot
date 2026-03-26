@@ -241,7 +241,8 @@ class ModelConfigService:
             effective[agent_key].update(
                 {
                     "provider": provider,
-                    "model": model or self._pick_catalog_model(provider_snapshot, effective[agent_key]["model"]),
+                    "model": model
+                    or self._pick_catalog_model(provider_snapshot, effective[agent_key]["model"]),
                     "temperature": temperature,
                     "source": "persisted",
                     "key_source": provider_snapshot.get("key_source", "none"),
@@ -458,7 +459,11 @@ class ModelConfigService:
                     credentials_cache[provider] = credentials
 
             api_key = credentials.get("api_key")
-            if not snapshot.get("configured") or not isinstance(api_key, str) or not api_key.strip():
+            if (
+                not snapshot.get("configured")
+                or not isinstance(api_key, str)
+                or not api_key.strip()
+            ):
                 continue
 
             model = self._pick_catalog_model(
@@ -488,7 +493,9 @@ class ModelConfigService:
         if not normalized_agent_key:
             raise ValueError(f"Unsupported agent_key for runtime resolution: {agent_key}")
 
-        default_temperature = float(AGENT_CONFIG.get(normalized_agent_key, {}).get("temperature", 1.0))
+        default_temperature = float(
+            AGENT_CONFIG.get(normalized_agent_key, {}).get("temperature", 1.0)
+        )
         default_model = str(AGENT_CONFIG.get(normalized_agent_key, {}).get("model") or "").strip()
 
         if user_id is None:
@@ -520,7 +527,9 @@ class ModelConfigService:
 
         provider = _normalize_provider(base_config.get("provider"))
         model = str(base_config.get("model") or "").strip()
-        temperature = _coerce_temperature(base_config.get("temperature"), default=default_temperature)
+        temperature = _coerce_temperature(
+            base_config.get("temperature"), default=default_temperature
+        )
         source = str(base_config.get("source") or "default")
         warnings = list(base_config.get("warnings") or [])
         is_custom_model = bool(base_config.get("is_custom_model"))

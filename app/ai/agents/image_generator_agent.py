@@ -64,6 +64,8 @@ class ImageGeneratorAgent(BaseAgent):
             await self._init_tools()
 
         message_content = message.content or ""
+        request_user_id = message.metadata.get("user_id")
+        request_device_id = message.metadata.get("device_id")
 
         # Check if this invocation includes tool results
         has_tool_results = "Tool results:" in message_content
@@ -93,7 +95,11 @@ class ImageGeneratorAgent(BaseAgent):
             )
 
         # Configure tool calling (only if no tool results yet)
-        llm_with_tools = self._get_llm_with_tools(conversation_id=conversation_id)
+        llm_with_tools = self._get_llm_with_tools(
+            conversation_id=conversation_id,
+            user_id=request_user_id,
+            device_id=request_device_id,
+        )
 
         messages = [
             {"role": "system", "content": self._get_system_prompt()},
@@ -165,6 +171,7 @@ Do not output anything else, just the prompt."""
         persona: str | None,
         conversation_id: str | None = None,
         user_id: str | None = None,
+        device_id: str | None = None,
         model_request: dict[str, Any] | None = None,
         history_summary: str | None = None,
         **system_prompt_kwargs: Any,
@@ -183,6 +190,7 @@ Do not output anything else, just the prompt."""
             persona,
             conversation_id,
             user_id=user_id,
+            device_id=device_id,
             model_request=model_request,
             history_summary=history_summary,
             **system_prompt_kwargs,
@@ -204,7 +212,12 @@ Do not output anything else, just the prompt."""
         # Derive the original user request from the current turn messages.
         original_prompt = enhanced_prompt
         for msg in reversed(messages):
-            if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content.strip() and isinstance(msg, LCHumanMessage):
+            if (
+                hasattr(msg, "content")
+                and isinstance(msg.content, str)
+                and msg.content.strip()
+                and isinstance(msg, LCHumanMessage)
+            ):
                 original_prompt = msg.content.strip()
                 break
 

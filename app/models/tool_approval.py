@@ -55,9 +55,29 @@ class ToolApproval(Base):
     decision = Column(SQLEnum(DecisionType, name="decision_type", create_type=True), nullable=False)
     decided_at = Column(DateTime(timezone=True), default=func.now(), nullable=False, index=True)
 
+    # Device context (optional - set when tool originated from a client device)
+    device_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("client_devices.id"),
+        nullable=True,
+        index=True,
+    )
+
+    # Tool provenance fields for audit
+    tool_origin = Column(
+        String(32), nullable=True, index=True
+    )  # e.g., "client_native", "client_mcp", "server"
+    server_name = Column(
+        String(255), nullable=True
+    )  # MCP server name when tool_origin is "client_mcp"
+    qualified_tool_id = Column(
+        String(512), nullable=True, index=True
+    )  # Fully qualified tool identifier
+
     # Relationships
     conversation = relationship("Conversation", backref="tool_approvals")
     user = relationship("User", backref="tool_approvals")
+    device = relationship("ClientDevice", backref="tool_approvals")
 
     def __repr__(self) -> str:
         return (

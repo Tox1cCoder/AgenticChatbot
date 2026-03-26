@@ -624,6 +624,37 @@ class Settings(BaseSettings):
         description="Log tool_search queries (disable in production to avoid logging sensitive queries).",
     )
 
+    # Client Runtime Bridge Configuration
+    enable_client_runtime_bridge: bool = Field(
+        default=True,
+        description="Enable the client-runtime bridge for per-device client backends. "
+        "When enabled, the server can dispatch tool calls to connected client devices.",
+    )
+    client_runtime_ws_timeout_seconds: int = Field(
+        default=60,
+        description="Timeout in seconds for client runtime WebSocket operations (tool dispatch, heartbeat).",
+    )
+    client_runtime_catalog_cache_ttl_seconds: int = Field(
+        default=300,
+        description="TTL in seconds for caching client device tool/skill catalogs. "
+        "Catalogs are refreshed when a device reconnects or explicitly syncs.",
+    )
+    client_runtime_require_connected_device_for_local_tools: bool = Field(
+        default=True,
+        description="When True, tool calls targeting client-local tools fail if no device is connected. "
+        "When False, such calls return a recoverable error allowing the model to adapt.",
+    )
+    client_runtime_heartbeat_interval_seconds: int = Field(
+        default=30,
+        description="Expected heartbeat interval from connected client devices. "
+        "Devices not sending heartbeats within 2x this interval are marked offline.",
+    )
+    client_runtime_max_tool_result_size_bytes: int = Field(
+        default=1048576,
+        description="Maximum size in bytes for tool results returned from client devices (1MB default). "
+        "Results exceeding this are truncated with a warning.",
+    )
+
     # ── Validators ──────────────────────────────────────────────────────
 
     @field_validator(

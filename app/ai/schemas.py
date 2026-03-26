@@ -110,6 +110,7 @@ class GraphState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     conversation_id: NotRequired[str | None]
     user_id: NotRequired[str | None]
+    device_id: NotRequired[str | None]
     selected_agent: NotRequired[str | None]
     response: NotRequired[AgentResponse | None]
     context: NotRequired[dict[str, Any]]

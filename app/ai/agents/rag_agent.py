@@ -26,10 +26,9 @@ from sentence_transformers import CrossEncoder, SentenceTransformer
 from ...core.config import Settings, settings
 from ...database.session import SessionLocal
 from ...repositories.document_image import DocumentImageRepository
+from ...services.model_config_service import ResolvedRuntimeModelConfig
 from ..agent_config import (
-    AGENT_CONFIG,
     build_gemini_generate_config,
-    create_langchain_model,
 )
 from ..mcp_integration import get_global_mcp_manager
 from ..mcp_registry import get_mcp_tools_generation
@@ -42,7 +41,6 @@ from ..utils import (
     extract_agent_execution_info,
     get_error_recovery_hint,
 )
-from ...services.model_config_service import ResolvedRuntimeModelConfig
 from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -112,14 +110,20 @@ class RAGAgent(BaseAgent):
         self.reranker = CrossEncoder(self.settings.reranker_model)
         logger.debug(f"Re-ranker initialized: {self.settings.reranker_model}")
 
-    def _get_full_system_prompt(self, base_prompt: str) -> str:
+    def _get_full_system_prompt(
+        self,
+        base_prompt: str,
+        *,
+        user_id: str | None = None,
+        device_id: str | None = None,
+    ) -> str:
         """Return base prompt + active skills suffix.
 
         RAGAgent doesn't have a single base prompt — different paths use
         different prompts, so caller passes the base in.  Overrides
         BaseAgent's no-arg version.
         """
-        suffix = self._build_skills_suffix()
+        suffix = self._build_skills_suffix(user_id=user_id, device_id=device_id)
         if suffix:
             return f"{base_prompt}{suffix}"
         return base_prompt
@@ -160,14 +164,6 @@ class RAGAgent(BaseAgent):
             tool_names = {tool.name for tool in self.tools}
             if search_documents_tool.name not in tool_names:
                 self.tools.insert(0, search_documents_tool)
-
-        # Ensure activate_skill is present when skills are active
-        skill_tools = self._get_skills_internal_tools()
-        existing_names = {t.name for t in self.tools}
-        for t in skill_tools:
-            if t.name not in existing_names:
-                self.tools.insert(0, t)
-                existing_names.add(t.name)
 
         # Log status if MCP manager is available
         if self.mcp_manager:
@@ -218,6 +214,7 @@ class RAGAgent(BaseAgent):
         persona = message.metadata.get("persona")
         model_request = message.metadata.get("model_request")
         request_user_id = message.metadata.get("user_id")
+        request_device_id = message.metadata.get("device_id")
         history_summary = message.metadata.get("history_summary")
 
         # Initialize tools if not done yet
@@ -276,9 +273,17 @@ class RAGAgent(BaseAgent):
         )
 
         # Append active skills to the prompt
-        prompt = self._get_full_system_prompt(prompt)
+        prompt = self._get_full_system_prompt(
+            prompt,
+            user_id=request_user_id,
+            device_id=request_device_id,
+        )
 
-        tools_for_binding = self._get_tools_for_binding(conversation_id=conversation_id)
+        tools_for_binding = self._get_tools_for_binding(
+            conversation_id=conversation_id,
+            user_id=request_user_id,
+            device_id=request_device_id,
+        )
         has_tool_binding = bool(tools_for_binding)
 
         response_text: str = ""
@@ -514,6 +519,8 @@ class RAGAgent(BaseAgent):
         self,
         prompt: str,
         conversation_id: str | None = None,
+        device_id: str | None = None,
+        user_id: str | None = None,
         tools_to_bind: list[BaseTool] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """
@@ -523,7 +530,11 @@ class RAGAgent(BaseAgent):
         try:
             tools = tools_to_bind
             if tools is None:
-                tools = self._get_tools_for_binding(conversation_id=conversation_id)
+                tools = self._get_tools_for_binding(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    device_id=device_id,
+                )
 
             if not tools:
                 return
@@ -758,12 +769,17 @@ class RAGAgent(BaseAgent):
         *,
         runtime_config: ResolvedRuntimeModelConfig,
         user_id: str | None = None,
+        device_id: str | None = None,
         conversation_id: str | None = None,
         tools_to_bind: list[BaseTool] | None = None,
     ) -> tuple[str, list[str], list[dict[str, Any]], ResolvedRuntimeModelConfig]:
         tools = tools_to_bind
         if tools is None:
-            tools = self._get_tools_for_binding(conversation_id=conversation_id)
+            tools = self._get_tools_for_binding(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                device_id=device_id,
+            )
 
         if not tools:
             return "", [], [], runtime_config
@@ -1052,7 +1068,9 @@ class RAGAgent(BaseAgent):
                     config=config,
                 )
 
-                return response.text if hasattr(response, "text") else str(response), current_runtime
+                return response.text if hasattr(response, "text") else str(
+                    response
+                ), current_runtime
             except Exception as exc:
                 logger.error("Error in vision generation: %s", exc, exc_info=True)
                 fallback_runtime = self._create_fallback_runtime_config(
@@ -1116,7 +1134,9 @@ class RAGAgent(BaseAgent):
                                 else:
                                     answer_parts.append(part.text)
 
-                    self._last_thinking_summary = "\n".join(thinking_parts) if thinking_parts else None
+                    self._last_thinking_summary = (
+                        "\n".join(thinking_parts) if thinking_parts else None
+                    )
                     return (
                         "".join(answer_parts)
                         if answer_parts
@@ -1124,7 +1144,9 @@ class RAGAgent(BaseAgent):
                         current_runtime,
                     )
 
-                return response.text if hasattr(response, "text") else str(response), current_runtime
+                return response.text if hasattr(response, "text") else str(
+                    response
+                ), current_runtime
             except Exception as exc:
                 logger.error("Error in text generation: %s", exc, exc_info=True)
                 fallback_runtime = self._create_fallback_runtime_config(
@@ -1134,7 +1156,9 @@ class RAGAgent(BaseAgent):
                     inherited_warnings=current_runtime.warnings,
                 )
                 if not fallback_runtime or fallback_runtime.provider == current_runtime.provider:
-                    raise RuntimeError(f"{current_runtime.provider.capitalize()} API error: {exc}") from exc
+                    raise RuntimeError(
+                        f"{current_runtime.provider.capitalize()} API error: {exc}"
+                    ) from exc
                 current_runtime = fallback_runtime
 
     async def initialize(self):
@@ -1444,12 +1468,16 @@ class RAGAgent(BaseAgent):
         agentic_images = message.metadata.get("agentic_images", [])
         model_request = message.metadata.get("model_request")
         request_user_id = message.metadata.get("user_id")
+        request_device_id = message.metadata.get("device_id")
         history_summary = message.metadata.get("history_summary")
 
         system_prompt = AGENTIC_RAG_SYSTEM_PROMPT
 
         # Append active skills
-        skills_suffix = self._build_skills_suffix()
+        skills_suffix = self._build_skills_suffix(
+            user_id=request_user_id,
+            device_id=request_device_id,
+        )
         if skills_suffix:
             system_prompt = f"{system_prompt}{skills_suffix}"
 
@@ -1477,6 +1505,8 @@ class RAGAgent(BaseAgent):
         tools_to_bind = self._get_tools_for_binding(
             conversation_id=conversation_id,
             internal_tools=[create_search_documents_tool()],
+            user_id=request_user_id,
+            device_id=request_device_id,
         )
 
         # Build messages list with conversation history
@@ -1576,7 +1606,10 @@ class RAGAgent(BaseAgent):
                         from_provider=current_runtime.provider,
                         inherited_warnings=current_runtime.warnings,
                     )
-                    if not fallback_runtime or fallback_runtime.provider == current_runtime.provider:
+                    if (
+                        not fallback_runtime
+                        or fallback_runtime.provider == current_runtime.provider
+                    ):
                         raise
                     current_runtime = fallback_runtime
 

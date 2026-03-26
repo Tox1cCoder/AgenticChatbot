@@ -14,7 +14,12 @@ from langchain_core.messages import (
 from langchain_core.tools import BaseTool
 
 from ...core.config import settings
+from ...services.model_config_service import (
+    ResolvedRuntimeModelConfig,
+    RuntimeFallbackConfig,
+)
 from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
+from ..client_runtime_tools import get_client_runtime_tools
 from ..deferred_tool_binding import (
     build_deferred_tool_list,
     should_use_deferred_loading,
@@ -24,17 +29,12 @@ from ..mcp_integration import get_global_mcp_manager
 from ..mcp_registry import get_mcp_tools_generation
 from ..prompts import DELEGATION_SUFFIX, TOOL_CONTEXT_SUFFIX
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..skills_registry import get_skills_generation, get_skills_registry
-from ..skills_tool import create_activate_skill_tool
+from ..skills_tool import create_activate_skill_tool, get_available_skill_summaries
 from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
 from ..utils import (
     coerce_response_text,
     extract_openai_reasoning_summary,
     extract_openai_reasoning_tokens,
-)
-from ...services.model_config_service import (
-    ResolvedRuntimeModelConfig,
-    RuntimeFallbackConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,10 +56,6 @@ class BaseAgent(ABC):
 
         # Track tools generation to detect when refresh is needed
         self._tools_generation_seen: int = 0
-
-        # Track skills generation to detect when skills suffix needs rebuild
-        self._skills_generation_seen: int = 0
-        self._cached_skills_suffix: str = ""
 
         self._init_gemini()
 
@@ -113,15 +109,8 @@ class BaseAgent(ABC):
             # Apply per-agent tool allowlist filtering
             self.tools = self._filter_tools_by_allowlist(unique_tools)
 
-            # Ensure activate_skill is present when skills are active
-            skill_tools = self._get_skills_internal_tools()
-            existing_names = {t.name for t in self.tools}
-            for t in skill_tools:
-                if t.name not in existing_names:
-                    self.tools.insert(0, t)
-                    existing_names.add(t.name)
-
             # Add inter-agent delegation tool so every agent can hand off
+            existing_names = {t.name for t in self.tools}
             if _hand_off_tool.name not in existing_names:
                 self.tools.append(_hand_off_tool)
                 existing_names.add(_hand_off_tool.name)
@@ -192,20 +181,31 @@ class BaseAgent(ABC):
         allowlist_key = f"{self.agent_config_key}_agent_allowed_tools"
         return getattr(settings, allowlist_key, []) or []
 
-    def _get_skills_internal_tools(self) -> list[BaseTool]:
-        """Return the activate_skill tool if any skills are active."""
-        try:
-            registry = get_skills_registry()
-            if registry.get_active_skills():
-                return [create_activate_skill_tool()]
-        except Exception:
-            pass
+    def _get_skills_internal_tools(
+        self,
+        *,
+        user_id: str | None,
+        device_id: str | None,
+    ) -> list[BaseTool]:
+        """Return the activate_skill tool when server or client skills are available."""
+        if get_available_skill_summaries(user_id=user_id, device_id=device_id):
+            return [create_activate_skill_tool(user_id=user_id, device_id=device_id)]
         return []
+
+    def _get_client_runtime_tools(
+        self,
+        *,
+        user_id: str | None,
+        device_id: str | None,
+    ) -> list[BaseTool]:
+        return get_client_runtime_tools(user_id=user_id, device_id=device_id)
 
     def _get_tools_for_binding(
         self,
         conversation_id: str | None = None,
         internal_tools: list[BaseTool] | None = None,
+        user_id: str | None = None,
+        device_id: str | None = None,
     ) -> list[BaseTool]:
         """
         Get the tools to bind to the model for this invocation.
@@ -226,7 +226,7 @@ class BaseAgent(ABC):
             List of tools to bind to the model
         """
         # Prepend activate_skill to internal tools when skills are active
-        skills_tools = self._get_skills_internal_tools()
+        skills_tools = self._get_skills_internal_tools(user_id=user_id, device_id=device_id)
         if skills_tools:
             merged_internal = list(skills_tools)
             if internal_tools:
@@ -238,6 +238,7 @@ class BaseAgent(ABC):
             internal_tools = merged_internal
 
         use_deferred = should_use_deferred_loading(self.agent_config_key)
+        remote_tools = self._get_client_runtime_tools(user_id=user_id, device_id=device_id)
 
         if use_deferred:
             # Build deferred tool list
@@ -249,20 +250,26 @@ class BaseAgent(ABC):
                 internal_tools=internal_tools,
                 allowlist=self._get_allowlist(),
             )
-
-            return tools
         else:
             # Traditional mode: return all tools (with internal tools prepended)
             if internal_tools:
                 # Combine internal tools with MCP tools, avoiding duplicates
                 seen = {t.name for t in internal_tools}
-                combined = list(internal_tools)
+                tools = list(internal_tools)
                 for tool in self.tools:
                     if tool.name not in seen:
-                        combined.append(tool)
+                        tools.append(tool)
                         seen.add(tool.name)
-                return combined
-            return self.tools
+            else:
+                tools = list(self.tools)
+
+        seen_names = {tool.name for tool in tools}
+        for tool in remote_tools:
+            if tool.name not in seen_names:
+                tools.append(tool)
+                seen_names.add(tool.name)
+
+        return tools
 
     def _resolve_model_request(self, model_request: dict[str, Any] | None) -> dict[str, Any] | None:
         if self.agent_config_key not in _MODEL_REQUEST_SUPPORTED_AGENT_KEYS:
@@ -283,6 +290,8 @@ class BaseAgent(ABC):
         model: Any = None,
         conversation_id: str | None = None,
         internal_tools: list[BaseTool] | None = None,
+        user_id: str | None = None,
+        device_id: str | None = None,
     ) -> Any:
         """
         Bind tools to the model for invocation.
@@ -301,6 +310,8 @@ class BaseAgent(ABC):
         tools = self._get_tools_for_binding(
             conversation_id=conversation_id,
             internal_tools=internal_tools,
+            user_id=user_id,
+            device_id=device_id,
         )
 
         if not tools or llm is None:
@@ -343,7 +354,9 @@ class BaseAgent(ABC):
         service = self._get_model_config_service()
 
         if service and user_uuid and self.agent_config_key in _MODEL_REQUEST_SUPPORTED_AGENT_KEYS:
-            return service.resolve_runtime_config(user_uuid, self.agent_config_key, request_override)
+            return service.resolve_runtime_config(
+                user_uuid, self.agent_config_key, request_override
+            )
 
         warnings: list[str] = []
         if request_override:
@@ -552,6 +565,7 @@ class BaseAgent(ABC):
         persona: str | None,
         conversation_id: str | None = None,
         user_id: str | None = None,
+        device_id: str | None = None,
         model_request: dict[str, Any] | None = None,
         history_summary: str | None = None,
         **system_prompt_kwargs: Any,
@@ -563,8 +577,17 @@ class BaseAgent(ABC):
                 runtime_config,
                 user_id=user_id,
             )
-            llm_with_tools = self._get_llm_with_tools(llm, conversation_id=conversation_id)
-            bound_tools = self._get_tools_for_binding(conversation_id=conversation_id)
+            llm_with_tools = self._get_llm_with_tools(
+                llm,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                device_id=device_id,
+            )
+            bound_tools = self._get_tools_for_binding(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                device_id=device_id,
+            )
             has_tool_context = any(
                 isinstance(msg, ToolMessage)
                 or (hasattr(msg, "tool_calls") and msg.tool_calls)
@@ -576,6 +599,8 @@ class BaseAgent(ABC):
                 persona,
                 has_tool_context,
                 history_summary=history_summary,
+                user_id=user_id,
+                device_id=device_id,
                 **system_prompt_kwargs,
             )
 
@@ -624,8 +649,12 @@ class BaseAgent(ABC):
                         llm_with_tools = self._get_llm_with_tools(
                             llm,
                             conversation_id=conversation_id,
+                            user_id=user_id,
+                            device_id=device_id,
                         )
-                        response = await self._ainvoke_with_retries(llm_with_tools, langchain_messages)
+                        response = await self._ainvoke_with_retries(
+                            llm_with_tools, langchain_messages
+                        )
                     except Exception:
                         fallback_runtime = self._create_fallback_runtime_config(
                             runtime_config.fallback_config,
@@ -645,8 +674,12 @@ class BaseAgent(ABC):
                         llm_with_tools = self._get_llm_with_tools(
                             llm,
                             conversation_id=conversation_id,
+                            user_id=user_id,
+                            device_id=device_id,
                         )
-                        response = await self._ainvoke_with_retries(llm_with_tools, langchain_messages)
+                        response = await self._ainvoke_with_retries(
+                            llm_with_tools, langchain_messages
+                        )
                 else:
                     fallback_runtime = self._create_fallback_runtime_config(
                         runtime_config.fallback_config,
@@ -666,6 +699,8 @@ class BaseAgent(ABC):
                     llm_with_tools = self._get_llm_with_tools(
                         llm,
                         conversation_id=conversation_id,
+                        user_id=user_id,
+                        device_id=device_id,
                     )
                     response = await self._ainvoke_with_retries(llm_with_tools, langchain_messages)
 
@@ -740,8 +775,11 @@ class BaseAgent(ABC):
     ) -> str:
         system_prompt = self._get_base_system_prompt()
 
-        # Append active skills
-        skills_suffix = self._build_skills_suffix()
+        user_id = _.get("user_id")
+        device_id = _.get("device_id")
+
+        # Append active client-side skills
+        skills_suffix = self._build_skills_suffix(user_id=user_id, device_id=device_id)
         if skills_suffix:
             system_prompt = f"{system_prompt}{skills_suffix}"
 
@@ -773,47 +811,42 @@ class BaseAgent(ABC):
     def _get_base_system_prompt(self) -> str:
         pass
 
-    def _build_skills_suffix(self) -> str:
-        """Build a suffix listing active skill *summaries* only.
-
-        Full skill content is loaded on-demand via the ``activate_skill``
-        tool (progressive disclosure).  The suffix tells the LLM which
-        skills exist and instructs it to call the tool when relevant.
-
-        Uses a generation counter to cache: the suffix is only rebuilt
-        when a skill is toggled or the registry is reloaded.
-        """
-        current_gen = get_skills_generation()
-        if current_gen == self._skills_generation_seen and self._cached_skills_suffix is not None:
-            return self._cached_skills_suffix
-
-        try:
-            registry = get_skills_registry()
-            active_skills = registry.get_active_skills()
-        except Exception as exc:
-            logger.warning("Failed to load active skills: %s", exc)
-            active_skills = []
+    def _build_skills_suffix(
+        self,
+        *,
+        user_id: str | None = None,
+        device_id: str | None = None,
+    ) -> str:
+        """Build a suffix listing active server/client skill summaries."""
+        active_skills = get_available_skill_summaries(user_id=user_id, device_id=device_id)
 
         if not active_skills:
-            self._cached_skills_suffix = ""
-        else:
-            parts = [
-                "\n\n── Available Skills ──",
-                "You have access to the following skills. Each skill contains "
-                "detailed instructions that you can load on demand using the "
-                "`activate_skill` tool. When a user's request seems related to "
-                "a skill below, call `activate_skill` with the skill name to "
-                "load its full instructions before responding.\n",
-            ]
-            for skill in active_skills:
-                parts.append(f"• **{skill.name}** – {skill.description}")
-            parts.append("\n── End Available Skills ──")
-            self._cached_skills_suffix = "\n".join(parts)
+            return ""
 
-        self._skills_generation_seen = current_gen
-        return self._cached_skills_suffix
+        parts = [
+            "\n\n── Available Skills ──",
+            "You have access to the following skills. Some may be hosted on the "
+            "server backend and some may be available from the connected client device. "
+            "Each skill contains "
+            "detailed instructions that you can load on demand using the "
+            "`activate_skill` tool. When a user's request seems related to "
+            "a skill below, call `activate_skill` with the skill name to "
+            "load its full instructions before responding.\n",
+        ]
+        for skill in active_skills:
+            lookup_name = str(skill.get("lookup_name") or skill.get("name") or "").strip()
+            source = str(skill.get("source") or "server").strip().lower()
+            description = str(skill.get("description") or "").strip()
+            parts.append(f"• **{lookup_name}** [{source}] – {description}")
+        parts.append("\n── End Available Skills ──")
+        return "\n".join(parts)
 
-    def _get_full_system_prompt(self) -> str:
+    def _get_full_system_prompt(
+        self,
+        *,
+        user_id: str | None = None,
+        device_id: str | None = None,
+    ) -> str:
         """Return base system prompt + active skills suffix.
 
         Used by code paths that call the Gemini SDK directly (e.g. ChatAgent
@@ -821,7 +854,7 @@ class BaseAgent(ABC):
         is not invoked.
         """
         base = self._get_base_system_prompt()
-        suffix = self._build_skills_suffix()
+        suffix = self._build_skills_suffix(user_id=user_id, device_id=device_id)
         if suffix:
             return f"{base}{suffix}"
         return base

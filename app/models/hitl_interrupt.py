@@ -80,9 +80,21 @@ class HITLInterrupt(Base):
     # Stored pending actions (serialized ToolInterruptRequest list)
     action_requests_json = Column(JSONB, nullable=False, default=list)
 
+    # Device context (optional - set when interrupt originated from a client device)
+    device_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("client_devices.id"),
+        nullable=True,
+        index=True,
+    )
+
+    # Additional metadata for the interrupt (device context, tool provenance, etc.)
+    interrupt_metadata_json = Column(JSONB, nullable=False, default=dict)
+
     # Relationships
     conversation = relationship("Conversation", backref="hitl_interrupts")
     user = relationship("User", backref="hitl_interrupts")
+    device = relationship("ClientDevice", backref="hitl_interrupts")
 
     def __repr__(self) -> str:
         return (

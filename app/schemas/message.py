@@ -21,6 +21,10 @@ from app.utils.case_conversion import (
 class MessageCreate(BaseModel):
     conversation_id: UUID = Field(..., description="Conversation ID this message belongs to")
     content: str = Field(..., min_length=1, description="Message content")
+    device_id: UUID | None = Field(
+        default=None,
+        description="Optional client device ID used for device-local tool dispatch.",
+    )
     role: MessageRole = Field(
         default=MessageRole.user, description="Message role: user=1, assistant=2"
     )
