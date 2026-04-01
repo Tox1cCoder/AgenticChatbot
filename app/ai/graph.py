@@ -1858,14 +1858,16 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             )
 
         if approved_external_calls:
-            external_outputs, external_artifacts, external_images = (
-                await self._execute_agent_tool_calls(
-                    state=state,
-                    agent=self.planning_agent,
-                    tool_calls=approved_external_calls,
-                    tool_map=tool_map,
-                    capture_images=True,
-                )
+            (
+                external_outputs,
+                external_artifacts,
+                external_images,
+            ) = await self._execute_agent_tool_calls(
+                state=state,
+                agent=self.planning_agent,
+                tool_calls=approved_external_calls,
+                tool_map=tool_map,
+                capture_images=True,
             )
             tool_outputs.extend(external_outputs)
             tool_artifacts.extend(external_artifacts)
@@ -2125,9 +2127,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         if response.metadata is None:
             response.metadata = {}
 
-        images = self._merge_unique_items(
-            response.metadata.get("images"), state_view.tool_images()
-        )
+        images = self._merge_unique_items(response.metadata.get("images"), state_view.tool_images())
         if images:
             response.metadata["images"] = images
 

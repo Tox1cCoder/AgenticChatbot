@@ -33,7 +33,7 @@ from ..agent_config import (
 )
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_factory import ModelFactory
-from ..prompts import AGENTIC_RAG_SYSTEM_PROMPT, build_rag_prompt
+from ..prompts import AGENTIC_RAG_SYSTEM_PROMPT, TOOL_EXPLORATION_SUFFIX, build_rag_prompt
 from ..rag_tools import create_search_documents_tool
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..utils import (
@@ -127,10 +127,11 @@ class RAGAgent(BaseAgent):
         different prompts, so caller passes the base in.  Overrides
         BaseAgent's no-arg version.
         """
+        prompt = f"{base_prompt}{TOOL_EXPLORATION_SUFFIX}"
         suffix = self._build_skills_suffix(user_id=user_id, device_id=device_id)
         if suffix:
-            return f"{base_prompt}{suffix}"
-        return base_prompt
+            return f"{prompt}{suffix}"
+        return prompt
 
     def _coerce_temperature(self, value: Any, default: float) -> float:
         if isinstance(value, (int, float)):
@@ -1476,6 +1477,7 @@ class RAGAgent(BaseAgent):
         history_summary = message.metadata.get("history_summary")
 
         system_prompt = AGENTIC_RAG_SYSTEM_PROMPT
+        system_prompt = f"{system_prompt}{TOOL_EXPLORATION_SUFFIX}"
 
         # Append active skills
         skills_suffix = self._build_skills_suffix(

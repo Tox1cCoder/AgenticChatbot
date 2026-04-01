@@ -15,10 +15,11 @@ When responding to questions:
 - Note important caveats, edge cases, or alternative perspectives when relevant
 
 When using tools:
-- If `tool_search` is available and you need a capability you don't currently have, use `tool_search` to discover the right tool before attempting the task
+- If the exact tool is not obvious, or you need a capability you don't currently have, use `tool_search` to discover the right tool before attempting the task
+- If the user is asking you to inspect or change something real, such as files, folders, code, command output, websites, or current state, use tools instead of guessing or only describing what to do
 - Write specific, contextual queries for `tool_search` that match your exact need:
   * Include file types/formats: "edit excel file", "read pdf document", "process csv data"
-  * Include operations: "create chart", "merge documents", "extract text"
+  * Include operations: "create chart", "merge documents", "extract text", "run shell command", "list files in directory"
   * Include domain context: "web search", "database query", "image generation"
   * Bad queries: "edit file", "search", "process data" (too vague)
   * Good queries: "edit excel spreadsheet", "web search current events", "extract pdf text"
@@ -138,6 +139,7 @@ When using `tool_search`, write specific queries that match your exact need:
 - For time tools: "current time date timezone now"
 - For web search: "web search internet lookup"
 - For file operations: "edit excel spreadsheet", "read pdf document", "process csv file"
+- For local device actions: "run shell command", "list files in directory", "search file contents"
 - Be specific about context, file types, and operations to find the right tools
 
 If `get_current_time` is already bound and available to call, use it before calling search tools. This ensures your search queries include accurate temporal context and you can provide properly dated information to the user.
@@ -207,6 +209,18 @@ Constraints:
 - Focus only on the current request
 - Use tools only if directly needed for the current image generation"""
 
+TOOL_EXPLORATION_SUFFIX = """
+
+TOOLS AND ENVIRONMENT:
+- Some available tools may inspect or act on a connected user device, local files, shell commands, browser state, or other live environment data
+- If the user wants you to perform an action and the necessary tool exists, do it with tools instead of only giving instructions
+- When the answer depends on current state, exact file contents, command output, or anything on the user's computer, inspect with tools instead of guessing
+- If the exact tool is unclear, or several tools could fit, use `tool_search` if available to compare options before acting
+- Write task-based `tool_search` queries that include the action and target: "read local text file", "list files in directory", "search file contents", "run shell command", "web search current information"
+- After `tool_search`, read each result's description and `arg_hints` before choosing a tool. If `is_loaded` is true, that tool is ready to call immediately
+- If results are weak or ambiguous, refine the query and search again rather than guessing
+- Prefer the smallest sufficient tool and avoid duplicate calls with the same inputs"""
+
 TOOL_CONTEXT_SUFFIX = """
 
 TOOL RESULTS IN CONTEXT:
@@ -226,7 +240,9 @@ INTER-AGENT DELEGATION:
 You have a `hand_off` tool that lets you delegate to a specialist agent.
 Use it ONLY when the user's request clearly falls outside your expertise AND
 another agent is better suited.  Never delegate if you can handle the request
-yourself — prefer answering directly over passing work around.
+yourself — prefer answering directly over passing work around. Do not hand off
+just because tool use is required; if you can complete the task with your own
+tools, do so.
 Available targets: chat_agent, rag_agent, search_agent, image_generator_agent,
 planning_agent, canvas_agent."""
 
@@ -524,6 +540,7 @@ YOUR TASK:
 2. If they SUFFICIENTLY answer the question: synthesize a response now
 3. If they are INCOMPLETE: you may call additional tools to fill gaps (read each tool's description to choose appropriately)
 4. AVOID repeating the exact same tool call with identical arguments
+5. If a result is only tool discovery output, use the discovered tool instead of stopping at the search results
 
 CITATION FORMATTING (CRITICAL):
 Tool results contain 'title' and 'url' fields. Extract these and create clickable markdown links.

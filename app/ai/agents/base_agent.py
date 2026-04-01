@@ -27,7 +27,7 @@ from ..deferred_tool_binding import (
 )
 from ..hand_off_tool import hand_off as _hand_off_tool
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
-from ..prompts import DELEGATION_SUFFIX, TOOL_CONTEXT_SUFFIX
+from ..prompts import DELEGATION_SUFFIX, TOOL_CONTEXT_SUFFIX, TOOL_EXPLORATION_SUFFIX
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..skills_tool import create_activate_skill_tool, get_available_skill_summaries
 from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
@@ -219,8 +219,9 @@ class BaseAgent(ABC):
         When mcp_tool_search_enabled is True, returns a reduced set:
         - Internal tools (if provided) + activate_skill
         - tool_search tool
-        - Pinned MCP tools
-        - Loaded deferred tools for this conversation
+        - Pinned server MCP tools
+        - Loaded deferred server tools for this conversation
+        - Device-scoped client runtime tools available for the active device
 
         When mcp_tool_search_enabled is False, returns all tools (current behavior).
 
@@ -780,6 +781,9 @@ class BaseAgent(ABC):
         skills_suffix = self._build_skills_suffix(user_id=user_id, device_id=device_id)
         if skills_suffix:
             system_prompt = f"{system_prompt}{skills_suffix}"
+
+        # Append shared tool-usage guidance.
+        system_prompt = f"{system_prompt}{TOOL_EXPLORATION_SUFFIX}"
 
         # Append delegation instructions (hand_off tool awareness)
         system_prompt = f"{system_prompt}{DELEGATION_SUFFIX}"

@@ -14,6 +14,7 @@ Key features:
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -32,6 +33,58 @@ from .tool_context import get_tool_context
 
 logger = logging.getLogger(__name__)
 
+_TOOL_SEARCH_QUERY_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "computer": ("local", "device", "client"),
+    "machine": ("local", "device", "client"),
+    "pc": ("local", "device", "client"),
+    "local": ("device", "client"),
+    "device": ("local", "client"),
+    "file": ("files", "filesystem", "path"),
+    "files": ("file", "filesystem", "directory", "folder", "path"),
+    "folder": ("directory", "filesystem", "path"),
+    "directory": ("folder", "filesystem", "path"),
+    "edit": ("write", "update", "modify"),
+    "write": ("edit", "save", "create"),
+    "read": ("open", "view", "inspect"),
+    "search": ("find", "lookup"),
+    "find": ("search", "lookup"),
+    "shell": ("terminal", "command", "execute", "run"),
+    "terminal": ("shell", "command", "execute", "run"),
+    "command": ("shell", "terminal", "execute", "run"),
+    "run": ("execute", "shell", "command"),
+}
+
+
+def _expand_tool_search_query(query: str | None) -> str | None:
+    """
+    Expand a natural-language tool query with a few capability aliases.
+
+    This keeps tool_search flexible when users or agents describe local-device
+    work in different words, such as "computer" vs "device" or "edit" vs
+    "write", without hard-coding specific tool names.
+    """
+    if not query or not query.strip():
+        return query
+
+    tokens = [tok.lower() for tok in re.split(r"[^a-zA-Z0-9_]+", query) if tok]
+    if not tokens:
+        return query
+
+    expanded_tokens: list[str] = []
+    seen: set[str] = set()
+
+    for token in tokens:
+        if token not in seen:
+            expanded_tokens.append(token)
+            seen.add(token)
+
+        for alias in _TOOL_SEARCH_QUERY_SYNONYMS.get(token, ()):
+            if alias not in seen:
+                expanded_tokens.append(alias)
+                seen.add(alias)
+
+    return " ".join(expanded_tokens)
+
 
 class ToolSearchInput(BaseModel):
     """Input schema for the tool_search tool."""
@@ -39,7 +92,9 @@ class ToolSearchInput(BaseModel):
     query: str | None = Field(
         default=None,
         description=(
-            "Natural language description of what you need the tool to do. "
+            "Describe the job, target, and environment in natural language. "
+            "Prefer specific phrases like 'read local text file', "
+            "'run shell command', or 'web search current news'. "
             "Leave empty to list all available tools."
         ),
     )
@@ -111,6 +166,7 @@ async def _execute_tool_search(
 
     effective_top_k = top_k if top_k is not None else default_top_k
     effective_top_k = max(1, min(effective_top_k, max_top_k))
+    expanded_query = _expand_tool_search_query(query)
 
     # Get tool context for conversation-scoped loading
     ctx = get_tool_context()
@@ -122,8 +178,9 @@ async def _execute_tool_search(
     # Log query if enabled
     if settings.mcp_tool_search_log_queries:
         logger.info(
-            "tool_search: query=%r top_k=%d server=%s conversation=%s agent=%s device=%s",
+            "tool_search: query=%r expanded=%r top_k=%d server=%s conversation=%s agent=%s device=%s",
             query,
+            expanded_query,
             effective_top_k,
             server_name,
             conversation_id,
@@ -141,7 +198,7 @@ async def _execute_tool_search(
 
         # Search server tools
         server_results = catalog.search(
-            query=query,
+            query=expanded_query,
             top_k=effective_top_k * 2,  # Request extra for merging
             server_name=server_name,
             allowlist=allowlist,
@@ -159,7 +216,7 @@ async def _execute_tool_search(
             client_catalog = get_client_tool_catalog(device_id, user_id)
             if client_catalog.tool_count > 0:
                 client_results = client_catalog.search(
-                    query=query,
+                    query=expanded_query,
                     top_k=effective_top_k * 2,  # Request extra for merging
                     server_name=server_name,
                     allowlist=allowlist,
@@ -177,7 +234,7 @@ async def _execute_tool_search(
     public_results, internal_results = _merge_search_results(
         server_results=server_results,
         client_results=client_results,
-        query=query,
+        query=expanded_query,
         top_k=effective_top_k + 1,  # Request one extra to detect truncation
     )
 
@@ -344,18 +401,25 @@ async def tool_search(
     Search for available tools to accomplish a task.
 
     Use this tool to discover what tools are available before attempting to
-    call them. The search will return a list of matching tools with their
-    names, descriptions, and argument hints.
+    call them. This is most useful when the exact tool is unclear, when
+    several tools might fit, or when you need a capability that is not
+    already obvious from the bound tool list.
 
     When deferred MCP loading is enabled, do not guess tool names first.
     Use tool_search with a specific query to find and autoload the tool you need,
     then call the discovered tool by name.
 
-    After searching, you can call the discovered tools directly by name.
-    The top results are automatically loaded and ready to use.
+    After searching:
+    - Read each result's description and arg_hints before choosing a tool
+    - Prefer task-based queries that include the action and target
+    - Refine the query and search again if the results are weak or ambiguous
+    - The top results are automatically loaded; any result with is_loaded=true
+      is ready to call immediately
 
     Examples:
     - Search for web tools: tool_search(query="search the web")
+    - Search for local file tools: tool_search(query="read local text file")
+    - Search for computer interaction tools: tool_search(query="run shell command")
     - List all tools: tool_search()
     - Filter by server: tool_search(query="search", server_name="tavily")
     """
@@ -393,15 +457,17 @@ def create_tool_search_tool(allowlist: list[str] | None = None):
         Search for available tools to accomplish a task.
 
         Use this tool to discover what tools are available before attempting to
-        call them. The search will return a list of matching tools with their
-        names, descriptions, and argument hints.
+        call them. This is most useful when the exact tool is unclear, when
+        several tools might fit, or when you need a capability that is not
+        already obvious from the bound tool list.
 
         When deferred MCP loading is enabled, do not guess tool names first.
         Use tool_search with a specific query to find and autoload the tool you need,
         then call the discovered tool by name.
 
-        After searching, you can call the discovered tools directly by name.
-        The top results are automatically loaded and ready to use.
+        After searching, inspect the descriptions and arg_hints, refine the
+        query if needed, and call the best matching tool by name. Results with
+        is_loaded=true are ready to use immediately.
         """
         result = await _execute_tool_search(
             query=query,
