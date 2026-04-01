@@ -352,23 +352,47 @@ class DocumentProcessingService:
             output_dir.mkdir(parents=True, exist_ok=True)
             self._mineru_output_path = str(output_dir)
 
-            subprocess.run(
-                [
-                    "mineru",
-                    "-p",
-                    file_path,
-                    "-o",
-                    str(output_dir),
-                    "-f",
-                    "true",
-                    "-t",
-                    "false",
-                ],
+            backend = getattr(self.settings, "mineru_backend", "pipeline")
+            extra_args: list[str] = list(getattr(self.settings, "mineru_extra_args", []) or [])
+
+            # Build formula / table flags from settings
+            formula_flag = "true"  # formula recognition is cheap; keep on
+            table_flag = (
+                "true" if getattr(self.settings, "extract_tables_from_pdf", True) else "false"
+            )
+
+            cmd = [
+                "mineru",
+                "-p",
+                file_path,
+                "-o",
+                str(output_dir),
+                "--backend",
+                backend,
+                "-f",
+                formula_flag,
+                "-t",
+                table_flag,
+                *extra_args,
+            ]
+
+            logger.info(
+                "Running MinerU (backend=%s) for document %s: %s",
+                backend,
+                document_id,
+                " ".join(cmd),
+            )
+
+            result = subprocess.run(
+                cmd,
                 timeout=self.settings.mineru_timeout,
                 check=True,
                 capture_output=True,
                 text=True,
             )
+
+            if result.stdout:
+                logger.debug("MinerU stdout for %s:\n%s", document_id, result.stdout)
 
             filename_without_ext = Path(file_path).stem
             filename_aliases = self._build_filename_aliases(filename_without_ext, original_filename)
@@ -509,8 +533,16 @@ class DocumentProcessingService:
             )
             raise RuntimeError(f"MinerU timed out after {self.settings.mineru_timeout}s") from exc
         except subprocess.CalledProcessError as exc:
-            logger.error("MinerU failed while processing %s: %s", file_path, exc.stderr)
-            raise RuntimeError(f"MinerU failed with error: {exc.stderr}") from exc
+            # MinerU routes progress/errors to stdout; log both streams.
+            combined = "\n".join(filter(None, [exc.stdout, exc.stderr]))
+            logger.error(
+                "MinerU (backend=%s) failed (exit %s) while processing %s:\n%s",
+                getattr(self.settings, "mineru_backend", "pipeline"),
+                exc.returncode,
+                file_path,
+                combined or "(no output captured)",
+            )
+            raise RuntimeError(f"MinerU failed with error: {combined}") from exc
         except Exception as exc:
             logger.error("Unexpected MinerU error while processing %s: %s", file_path, exc)
             raise RuntimeError(f"Unexpected error in MinerU processing: {str(exc)}") from exc

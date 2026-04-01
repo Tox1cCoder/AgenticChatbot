@@ -120,29 +120,6 @@ def clean_text(text: str) -> str:
     return text
 
 
-def validate_persona(persona: str | None, max_length: int = 8000) -> str | None:
-    """
-    Validate persona text.
-
-    Args:
-        persona: The persona text to validate
-        max_length: Maximum allowed length
-
-    Returns:
-        The validated persona or None if empty
-
-    Raises:
-        ValueError: If persona exceeds max_length
-    """
-    if persona is None or not persona.strip():
-        return None
-
-    if len(persona) > max_length:
-        raise ValueError(f"Persona exceeds maximum length of {max_length} characters")
-
-    return persona
-
-
 def sanitize_persona(persona: str | None) -> str | None:
     """
     Sanitize and truncate persona text.

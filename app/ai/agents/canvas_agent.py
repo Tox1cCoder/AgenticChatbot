@@ -30,6 +30,7 @@ from typing import Any
 from langchain_core.messages import BaseMessage
 from langchain_core.messages import HumanMessage as LCHumanMessage
 
+from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..schemas import AgentMessage, AgentResponse, AgentType
 from .base_agent import BaseAgent
 
@@ -156,8 +157,11 @@ def _extract_previous_artifact(conversation_history: list[Any]) -> str | None:
 class CanvasAgent(BaseAgent):
     """Generates and iteratively edits self-contained canvas artifacts."""
 
-    def __init__(self) -> None:
-        super().__init__(agent_config_key="canvas")
+    def __init__(self, runtime_model_resolver: IRuntimeModelResolver | None = None) -> None:
+        super().__init__(
+            agent_config_key="canvas",
+            runtime_model_resolver=runtime_model_resolver,
+        )
 
     # ------------------------------------------------------------------
     # BaseAgent contract

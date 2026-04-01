@@ -2,6 +2,7 @@ import base64
 import html
 import json
 import mimetypes
+import os
 import re
 import uuid
 from collections.abc import Callable
@@ -19,7 +20,7 @@ from urllib3.util.retry import Retry
 from app.services.stream_events import infer_tool_state, normalize_tool_phase
 from upload_support import delete_document, get_uploaded_documents, upload_document
 
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = os.environ.get("CHATBOT_API_BASE_URL", "http://127.0.0.1:8000")
 REQUEST_TIMEOUT = (5, 30)
 STREAM_REQUEST_TIMEOUT = (10, 900)
 

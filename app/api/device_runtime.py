@@ -18,6 +18,17 @@ from app.core.auth import get_current_user
 from app.core.config import settings
 from app.database.session import get_db
 from app.models.user import User
+from app.schemas.runtime_protocol import (
+    RUNTIME_MESSAGE_ACK,
+    RUNTIME_MESSAGE_ERROR,
+    RUNTIME_MESSAGE_HEARTBEAT,
+    RUNTIME_MESSAGE_TOOL_REQUEST,
+    RUNTIME_MESSAGE_TOOL_RESULT,
+    RuntimeAckMessage,
+    RuntimeErrorMessage,
+    ToolDispatchRequest,
+    ToolDispatchResult,
+)
 from app.services.client_device_service import ClientDeviceService, DeviceSession
 
 logger = logging.getLogger(__name__)
@@ -27,69 +38,26 @@ router = APIRouter(prefix="/device-runtime", tags=["device-runtime"])
 class WebSocketMessage:
     """Base message structure for WebSocket communication."""
 
-    TYPE_TOOL_REQUEST = "tool_request"
-    TYPE_TOOL_RESULT = "tool_result"
-    TYPE_HEARTBEAT = "heartbeat"
-    TYPE_ERROR = "error"
-    TYPE_ACK = "ack"
-
-    @staticmethod
-    def tool_request(
-        request_id: str,
-        tool_name: str,
-        qualified_tool_id: str,
-        arguments: dict[str, Any],
-        timeout_seconds: int = 30,
-    ) -> dict:
-        """Create a tool request message."""
-        return {
-            "type": WebSocketMessage.TYPE_TOOL_REQUEST,
-            "request_id": request_id,
-            "tool_name": tool_name,
-            "qualified_tool_id": qualified_tool_id,
-            "arguments": arguments,
-            "timeout_seconds": timeout_seconds,
-        }
-
-    @staticmethod
-    def tool_result(
-        request_id: str,
-        success: bool,
-        result: Any = None,
-        error: str | None = None,
-        execution_time_ms: int = 0,
-    ) -> dict:
-        """Create a tool result message."""
-        return {
-            "type": WebSocketMessage.TYPE_TOOL_RESULT,
-            "request_id": request_id,
-            "success": success,
-            "result": result,
-            "error": error,
-            "execution_time_ms": execution_time_ms,
-        }
+    TYPE_TOOL_REQUEST = RUNTIME_MESSAGE_TOOL_REQUEST
+    TYPE_TOOL_RESULT = RUNTIME_MESSAGE_TOOL_RESULT
+    TYPE_HEARTBEAT = RUNTIME_MESSAGE_HEARTBEAT
+    TYPE_ERROR = RUNTIME_MESSAGE_ERROR
+    TYPE_ACK = RUNTIME_MESSAGE_ACK
 
     @staticmethod
     def heartbeat() -> dict:
         """Create a heartbeat message."""
-        return {"type": WebSocketMessage.TYPE_HEARTBEAT}
+        return {"type": RUNTIME_MESSAGE_HEARTBEAT}
 
     @staticmethod
     def error(message: str, code: str | None = None) -> dict:
         """Create an error message."""
-        return {
-            "type": WebSocketMessage.TYPE_ERROR,
-            "message": message,
-            "code": code,
-        }
+        return RuntimeErrorMessage(message=message, code=code).model_dump(mode="json")
 
     @staticmethod
     def ack(message_id: str | None = None) -> dict:
         """Create an acknowledgment message."""
-        return {
-            "type": WebSocketMessage.TYPE_ACK,
-            "message_id": message_id,
-        }
+        return RuntimeAckMessage(message_id=message_id).model_dump(mode="json")
 
 
 class DeviceRuntimeGateway:
@@ -190,7 +158,17 @@ class DeviceRuntimeGateway:
         Args:
             message: The tool result message.
         """
-        request_id = message.get("request_id")
+        try:
+            payload = ToolDispatchResult.model_validate(message)
+        except Exception as exc:
+            logger.warning(
+                "Invalid tool result payload from device %s: %s",
+                self.device_id,
+                exc,
+            )
+            return
+
+        request_id = payload.request_id
         if not request_id:
             logger.warning(f"Tool result missing request_id from device {self.device_id}")
             return
@@ -198,7 +176,7 @@ class DeviceRuntimeGateway:
         # Store result in session for retrieval by the waiting request
         if request_id in self.session.pending_tool_requests:
             result_future = self.session.pending_tool_requests[request_id]
-            result_future.set_result(message)
+            result_future.set_result(payload.model_dump(mode="json"))
             logger.debug(f"Tool result received for request {request_id}")
         else:
             logger.warning(
@@ -248,14 +226,14 @@ class DeviceRuntimeGateway:
 
         try:
             # Send tool request
-            message = WebSocketMessage.tool_request(
+            message = ToolDispatchRequest(
                 request_id=request_id,
                 tool_name=tool_name,
                 qualified_tool_id=qualified_tool_id,
                 arguments=arguments,
                 timeout_seconds=timeout_seconds,
             )
-            await self.send_message(message)
+            await self.send_message(message.model_dump(mode="json"))
 
             # Wait for result with timeout
             result = await asyncio.wait_for(result_future, timeout=timeout_seconds)

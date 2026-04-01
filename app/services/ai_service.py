@@ -4,17 +4,19 @@ from typing import Any
 from uuid import UUID
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
 
-from ..ai.graph import create_workflow
 from ..ai.prompts import TITLE_GENERATION_PROMPT
 from ..ai.schemas import (
-    AgentMessage,
-    AgentResponse,
-    AgentType,
-    InterruptDecision,
-    MessageRole,
+    AgentResponse as AIAgentResponse,
+)
+from ..ai.schemas import (
+    InterruptDecision as AIInterruptDecision,
+)
+from ..ai.schemas import (
+    InterruptResponse as AIInterruptResponse,
+)
+from ..ai.schemas import (
+    WorkflowExecutionRequest as AIWorkflowExecutionRequest,
 )
 from ..ai.utils import make_json_safe
 from ..core.response_constants import (
@@ -22,8 +24,15 @@ from ..core.response_constants import (
     ERROR_NO_RESPONSE_RESUME,
     UNKNOWN_ERROR,
 )
+from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
 from ..repositories.conversation import ConversationRepository
-from ..repositories.document import DocumentRepository
+from ..schemas.workflow import (
+    InterruptDecision,
+    InterruptResponse,
+    WorkflowExecutionRequest,
+    WorkflowResponse,
+    WorkflowResponseMessage,
+)
 from ..utils.text_processing import sanitize_persona
 from .stream_events import build_canonical_tool_event
 
@@ -31,145 +40,128 @@ from .stream_events import build_canonical_tool_event
 class AIService:
     def __init__(
         self,
-        qdrant_client: QdrantClient,
-        embedding_model: SentenceTransformer,
+        workflow_runtime: IWorkflowRuntime,
         conversation_repository: ConversationRepository,
-        document_repository: DocumentRepository | None = None,
         checkpointer: BaseCheckpointSaver | None = None,
     ):
         self.checkpointer = checkpointer
+        self.workflow = workflow_runtime
         self.conversation_repository = conversation_repository
-        self.document_repository = document_repository
-        self.workflow = create_workflow(
-            qdrant_client=qdrant_client,
-            embedding_model=embedding_model,
-            checkpointer=checkpointer,
-            document_repository=document_repository,
-        )
 
-    def _load_persona(self, conversation_id: UUID) -> str | None:
-        """Load persona from conversation"""
-        try:
-            conversation = self.conversation_repository.get_by_id(conversation_id)
-            return conversation.persona_prompt if conversation else None
-        except Exception:
-            return None
+    async def initialize(self) -> None:
+        await self.workflow.initialize()
 
-    def _build_error_response(self, message: str = ERROR_NO_RESPONSE) -> AgentResponse:
-        return AgentResponse(
-            agent_type=AgentType.CHAT,
+    def invalidate_history_cache(self, conversation_id: str) -> None:
+        self.workflow.invalidate_history_cache(conversation_id)
+
+    def _build_error_response(self, message: str = ERROR_NO_RESPONSE) -> WorkflowResponse:
+        return WorkflowResponse(
+            agent_type="chat",
             agent_id="chat_agent",
-            message=AgentMessage(role=MessageRole.ASSISTANT, content=message),
+            message=WorkflowResponseMessage(content=message),
             metadata={"error": True},
             error=message,
         )
 
-    async def process_message(
-        self,
-        conversation_id: UUID,
-        user_id: UUID,
-        message: str,
-        device_id: UUID | None = None,
-        attachments: list | None = None,
-        current_task: dict[str, Any] | None = None,
-        all_tasks: list[dict[str, Any]] | None = None,
-        planning_mode_enabled: bool = False,
-        has_existing_plan: bool = False,
-        existing_tasks: list[dict[str, Any]] | None = None,
-        model_request: dict[str, Any] | None = None,
-        persona: str | None = None,
-        plan_lifecycle: str | None = None,
-    ) -> AgentResponse:
+    def _prepare_request(self, request: WorkflowExecutionRequest) -> WorkflowExecutionRequest:
+        if request.persona is not None or not request.conversation_id:
+            return request
+        try:
+            conversation = self.conversation_repository.get_by_id(UUID(request.conversation_id))
+            raw_persona = conversation.persona_prompt if conversation else None
+        except Exception:
+            raw_persona = None
+        return request.model_copy(update={"persona": sanitize_persona(raw_persona)})
 
-        thread_id = str(conversation_id) if conversation_id and self.checkpointer else None
+    @staticmethod
+    def _to_ai_request(request: WorkflowExecutionRequest) -> AIWorkflowExecutionRequest:
+        return AIWorkflowExecutionRequest.model_validate(request.model_dump(mode="python"))
 
-        if persona is None:
-            persona = self._load_persona(conversation_id)
-            persona = sanitize_persona(persona)
+    @staticmethod
+    def _to_ai_decisions(decisions: list[InterruptDecision]) -> list[AIInterruptDecision]:
+        return [
+            AIInterruptDecision.model_validate(decision.model_dump(mode="python"))
+            for decision in decisions
+        ]
 
-        response = await self.workflow.execute(
-            message=message,
-            conversation_id=str(conversation_id) if conversation_id else None,
-            user_id=str(user_id) if user_id else None,
-            device_id=str(device_id) if device_id else None,
-            thread_id=thread_id,
-            persona=persona,
-            attachments=attachments,
-            current_task=current_task,
-            all_tasks=all_tasks,
-            planning_mode_enabled=planning_mode_enabled,
-            has_existing_plan=has_existing_plan,
-            existing_tasks=existing_tasks,
-            model_request=model_request,
-            plan_lifecycle=plan_lifecycle,
+    @staticmethod
+    def _normalize_interrupt_payload(payload: Any) -> dict[str, Any] | Any:
+        if payload is None:
+            return None
+        if isinstance(payload, InterruptResponse):
+            return payload.model_dump(mode="json")
+        if isinstance(payload, AIInterruptResponse):
+            return InterruptResponse.model_validate(payload.model_dump(mode="python")).model_dump(
+                mode="json"
+            )
+        if isinstance(payload, dict):
+            try:
+                return InterruptResponse.model_validate(payload).model_dump(mode="json")
+            except Exception:
+                return make_json_safe(payload)
+        if hasattr(payload, "model_dump"):
+            try:
+                dumped = payload.model_dump(mode="python")
+                return InterruptResponse.model_validate(dumped).model_dump(mode="json")
+            except Exception:
+                pass
+        return {"raw": str(payload)}
+
+    def _to_service_response(self, response: AIAgentResponse | None) -> WorkflowResponse | None:
+        if response is None:
+            return None
+
+        message = getattr(response, "message", None)
+        message_metadata = dict(getattr(message, "metadata", None) or {})
+        metadata = dict(getattr(response, "metadata", None) or {})
+        interrupt_payload = metadata.get("interrupt")
+        if interrupt_payload is not None:
+            metadata["interrupt"] = self._normalize_interrupt_payload(interrupt_payload)
+
+        return WorkflowResponse(
+            agent_type=str(
+                getattr(getattr(response, "agent_type", None), "value", response.agent_type)
+            ),
+            agent_id=str(getattr(response, "agent_id", "")),
+            message=WorkflowResponseMessage(
+                role=str(
+                    getattr(
+                        getattr(message, "role", None),
+                        "value",
+                        getattr(message, "role", "assistant"),
+                    )
+                ),
+                content=str(getattr(message, "content", "") or ""),
+                metadata=message_metadata,
+            ),
+            metadata=metadata,
+            tool_artifacts=getattr(response, "tool_artifacts", None),
+            error=getattr(response, "error", None),
+            suggested_questions=getattr(response, "suggested_questions", None),
         )
 
+    async def execute_request(self, request: WorkflowExecutionRequest) -> WorkflowResponse:
+        prepared_request = self._prepare_request(request)
+        response = await self.workflow.execute_request(self._to_ai_request(prepared_request))
         if response:
-            if response.metadata and "interrupt" in response.metadata:
-                return response
-            return response
-
+            normalized_response = self._to_service_response(response)
+            if normalized_response:
+                return normalized_response
         return self._build_error_response()
 
-    async def generate_bot_response(
-        self,
-        user_message: str,
-        conversation_id: UUID | None = None,
-        user_id: UUID | None = None,
-        device_id: UUID | None = None,
-        attachments: list | None = None,
-        current_task: dict[str, Any] | None = None,
-        all_tasks: list[dict[str, Any]] | None = None,
-        planning_mode_enabled: bool = False,
-        has_existing_plan: bool = False,
-        existing_tasks: list[dict[str, Any]] | None = None,
-        model_request: dict[str, Any] | None = None,
-        persona: str | None = None,
-        plan_lifecycle: str | None = None,
-    ) -> AgentResponse:
-
-        if conversation_id is None or user_id is None:
-            response = await self.workflow.execute(
-                message=user_message,
-                conversation_id=None,
-                user_id=None,
-                device_id=str(device_id) if device_id else None,
-                persona=None,
-                attachments=attachments,
-                current_task=current_task,
-                all_tasks=all_tasks,
-                planning_mode_enabled=planning_mode_enabled,
-                has_existing_plan=has_existing_plan,
-                existing_tasks=existing_tasks,
-                model_request=model_request,
-                plan_lifecycle=plan_lifecycle,
-            )
-            if response:
-                return response
-            return self._build_error_response()
-
-        return await self.process_message(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            message=user_message,
-            device_id=device_id,
-            attachments=attachments,
-            current_task=current_task,
-            all_tasks=all_tasks,
-            planning_mode_enabled=planning_mode_enabled,
-            has_existing_plan=has_existing_plan,
-            existing_tasks=existing_tasks,
-            model_request=model_request,
-            persona=persona,
-            plan_lifecycle=plan_lifecycle,
-        )
+    async def execute_request_stream(self, request: WorkflowExecutionRequest):
+        prepared_request = self._prepare_request(request)
+        async for mapped_event in self._map_workflow_stream(
+            self.workflow.execute_request_stream(self._to_ai_request(prepared_request))
+        ):
+            yield mapped_event
 
     async def resume_workflow(
         self,
         conversation_id: UUID,
         user_id: UUID,
         user_input: str | None = None,
-    ) -> AgentResponse:
+    ) -> WorkflowResponse:
         thread_id = str(conversation_id) if conversation_id and self.checkpointer else None
 
         if not thread_id:
@@ -183,7 +175,9 @@ class AIService:
         )
 
         if response:
-            return response
+            normalized_response = self._to_service_response(response)
+            if normalized_response:
+                return normalized_response
 
         return self._build_error_response(ERROR_NO_RESPONSE_RESUME)
 
@@ -241,20 +235,28 @@ class AIService:
                 )
 
             elif event_type == "complete":
-                final_response = event.get("response")
+                final_response = self._to_service_response(event.get("response"))
 
             elif event_type == "error":
                 error_msg = event.get("error", UNKNOWN_ERROR)
-                yield {"type": "error", "error": error_msg}
+                display_error = str(error_msg).strip() or UNKNOWN_ERROR
+                if not display_error.lower().startswith("error:"):
+                    display_error = f"Error: {display_error}"
+                yield {
+                    "type": "error",
+                    "error": str(error_msg),
+                    "response": self._build_error_response(display_error),
+                }
 
             elif event_type == "continuation_start" or event_type == "node_complete":
                 yield event
 
             elif event_type == "interrupt":
                 interrupt_payload = event.get("interrupt")
+                normalized_interrupt = self._normalize_interrupt_payload(interrupt_payload)
                 interrupt_message = None
-                if isinstance(interrupt_payload, dict):
-                    interrupt_metadata = interrupt_payload.get("metadata")
+                if isinstance(normalized_interrupt, dict):
+                    interrupt_metadata = normalized_interrupt.get("metadata")
                     if isinstance(interrupt_metadata, dict):
                         message_value = interrupt_metadata.get("message") or interrupt_metadata.get(
                             "reason"
@@ -266,7 +268,7 @@ class AIService:
                     "next": event.get("next", []),
                     "thread_id": event.get("thread_id"),
                     "pending_tool_calls": event.get("pending_tool_calls"),
-                    "interrupt": interrupt_payload,
+                    "interrupt": normalized_interrupt,
                     "message": interrupt_message,
                 }
 
@@ -275,48 +277,6 @@ class AIService:
         else:
             error_response = self._build_error_response()
             yield {"type": "complete", "response": error_response}
-
-    async def generate_bot_response_stream(
-        self,
-        user_message: str,
-        conversation_id: UUID | None = None,
-        user_id: UUID | None = None,
-        device_id: UUID | None = None,
-        attachments: list | None = None,
-        current_task: dict[str, Any] | None = None,
-        all_tasks: list[dict[str, Any]] | None = None,
-        planning_mode_enabled: bool = False,
-        has_existing_plan: bool = False,
-        existing_tasks: list[dict[str, Any]] | None = None,
-        model_request: dict[str, Any] | None = None,
-        persona: str | None = None,
-        plan_lifecycle: str | None = None,
-    ):
-        thread_id = str(conversation_id) if conversation_id and self.checkpointer else None
-
-        if persona is None and conversation_id:
-            persona = self._load_persona(conversation_id)
-            persona = sanitize_persona(persona)
-
-        async for mapped_event in self._map_workflow_stream(
-            self.workflow.execute_stream(
-                message=user_message,
-                conversation_id=str(conversation_id) if conversation_id else None,
-                user_id=str(user_id) if user_id else None,
-                device_id=str(device_id) if device_id else None,
-                thread_id=thread_id,
-                persona=persona,
-                attachments=attachments,
-                current_task=current_task,
-                all_tasks=all_tasks,
-                planning_mode_enabled=planning_mode_enabled,
-                has_existing_plan=has_existing_plan,
-                existing_tasks=existing_tasks,
-                model_request=model_request,
-                plan_lifecycle=plan_lifecycle,
-            )
-        ):
-            yield mapped_event
 
     async def resume_interrupted_execution_stream(
         self,
@@ -330,7 +290,7 @@ class AIService:
         async for mapped_event in self._map_workflow_stream(
             self.workflow.resume_with_decisions_stream(
                 thread_id=thread_id,
-                decisions=decisions,
+                decisions=self._to_ai_decisions(decisions),
             )
         ):
             yield mapped_event
@@ -340,8 +300,14 @@ class AIService:
         user_message: str,
         conversation_id: UUID | None = None,
         user_id: UUID | None = None,
-    ) -> AgentResponse:
-        return asyncio.run(self.generate_bot_response(user_message, conversation_id, user_id))
+    ) -> WorkflowResponse:
+        request = WorkflowExecutionRequest(
+            message=user_message,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            user_id=str(user_id) if user_id else None,
+            thread_id=str(conversation_id) if conversation_id and self.checkpointer else None,
+        )
+        return asyncio.run(self.execute_request(request))
 
     async def generate_conversation_title(self, user_message: str) -> str:
         """

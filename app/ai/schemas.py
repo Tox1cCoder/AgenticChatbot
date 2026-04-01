@@ -1,9 +1,11 @@
 from enum import Enum
-from typing import Annotated, Any, NotRequired, TypedDict
+from typing import Annotated, Any, NotRequired, TypedDict, cast
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
+
+from app.models.enums import PlanLifecycle
 
 
 class AgentType(str, Enum):
@@ -106,6 +108,57 @@ class AgentResponse(BaseModel):
     )
 
 
+class WorkflowPlanningContext(BaseModel):
+    planning_mode_enabled: bool = False
+    has_existing_plan: bool = False
+    current_task: dict[str, Any] | None = None
+    tasks: list[dict[str, Any]] = Field(default_factory=list)
+    plan_lifecycle: PlanLifecycle | None = None
+
+
+class WorkflowExecutionRequest(BaseModel):
+    message: str
+    conversation_id: str | None = None
+    user_id: str | None = None
+    device_id: str | None = None
+    thread_id: str | None = None
+    persona: str | None = None
+    attachments: list[Any] | None = None
+    model_request: dict[str, Any] | None = None
+    planning: WorkflowPlanningContext = Field(default_factory=WorkflowPlanningContext)
+
+
+class ContinuationSignal(TypedDict, total=False):
+    should_continue: bool
+    reason: str
+    scope: str
+    count: int
+    limit: int
+
+
+class GraphContext(TypedDict, total=False):
+    attachments: list[Any]
+    planning_mode_enabled: bool
+    has_existing_plan: bool
+    tool_artifacts: list[dict[str, Any]]
+    tool_images: list[dict[str, Any]]
+    pending_action_requests: list[dict[str, Any]]
+    interrupt_metadata: dict[str, Any]
+    generate_plan_response: bool
+    generate_final_summary: bool
+    final_summary_generated: bool
+    plan_just_modified: bool
+    continuation_signal: ContinuationSignal
+    pause_reason: str
+    continuation_round: int
+    continuation_reason: str
+    agentic_rag_iteration: int
+    consecutive_errors: int
+    all_tasks_completed: bool
+    conversation_summarized: bool
+    tool_provenance: dict[str, dict[str, Any]]
+
+
 class GraphState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     conversation_id: NotRequired[str | None]
@@ -113,8 +166,9 @@ class GraphState(TypedDict):
     device_id: NotRequired[str | None]
     selected_agent: NotRequired[str | None]
     response: NotRequired[AgentResponse | None]
-    context: NotRequired[dict[str, Any]]
+    context: NotRequired[GraphContext]
     persona: NotRequired[str | None]
+    attachments: NotRequired[list[Any] | None]
     iteration_count: NotRequired[int | None]
     pending_tool_calls: NotRequired[list[Any] | None]
     # Multi-provider model configuration
@@ -132,13 +186,106 @@ class GraphState(TypedDict):
     # Planning phase: "planning" = create/edit only, "executing" = work through tasks
     planning_phase: NotRequired[str | None]
     # Persisted plan lifecycle (draft/ready/executing/paused/completed); None = no plan yet
-    plan_lifecycle: NotRequired[str | None]
+    plan_lifecycle: NotRequired[PlanLifecycle | None]
     # Inter-agent delegation depth counter (reset each user turn)
     delegation_count: NotRequired[int | None]
     # Rolling conversation summary memory (checkpoint-backed)
     history_summary: NotRequired[str | None]
     history_summary_updated_at: NotRequired[str | None]
     summary_cursor_message_id: NotRequired[str | None]
+
+
+class GraphStateView:
+    """Typed access layer over LangGraph's dict-backed workflow state."""
+
+    def __init__(self, state: GraphState | dict[str, Any] | None):
+        self._state = state if isinstance(state, dict) else {}
+
+    def messages(self) -> list[BaseMessage]:
+        messages = self._state.get("messages", [])
+        return messages if isinstance(messages, list) else []
+
+    def conversation_id(self) -> str | None:
+        value = self._state.get("conversation_id")
+        return value if isinstance(value, str) or value is None else str(value)
+
+    def user_id(self) -> str | None:
+        value = self._state.get("user_id")
+        return value if isinstance(value, str) or value is None else str(value)
+
+    def device_id(self) -> str | None:
+        value = self._state.get("device_id")
+        return value if isinstance(value, str) or value is None else str(value)
+
+    def selected_agent(self) -> str | None:
+        value = self._state.get("selected_agent")
+        return value if isinstance(value, str) or value is None else str(value)
+
+    def iteration_count(self, default: int = 0) -> int:
+        value = self._state.get("iteration_count")
+        return int(value) if isinstance(value, int) else default
+
+    def planning_call_count(self, default: int = 0) -> int:
+        value = self._state.get("planning_call_count")
+        return int(value) if isinstance(value, int) else default
+
+    def context(self) -> GraphContext:
+        context = self._state.get("context", {})
+        if isinstance(context, dict):
+            return cast(GraphContext, context)
+        return cast(GraphContext, {})
+
+    def context_copy(self) -> GraphContext:
+        return cast(GraphContext, dict(self.context()))
+
+    def attachments(self) -> list[Any]:
+        attachments = self._state.get("attachments")
+        if isinstance(attachments, list):
+            return attachments
+        context_attachments = self.context().get("attachments")
+        return context_attachments if isinstance(context_attachments, list) else []
+
+    def planning_flags(self) -> tuple[bool, bool]:
+        planning_mode_enabled = self._state.get("planning_mode_enabled")
+        has_existing_plan = self._state.get("has_existing_plan")
+        if isinstance(planning_mode_enabled, bool) and isinstance(has_existing_plan, bool):
+            return planning_mode_enabled, has_existing_plan
+
+        context = self.context()
+        return (
+            bool(
+                planning_mode_enabled
+                if isinstance(planning_mode_enabled, bool)
+                else context.get("planning_mode_enabled", False)
+            ),
+            bool(
+                has_existing_plan
+                if isinstance(has_existing_plan, bool)
+                else context.get("has_existing_plan", False)
+            ),
+        )
+
+    def tool_artifacts(self) -> list[dict[str, Any]]:
+        value = self.context().get("tool_artifacts")
+        return value if isinstance(value, list) else []
+
+    def tool_images(self) -> list[dict[str, Any]]:
+        value = self.context().get("tool_images")
+        return value if isinstance(value, list) else []
+
+    def pending_action_requests(self) -> list[dict[str, Any]]:
+        value = self.context().get("pending_action_requests")
+        return value if isinstance(value, list) else []
+
+    def interrupt_metadata(self) -> dict[str, Any]:
+        value = self.context().get("interrupt_metadata")
+        return value if isinstance(value, dict) else {}
+
+    def continuation_signal(self) -> ContinuationSignal:
+        value = self.context().get("continuation_signal")
+        if isinstance(value, dict):
+            return cast(ContinuationSignal, value)
+        return cast(ContinuationSignal, {})
 
 
 # === Todo Management Schemas for write_todos tool ===

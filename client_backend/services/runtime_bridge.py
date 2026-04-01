@@ -17,11 +17,27 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
 
+from app.schemas.runtime_protocol import (
+    RuntimeAckMessage,
+    RuntimeErrorMessage,
+    RuntimeHeartbeatMessage,
+    RuntimeMessage,
+    dump_runtime_message,
+    parse_runtime_message,
+)
 from client_backend import __version__
 from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
 from client_backend.core.security import generate_device_identifier
-from client_backend.schemas.runtime import DeviceInfo, RuntimeState, RuntimeStatus
+from client_backend.schemas.runtime import (
+    DeviceInfo,
+    DeviceRegistrationResult,
+    RuntimeErrorContext,
+    RuntimeState,
+    RuntimeStatus,
+    ToolDispatchRequest,
+    ToolDispatchResult,
+)
 from client_backend.services.filesystem_service import get_filesystem_service
 from client_backend.services.local_mcp_manager import get_mcp_manager, shutdown_mcp_manager
 from client_backend.services.local_skills_registry import (
@@ -165,13 +181,19 @@ class RuntimeBridgeService:
         tool_catalog = await self._build_tool_catalog()
         skill_catalog = get_skills_registry().get_skill_catalog(include_content=False)
 
-        await self._server_client.update_device_tool_catalog(
+        tool_sync = await self._server_client.update_device_tool_catalog(
             device_id=self._device_id,
             catalog=tool_catalog,
         )
-        await self._server_client.update_device_skill_catalog(
+        skill_sync = await self._server_client.update_device_skill_catalog(
             device_id=self._device_id,
             catalog=skill_catalog,
+        )
+        logger.debug(
+            "Runtime catalogs synced for device %s (tools=%s, skills=%s)",
+            self._device_id,
+            tool_sync.tool_count,
+            skill_sync.skill_count,
         )
 
     async def _wait_for_initial_connection(self, timeout_seconds: int | None = None) -> bool:
@@ -188,6 +210,28 @@ class RuntimeBridgeService:
         payload.update(changes)
         self._state = RuntimeState(**payload)
 
+    @staticmethod
+    def _build_runtime_error_context(
+        exc: Exception,
+        *,
+        detail: dict[str, Any] | None = None,
+    ) -> RuntimeErrorContext:
+        return RuntimeErrorContext(
+            message=str(exc),
+            code=exc.__class__.__name__,
+            detail=detail or None,
+        )
+
+    @staticmethod
+    def _runtime_error_context_from_message(message: RuntimeErrorMessage) -> RuntimeErrorContext:
+        if message.error_context is not None:
+            return message.error_context
+
+        return RuntimeErrorContext(
+            message=message.message,
+            code=message.code,
+        )
+
     async def _run_forever(self) -> None:
         attempts = 0
 
@@ -195,8 +239,8 @@ class RuntimeBridgeService:
             try:
                 await self._initialize_local_runtime()
                 registration = await self._register_device()
-                self._device_id = registration["device_id"]
-                self._session_id = registration["session_id"]
+                self._device_id = registration.device_id
+                self._session_id = registration.session_id
 
                 self._set_state(
                     status=RuntimeStatus.CONNECTING,
@@ -238,7 +282,7 @@ class RuntimeBridgeService:
             await get_mcp_manager().initialize()
         await initialize_skills_registry()
 
-    async def _register_device(self) -> dict[str, Any]:
+    async def _register_device(self) -> DeviceRegistrationResult:
         capabilities = {
             "native_tools": True,
             "local_mcp": True,
@@ -278,9 +322,11 @@ class RuntimeBridgeService:
                 websocket.recv(),
                 timeout=client_settings.server_api_timeout_seconds,
             )
-            message = self._decode_message(raw_message)
-            if message.get("type") != "ack":
-                raise RuntimeError(f"Unexpected runtime handshake message: {message}")
+            message = self._decode_runtime_message(raw_message)
+            if not isinstance(message, RuntimeAckMessage):
+                raise RuntimeError(
+                    f"Unexpected runtime handshake message: {dump_runtime_message(message)}"
+                )
 
             now = datetime.now(timezone.utc)
             self._set_state(
@@ -312,63 +358,83 @@ class RuntimeBridgeService:
     async def _heartbeat_loop(self) -> None:
         while not self._stop_requested and self._websocket is not None:
             await asyncio.sleep(client_settings.heartbeat_interval_seconds)
-            await self._send_json({"type": "heartbeat"})
+            await self._send_runtime_message(RuntimeHeartbeatMessage())
             self._set_state(last_heartbeat=datetime.now(timezone.utc))
 
     async def _receive_loop(self) -> None:
         while not self._stop_requested and self._websocket is not None:
             raw_message = await self._websocket.recv()
-            message = self._decode_message(raw_message)
+            try:
+                message = self._decode_runtime_message(raw_message)
+            except Exception as exc:
+                logger.warning("Runtime bridge received invalid WebSocket message: %s", exc)
+                continue
             await self._handle_server_message(message)
 
-    async def _handle_server_message(self, message: dict[str, Any]) -> None:
-        message_type = message.get("type")
-
-        if message_type == "tool_request":
+    async def _handle_server_message(self, message: RuntimeMessage) -> None:
+        if isinstance(message, ToolDispatchRequest):
             await self._handle_tool_request(message)
             return
 
-        if message_type == "ack":
+        if isinstance(message, RuntimeAckMessage):
             return
 
-        if message_type == "error":
-            logger.error("Runtime bridge received server error: %s", message.get("message"))
+        if isinstance(message, RuntimeHeartbeatMessage):
+            self._set_state(last_heartbeat=datetime.now(timezone.utc))
             return
 
-        logger.warning("Runtime bridge received unsupported message: %s", message_type)
+        if isinstance(message, RuntimeErrorMessage):
+            error_context = self._runtime_error_context_from_message(message)
+            self._set_state(error_message=error_context.message)
+            logger.error(
+                "Runtime bridge received server error (code=%s, detail=%s): %s",
+                error_context.code,
+                error_context.detail,
+                error_context.message,
+            )
+            return
 
-    async def _handle_tool_request(self, message: dict[str, Any]) -> None:
-        request_id = str(message.get("request_id") or "")
+        logger.warning(
+            "Runtime bridge received unsupported message: %s",
+            message.type,
+        )
+
+    async def _handle_tool_request(self, request: ToolDispatchRequest) -> None:
         started_at = datetime.now(timezone.utc)
 
         try:
-            result = await self._execute_tool_request(message)
+            result = await self._execute_tool_request(request)
             duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
-            payload = {
-                "type": "tool_result",
-                "request_id": request_id,
-                "success": True,
-                "result": result,
-                "execution_time_ms": duration_ms,
-            }
+            payload = ToolDispatchResult(
+                request_id=request.request_id,
+                success=True,
+                result=result,
+                execution_time_ms=duration_ms,
+            )
         except Exception as exc:
             duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
-            payload = {
-                "type": "tool_result",
-                "request_id": request_id,
-                "success": False,
-                "error": str(exc),
-                "execution_time_ms": duration_ms,
-            }
+            error_context = self._build_runtime_error_context(
+                exc,
+                detail={
+                    "request_id": request.request_id,
+                    "tool_name": request.tool_name,
+                    "qualified_tool_id": request.qualified_tool_id,
+                },
+            )
+            payload = ToolDispatchResult(
+                request_id=request.request_id,
+                success=False,
+                error=error_context.message,
+                error_context=error_context,
+                execution_time_ms=duration_ms,
+            )
 
-        await self._send_json(payload)
+        await self._send_runtime_message(payload)
 
-    async def _execute_tool_request(self, message: dict[str, Any]) -> Any:
-        qualified_tool_id = str(message.get("qualified_tool_id") or "")
-        arguments = message.get("arguments") or {}
-        timeout_seconds = int(
-            message.get("timeout_seconds") or client_settings.shell_timeout_seconds
-        )
+    async def _execute_tool_request(self, request: ToolDispatchRequest) -> Any:
+        qualified_tool_id = request.qualified_tool_id
+        arguments = request.arguments
+        timeout_seconds = int(request.timeout_seconds or client_settings.shell_timeout_seconds)
 
         if qualified_tool_id.startswith("native::"):
             return await self._execute_native_tool(
@@ -575,6 +641,9 @@ class RuntimeBridgeService:
             },
         ]
 
+    async def _send_runtime_message(self, message: RuntimeMessage) -> None:
+        await self._send_json(dump_runtime_message(message))
+
     async def _send_json(self, payload: dict[str, Any]) -> None:
         if self._websocket is None:
             raise RuntimeError("Runtime WebSocket is not connected")
@@ -591,6 +660,10 @@ class RuntimeBridgeService:
         if isinstance(raw_message, dict):
             return raw_message
         raise ValueError(f"Unsupported WebSocket message payload: {type(raw_message)!r}")
+
+    @classmethod
+    def _decode_runtime_message(cls, raw_message: Any) -> RuntimeMessage:
+        return parse_runtime_message(cls._decode_message(raw_message))
 
 
 _runtime_bridge: RuntimeBridgeService | None = None

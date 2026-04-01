@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 
@@ -130,7 +131,11 @@ class SuggestionGenerator:
 
             # Create cache key and get cached result
             cache_key = self._create_cache_key(user_query, response_content)
-            suggestions = self._get_cached_suggestions(cache_key, prompt)
+            suggestions = await asyncio.to_thread(
+                self._get_cached_suggestions,
+                cache_key,
+                prompt,
+            )
 
             if suggestions is None:
                 return []

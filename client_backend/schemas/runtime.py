@@ -1,6 +1,4 @@
-"""
-Runtime-related schemas for the client backend.
-"""
+"""Runtime-related schemas for the client backend."""
 
 from datetime import datetime
 from enum import Enum
@@ -83,22 +81,18 @@ class ToolCatalog(BaseModel):
     version: str
 
 
-class ToolDispatchRequest(BaseModel):
-    """Request to execute a local tool."""
+class DeviceRegistrationResult(BaseModel):
+    """Normalized result returned after registering a client runtime device."""
 
-    request_id: str
-    tool_name: str
-    qualified_tool_id: str
-    arguments: dict[str, Any]
-    timeout_seconds: int = 30
+    device_id: str
+    session_id: str
+    status: str
+    message: str
 
 
-class ToolDispatchResult(BaseModel):
-    """Result of a local tool execution."""
+class CatalogSyncResult(BaseModel):
+    """Normalized result returned after syncing a device catalog."""
 
-    request_id: str
-    success: bool
-    result: Any = None
-    error: str | None = None
-    execution_time_ms: int
-    truncated: bool = False
+    status: str
+    tool_count: int | None = None
+    skill_count: int | None = None

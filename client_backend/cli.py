@@ -50,10 +50,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def _run_doctor(args: argparse.Namespace) -> int:
     _apply_env_overrides(args)
 
-    from client_backend.core.config import get_client_settings
+    from client_backend.core.config import get_client_settings, initialize_client_environment
     from client_backend.services.local_mcp_manager import LocalMCPManager
 
     settings = get_client_settings()
+    initialize_client_environment(settings)
     mcp_manager = LocalMCPManager()
 
     parsed_server = urlparse(settings.server_api_base_url)

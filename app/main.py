@@ -10,21 +10,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from redis import Redis
 
 from app.api import (
+    ai_sdk_router,
+    auth_router,
+    client_devices_router,
     conversations_router,
+    device_runtime_router,
+    documents_router,
     feedback_router,
+    mcp_router,
     messages_router,
+    model_config_router,
+    providers_router,
+    skills_router,
+    task_plans_router,
     users_router,
 )
-from app.api.ai_sdk import router as ai_sdk_router
-from app.api.auth import router as auth_router
-from app.api.client_devices import router as client_devices_router
-from app.api.device_runtime import router as device_runtime_router
-from app.api.documents import router as documents_router
-from app.api.mcp import router as mcp_router
-from app.api.model_config import router as model_config_router
-from app.api.providers import router as providers_router
-from app.api.skills import router as skills_router
-from app.api.task_plans import router as task_plans_router
 from app.core.config import settings
 from app.core.container import (
     get_container,
@@ -63,7 +63,7 @@ async def init_agents():
         container = get_container()
         ai_service = container.ai_service()
 
-        await ai_service.workflow.initialize()
+        await ai_service.initialize()
 
     except Exception as e:
         logger.error(f"Failed to initialize agents: {e}")
@@ -92,7 +92,7 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     try:
-        from app.ai.mcp_integration import get_global_mcp_manager
+        from app.ai.mcp_registry import get_global_mcp_manager
 
         mcp_manager = await get_global_mcp_manager()
         if mcp_manager:

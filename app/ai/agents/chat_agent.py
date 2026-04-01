@@ -5,6 +5,7 @@ from typing import Any
 from google.genai import types
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..agent_config import build_gemini_generate_config
 from ..prompts import CHAT_SYSTEM_PROMPT, build_chat_prompt
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
@@ -15,8 +16,11 @@ logger = logging.getLogger(__name__)
 
 
 class ChatAgent(BaseAgent):
-    def __init__(self):
-        super().__init__(agent_config_key="chat")
+    def __init__(self, runtime_model_resolver: IRuntimeModelResolver | None = None):
+        super().__init__(
+            agent_config_key="chat",
+            runtime_model_resolver=runtime_model_resolver,
+        )
 
     @property
     def agent_type(self) -> AgentType:

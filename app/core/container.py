@@ -8,8 +8,10 @@ from sentence_transformers import SentenceTransformer
 
 from app.ai.agents.planning_agent import PlanningAgent
 from app.ai.checkpoint import CheckpointManager
+from app.ai.graph import create_workflow
 from app.ai.mcp_integration import MCPManager
 from app.ai.mcp_registry import MCPRegistry
+from app.ai.planning_runtime_adapter import PlanningRuntimeAdapter
 from app.ai.skills_registry import get_skills_registry
 from app.core.config import settings
 from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
@@ -22,6 +24,7 @@ from app.interfaces import (
     IMessageService,
     IUserService,
 )
+from app.interfaces.planning_runtime_interface import IPlanningRuntimeService
 from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.repositories.conversation import ConversationRepository
@@ -199,9 +202,21 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    provider_service = providers.Factory(
+        ProviderService,
+        provider_repository=model_provider_repository,
+    )
+
+    model_config_service = providers.Factory(
+        ModelConfigService,
+        repository=agent_model_config_repository,
+        provider_service=provider_service,
+    )
+
     # Planning agent
     planning_agent = providers.Factory(
         PlanningAgent,
+        runtime_model_resolver=model_config_service,
     )
 
     # Business services
@@ -218,47 +233,45 @@ class Container(containers.DeclarativeContainer):
         conversation_validation_utils=conversation_validation_utils,
     )
 
+    def _get_checkpointer():
+        if not settings.enable_langgraph_checkpoints:
+            return None
+
+        checkpoint_mgr = container.checkpoint_manager()
+        return checkpoint_mgr.get_checkpointer()
+
     # AI service with conditional checkpoint injection
     def _create_ai_service():
         """Factory function to create AIService with conditional checkpointer."""
-        qdrant = container.qdrant_client()
-        embeddings = container.embedding_model()
-
-        # Conditionally get checkpointer based on settings
-        checkpointer = None
-        if settings.enable_langgraph_checkpoints:
-            checkpoint_mgr = container.checkpoint_manager()
-            # Get the checkpointer (now synchronous)
-            checkpointer = checkpoint_mgr.get_checkpointer()
+        checkpointer = Container._get_checkpointer()
+        workflow_runtime = create_workflow(
+            qdrant_client=container.qdrant_client(),
+            embedding_model=container.embedding_model(),
+            checkpointer=checkpointer,
+            document_repository=container.document_repository(),
+            runtime_model_resolver=container.model_config_service(),
+        )
 
         return AIService(
-            qdrant_client=qdrant,
-            embedding_model=embeddings,
+            workflow_runtime=workflow_runtime,
             conversation_repository=container.conversation_repository(),
-            document_repository=container.document_repository(),
             checkpointer=checkpointer,
         )
 
     ai_service = providers.Singleton(_create_ai_service)
+
+    planning_runtime_service: providers.Provider[IPlanningRuntimeService] = providers.Factory(
+        PlanningRuntimeAdapter,
+        planning_agent=planning_agent,
+    )
 
     task_plan_service: providers.Provider[ITaskPlanService] = providers.Factory(
         TaskPlanService,
         task_plan_repository=task_plan_repository,
         conversation_validation_utils=conversation_validation_utils,
         task_plan_validation_utils=task_plan_validation_utils,
-        planning_agent=planning_agent,
+        planning_runtime=planning_runtime_service,
         conversation_repository=conversation_repository,
-    )
-
-    provider_service = providers.Factory(
-        ProviderService,
-        provider_repository=model_provider_repository,
-    )
-
-    model_config_service = providers.Factory(
-        ModelConfigService,
-        repository=agent_model_config_repository,
-        provider_service=provider_service,
     )
 
     message_service: providers.Provider[IMessageService] = providers.Factory(
@@ -267,7 +280,6 @@ class Container(containers.DeclarativeContainer):
         conversation_validation_utils=conversation_validation_utils,
         message_validation_utils=message_validation_utils,
         ai_service=ai_service,
-        model_config_service=model_config_service,
         tool_approval_repository=tool_approval_repository,
         hitl_interrupt_repository=hitl_interrupt_repository,
         task_plan_service=task_plan_service,

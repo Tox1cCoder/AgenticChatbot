@@ -3,15 +3,26 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from anyio import BrokenResourceError, ClosedResourceError
 
 from ..core.config import settings
+from .client_runtime_tools import (
+    CLIENT_TOOL_PREFIX,
+    get_client_tool_device_id,
+    is_client_tool,
+)
 from .tool_search_tool import create_tool_search_tool
 from .utils import extract_content_from_result, normalize_tool_call
 
+if TYPE_CHECKING:
+    from langchain_core.tools import BaseTool
+
 logger = logging.getLogger(__name__)
+
+# Tool names that may load additional tools dynamically
+TOOL_LOADING_TOOLS = {"tool_search"}
 
 
 def extract_images_from_tool_result(result_text: str) -> list[dict[str, str]]:
@@ -102,6 +113,59 @@ def build_rejected_tool_artifacts(
     return artifacts
 
 
+def _validate_client_tool_device_binding(
+    tool: Any,
+    context_device_id: str | None,
+    tool_name: str,
+) -> str | None:
+    """
+    Validate that a client tool is being executed on its bound device.
+    
+    This provides defense-in-depth for client tool isolation. The primary
+    validation happens inside the tool's dispatch function, but this catches
+    mismatches earlier in the execution path.
+    
+    Args:
+        tool: The tool being executed
+        context_device_id: The device_id from the current execution context
+        tool_name: The tool name (for error messages)
+        
+    Returns:
+        Error message if validation fails, None if validation passes
+    """
+    if not is_client_tool(tool):
+        return None
+    
+    bound_device_id = get_client_tool_device_id(tool)
+    if not bound_device_id:
+        # Client tool without device binding - this shouldn't happen
+        logger.warning(
+            "Client tool '%s' has no device_id binding in metadata",
+            tool_name,
+        )
+        return None
+    
+    if not context_device_id:
+        return (
+            f"Client tool '{tool_name}' requires a device context but none was provided. "
+            "Ensure the request includes device_id."
+        )
+    
+    if str(context_device_id) != str(bound_device_id):
+        logger.warning(
+            "Client tool device mismatch: tool '%s' bound to device %s but context has device %s",
+            tool_name,
+            bound_device_id,
+            context_device_id,
+        )
+        return (
+            f"Client tool '{tool_name}' is bound to a different device. "
+            "This tool cannot be executed from the current device session."
+        )
+    
+    return None
+
+
 async def ensure_agent_tool_map(
     agent: Any,
     conversation_id: str | None = None,
@@ -114,10 +178,16 @@ async def ensure_agent_tool_map(
     In deferred mode, the execution map is built from the same reduced tool set
     used for model binding (tool_search + pinned + loaded + required internal tools).
     In non-deferred mode, it falls back to all initialized agent tools.
+    
+    Client tools are added separately and are always scoped to a specific device.
+    The tool_search system only operates on server-side MCP tools - client tools
+    are excluded from discovery to maintain clean separation.
 
     Args:
         agent: The agent instance
         conversation_id: Optional conversation ID for deferred tool lookup
+        user_id: Optional user ID for client tool lookup
+        device_id: Optional device ID for client tool scoping
 
     Returns:
         Dict mapping tool names to tool objects
@@ -159,6 +229,7 @@ async def ensure_agent_tool_map(
         if not any(getattr(t, "name", None) == tool_search.name for t in tools):
             tools.append(tool_search)
 
+    # Add client runtime tools (device-scoped, separate from server MCP tools)
     if hasattr(agent, "_get_client_runtime_tools"):
         try:
             remote_tools = agent._get_client_runtime_tools(user_id=user_id, device_id=device_id)
@@ -166,9 +237,10 @@ async def ensure_agent_tool_map(
             remote_tools = agent._get_client_runtime_tools(user_id=user_id, device_id=device_id)
         existing_names = {getattr(t, "name", None) for t in tools}
         for tool in remote_tools:
-            if getattr(tool, "name", None) not in existing_names:
+            tool_name = getattr(tool, "name", None)
+            if tool_name and tool_name not in existing_names:
                 tools.append(tool)
-                existing_names.add(getattr(tool, "name", None))
+                existing_names.add(tool_name)
 
     tool_map = {t.name: t for t in tools if getattr(t, "name", None)}
 
@@ -197,6 +269,91 @@ def _mark_tool_used_if_deferred(tool_name: str) -> None:
 
     state = get_deferred_tool_state()
     state.mark_tool_used(ctx.conversation_id, ctx.agent_key, tool_name)
+
+
+async def _refresh_tool_map_after_search(
+    tool_map: dict[str, Any],
+    agent: Any | None,
+    conversation_id: str | None,
+    user_id: str | None,
+    device_id: str | None,
+) -> None:
+    """
+    Refresh the tool map after tool_search executes to include newly loaded tools.
+    
+    This is critical for multi-client scenarios where tool_search autoloads tools
+    that the model then tries to call in the same turn. Without this refresh,
+    the tool map wouldn't include the newly loaded tools.
+    
+    Args:
+        tool_map: The existing tool map to update in-place
+        agent: The agent instance (may be None)
+        conversation_id: Current conversation ID
+        user_id: Current user ID
+        device_id: Current device ID
+    """
+    if not settings.mcp_tool_search_enabled:
+        return
+    
+    from .deferred_tool_binding import get_deferred_tools_for_binding
+    from .deferred_tool_state import get_deferred_tool_state
+    from .mcp_registry import get_global_mcp_manager
+    from .client_runtime_tools import get_client_runtime_tools
+    
+    if not conversation_id:
+        return
+    
+    try:
+        mcp_manager = await get_global_mcp_manager()
+        
+        # Get the agent key for looking up loaded tools
+        agent_key = "default"
+        if agent:
+            agent_key = getattr(agent, "agent_config_key", None) or "default"
+        
+        # Get all MCP tools from the manager
+        all_mcp_tools = await mcp_manager.get_tools() if mcp_manager else []
+        
+        # Get the newly loaded deferred server tools
+        deferred_tools = get_deferred_tools_for_binding(
+            conversation_id=conversation_id,
+            agent_key=agent_key,
+            mcp_manager=mcp_manager,
+            all_tools=all_mcp_tools,
+        )
+        
+        # Add any new deferred tools to the map
+        for tool in deferred_tools:
+            tool_name = getattr(tool, "name", None)
+            if tool_name and tool_name not in tool_map:
+                tool_map[tool_name] = tool
+                logger.debug(
+                    "Added newly loaded deferred tool '%s' to tool map",
+                    tool_name,
+                )
+        
+        # Also refresh client tools (they may have been loaded via tool_search)
+        state = get_deferred_tool_state()
+        loaded_client_tools = state.get_loaded_client_tools(conversation_id, agent_key)
+        
+        if loaded_client_tools and device_id:
+            # Get fresh client tools and add any that match loaded references
+            client_tools = get_client_runtime_tools(user_id=user_id, device_id=device_id)
+            for client_tool in client_tools:
+                tool_name = getattr(client_tool, "name", None)
+                if tool_name and tool_name not in tool_map:
+                    # Check if this tool was loaded by tool_search
+                    for loaded in loaded_client_tools:
+                        if loaded.tool_name == tool_name:
+                            tool_map[tool_name] = client_tool
+                            logger.debug(
+                                "Added newly loaded client tool '%s' to tool map",
+                                tool_name,
+                            )
+                            break
+    except Exception as e:
+        # Don't fail the entire tool execution if refresh fails
+        logger.warning("Failed to refresh tool map after tool_search: %s", e)
 
 
 async def invoke_tool(tool: Any, tool_args: Any) -> Any:
@@ -229,7 +386,36 @@ async def execute_tool_calls(
     tool_map: dict[str, Any],
     capture_images: bool = True,
     artifact_max_output_chars: int = 1000,
+    device_id: str | None = None,
+    agent: Any | None = None,
+    conversation_id: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
+    """
+    Execute a list of tool calls and return outputs, artifacts, and images.
+    
+    For client tools (those with names starting with CLIENT_TOOL_PREFIX), the
+    device_id parameter is used to validate that the tool is being executed
+    on its bound device.
+    
+    When tool_search is among the tool calls, this function will automatically
+    refresh the tool_map after tool_search executes to include newly loaded
+    deferred tools. This ensures that tools discovered via tool_search can be
+    called in the same turn without a second round-trip.
+    
+    Args:
+        tool_calls: List of tool call objects to execute
+        tool_map: Dict mapping tool names to tool objects (modified in-place if refresh needed)
+        capture_images: Whether to extract images from tool results
+        artifact_max_output_chars: Max chars for artifact output truncation
+        device_id: Current device_id for client tool validation
+        agent: Optional agent instance for tool map refresh
+        conversation_id: Optional conversation ID for tool map refresh
+        user_id: Optional user ID for tool map refresh
+        
+    Returns:
+        Tuple of (outputs, artifacts, images)
+    """
     outputs: list[dict[str, Any]] = []
     artifacts: list[dict[str, Any]] = []
     images: list[dict[str, str]] = []
@@ -264,11 +450,19 @@ async def execute_tool_calls(
         tool = tool_map.get(tool_name)
         if not tool:
             if settings.mcp_tool_search_enabled:
-                error_msg = (
-                    f"Error: Tool {tool_name} not found. "
-                    "Use tool_search first to discover and load the correct tool, "
-                    "then call the discovered tool by name."
-                )
+                # Check if this looks like a client tool name that isn't available
+                if tool_name.startswith(CLIENT_TOOL_PREFIX):
+                    error_msg = (
+                        f"Error: Client tool {tool_name} not found. "
+                        "This tool may not be available from the current device, "
+                        "or the device may have disconnected."
+                    )
+                else:
+                    error_msg = (
+                        f"Error: Tool {tool_name} not found. "
+                        "Use tool_search first to discover and load the correct tool, "
+                        "then call the discovered tool by name."
+                    )
             else:
                 error_msg = f"Error: Tool {tool_name} not found"
             outputs.append({"tool_call_id": tool_id, "name": tool_name, "content": error_msg})
@@ -279,6 +473,22 @@ async def execute_tool_calls(
                     tool_args=tool_args,
                     output_text=None,
                     error=error_msg,
+                    max_output_chars=artifact_max_output_chars,
+                )
+            )
+            continue
+
+        # Validate client tool device binding before execution
+        device_error = _validate_client_tool_device_binding(tool, device_id, tool_name)
+        if device_error:
+            outputs.append({"tool_call_id": tool_id, "name": tool_name, "content": f"Error: {device_error}"})
+            artifacts.append(
+                build_tool_artifact(
+                    tool_call_id=tool_id,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    output_text=None,
+                    error=device_error,
                     max_output_chars=artifact_max_output_chars,
                 )
             )
@@ -305,6 +515,18 @@ async def execute_tool_calls(
 
             # Update LRU timestamp for deferred tools on successful execution
             _mark_tool_used_if_deferred(tool_name)
+            
+            # If this was a tool-loading tool (like tool_search), refresh the
+            # tool map to include newly loaded deferred tools. This allows
+            # subsequent tool calls in the same batch to use the discovered tools.
+            if tool_name in TOOL_LOADING_TOOLS and settings.mcp_tool_search_enabled:
+                await _refresh_tool_map_after_search(
+                    tool_map=tool_map,
+                    agent=agent,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    device_id=device_id,
+                )
         except (ClosedResourceError, BrokenResourceError) as session_exc:
             # MCP session died – attempt reconnect once, then retry
             logger.warning(
@@ -314,7 +536,7 @@ async def execute_tool_calls(
             )
             reconnected = False
             try:
-                from .mcp_integration import get_global_mcp_manager
+                from .mcp_registry import get_global_mcp_manager
 
                 manager = await get_global_mcp_manager()
                 fresh_tool = await manager.reconnect_and_get_tool(tool_name)

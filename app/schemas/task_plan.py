@@ -125,3 +125,27 @@ class PlanningStatusResponse(BaseModel):
     next_task: TaskPlanRead | None = Field(None, description="The next task to work on (if any)")
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class PlanningRuntimeRequest(BaseModel):
+    """Service-owned request for planning runtime operations."""
+
+    user_message: str = Field(..., min_length=1, description="User message to plan from")
+    conversation_id: str | None = Field(
+        default=None,
+        description="Conversation ID for planning context",
+    )
+    user_id: str | None = Field(default=None, description="User ID for planning context")
+    existing_tasks: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Existing task snapshot when modifying a plan",
+    )
+
+
+class PlanningRuntimeResult(BaseModel):
+    """Service-owned result for planning runtime operations."""
+
+    todos: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Canonical todo payload returned by the planning runtime",
+    )

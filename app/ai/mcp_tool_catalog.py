@@ -1,13 +1,17 @@
 """
 MCP Tool Catalog - Tool discovery and search for deferred loading.
 
-This module provides a searchable catalog of MCP tools that supports:
+This module provides a searchable catalog of SERVER-SIDE MCP tools that supports:
 - Caching keyed by MCP tools generation (invalidated on config changes)
 - Lightweight search ranking (name match + description token overlap)
 - Per-agent allowlist filtering
 - Tool name collision detection across servers
 
-Used by the `tool_search` tool to implement Claude-style deferred tool loading.
+Client device tools are indexed separately in client_tool_catalog.py and are
+merged with server tool results in tool_search_tool.py for unified search.
+
+The tool_search system provides consistent deferred loading for BOTH server
+and client tools - the only difference is the tool list available.
 """
 
 import hashlib
@@ -23,10 +27,21 @@ from .mcp_registry import get_mcp_tools_generation
 
 logger = logging.getLogger(__name__)
 
+# Import client tool prefix for reference
+CLIENT_TOOL_PREFIX = "client__"
+
+# Tool origin constants (duplicated here to avoid circular imports)
+TOOL_ORIGIN_SERVER_MCP = "server_mcp"
+
 
 @dataclass
 class ToolDescriptor:
-    """Describes a single MCP tool with metadata for search and loading."""
+    """
+    Describes a single MCP tool with metadata for search and loading.
+
+    This class is used for SERVER-SIDE MCP tools. Client device tools
+    use ClientToolDescriptor from client_tool_catalog.py.
+    """
 
     tool_name: str
     server_name: str
@@ -35,11 +50,7 @@ class ToolDescriptor:
     required_arg_names: list[str]
     schema_fingerprint: str
     args_schema: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def display_name(self) -> str:
-        """Format tool name with server prefix for disambiguation."""
-        return f"[{self.server_name}] {self.tool_name}"
+    origin: str = field(default=TOOL_ORIGIN_SERVER_MCP)  # Always server_mcp for this catalog
 
     @property
     def arg_hints(self) -> str:
@@ -56,15 +67,37 @@ class ToolDescriptor:
         return f"({', '.join(hints)})"
 
     def to_search_result(self) -> dict[str, Any]:
-        """Convert to a search result dict for tool_search output."""
+        """
+        Convert to a search result dict for tool_search output.
+
+        IMPORTANT: Only expose information the model needs to USE the tool.
+        Do NOT expose internal details like server_name, origin, etc.
+        that could lead to the model guessing tool names.
+        """
+        return {
+            "tool_name": self.tool_name,
+            "description": self.description[:200] if self.description else "",
+            "arg_hints": self.arg_hints,
+            "is_loaded": False,  # Will be updated by tool_search
+        }
+
+    def _to_internal_result(self) -> dict[str, Any]:
+        """
+        Internal result with full metadata for autoloading logic.
+        NOT exposed to the model.
+        """
         return {
             "tool_name": self.tool_name,
             "server_name": self.server_name,
-            "display_name": self.display_name,
             "description": self.description[:200] if self.description else "",
             "arg_hints": self.arg_hints,
-            "call_as": self.tool_name,
+            "origin": self.origin,
+            "is_client_tool": False,
         }
+
+    def is_server_tool(self) -> bool:
+        """Check if this is a server-side tool (always True for ToolDescriptor)."""
+        return True
 
 
 @dataclass
@@ -161,7 +194,13 @@ class McpToolCatalog:
         return True
 
     async def _rebuild_catalog(self) -> None:
-        """Rebuild the entire catalog from the MCP manager."""
+        """
+        Rebuild the entire catalog from the MCP manager.
+
+        IMPORTANT: This only indexes SERVER-SIDE MCP tools. Any tools with names
+        starting with CLIENT_TOOL_PREFIX are explicitly filtered out to maintain
+        clean separation between server and client tool namespaces.
+        """
         start_time = time.time()
 
         # Clear existing data
@@ -179,12 +218,26 @@ class McpToolCatalog:
             logger.error("Failed to fetch tools from MCP manager: %s", e)
             tools_info = []
 
-        # Build descriptors
+        # Track filtered tools for logging
+        filtered_count = 0
+
+        # Build descriptors (only for server-side tools)
         for tool_info in tools_info:
             tool_name = tool_info.get("name", "")
             server_name = tool_info.get("server_name", "unknown")
             description = tool_info.get("description", "")
             args_schema = tool_info.get("args_schema", {}) or {}
+
+            # CRITICAL: Filter out any client tools to maintain clean separation
+            # Client tools should never appear in MCP manager, but this is defense-in-depth
+            if tool_name.startswith(CLIENT_TOOL_PREFIX):
+                logger.warning(
+                    "Filtering client tool '%s' from server MCP catalog - "
+                    "client tools should not be in MCP manager",
+                    tool_name,
+                )
+                filtered_count += 1
+                continue
 
             arg_names, required_args = extract_arg_info(args_schema)
             fingerprint = compute_schema_fingerprint(args_schema, description)
@@ -197,6 +250,7 @@ class McpToolCatalog:
                 required_arg_names=required_args,
                 schema_fingerprint=fingerprint,
                 args_schema=args_schema,
+                origin=TOOL_ORIGIN_SERVER_MCP,
             )
 
             idx = len(self._tools)
@@ -225,8 +279,13 @@ class McpToolCatalog:
         self._total_docs = len(self._tools)
 
         elapsed = time.time() - start_time
+        log_msg = (
+            "Rebuilt MCP tool catalog: %d server tools from %d servers in %.2fms (collisions: %d)"
+        )
+        if filtered_count:
+            log_msg += f" [filtered {filtered_count} client tools]"
         logger.info(
-            "Rebuilt MCP tool catalog: %d tools from %d servers in %.2fms (collisions: %d)",
+            log_msg,
             len(self._tools),
             len(self._tools_by_server),
             elapsed * 1000,

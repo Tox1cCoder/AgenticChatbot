@@ -295,6 +295,17 @@ class Settings(BaseSettings):
         default=300,
         description="Timeout for MinerU subprocess in seconds",
     )
+    mineru_backend: str = Field(
+        default="pipeline",
+        description=(
+            "MinerU processing backend: 'pipeline' (fast, no large VLM download) "
+            "or 'vlm' (high-quality, requires ~7GB VLM model — run scripts/warm_mineru.py first)"
+        ),
+    )
+    mineru_extra_args: list[str] = Field(
+        default=[],
+        description="Extra CLI arguments forwarded verbatim to the mineru command (e.g. ['--device', 'cpu'])",
+    )
     document_images_storage_path: str = Field(
         default="app/storage/document_images",
         description="Storage path for extracted document images",
@@ -510,7 +521,7 @@ class Settings(BaseSettings):
         description="Toggle to enable/disable human-in-the-loop globally",
     )
     hitl_tools_require_approval: list[str] = Field(
-        default=["get_current_time"],
+        default=[],
         description="List of tool names that require human approval. Empty list means NO tools require approval when HITL is enabled.",
     )
     hitl_approval_timeout_minutes: int = Field(

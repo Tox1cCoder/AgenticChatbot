@@ -12,13 +12,18 @@ from anyio import BrokenResourceError, ClosedResourceError
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
-from pydantic import BaseModel as PydanticBaseModel
 
 from app.core.config import settings
 from app.core.exceptions.mcp import (
     ServerConfigurationError,
     ServerNotFoundError,
     ToolNotFoundError,
+)
+from app.core.mcp_adapter_utils import (
+    build_mcp_server_entry,
+    clone_mcp_tool,
+    normalize_mcp_transport,
+    sanitize_mcp_schema,
 )
 
 from .utils import get_error_recovery_hint
@@ -76,13 +81,13 @@ class MCPManager:
 
     def _build_server_config(self) -> dict[str, dict[str, Any]]:
         mcp_servers = self.config.get("mcp_servers", {})
-        server_config = {}
+        server_config: dict[str, dict[str, Any]] = {}
 
         for server_name, server_info in mcp_servers.items():
             if not server_info.get("enabled", True):
                 continue
 
-            transport = server_info.get("transport", "stdio")
+            transport = normalize_mcp_transport(server_info.get("transport"))
 
             if transport == "stdio":
                 # Convert relative paths to absolute
@@ -96,28 +101,25 @@ class MCPManager:
                     else:
                         abs_args.append(arg)
 
-                server_config[server_name] = {
-                    "transport": transport,
-                    "command": server_info.get("command", "python"),
-                    "args": abs_args,
-                }
-
-                # Pass current working directory if specified
-                if "cwd" in server_info:
-                    server_config[server_name]["cwd"] = server_info["cwd"]
-
-                # Pass environment variables to subprocess if specified
-                if "env" in server_info:
-                    server_config[server_name]["env"] = server_info["env"]
-            elif transport in ["streamable_http", "sse"]:
-                server_config[server_name] = {
-                    "transport": transport,
-                    "url": server_info.get("url", ""),
-                }
-                if "headers" in server_info:
-                    server_config[server_name]["headers"] = server_info["headers"]
+                entry = build_mcp_server_entry(
+                    transport=transport,
+                    command=server_info.get("command", "python"),
+                    args=abs_args,
+                    cwd=server_info.get("cwd"),
+                    env=server_info.get("env"),
+                )
+            elif transport in {"streamable_http", "sse"}:
+                entry = build_mcp_server_entry(
+                    transport=transport,
+                    url=server_info.get("url", ""),
+                    headers=server_info.get("headers"),
+                )
             else:
+                entry = None
+
+            if entry is None:
                 continue
+            server_config[server_name] = entry
 
         return server_config
 
@@ -198,14 +200,8 @@ class MCPManager:
             session_context = self.client.session(server_name)
             session = await session_context.__aenter__()
 
-            tools = list(await load_mcp_tools(session))
-
-            for tool in tools:
-                if hasattr(tool, "name") and ":" in tool.name:
-                    # Remove the prefix before the colon
-                    tool.name = tool.name.split(":", 1)[-1]
-
-            cleaned_tools = self._clean_tool_schemas(tools)
+            loaded_tools = list(await load_mcp_tools(session))
+            cleaned_tools = [clone_mcp_tool(tool) for tool in loaded_tools]
 
             # Store context and session for proper cleanup
             self._session_contexts[server_name] = {
@@ -243,171 +239,9 @@ class MCPManager:
             if not any(existing is tool for existing in indexed_tools):
                 indexed_tools.append(tool)
 
-    def _filter_schema_recursively(self, schema: Any) -> Any:
-        unsupported_keys = {"$schema", "additionalProperties"}
-
-        if isinstance(schema, dict):
-            filtered = {}
-            for key, value in schema.items():
-                if key in unsupported_keys:
-                    continue
-
-                # Skip None values
-                if value is None:
-                    continue
-
-                # Recursively filter nested structures
-                if key in (
-                    "properties",
-                    "items",
-                    "anyOf",
-                    "allOf",
-                    "oneOf",
-                    "definitions",
-                ):
-                    filtered_value = self._filter_schema_recursively(value)
-                    # Only include if not empty after filtering
-                    if filtered_value:
-                        filtered[key] = filtered_value
-                elif isinstance(value, dict):
-                    filtered_value = self._filter_schema_recursively(value)
-                    if filtered_value:  # Only include non-empty dicts
-                        filtered[key] = filtered_value
-                elif isinstance(value, list):
-                    filtered[key] = [
-                        self._filter_schema_recursively(item) for item in value if item is not None
-                    ]
-                else:
-                    filtered[key] = value
-
-            # Gemini requires every array type to have an explicit `items` field.
-            # If this schema node is an array but `items` was missing or got stripped,
-            # inject a default so the API doesn't reject with "missing field".
-            if filtered.get("type") == "array" and "items" not in filtered:
-                filtered["items"] = {"type": "string"}
-
-            return filtered
-        elif isinstance(schema, list):
-            return [self._filter_schema_recursively(item) for item in schema if item is not None]
-        else:
-            return schema
-
-    def _remove_non_string_enums(self, schema: Any) -> Any:
-        if isinstance(schema, dict):
-            cleaned: dict[str, Any] = {}
-            for key, value in schema.items():
-                if (
-                    key == "enum"
-                    and isinstance(value, list)
-                    and any(not isinstance(item, str) for item in value)
-                ):
-                    continue
-                cleaned[key] = self._remove_non_string_enums(value)
-            return cleaned
-        if isinstance(schema, list):
-            return [self._remove_non_string_enums(item) for item in schema]
-        return schema
-
-    def _clean_tool_schemas(self, tools: list[BaseTool]) -> list[BaseTool]:
-
-        cleaned_tools = []
-        for tool in tools:
-            # Check if tool has an args_schema
-            tool_had_no_schema = not hasattr(tool, "args_schema") or tool.args_schema is None
-            if tool_had_no_schema:
-                # Add empty properties schema for tools without args_schema
-                # Only set to dict for tools that originally had None
-                tool.args_schema = {"type": "object", "properties": {}}
-                cleaned_tools.append(tool)
-                continue
-
-            args_schema = tool.args_schema
-
-            # Some MCP adapters expose JSON-schema dicts directly
-            # Sanitize those in-place (schema-only)
-            if isinstance(args_schema, dict):
-                filtered = self._filter_schema_recursively(args_schema)
-                tool.args_schema = self._remove_non_string_enums(filtered)
-
-                # Ensure OpenAI-compatible schema: must have type and properties
-                if not tool.args_schema.get("properties"):
-                    tool.args_schema["properties"] = {}
-                if not tool.args_schema.get("type"):
-                    tool.args_schema["type"] = "object"
-
-                cleaned_tools.append(tool)
-                continue
-
-            if isinstance(args_schema, type) and issubclass(args_schema, PydanticBaseModel):
-                # Get the original schema
-                original_schema_method = args_schema.model_json_schema
-
-                # Create a wrapper that filters unsupported keys
-                def filtered_schema_method(
-                    *args,
-                    original_schema_method=original_schema_method,
-                    **kwargs,
-                ):
-                    schema = original_schema_method(*args, **kwargs)
-                    if isinstance(schema, dict):
-                        schema = self._filter_schema_recursively(schema)
-                        schema = self._remove_non_string_enums(schema)
-                        if not schema.get("properties"):
-                            schema["properties"] = {}
-                        if not schema.get("type"):
-                            schema["type"] = "object"
-                    return schema
-
-                args_schema.model_json_schema = staticmethod(filtered_schema_method)
-
-            cleaned_tools.append(tool)
-
-        return cleaned_tools
-
-    def _serialize_args_schema(self, schema: Any) -> dict[str, Any]:
-        """Normalize a tool args schema into a serializable dictionary."""
-        if not schema:
-            return {}
-
-        result_schema = {}
-
-        if isinstance(schema, dict):
-            result_schema = schema
-        elif (
-            PydanticBaseModel is not None
-            and (
-                isinstance(schema, type)
-                and issubclass(schema, PydanticBaseModel)
-                or isinstance(schema, PydanticBaseModel)
-            )
-            and hasattr(schema, "model_json_schema")
-        ):
-            result_schema = schema.model_json_schema()
-
-        if not result_schema:
-            for attr_name in ("model_json_schema", "json_schema", "schema"):
-                exporter = getattr(schema, attr_name, None)
-                if callable(exporter):
-                    try:
-                        result_schema = exporter()
-                        break
-                    except TypeError:
-                        try:
-                            result_schema = exporter(by_alias=True)
-                            break
-                        except Exception:
-                            continue
-                    except Exception:
-                        continue
-
-        if result_schema and isinstance(result_schema, dict):
-            result_schema = self._filter_schema_recursively(result_schema)
-
-        return result_schema
-
     def get_tool_args_schema(self, tool: BaseTool) -> dict[str, Any]:
         """Public helper to expose argument schema for a tool."""
-        return self._serialize_args_schema(getattr(tool, "args_schema", None))
+        return sanitize_mcp_schema(getattr(tool, "args_schema", None))
 
     def get_server_for_tool(self, tool: BaseTool) -> str | None:
         """Return the server name that provided the given tool, if known."""
@@ -584,7 +418,7 @@ class MCPManager:
 
         for server_name, tools in self._server_tools.items():
             for tool in tools:
-                args_schema = self._serialize_args_schema(getattr(tool, "args_schema", None))
+                args_schema = sanitize_mcp_schema(getattr(tool, "args_schema", None))
                 tools_info.append(
                     {
                         "name": tool.name,
@@ -905,35 +739,3 @@ class MCPManager:
         except ImportError:
             # Registry not available, ignore
             pass
-
-
-# =============================================================================
-# Module-level functions - delegate to MCPRegistry for unified instance management
-# =============================================================================
-
-
-async def get_global_mcp_manager() -> MCPManager:
-    """
-    Get or create a singleton MCPManager instance.
-
-    This function delegates to MCPRegistry to ensure a single shared instance
-    is used by both agents and the DI container.
-
-    Returns:
-        MCPManager: The global MCP manager instance with tools pre-loaded.
-    """
-    from .mcp_registry import MCPRegistry
-
-    return await MCPRegistry.get_manager_async()
-
-
-async def reset_global_mcp_manager() -> None:
-    """
-    Reset the global MCP manager.
-
-    Delegates to MCPRegistry for unified cleanup.
-    """
-    from .mcp_registry import MCPRegistry
-
-    await MCPRegistry.reset()
-    logger.debug("Global MCP manager reset via registry")

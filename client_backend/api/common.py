@@ -84,13 +84,18 @@ async def proxy_server_request(
     *,
     upstream_path: str,
     inject_device_context: bool = False,
+    params_override: Any = None,
 ) -> Response:
     """
     Forward a request to the canonical server while preserving its response body.
     """
     try:
         kwargs: dict[str, Any] = {
-            "params": list(request.query_params.multi_items()),
+            "params": (
+                params_override
+                if params_override is not None
+                else list(request.query_params.multi_items())
+            ),
         }
 
         content_type = str(request.headers.get("content-type") or "")

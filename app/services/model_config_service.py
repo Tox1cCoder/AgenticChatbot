@@ -14,11 +14,15 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
 from app.ai.agent_config import AGENT_CONFIG
+from app.core.runtime_modeling import (
+    ResolvedRuntimeModelConfig,
+    RuntimeFallbackConfig,
+)
+from app.interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.services.provider_service import ProviderService
 
@@ -26,31 +30,6 @@ SUPPORTED_AGENT_KEYS = ("chat", "rag", "search", "planning")
 SUPPORTED_PROVIDERS = ("gemini", "openai")
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class RuntimeFallbackConfig:
-    provider: str
-    model: str
-    temperature: float
-    api_key: str
-    key_source: str
-
-
-@dataclass
-class ResolvedRuntimeModelConfig:
-    agent_key: str
-    provider: str
-    model: str
-    temperature: float
-    api_key: str | None
-    key_source: str
-    source: str
-    warnings: list[str] = field(default_factory=list)
-    is_custom_model: bool = False
-    capabilities: dict[str, bool] = field(default_factory=dict)
-    provider_fallback: dict[str, Any] | None = None
-    fallback_config: RuntimeFallbackConfig | None = None
 
 
 def _normalize_agent_key(value: Any) -> str | None:
@@ -100,7 +79,7 @@ def _default_agent_config(agent_key: str) -> dict[str, Any]:
     }
 
 
-class ModelConfigService:
+class ModelConfigService(IRuntimeModelResolver):
     def __init__(
         self,
         repository: AgentModelConfigRepository,

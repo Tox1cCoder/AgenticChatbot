@@ -14,10 +14,11 @@ from langchain_core.messages import (
 from langchain_core.tools import BaseTool
 
 from ...core.config import settings
-from ...services.model_config_service import (
+from ...core.runtime_modeling import (
     ResolvedRuntimeModelConfig,
     RuntimeFallbackConfig,
 )
+from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
 from ..client_runtime_tools import get_client_runtime_tools
 from ..deferred_tool_binding import (
@@ -25,8 +26,7 @@ from ..deferred_tool_binding import (
     should_use_deferred_loading,
 )
 from ..hand_off_tool import hand_off as _hand_off_tool
-from ..mcp_integration import get_global_mcp_manager
-from ..mcp_registry import get_mcp_tools_generation
+from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..prompts import DELEGATION_SUFFIX, TOOL_CONTEXT_SUFFIX
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..skills_tool import create_activate_skill_tool, get_available_skill_summaries
@@ -46,9 +46,15 @@ _OPENAI_REASONING_SUMMARY_DISABLED_USERS: set[str] = set()
 class BaseAgent(ABC):
     """Abstract base class for all agents. Child classes must implement: agent_type, agent_id, _get_base_system_prompt()."""
 
-    def __init__(self, model_name: str | None = None, agent_config_key: str = "chat"):
+    def __init__(
+        self,
+        model_name: str | None = None,
+        agent_config_key: str = "chat",
+        runtime_model_resolver: IRuntimeModelResolver | None = None,
+    ):
         self.agent_config_key = agent_config_key
         self.model_name = model_name or AGENT_CONFIG[agent_config_key]["model"]
+        self.runtime_model_resolver = runtime_model_resolver
         self.gemini_client = None
         self.langchain_model = None
         self.mcp_manager = None
@@ -336,14 +342,6 @@ class BaseAgent(ABC):
         except Exception:
             return None
 
-    def _get_model_config_service(self):
-        try:
-            from app.core.container import container
-
-            return container.model_config_service()
-        except Exception:
-            return None
-
     def _resolve_runtime_model_config(
         self,
         user_id: str | None,
@@ -351,10 +349,10 @@ class BaseAgent(ABC):
     ) -> ResolvedRuntimeModelConfig:
         request_override = self._resolve_model_request(model_request)
         user_uuid = self._parse_user_uuid(user_id)
-        service = self._get_model_config_service()
+        resolver = self.runtime_model_resolver
 
-        if service and user_uuid and self.agent_config_key in _MODEL_REQUEST_SUPPORTED_AGENT_KEYS:
-            return service.resolve_runtime_config(
+        if resolver and user_uuid and self.agent_config_key in _MODEL_REQUEST_SUPPORTED_AGENT_KEYS:
+            return resolver.resolve_runtime_config(
                 user_uuid, self.agent_config_key, request_override
             )
 

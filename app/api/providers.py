@@ -15,6 +15,7 @@ from app.models.user import User
 from app.schemas.responses import ApiResponse
 from app.services.model_config_service import ModelConfigService
 from app.services.provider_service import ProviderService
+from app.utils.api_error_helpers import translate_service_errors
 from app.utils.case_conversion import to_camel_case as to_camel
 
 router = APIRouter(prefix="/providers", tags=["providers"])
@@ -93,7 +94,10 @@ async def add_provider(
     Stores the API key encrypted in the database. If a provider of the same type
     already exists for the user, it will be updated (upsert operation).
     """
-    try:
+    with translate_service_errors(
+        action="add provider",
+        value_error_status=status.HTTP_400_BAD_REQUEST,
+    ):
         provider = provider_service.add_provider(
             user_id=current_user.id,
             provider_type=request.provider_type,
@@ -120,16 +124,6 @@ async def add_provider(
             message=f"{request.provider_type} provider added/updated successfully",
             data=response_data,
         )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        ) from e
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to add provider: {str(e)}",
-        ) from e
 
 
 @router.get("", response_model=ApiResponse[list[ProviderResponse]])
@@ -144,7 +138,10 @@ async def list_providers(
     Returns provider information without decrypted API keys.
     Shows last 4 characters of encrypted key for verification.
     """
-    try:
+    with translate_service_errors(
+        action="list providers",
+        value_error_status=status.HTTP_400_BAD_REQUEST,
+    ):
         providers = provider_service.get_all_providers(
             user_id=current_user.id,
             include_encrypted=True,
@@ -167,11 +164,6 @@ async def list_providers(
             message="Providers retrieved successfully",
             data=response_data,
         )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list providers: {str(e)}",
-        ) from e
 
 
 @router.get("/{provider_type}", response_model=ApiResponse[ProviderResponse])
@@ -186,7 +178,10 @@ async def get_provider(
 
     Returns provider information without decrypted API key.
     """
-    try:
+    with translate_service_errors(
+        action="get provider",
+        value_error_status=status.HTTP_400_BAD_REQUEST,
+    ):
         config = provider_service.get_provider_config(
             user_id=current_user.id,
             provider_type=provider_type,
@@ -212,13 +207,6 @@ async def get_provider(
             message="Provider retrieved successfully",
             data=response_data,
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get provider: {str(e)}",
-        ) from e
 
 
 @router.delete("/{provider_type}", response_model=ApiResponse[dict[str, Any]])
@@ -234,7 +222,10 @@ async def delete_provider(
 
     Soft deletes the provider, removing access to the encrypted API key.
     """
-    try:
+    with translate_service_errors(
+        action="delete provider",
+        value_error_status=status.HTTP_400_BAD_REQUEST,
+    ):
         deleted = provider_service.delete_provider(
             user_id=current_user.id,
             provider_type=provider_type,
@@ -259,13 +250,6 @@ async def delete_provider(
                 "reset_agent_keys": reset_agent_keys,
             },
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete provider: {str(e)}",
-        ) from e
 
 
 @router.post("/{provider_type}/validate", response_model=ApiResponse[ProviderValidationResponse])
@@ -281,7 +265,10 @@ async def validate_provider(
     Tests the stored API key by attempting to list models from the provider's API.
     For OpenAI, returns a list of available models.
     """
-    try:
+    with translate_service_errors(
+        action="validate provider",
+        value_error_status=status.HTTP_400_BAD_REQUEST,
+    ):
         result = await provider_service.validate_provider(
             user_id=current_user.id,
             provider_type=provider_type,
@@ -301,11 +288,6 @@ async def validate_provider(
             message=("Provider validated" if result.get("valid") else "Provider validation failed"),
             data=response_data,
         )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to validate provider: {str(e)}",
-        ) from e
 
 
 @router.get("/{provider_type}/models", response_model=ApiResponse[list[ProviderModelOption]])
@@ -320,7 +302,10 @@ async def list_provider_models(
 
     Forces a catalog sync and returns normalized model metadata.
     """
-    try:
+    with translate_service_errors(
+        action="list models",
+        value_error_status=status.HTTP_400_BAD_REQUEST,
+    ):
         result = await provider_service.sync_provider_models(
             user_id=current_user.id,
             provider_type=provider_type,
@@ -340,10 +325,3 @@ async def list_provider_models(
             message=f"Retrieved {len(models)} models from {provider_type}",
             data=models,
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list models: {str(e)}",
-        ) from e

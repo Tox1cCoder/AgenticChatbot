@@ -24,8 +24,8 @@ from client_backend.api.messages import router as messages_router
 from client_backend.api.proxy import router as proxy_router
 from client_backend.api.runtime import router as runtime_router
 from client_backend.api.skills import router as skills_router
-from client_backend.core.config import client_settings
-from client_backend.core.logging import get_logger
+from client_backend.core.config import client_settings, initialize_client_environment
+from client_backend.core.logging import get_logger, setup_logging
 from client_backend.services.local_mcp_manager import get_mcp_manager
 from client_backend.services.local_skills_registry import initialize_skills_registry
 from client_backend.services.runtime_bridge import get_runtime_bridge
@@ -39,6 +39,8 @@ async def lifespan(app: FastAPI):
     """
     Application lifespan handler for startup and shutdown events.
     """
+    initialize_client_environment()
+    setup_logging()
     logger.info(
         f"Starting Client Backend v{__version__} on "
         f"{client_settings.backend_host}:{client_settings.backend_port}"
@@ -129,6 +131,9 @@ def main():
     Main entry point for running the client backend.
     """
     import uvicorn
+
+    initialize_client_environment()
+    setup_logging()
 
     uvicorn.run(
         "client_backend.main:app",

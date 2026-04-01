@@ -4,6 +4,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..prompts import SEARCH_SYSTEM_PROMPT, build_search_prompt
 from ..schemas import AgentMessage, AgentResponse, AgentType
 from ..utils import normalize_tool_call
@@ -13,8 +14,11 @@ logger = logging.getLogger(__name__)
 
 
 class SearchAgent(BaseAgent):
-    def __init__(self):
-        super().__init__(agent_config_key="search")
+    def __init__(self, runtime_model_resolver: IRuntimeModelResolver | None = None):
+        super().__init__(
+            agent_config_key="search",
+            runtime_model_resolver=runtime_model_resolver,
+        )
 
     @property
     def agent_type(self) -> AgentType:

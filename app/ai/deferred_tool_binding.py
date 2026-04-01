@@ -78,15 +78,23 @@ def get_deferred_tools_for_binding(
     These are tools that were discovered via tool_search and loaded
     for use in this conversation.
 
+    IMPORTANT: This function retrieves tools from the MCP manager's full tool
+    index, NOT from the filtered all_tools list. This ensures that tools found
+    by tool_search can be properly bound even if they weren't in the agent's
+    initial filtered tool list.
+
     Args:
         conversation_id: The conversation ID
         agent_key: The agent key (e.g., "chat", "search", "rag")
         mcp_manager: The MCP manager instance
-        all_tools: All available tools from MCP (may be deduplicated)
+        all_tools: All available tools from MCP (may be deduplicated/filtered)
 
     Returns:
         List of BaseTool objects for loaded deferred tools
     """
+    import logging
+
+    logger = logging.getLogger(__name__)
 
     state = get_deferred_tool_state()
     loaded_tools = state.get_loaded(conversation_id, agent_key)
@@ -97,10 +105,11 @@ def get_deferred_tools_for_binding(
     deferred_tools: list[BaseTool] = []
 
     for loaded in loaded_tools:
-        # Use MCP manager's get_tool_by_name with server_name to handle collisions correctly
         tool = None
 
-        # First try direct lookup from _tool_index (handles collision correctly)
+        # PRIMARY: Use MCP manager's _tool_index which contains ALL tools
+        # This is critical - it gives us access to tools that may have been
+        # filtered out of the agent's initial tool list
         if hasattr(mcp_manager, "_tool_index"):
             candidates = mcp_manager._tool_index.get(loaded.tool_name, [])
             for t in candidates:
@@ -108,7 +117,16 @@ def get_deferred_tools_for_binding(
                     tool = t
                     break
 
-        # Fallback: search through all_tools (may not find the right server version)
+        # SECONDARY: Check _server_tools directly (another way to access full tool set)
+        if tool is None and hasattr(mcp_manager, "_server_tools"):
+            server_tools = mcp_manager._server_tools.get(loaded.server_name, [])
+            for t in server_tools:
+                if t.name == loaded.tool_name:
+                    tool = t
+                    break
+
+        # TERTIARY: Fall back to all_tools if above methods fail
+        # Note: This may miss tools that were filtered from all_tools
         if tool is None:
             for t in all_tools:
                 if (
@@ -120,6 +138,14 @@ def get_deferred_tools_for_binding(
 
         if tool:
             deferred_tools.append(tool)
+        else:
+            # Log warning when tool can't be found - this helps debug loading issues
+            logger.warning(
+                "Deferred tool '%s' from server '%s' could not be found in MCP manager. "
+                "The tool may have been removed or the server disconnected.",
+                loaded.tool_name,
+                loaded.server_name,
+            )
 
     return deferred_tools
 

@@ -9,6 +9,8 @@ from pathlib import Path
 
 from client_backend.core.config import client_settings
 
+_logging_configured = False
+
 
 def setup_logging() -> logging.Logger:
     """
@@ -17,6 +19,7 @@ def setup_logging() -> logging.Logger:
     Returns:
         The root logger configured for the client backend.
     """
+    global _logging_configured
     log_level = getattr(logging, client_settings.log_level, logging.INFO)
 
     # Create formatter
@@ -52,6 +55,7 @@ def setup_logging() -> logging.Logger:
 
         root_logger.info(f"Logging to file: {log_file}")
 
+    _logging_configured = True
     return root_logger
 
 
@@ -68,7 +72,3 @@ def get_logger(name: str) -> logging.Logger:
     if not name.startswith("client_backend"):
         name = f"client_backend.{name}"
     return logging.getLogger(name)
-
-
-# Initialize logging on module import
-logger = setup_logging()

@@ -51,9 +51,13 @@ class ToolExecutionError(MCPException):
 class ServerConfigurationError(MCPException):
     """Raised when MCP server configuration is invalid"""
 
-    def __init__(self, detail: str):
+    def __init__(
+        self,
+        detail: str,
+        error_code: str = "SERVER_CONFIGURATION_ERROR",
+    ):
         super().__init__(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=detail,
-            error_code="SERVER_CONFIGURATION_ERROR",
+            error_code=error_code,
         )

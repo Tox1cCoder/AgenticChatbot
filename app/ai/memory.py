@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections import deque
 from uuid import UUID
@@ -34,20 +35,25 @@ class ConversationMemory:
             return
 
         try:
-            db = next(get_db())
-            try:
-                loaded_messages, total_available = self._load_messages_from_db(db)
-
-                self._messages.clear()
-                self._messages.extend(loaded_messages)
-
-            finally:
-                db.close()
+            loaded_messages, _total_available = await asyncio.to_thread(
+                self._load_messages_from_storage
+            )
+            self._messages.clear()
+            self._messages.extend(loaded_messages)
 
             self._initialized = True
         except Exception as e:
             logger.error(f"Failed to initialize memory: {e}")
             self._initialized = True
+
+    def _load_messages_from_storage(self) -> tuple[list[AgentMessage], int]:
+        """Load persisted conversation history using a synchronous SQLAlchemy session."""
+
+        db = next(get_db())
+        try:
+            return self._load_messages_from_db(db)
+        finally:
+            db.close()
 
     def _load_messages_from_db(self, db: Session) -> tuple[list[AgentMessage], int]:
         collected: list[AgentMessage] = []

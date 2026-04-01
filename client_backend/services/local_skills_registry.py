@@ -77,28 +77,46 @@ class LocalSkillsRegistry:
     """
 
     def __init__(self, skill_roots: list[str] | None = None):
-        self.skill_roots = skill_roots or client_settings.skills_roots
+        self._explicit_skill_roots = list(skill_roots) if skill_roots is not None else None
+        self.skill_roots = (
+            list(self._explicit_skill_roots)
+            if self._explicit_skill_roots is not None
+            else list(client_settings.skills_roots)
+        )
         self.skills: dict[str, SkillMetadata] = {}
         self._initialized = False
+        self._active_user_id: str | None = None
+        self._active_skill_roots: tuple[str, ...] = ()
 
     async def initialize(self) -> None:
         """
         Initialize the registry by scanning skill roots.
         """
-        if self._initialized:
+        current_user_id = self._resolve_current_user_id()
+        resolved_skill_roots = tuple(self._resolve_skill_roots())
+        roots_changed = resolved_skill_roots != self._active_skill_roots
+
+        if self._initialized and not roots_changed:
             self._apply_persisted_skill_state()
+            self._active_user_id = current_user_id
             return
 
         logger.info("Initializing local skills registry...")
+        self.skill_roots = list(resolved_skill_roots)
 
         if not self.skill_roots:
             logger.warning("No skill roots configured")
+            self.skills = {}
             self._initialized = True
+            self._active_user_id = current_user_id
+            self._active_skill_roots = resolved_skill_roots
             return
 
         await self.scan_skills()
 
         self._initialized = True
+        self._active_user_id = current_user_id
+        self._active_skill_roots = resolved_skill_roots
         logger.info(f"Skills registry initialized with {len(self.skills)} skills")
 
     async def scan_skills(self) -> int:
@@ -245,46 +263,15 @@ class LocalSkillsRegistry:
         return False
 
     def get_skill(self, skill_name: str) -> SkillMetadata | None:
-        """
-        Get a skill by name.
-
-        Args:
-            skill_name: The skill name.
-
-        Returns:
-            SkillMetadata if found, None otherwise.
-        """
         return self.skills.get(skill_name)
 
     def get_all_skills(self) -> list[SkillMetadata]:
-        """
-        Get all skills.
-
-        Returns:
-            List of SkillMetadata objects.
-        """
         return list(self.skills.values())
 
     def get_enabled_skills(self) -> list[SkillMetadata]:
-        """
-        Get only enabled skills.
-
-        Returns:
-            List of enabled SkillMetadata objects.
-        """
         return [skill for skill in self.skills.values() if skill.enabled]
 
     def set_skill_enabled(self, skill_name: str, enabled: bool) -> bool:
-        """
-        Enable or disable a skill.
-
-        Args:
-            skill_name: The skill name.
-            enabled: Whether to enable or disable.
-
-        Returns:
-            True if updated successfully.
-        """
         skill = self.skills.get(skill_name)
         if not skill:
             return False
@@ -295,15 +282,6 @@ class LocalSkillsRegistry:
         return True
 
     def bulk_set_enabled(self, skill_states: dict[str, bool]) -> int:
-        """
-        Set enabled state for multiple skills.
-
-        Args:
-            skill_states: Dict mapping skill_name -> enabled.
-
-        Returns:
-            Number of skills updated.
-        """
         count = 0
         for skill_name, enabled in skill_states.items():
             if self.set_skill_enabled(skill_name, enabled):
@@ -368,15 +346,6 @@ class LocalSkillsRegistry:
         return results
 
     def get_skills_by_category(self, category: str) -> list[SkillMetadata]:
-        """
-        Get skills by category.
-
-        Args:
-            category: The category name.
-
-        Returns:
-            List of SkillMetadata objects in the category.
-        """
         return [
             skill
             for skill in self.skills.values()
@@ -384,12 +353,6 @@ class LocalSkillsRegistry:
         ]
 
     def get_categories(self) -> set[str]:
-        """
-        Get all unique skill categories.
-
-        Returns:
-            Set of category names.
-        """
         categories = set()
         for skill in self.skills.values():
             if skill.category:
@@ -401,9 +364,10 @@ class LocalSkillsRegistry:
         Refresh the registry by rescanning all skill roots.
 
         Returns:
-            Number of new skills discovered.
+            Number of newly discovered skills.
         """
         logger.info("Refreshing skills registry...")
+        self.skill_roots = self._resolve_skill_roots()
 
         # Keep track of existing skills
         old_count = len(self.skills)
@@ -412,14 +376,30 @@ class LocalSkillsRegistry:
         await self.scan_skills()
 
         new_count = len(self.skills)
-        discovered = new_count - old_count
+        discovered = max(new_count - old_count, 0)
+        removed = max(old_count - new_count, 0)
 
-        logger.info(f"Refresh complete: {new_count} total skills ({discovered} new)")
+        logger.info(
+            "Refresh complete: %s total skills (%s new, %s removed)",
+            new_count,
+            discovered,
+            removed,
+        )
+        self._active_user_id = self._resolve_current_user_id()
+        self._active_skill_roots = tuple(self.skill_roots)
         return discovered
 
-    def _get_skill_state_path(self) -> Path | None:
+    def _resolve_current_user_id(self) -> str | None:
         auth_service = get_upstream_auth_service()
-        current_user_id = auth_service.get_current_user_id()
+        return auth_service.get_current_user_id()
+
+    def _resolve_skill_roots(self) -> list[str]:
+        if self._explicit_skill_roots is not None:
+            return list(self._explicit_skill_roots)
+        return list(client_settings.skills_roots)
+
+    def _get_skill_state_path(self) -> Path | None:
+        current_user_id = self._resolve_current_user_id()
         if not current_user_id:
             return None
         return get_profile_subdir(current_user_id, "skills") / "state.json"
@@ -445,6 +425,9 @@ class LocalSkillsRegistry:
         return {str(name): bool(value) for name, value in enabled_state.items()}
 
     def _apply_persisted_skill_state(self) -> None:
+        for skill in self.skills.values():
+            skill.enabled = True
+
         persisted = self._load_persisted_skill_state()
         if not persisted:
             return
@@ -473,7 +456,6 @@ _skills_registry: LocalSkillsRegistry | None = None
 
 
 def get_skills_registry() -> LocalSkillsRegistry:
-    """Get the global skills registry."""
     global _skills_registry
     if _skills_registry is None:
         _skills_registry = LocalSkillsRegistry()
@@ -481,6 +463,5 @@ def get_skills_registry() -> LocalSkillsRegistry:
 
 
 async def initialize_skills_registry() -> None:
-    """Initialize the global skills registry."""
     registry = get_skills_registry()
     await registry.initialize()

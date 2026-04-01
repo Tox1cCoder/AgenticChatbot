@@ -7,9 +7,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.ai.schemas import InterruptDecision, InterruptResponse
 from app.models.enums import MessageRole
 from app.schemas.feedback import FeedbackRead
+from app.schemas.workflow import InterruptDecision, InterruptResponse
 from app.utils.case_conversion import (
     convert_dict_keys_to_snake_case,
 )

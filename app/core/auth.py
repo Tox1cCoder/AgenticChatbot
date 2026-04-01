@@ -9,6 +9,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.core.exceptions import (
     AuthenticationException,
     AuthorizationException,
+    ResourceNotFoundException,
     TokenExpiredException,
 )
 from app.core.security import get_user_id_from_token, verify_refresh_token
@@ -106,16 +107,13 @@ async def get_current_user(
         TokenExpiredException: If the token has expired
         AuthenticationException: If the token is invalid or user not found
     """
-    from app.core.container import container
-    from app.interfaces.user_service_interface import IUserService
-
+    user_service = get_user_service()
     token = credentials.credentials
     try:
         user_id_str = get_user_id_from_token(token, jwt_service)
         user_id = UUID(user_id_str)
 
         # Get user from service
-        user_service: IUserService = container.user_service()
         user_read = user_service.get_by_id(user_id)
 
         # Convert UserRead schema to User model
@@ -138,4 +136,9 @@ async def get_current_user(
         raise AuthenticationException(
             detail="Invalid user ID format in token",
             error_code="INVALID_USER_ID_FORMAT",
+        ) from e
+    except ResourceNotFoundException as e:
+        raise AuthenticationException(
+            detail="Authenticated user no longer exists",
+            error_code="AUTHENTICATED_USER_NOT_FOUND",
         ) from e

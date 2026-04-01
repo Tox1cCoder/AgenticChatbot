@@ -8,6 +8,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.messages import HumanMessage as LCHumanMessage
 
 from ...core.config import settings
+from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..utils import coerce_response_text
@@ -17,11 +18,14 @@ logger = logging.getLogger(__name__)
 
 
 class ImageGeneratorAgent(BaseAgent):
-    def __init__(self):
+    def __init__(self, runtime_model_resolver: IRuntimeModelResolver | None = None):
         self.default_aspect_ratio = settings.image_generator_default_aspect_ratio
         self.max_images = max(1, settings.image_generator_max_images)
         self.enabled = settings.enable_image_generation
-        super().__init__(agent_config_key="image_generator")
+        super().__init__(
+            agent_config_key="image_generator",
+            runtime_model_resolver=runtime_model_resolver,
+        )
 
     def _init_gemini(self) -> None:
         if not self.enabled:

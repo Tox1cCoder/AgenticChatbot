@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
 
 from ...core.config import settings
+from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..model_factory import ModelFactory
 from ..planning_tools import create_write_todos_tool
 from ..prompts import PLANNING_EXECUTION_PROMPT
@@ -28,9 +29,17 @@ from .base_agent import BaseAgent
 class PlanningAgent(BaseAgent):
     """Planning agent that manages task plans using ReAct-style tool-calling."""
 
-    def __init__(self, model_name: str | None = None):
+    def __init__(
+        self,
+        model_name: str | None = None,
+        runtime_model_resolver: IRuntimeModelResolver | None = None,
+    ):
         """Initialize Planning Agent with 'planning' config key."""
-        super().__init__(model_name=model_name, agent_config_key="planning")
+        super().__init__(
+            model_name=model_name,
+            agent_config_key="planning",
+            runtime_model_resolver=runtime_model_resolver,
+        )
 
     @property
     def agent_type(self) -> AgentType:

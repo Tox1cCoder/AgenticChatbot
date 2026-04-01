@@ -646,34 +646,37 @@ class ProviderService:
             logger.error("Failed to fetch OpenAI models: %s", e)
             raise ValueError(f"Failed to fetch OpenAI models: {e}") from e
 
+    def _fetch_gemini_models_sync(self, api_key: str) -> list[dict[str, Any]]:
+        from google import genai
+
+        client = genai.Client(api_key=api_key)
+        pager = client.models.list(config={"page_size": 100, "query_base": True})
+
+        normalized_models: list[dict[str, Any]] = []
+        for model in pager:
+            model_name = getattr(model, "name", None)
+            if not isinstance(model_name, str) or not model_name.strip():
+                continue
+
+            model_id = model_name.rsplit("/", 1)[-1].strip()
+            supported_actions = list(getattr(model, "supported_actions", None) or [])
+            if not self._should_include_gemini_model(model_id, supported_actions):
+                continue
+
+            normalized_models.append(
+                self._normalize_gemini_model(
+                    model_id=model_id,
+                    display_name=getattr(model, "display_name", None),
+                    supported_actions=supported_actions,
+                    thinking_metadata=getattr(model, "thinking", None),
+                )
+            )
+
+        return self._apply_recommended_model_flags("gemini", normalized_models)
+
     async def _fetch_gemini_models(self, api_key: str) -> list[dict[str, Any]]:
         try:
-            from google import genai
-
-            client = genai.Client(api_key=api_key)
-            pager = client.models.list(config={"page_size": 100, "query_base": True})
-
-            normalized_models: list[dict[str, Any]] = []
-            for model in pager:
-                model_name = getattr(model, "name", None)
-                if not isinstance(model_name, str) or not model_name.strip():
-                    continue
-
-                model_id = model_name.rsplit("/", 1)[-1].strip()
-                supported_actions = list(getattr(model, "supported_actions", None) or [])
-                if not self._should_include_gemini_model(model_id, supported_actions):
-                    continue
-
-                normalized_models.append(
-                    self._normalize_gemini_model(
-                        model_id=model_id,
-                        display_name=getattr(model, "display_name", None),
-                        supported_actions=supported_actions,
-                        thinking_metadata=getattr(model, "thinking", None),
-                    )
-                )
-
-            normalized_models = self._apply_recommended_model_flags("gemini", normalized_models)
+            normalized_models = await asyncio.to_thread(self._fetch_gemini_models_sync, api_key)
             logger.info("Fetched %d normalized Gemini models", len(normalized_models))
             return normalized_models
         except Exception as e:

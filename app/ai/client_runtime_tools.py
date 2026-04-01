@@ -17,6 +17,15 @@ from .tool_context import get_tool_context
 
 logger = logging.getLogger(__name__)
 
+# Tool origin constants for clean separation between server and client tools
+TOOL_ORIGIN_SERVER_MCP = "server_mcp"  # MCP tools running on the server
+TOOL_ORIGIN_CLIENT_MCP = "client_mcp"  # MCP tools running on a client device
+TOOL_ORIGIN_CLIENT_NATIVE = "client_native"  # Native tools on a client device (shell, filesystem)
+TOOL_ORIGIN_INTERNAL = "internal"  # Built-in server tools (tool_search, write_todos, etc.)
+
+# Prefix used for client tool exposed names to prevent collision with server tools
+CLIENT_TOOL_PREFIX = "client__"
+
 _CLIENT_TOOL_CACHE = TTLCache(
     maxsize=512,
     ttl=max(1, settings.client_runtime_catalog_cache_ttl_seconds),
@@ -37,9 +46,14 @@ class ClientRuntimeToolSpec:
 
     @property
     def tool_origin(self) -> str:
+        """Return the normalized tool origin constant."""
         if self.origin == "mcp":
-            return "client_mcp"
-        return "client_native"
+            return TOOL_ORIGIN_CLIENT_MCP
+        return TOOL_ORIGIN_CLIENT_NATIVE
+
+    def is_client_tool(self) -> bool:
+        """Check if this is a client-side tool (always True for ClientRuntimeToolSpec)."""
+        return True
 
 
 def _sanitize_name_token(value: str | None) -> str:
@@ -58,14 +72,20 @@ def _normalize_input_schema(schema: Any) -> dict[str, Any]:
 
 
 def _build_exposed_name(raw_entry: dict[str, Any], seen: set[str]) -> str:
+    """
+    Build a unique exposed name for a client tool.
+
+    Client tools always get the CLIENT_TOOL_PREFIX to ensure they cannot collide
+    with server-side MCP tools or internal tools.
+    """
     origin = str(raw_entry.get("origin") or "native").strip().lower()
     base_name = _sanitize_name_token(raw_entry.get("name"))
 
     if origin == "mcp":
         server_name = _sanitize_name_token(raw_entry.get("server_name"))
-        candidate = f"client__{server_name}__{base_name}"
+        candidate = f"{CLIENT_TOOL_PREFIX}{server_name}__{base_name}"
     else:
-        candidate = f"client__{base_name}"
+        candidate = f"{CLIENT_TOOL_PREFIX}{base_name}"
 
     if candidate not in seen:
         seen.add(candidate)
@@ -127,6 +147,31 @@ def _format_tool_result(result: Any) -> str:
     return json.dumps(result, indent=2, ensure_ascii=False, default=str)
 
 
+def _format_runtime_tool_error(response: dict[str, Any]) -> str:
+    error_context = response.get("error_context")
+    if isinstance(error_context, dict):
+        message = str(
+            error_context.get("message")
+            or response.get("error")
+            or "Unknown client-local tool error"
+        )
+        code = error_context.get("code")
+        detail = error_context.get("detail")
+        extras: list[str] = []
+        if code:
+            extras.append(f"code={code}")
+        if detail not in (None, "", {}):
+            extras.append(f"detail={_format_tool_result(detail)}")
+        if extras:
+            return f"{message} ({'; '.join(extras)})"
+        return message
+
+    error_message = response.get("error")
+    if isinstance(error_message, str) and error_message:
+        return error_message
+    return "Unknown client-local tool error"
+
+
 def _build_tool(
     *,
     spec: ClientRuntimeToolSpec,
@@ -165,8 +210,7 @@ def _build_tool(
         )
 
         if not response.get("success", False):
-            error_message = response.get("error") or "Unknown client-local tool error"
-            raise RuntimeError(error_message)
+            raise RuntimeError(_format_runtime_tool_error(response))
 
         return _format_tool_result(response.get("result"))
 
@@ -182,12 +226,19 @@ def _build_tool(
         args_schema=spec.input_schema,
         infer_schema=False,
         metadata={
+            # Core identification - marks this as a client-side tool
             "client_runtime": True,
+            "is_client_tool": True,  # Explicit flag for filtering
+            # Device binding - tools are scoped to a specific device session
             "device_id": bound_device_id,
-            "tool_origin": spec.tool_origin,
-            "server_name": spec.server_name,
-            "qualified_tool_id": spec.qualified_tool_id,
-            "source_tool_name": spec.name,
+            "user_id": bound_user_id,
+            "session_id": bound_session_id,
+            # Tool origin classification for clean separation
+            "tool_origin": spec.tool_origin,  # TOOL_ORIGIN_CLIENT_MCP or TOOL_ORIGIN_CLIENT_NATIVE
+            # Original tool identification for dispatch
+            "server_name": spec.server_name,  # MCP server name on client (if origin=mcp)
+            "qualified_tool_id": spec.qualified_tool_id,  # e.g., "native::shell_execute"
+            "source_tool_name": spec.name,  # Original tool name before prefixing
         },
     )
 
@@ -238,3 +289,48 @@ def get_client_runtime_tools(
 
     _CLIENT_TOOL_CACHE[cache_key] = tools
     return tools
+
+
+def is_client_tool(tool: BaseTool) -> bool:
+    """
+    Check if a tool is a client-side tool (runs on a connected device).
+
+    This is used to ensure clean separation between server MCP tools and
+    client device tools in tool search and execution paths.
+
+    Args:
+        tool: The tool to check
+
+    Returns:
+        True if the tool is a client-side tool
+    """
+    metadata = getattr(tool, "metadata", None) or {}
+
+    # Check explicit flag first
+    if metadata.get("is_client_tool"):
+        return True
+
+    # Fallback: check for client_runtime marker
+    if metadata.get("client_runtime"):
+        return True
+
+    # Fallback: check name prefix
+    tool_name = getattr(tool, "name", "") or ""
+    return bool(tool_name.startswith(CLIENT_TOOL_PREFIX))
+
+
+def get_client_tool_device_id(tool: BaseTool) -> str | None:
+    """
+    Get the device_id that a client tool is bound to.
+
+    Args:
+        tool: The tool to check
+
+    Returns:
+        The device_id string if this is a client tool, None otherwise
+    """
+    if not is_client_tool(tool):
+        return None
+
+    metadata = getattr(tool, "metadata", None) or {}
+    return metadata.get("device_id")

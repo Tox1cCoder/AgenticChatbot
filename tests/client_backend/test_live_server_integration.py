@@ -58,7 +58,7 @@ def _make_identity() -> dict[str, str]:
     }
 
 
-def _provision_user_on_server(identity: dict[str, str]) -> None:
+def _provision_user_on_server(identity: dict[str, str]) -> dict[str, str]:
     response = requests.post(
         f"{LIVE_SERVER_URL}/auth/signup",
         json={
@@ -71,6 +71,7 @@ def _provision_user_on_server(identity: dict[str, str]) -> None:
     assert response.status_code < 300, response.text
     payload = response.json()
     assert payload["success"] is True, payload
+    return payload["data"]
 
 
 def _signup_and_login(
@@ -366,6 +367,50 @@ def test_live_proxy_and_local_management_endpoints(live_client_backend):
         mcp_payload = _assert_api_success(client.get("/api/mcp/servers", headers=local_headers))
         assert "servers" in mcp_payload["data"]
         assert "totalCount" in mcp_payload["data"]
+
+
+def test_live_server_admin_routes_require_auth_and_scope_user_access(live_client_backend):
+    with TestClient(app) as client:
+        session = _signup_and_login(
+            client,
+            login_path="/auth/login",
+            signup_via_client=False,
+        )
+
+    other_user = _provision_user_on_server(_make_identity())
+    access_headers = _auth_headers(session["access_token"])
+
+    unauthenticated_skills = requests.get(f"{LIVE_SERVER_URL}/skills", timeout=120)
+    assert unauthenticated_skills.status_code in {401, 403}, unauthenticated_skills.text
+
+    unauthenticated_mcp = requests.get(f"{LIVE_SERVER_URL}/mcp/servers", timeout=120)
+    assert unauthenticated_mcp.status_code in {401, 403}, unauthenticated_mcp.text
+
+    own_user_payload = _assert_api_success(
+        requests.get(
+            f"{LIVE_SERVER_URL}/users/{session['user_id']}",
+            headers=access_headers,
+            timeout=120,
+        )
+    )
+    assert own_user_payload["data"]["email"] == session["email"]
+
+    other_user_response = requests.get(
+        f"{LIVE_SERVER_URL}/users/{other_user['id']}",
+        headers=access_headers,
+        timeout=120,
+    )
+    assert other_user_response.status_code == 403, other_user_response.text
+
+    skills_payload = _assert_api_success(
+        requests.get(f"{LIVE_SERVER_URL}/skills", headers=access_headers, timeout=120)
+    )
+    assert "skills" in skills_payload["data"]
+
+    mcp_payload = _assert_api_success(
+        requests.get(f"{LIVE_SERVER_URL}/mcp/servers", headers=access_headers, timeout=120)
+    )
+    assert "servers" in mcp_payload["data"]
 
 
 def test_live_document_upload_list_get_task_and_delete_flow(live_client_backend, tmp_path):

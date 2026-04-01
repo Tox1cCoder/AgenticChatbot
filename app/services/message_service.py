@@ -9,17 +9,10 @@ from uuid import UUID
 
 import redis
 
-from app.ai.schemas import (
-    AgentResponse,
-    InterruptDecision,
-    InterruptDecisionType,
-    InterruptResponse,
-)
 from app.ai.suggestion_generator import generate_follow_up_suggestions
 from app.core.config import settings
 from app.core.exceptions import PauseReason
 from app.core.response_constants import (
-    ERROR_NO_RESPONSE,
     ERROR_RESPONSE_AFTER_RESUME,
     NO_RESPONSE_GENERATED,
     UNKNOWN_ERROR,
@@ -36,9 +29,16 @@ from app.repositories.message import MessageRepository
 from app.repositories.tool_approval import ToolApprovalRepository
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageRead, MessageUpdate
+from app.schemas.workflow import (
+    InterruptDecision,
+    InterruptDecisionType,
+    InterruptResponse,
+    WorkflowExecutionRequest,
+    WorkflowPlanningContext,
+    WorkflowResponse,
+)
 from app.services.ai_service import AIService
 from app.services.generation_registry import get_generation_registry
-from app.services.model_config_service import ModelConfigService
 from app.utils.text_processing import fix_markdown_code_blocks, sanitize_persona
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 from app.utils.validation.message_validation import MessageValidationUtils
@@ -55,7 +55,6 @@ class MessageService(IMessageService):
         conversation_validation_utils: ConversationValidationUtils,
         message_validation_utils: MessageValidationUtils,
         ai_service: AIService,
-        model_config_service: ModelConfigService | None = None,
         tool_approval_repository: ToolApprovalRepository | None = None,
         hitl_interrupt_repository: HITLInterruptRepository | None = None,
         task_plan_service: ITaskPlanService | None = None,
@@ -64,7 +63,6 @@ class MessageService(IMessageService):
         self.conversation_validation_utils = conversation_validation_utils
         self.message_validation_utils = message_validation_utils
         self.ai_service = ai_service
-        self.model_config_service = model_config_service
         self.tool_approval_repository = tool_approval_repository
         self.hitl_interrupt_repository = hitl_interrupt_repository
         self.task_plan_service = task_plan_service
@@ -102,11 +100,8 @@ class MessageService(IMessageService):
             id=message_id,
         )
         bot_message = self.repository.create(bot_response_entity)
-        try:
-            if getattr(self.ai_service, "workflow", None):
-                self.ai_service.workflow.invalidate_history_cache(str(conversation_id))
-        except Exception:
-            pass
+        with contextlib.suppress(Exception):
+            self.ai_service.invalidate_history_cache(str(conversation_id))
         return MessageRead.model_validate(bot_message)
 
     @staticmethod
@@ -152,7 +147,7 @@ class MessageService(IMessageService):
     def _infer_plan_lifecycle(
         self,
         *,
-        response: AgentResponse | None,
+        response: WorkflowResponse | None,
         current_lifecycle: str | PlanLifecycle | None,
     ) -> PlanLifecycle | None:
         if not response or not isinstance(getattr(response, "metadata", None), dict):
@@ -205,7 +200,7 @@ class MessageService(IMessageService):
         *,
         conversation_id: UUID,
         user_id: UUID | None,
-        bot_response: AgentResponse | None,
+        bot_response: WorkflowResponse | None,
         current_lifecycle: str | PlanLifecycle | None,
     ) -> bool:
         lifecycle = self._infer_plan_lifecycle(
@@ -419,69 +414,20 @@ class MessageService(IMessageService):
             conversation = self.conversation_validation_utils.conversation_repository.get_by_id(
                 message_create_data.conversation_id
             )
-            user_id = user_id or (conversation.owner_id if conversation else None)
-            persona = conversation.persona_prompt if conversation else None
-            sanitized_persona = sanitize_persona(persona)
-
-            planning_mode_enabled = conversation.planning_mode_enabled if conversation else False
-            _lifecycle = getattr(conversation, "plan_lifecycle", None)
-            plan_lifecycle_value = (
-                _lifecycle.value
-                if hasattr(_lifecycle, "value")
-                else str(_lifecycle)
-                if _lifecycle is not None
-                else None
-            )
-
-            # Use shared helper to prepare planning context (non-stream path)
-            planning_ctx = await self._prepare_planning_context(
-                conversation_id=message_create_data.conversation_id,
-                user_id=user_id,
-                message_content=message_create_data.content,
-                planning_mode_enabled=planning_mode_enabled,
-                plan_lifecycle=plan_lifecycle_value,
-            )
-            planning_mode_enabled = planning_ctx["planning_mode_enabled"]
-            has_existing_plan = planning_ctx["has_existing_plan"]
-            current_task_context = planning_ctx["current_task_context"]
-            existing_tasks_dict = planning_ctx["existing_tasks_dict"]
-            plan_lifecycle_value = planning_ctx.get("plan_lifecycle")
-
-            # Extract attachments from message_create_data if present
-            attachments = (
-                message_create_data.attachments
-                if hasattr(message_create_data, "attachments")
-                else None
-            )
-
-            model_request = (
-                message_create_data.model_config_field
-                if (
-                    hasattr(message_create_data, "model_config_field")
-                    and isinstance(message_create_data.model_config_field, dict)
-                    and message_create_data.model_config_field
-                )
-                else None
-            )
-
             (
-                bot_response_content,
-                bot_metadata,
-                interrupt_payload,
-            ) = await self._run_plan_execution_loop(
-                message_content=message_create_data.content,
-                conversation_id=message_create_data.conversation_id,
+                resolved_user_id,
+                sanitized_persona,
+                workflow_request,
+            ) = await self._build_user_message_workflow_request(
+                message_create_data=message_create_data,
                 user_id=user_id,
-                device_id=message_create_data.device_id,
-                sanitized_persona=sanitized_persona,
-                planning_mode_enabled=planning_mode_enabled,
-                has_existing_plan=has_existing_plan,
-                current_task_context=current_task_context,
-                existing_tasks_dict=existing_tasks_dict,
-                attachments=attachments,
-                model_request=model_request,
-                persona=sanitized_persona,
-                plan_lifecycle=plan_lifecycle_value,
+                conversation=conversation,
+            )
+
+            bot_response, interrupt_payload = await self._execute_user_message_workflow(
+                workflow_request=workflow_request,
+                conversation_id=message_create_data.conversation_id,
+                user_id=resolved_user_id,
             )
 
             if interrupt_payload:
@@ -506,15 +452,17 @@ class MessageService(IMessageService):
                             if isinstance(interrupt_payload, InterruptResponse)
                             else None
                         ),
-                        user_id=user_id,
+                        user_id=resolved_user_id,
                     )
 
                 return user_message_read
 
-            self._create_bot_response_message(
+            await self._persist_completed_workflow_response(
                 conversation_id=message_create_data.conversation_id,
-                content=bot_response_content,
-                metadata=bot_metadata,
+                user_id=resolved_user_id,
+                bot_response=bot_response,
+                sanitized_persona=sanitized_persona,
+                workflow_request=workflow_request,
             )
 
         return MessageRead.model_validate(created_message)
@@ -583,67 +531,22 @@ class MessageService(IMessageService):
 
         if message_create_data.role == MessageRole.user:
             # Extract context from the already-loaded conversation
-            user_id = user_id or (conversation.owner_id if conversation else None)
-            persona = conversation.persona_prompt if conversation else None
-            sanitized_persona = sanitize_persona(persona)
-
-            planning_mode_enabled = conversation.planning_mode_enabled if conversation else False
-            _lc = getattr(conversation, "plan_lifecycle", None)
-            plan_lifecycle_value = (
-                _lc.value if hasattr(_lc, "value") else str(_lc) if _lc is not None else None
-            )
-
-            # Use shared helper to prepare planning context (stream path)
-            planning_ctx = await self._prepare_planning_context(
-                conversation_id=message_create_data.conversation_id,
+            (
+                resolved_user_id,
+                sanitized_persona,
+                workflow_request,
+            ) = await self._build_user_message_workflow_request(
+                message_create_data=message_create_data,
                 user_id=user_id,
-                message_content=message_create_data.content,
-                planning_mode_enabled=planning_mode_enabled,
-                plan_lifecycle=plan_lifecycle_value,
-            )
-            planning_mode_enabled = planning_ctx["planning_mode_enabled"]
-            has_existing_plan = planning_ctx["has_existing_plan"]
-            current_task_context = planning_ctx["current_task_context"]
-            existing_tasks_dict = planning_ctx["existing_tasks_dict"]
-            plan_lifecycle_value = planning_ctx.get("plan_lifecycle")
-
-            # Extract attachments from message_create_data if present
-            attachments = (
-                message_create_data.attachments
-                if hasattr(message_create_data, "attachments")
-                else None
-            )
-
-            model_request = (
-                message_create_data.model_config_field
-                if (
-                    hasattr(message_create_data, "model_config_field")
-                    and isinstance(message_create_data.model_config_field, dict)
-                    and message_create_data.model_config_field
-                )
-                else None
+                conversation=conversation,
             )
 
             # Stream bot response generation
-            bot_response_content = ERROR_NO_RESPONSE
             bot_response = None
             bot_message_persisted = False
 
             try:
-                async for event in self.ai_service.generate_bot_response_stream(
-                    user_message=message_create_data.content,
-                    conversation_id=message_create_data.conversation_id,
-                    user_id=user_id,
-                    device_id=message_create_data.device_id,
-                    attachments=attachments,
-                    current_task=current_task_context,
-                    planning_mode_enabled=planning_mode_enabled,
-                    has_existing_plan=has_existing_plan,
-                    existing_tasks=existing_tasks_dict,
-                    model_request=model_request,
-                    persona=sanitized_persona,
-                    plan_lifecycle=plan_lifecycle_value,
-                ):
+                async for event in self.ai_service.execute_request_stream(workflow_request):
                     # ---- Check cancellation before processing each event ----
                     if inflight.is_cancelled:
                         logging.info(
@@ -688,7 +591,7 @@ class MessageService(IMessageService):
                         )
                         self._set_plan_lifecycle(
                             message_create_data.conversation_id,
-                            user_id,
+                            resolved_user_id,
                             PlanLifecycle.paused,
                         )
 
@@ -707,7 +610,7 @@ class MessageService(IMessageService):
                                 thread_id=event.get("thread_id")
                                 or str(message_create_data.conversation_id),
                                 next_nodes=event.get("next"),
-                                user_id=user_id,
+                                user_id=resolved_user_id,
                                 message_id=bot_message_id,
                             ).model_dump(mode="json"),
                         }
@@ -730,7 +633,7 @@ class MessageService(IMessageService):
                     elif event_type == "complete":
                         # Store final response
                         bot_response = event.get("response")
-                        bot_response_content = extract_response_content(
+                        extract_response_content(
                             bot_response, NO_RESPONSE_GENERATED
                         )
                         break
@@ -739,7 +642,7 @@ class MessageService(IMessageService):
                         # Handle error
                         bot_response = event.get("response")
                         error_msg = event.get("error", UNKNOWN_ERROR)
-                        bot_response_content = extract_response_content(
+                        extract_response_content(
                             bot_response, f"Error: {error_msg}"
                         )
                         break
@@ -768,32 +671,15 @@ class MessageService(IMessageService):
                     registry.remove(user_message_id)
                     return
 
-                bot_response_content = fix_markdown_code_blocks(bot_response_content)
-
-                # Create metadata for bot response
-                bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
-                bot_metadata["reply_to_user_message_id"] = str(user_message_id)
-
-                # Sync todos and persist the derived lifecycle from graph state.
-                if self._sync_response_plan_state(
+                bot_message = await self._persist_completed_workflow_response(
                     conversation_id=message_create_data.conversation_id,
-                    user_id=user_id,
+                    user_id=resolved_user_id,
                     bot_response=bot_response,
-                    current_lifecycle=plan_lifecycle_value,
-                ):
-                    bot_metadata["todos_synced"] = True
-
-                # Generate follow-up question suggestions
-                await self._generate_and_add_suggestions(
-                    message_create_data.content, bot_response_content, bot_metadata
-                )
-
-                # Create and persist bot response message
-                bot_message = self._create_bot_response_message(
-                    conversation_id=message_create_data.conversation_id,
-                    content=bot_response_content,
-                    metadata=bot_metadata,
+                    sanitized_persona=sanitized_persona,
+                    workflow_request=workflow_request,
                     message_id=bot_message_id,
+                    reply_to_user_message_id=user_message_id,
+                    suggestion_source_message=message_create_data.content,
                 )
                 bot_message_persisted = True
 
@@ -1457,31 +1343,34 @@ class MessageService(IMessageService):
             "status": (task.status.value if hasattr(task.status, "value") else str(task.status)),
         }
 
+    @staticmethod
+    def _extract_message_execution_inputs(
+        message_create_data: MessageCreate,
+    ) -> tuple[list | None, dict[str, Any] | None]:
+        attachments = message_create_data.attachments or None
+        model_request = (
+            message_create_data.model_config_field
+            if (
+                isinstance(message_create_data.model_config_field, dict)
+                and message_create_data.model_config_field
+            )
+            else None
+        )
+        return attachments, model_request
+
     async def _prepare_planning_context(
         self,
         conversation_id: UUID,
         user_id: UUID,
         message_content: str,
         planning_mode_enabled: bool,
-        plan_lifecycle: str | None = None,
-    ) -> dict[str, Any]:
-        """
-        Prepare task planning context for message creation.
-
-        Returns a dict with keys:
-        - planning_mode_enabled: bool
-        - has_existing_plan: bool
-        - current_task_context: Optional[dict]
-        - existing_tasks_dict: Optional[List[dict]]
-        - plan_lifecycle: Optional[str]
-        """
-        result = {
-            "planning_mode_enabled": planning_mode_enabled,
-            "has_existing_plan": False,
-            "current_task_context": None,
-            "existing_tasks_dict": None,
-            "plan_lifecycle": plan_lifecycle,
-        }
+        plan_lifecycle: PlanLifecycle | str | None = None,
+    ) -> WorkflowPlanningContext:
+        result = WorkflowPlanningContext(
+            planning_mode_enabled=planning_mode_enabled,
+            has_existing_plan=False,
+            plan_lifecycle=self._coerce_plan_lifecycle(plan_lifecycle),
+        )
 
         if not self.task_plan_service or not user_id:
             return result
@@ -1490,29 +1379,29 @@ class MessageService(IMessageService):
             existing_tasks = self.task_plan_service.get_conversation_tasks(
                 conversation_id, user_id, include_completed=True
             )
-            result["has_existing_plan"] = len(existing_tasks) > 0
+            result.has_existing_plan = len(existing_tasks) > 0
 
             # Create plan if planning mode enabled but no plan exists
-            if planning_mode_enabled and not result["has_existing_plan"]:
+            if planning_mode_enabled and not result.has_existing_plan:
                 created_tasks = await self.task_plan_service.create_task_plan(
                     conversation_id, message_content, user_id
                 )
-                result["has_existing_plan"] = len(created_tasks) > 0
-                if result["has_existing_plan"]:
+                result.has_existing_plan = len(created_tasks) > 0
+                if result.has_existing_plan:
                     existing_tasks = self.task_plan_service.get_conversation_tasks(
                         conversation_id, user_id, include_completed=True
                     )
 
-            if result["has_existing_plan"]:
-                result["planning_mode_enabled"] = True
+            if result.has_existing_plan:
+                result.planning_mode_enabled = True
 
             # Get current task for execution context
             current_task = self.task_plan_service.get_active_or_next_task(conversation_id, user_id)
-            result["current_task_context"] = self._build_task_context_dict(current_task)
+            result.current_task = self._build_task_context_dict(current_task)
 
             # Convert existing tasks to dict for planning agent
             if existing_tasks:
-                result["existing_tasks_dict"] = [
+                result.tasks = [
                     {
                         "id": str(task.id),
                         "description": task.description,
@@ -1533,53 +1422,51 @@ class MessageService(IMessageService):
 
         return result
 
-    async def _run_plan_execution_loop(
+    async def _build_user_message_workflow_request(
         self,
         *,
-        message_content: str,
+        message_create_data: MessageCreate,
+        user_id: UUID | None,
+        conversation: Any,
+    ) -> tuple[UUID | None, str | None, WorkflowExecutionRequest]:
+        resolved_user_id = user_id or (conversation.owner_id if conversation else None)
+        sanitized_persona = sanitize_persona(conversation.persona_prompt if conversation else None)
+        planning_context = await self._prepare_planning_context(
+            conversation_id=message_create_data.conversation_id,
+            user_id=resolved_user_id,
+            message_content=message_create_data.content,
+            planning_mode_enabled=conversation.planning_mode_enabled if conversation else False,
+            plan_lifecycle=self._coerce_plan_lifecycle(
+                getattr(conversation, "plan_lifecycle", None)
+            ),
+        )
+        attachments, model_request = self._extract_message_execution_inputs(message_create_data)
+        request = WorkflowExecutionRequest(
+            message=message_create_data.content,
+            conversation_id=str(message_create_data.conversation_id),
+            user_id=str(resolved_user_id) if resolved_user_id else None,
+            device_id=str(message_create_data.device_id) if message_create_data.device_id else None,
+            persona=sanitized_persona,
+            attachments=attachments,
+            model_request=model_request,
+            planning=planning_context,
+        )
+        return resolved_user_id, sanitized_persona, request
+
+    async def _execute_user_message_workflow(
+        self,
+        *,
+        workflow_request: WorkflowExecutionRequest,
         conversation_id: UUID,
         user_id: UUID | None,
-        device_id: UUID | None,
-        sanitized_persona: str | None,
-        planning_mode_enabled: bool,
-        has_existing_plan: bool,
-        current_task_context: dict[str, Any] | None,
-        existing_tasks_dict: list[dict[str, Any]] | None,
-        attachments: list | None,
-        model_request: dict[str, Any] | None = None,
-        persona: str | None = None,
-        plan_lifecycle: str | None = None,
     ) -> tuple[
-        str | None,
-        dict[str, Any],
+        WorkflowResponse | None,
         dict[str, Any] | None,
     ]:
         """
-        Execute planning workflow with graph-driven ReAct loop.
-
-        The graph now handles iteration internally via the planning_tools node.
-        This function makes a single call and syncs todo state afterward.
+        Execute one canonical workflow request and surface interrupts separately.
         """
-        bot_response: AgentResponse | None = None
-        bot_metadata: dict[str, Any] = {}
-        has_plan = has_existing_plan
-
-        # Single call to AI service - graph handles ReAct loop internally
-        bot_response = await self.ai_service.generate_bot_response(
-            user_message=message_content,
-            conversation_id=conversation_id,
-            user_id=user_id,
-            device_id=device_id,
-            attachments=attachments,
-            current_task=current_task_context,
-            all_tasks=existing_tasks_dict,
-            planning_mode_enabled=planning_mode_enabled,
-            has_existing_plan=has_plan,
-            existing_tasks=existing_tasks_dict,
-            model_request=model_request,
-            persona=persona,
-            plan_lifecycle=plan_lifecycle,
-        )
+        bot_response = await self.ai_service.execute_request(workflow_request)
 
         # Handle interrupts (HITL)
         if bot_response and bot_response.metadata and "interrupt" in bot_response.metadata:
@@ -1590,24 +1477,38 @@ class MessageService(IMessageService):
             )
             return (
                 None,
-                {},
                 bot_response.metadata["interrupt"],
             )
 
-        bot_response_content = extract_response_content(bot_response)
+        return bot_response, None
 
+    async def _persist_completed_workflow_response(
+        self,
+        *,
+        conversation_id: UUID,
+        user_id: UUID | None,
+        bot_response: WorkflowResponse | None,
+        sanitized_persona: str | None,
+        workflow_request: WorkflowExecutionRequest,
+        message_id: UUID | None = None,
+        reply_to_user_message_id: UUID | None = None,
+        suggestion_source_message: str | None = None,
+    ) -> MessageRead:
+        bot_response_content = fix_markdown_code_blocks(
+            extract_response_content(bot_response, NO_RESPONSE_GENERATED)
+        )
         bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
+        if reply_to_user_message_id:
+            bot_metadata["reply_to_user_message_id"] = str(reply_to_user_message_id)
 
-        # Sync todos and persist the derived lifecycle from graph state if present.
         if self._sync_response_plan_state(
             conversation_id=conversation_id,
             user_id=user_id,
             bot_response=bot_response,
-            current_lifecycle=plan_lifecycle,
+            current_lifecycle=workflow_request.planning.plan_lifecycle,
         ):
             bot_metadata["todos_synced"] = True
 
-        # Check if planning budget was reached
         if bot_response and bot_response.metadata.get("planning_budget_reached"):
             bot_metadata["execution_paused"] = True
             bot_metadata["execution_pause_reason"] = PauseReason.MAX_TASKS_REACHED.value
@@ -1615,8 +1516,7 @@ class MessageService(IMessageService):
                 "Completed a planning iteration. Send a message to continue."
             )
 
-        # Refresh task data for next_task info
-        if planning_mode_enabled and self.task_plan_service and user_id:
+        if workflow_request.planning.planning_mode_enabled and self.task_plan_service and user_id:
             try:
                 next_task = self.task_plan_service.get_active_or_next_task(conversation_id, user_id)
                 if next_task:
@@ -1628,9 +1528,19 @@ class MessageService(IMessageService):
             except Exception:
                 pass
 
-        bot_response_content = fix_markdown_code_blocks(bot_response_content)
+        if suggestion_source_message:
+            await self._generate_and_add_suggestions(
+                suggestion_source_message,
+                bot_response_content,
+                bot_metadata,
+            )
 
-        return bot_response_content, bot_metadata, None
+        return self._create_bot_response_message(
+            conversation_id=conversation_id,
+            content=bot_response_content,
+            metadata=bot_metadata,
+            message_id=message_id,
+        )
 
     def _sync_todos_to_database(
         self,

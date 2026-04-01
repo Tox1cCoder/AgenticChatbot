@@ -5,6 +5,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from client_backend.api import auth as auth_api
 from client_backend.core import auth as auth_module
 from client_backend.core.security import create_local_session_token
+from client_backend.services.server_api import TokenPair
 
 
 class _AuthStub:
@@ -97,21 +98,16 @@ async def test_require_local_session_accepts_active_upstream_access_token(monkey
 @pytest.mark.asyncio
 async def test_login_returns_server_shape_with_local_metadata(monkeypatch):
     class _AuthServiceStub:
-        async def login(self, email: str, password: str) -> dict:
+        async def login(self, email: str, password: str) -> TokenPair:
             assert email == "user@example.com"
             assert password == "secret"
-            return {
-                "success": True,
-                "message": "Login successful",
-                "data": {
-                    "accessToken": "access-token",
-                    "refreshToken": "refresh-token",
-                    "tokenType": "bearer",
-                    "expiresIn": 3600,
-                    "userId": "user-123",
-                },
-                "error": None,
-            }
+            return TokenPair(
+                access_token="access-token",
+                refresh_token="refresh-token",
+                token_type="bearer",
+                expires_in=3600,
+                user_id="user-123",
+            )
 
     class _BridgeStub:
         def get_registered_device_id(self) -> str:

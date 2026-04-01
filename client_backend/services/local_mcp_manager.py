@@ -18,8 +18,13 @@ from typing import Any
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
-from pydantic import BaseModel as PydanticBaseModel
 
+from app.core.mcp_adapter_utils import (
+    build_mcp_server_entry,
+    clean_mcp_tool_name,
+    normalize_mcp_transport,
+    sanitize_mcp_schema,
+)
 from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
 from client_backend.core.paths import get_profile_subdir, normalize_path
@@ -181,7 +186,7 @@ class LocalMCPManager:
                 logger.debug("Skipping disabled MCP server %s", name)
                 continue
 
-            transport = self._normalize_transport(server_data.get("transport"))
+            transport = normalize_mcp_transport(server_data.get("transport"))
             env = {
                 str(key): self._expand_env_placeholders(str(value))
                 for key, value in (server_data.get("env") or {}).items()
@@ -264,27 +269,17 @@ class LocalMCPManager:
         server_config: dict[str, dict[str, Any]] = {}
 
         for config in configs:
-            if config.transport == "stdio":
-                entry: dict[str, Any] = {
-                    "transport": "stdio",
-                    "command": config.command,
-                    "args": list(config.args),
-                }
-                if config.cwd:
-                    entry["cwd"] = config.cwd
-                if config.env:
-                    entry["env"] = config.env
-            elif config.transport in {"streamable_http", "sse"}:
-                entry = {
-                    "transport": config.transport,
-                    "url": config.url,
-                }
-                if config.headers:
-                    entry["headers"] = config.headers
-            else:
-                continue
-
-            server_config[config.name] = entry
+            entry = build_mcp_server_entry(
+                transport=config.transport,
+                command=config.command,
+                args=config.args,
+                cwd=config.cwd,
+                env=config.env,
+                url=config.url,
+                headers=config.headers,
+            )
+            if entry is not None:
+                server_config[config.name] = entry
 
         return server_config
 
@@ -296,7 +291,6 @@ class LocalMCPManager:
         try:
             async with self._client.session(server_name) as session:
                 loaded_tools = list(await load_mcp_tools(session))
-                loaded_tools = self._clean_loaded_tools(loaded_tools)
 
             tool_records = self._tool_records_from_loaded_tools(server_name, loaded_tools)
             runtime.mark_running(tool_records)
@@ -382,19 +376,6 @@ class LocalMCPManager:
 
         return str(config_relative_path)
 
-    @staticmethod
-    def _normalize_transport(value: Any) -> str:
-        transport = str(value or "stdio").strip().lower()
-        if transport == "http":
-            return "streamable_http"
-        return transport
-
-    @staticmethod
-    def _clean_tool_name(tool_name: str) -> str:
-        if ":" in tool_name:
-            return tool_name.split(":", 1)[-1]
-        return tool_name
-
     def _tool_records_from_loaded_tools(
         self,
         server_name: str,
@@ -402,159 +383,16 @@ class LocalMCPManager:
     ) -> list[MCPTool]:
         records: list[MCPTool] = []
         for tool in loaded_tools:
-            tool_name = self._clean_tool_name(getattr(tool, "name", "") or "unknown")
+            tool_name = clean_mcp_tool_name(str(getattr(tool, "name", "") or "unknown"))
             records.append(
                 MCPTool(
                     name=tool_name,
                     description=str(getattr(tool, "description", "") or ""),
                     server_name=server_name,
-                    input_schema=self._serialize_args_schema(getattr(tool, "args_schema", None)),
+                    input_schema=sanitize_mcp_schema(getattr(tool, "args_schema", None)),
                 )
             )
         return records
-
-    def _filter_schema_recursively(self, schema: Any) -> Any:
-        unsupported_keys = {"$schema", "additionalProperties"}
-
-        if isinstance(schema, dict):
-            filtered = {}
-            for key, value in schema.items():
-                if key in unsupported_keys or value is None:
-                    continue
-
-                if key in {
-                    "properties",
-                    "items",
-                    "anyOf",
-                    "allOf",
-                    "oneOf",
-                    "definitions",
-                } or isinstance(value, dict):
-                    filtered_value = self._filter_schema_recursively(value)
-                    if filtered_value:
-                        filtered[key] = filtered_value
-                elif isinstance(value, list):
-                    filtered[key] = [
-                        self._filter_schema_recursively(item) for item in value if item is not None
-                    ]
-                else:
-                    filtered[key] = value
-
-            if filtered.get("type") == "array" and "items" not in filtered:
-                filtered["items"] = {"type": "string"}
-
-            return filtered
-
-        if isinstance(schema, list):
-            return [self._filter_schema_recursively(item) for item in schema if item is not None]
-
-        return schema
-
-    def _remove_non_string_enums(self, schema: Any) -> Any:
-        if isinstance(schema, dict):
-            cleaned: dict[str, Any] = {}
-            for key, value in schema.items():
-                if (
-                    key == "enum"
-                    and isinstance(value, list)
-                    and any(not isinstance(item, str) for item in value)
-                ):
-                    continue
-                cleaned[key] = self._remove_non_string_enums(value)
-            return cleaned
-
-        if isinstance(schema, list):
-            return [self._remove_non_string_enums(item) for item in schema]
-
-        return schema
-
-    def _clean_loaded_tools(self, tools: list[BaseTool]) -> list[BaseTool]:
-        cleaned_tools: list[BaseTool] = []
-
-        for tool in tools:
-            args_schema = getattr(tool, "args_schema", None)
-
-            if args_schema is None:
-                tool.args_schema = {"type": "object", "properties": {}}
-                cleaned_tools.append(tool)
-                continue
-
-            if isinstance(args_schema, dict):
-                filtered = self._filter_schema_recursively(args_schema)
-                filtered = self._remove_non_string_enums(filtered)
-                if not filtered.get("properties"):
-                    filtered["properties"] = {}
-                if not filtered.get("type"):
-                    filtered["type"] = "object"
-                tool.args_schema = filtered
-                cleaned_tools.append(tool)
-                continue
-
-            if isinstance(args_schema, type) and issubclass(args_schema, PydanticBaseModel):
-                original_schema_method = args_schema.model_json_schema
-
-                def filtered_schema_method(
-                    *args,
-                    original_schema_method=original_schema_method,
-                    **kwargs,
-                ):
-                    schema = original_schema_method(*args, **kwargs)
-                    if isinstance(schema, dict):
-                        schema = self._filter_schema_recursively(schema)
-                        schema = self._remove_non_string_enums(schema)
-                        if not schema.get("properties"):
-                            schema["properties"] = {}
-                        if not schema.get("type"):
-                            schema["type"] = "object"
-                    return schema
-
-                args_schema.model_json_schema = staticmethod(filtered_schema_method)
-
-            cleaned_tools.append(tool)
-
-        return cleaned_tools
-
-    def _serialize_args_schema(self, schema: Any) -> dict[str, Any]:
-        if not schema:
-            return {}
-
-        result_schema = {}
-
-        if isinstance(schema, dict):
-            result_schema = schema
-        elif (
-            (
-                isinstance(schema, type)
-                and issubclass(schema, PydanticBaseModel)
-                and hasattr(schema, "model_json_schema")
-            )
-            or isinstance(schema, PydanticBaseModel)
-            and hasattr(schema, "model_json_schema")
-        ):
-            result_schema = schema.model_json_schema()
-
-        if not result_schema:
-            for attr_name in ("model_json_schema", "json_schema", "schema"):
-                exporter = getattr(schema, attr_name, None)
-                if not callable(exporter):
-                    continue
-                try:
-                    result_schema = exporter()
-                    break
-                except TypeError:
-                    try:
-                        result_schema = exporter(by_alias=True)
-                        break
-                    except Exception:
-                        continue
-                except Exception:
-                    continue
-
-        if isinstance(result_schema, dict):
-            result_schema = self._filter_schema_recursively(result_schema)
-            result_schema = self._remove_non_string_enums(result_schema)
-
-        return result_schema if isinstance(result_schema, dict) else {}
 
     async def shutdown(self) -> None:
         """Clear loaded MCP state."""
@@ -667,14 +505,13 @@ class LocalMCPManager:
 
         async with self._client.session(server_name) as session:
             loaded_tools = list(await load_mcp_tools(session))
-            loaded_tools = self._clean_loaded_tools(loaded_tools)
             runtime = self.servers.get(server_name)
             if runtime is not None:
                 runtime.mark_running(
                     self._tool_records_from_loaded_tools(server_name, loaded_tools)
                 )
             for tool in loaded_tools:
-                if self._clean_tool_name(getattr(tool, "name", "") or "") != tool_name:
+                if clean_mcp_tool_name(str(getattr(tool, "name", "") or "")) != tool_name:
                     continue
                 return await asyncio.wait_for(tool.ainvoke(arguments), timeout=timeout)
 

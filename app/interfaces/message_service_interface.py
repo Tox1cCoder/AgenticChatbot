@@ -7,9 +7,9 @@ from collections.abc import AsyncGenerator
 from typing import Any
 from uuid import UUID
 
-from app.ai.schemas import InterruptDecision
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageRead, MessageUpdate
+from app.schemas.workflow import InterruptDecision
 
 
 class IMessageService(ABC):

@@ -10,7 +10,7 @@ Allows users to store provider/model/temperature selection for:
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 from app.core.auth import get_current_user
@@ -18,6 +18,7 @@ from app.core.dependency_injection import AppAutoInjector
 from app.models.user import User
 from app.schemas.responses import ApiResponse
 from app.services.model_config_service import ModelConfigService
+from app.utils.api_error_helpers import translate_service_errors
 from app.utils.case_conversion import to_camel_case as to_camel
 
 router = APIRouter(prefix="/model-config", tags=["model-config"])
@@ -101,18 +102,13 @@ async def get_model_config(
     model_config_service: ModelConfigService,
     current_user: User = Depends(get_current_user),  # noqa: B008
 ) -> ApiResponse[dict[str, dict[str, Any]]]:
-    try:
+    with translate_service_errors(action="retrieve model config"):
         config = model_config_service.get_effective_model_config(current_user.id)
         return ApiResponse(
             success=True,
             message="Model config retrieved successfully",
             data=config,
         )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve model config: {str(e)}",
-        ) from e
 
 
 @router.get("/options", response_model=ApiResponse[ModelConfigOptionsSnapshot])
@@ -121,7 +117,7 @@ async def get_model_config_options(
     model_config_service: ModelConfigService,
     current_user: User = Depends(get_current_user),  # noqa: B008
 ) -> ApiResponse[ModelConfigOptionsSnapshot]:
-    try:
+    with translate_service_errors(action="retrieve model config options"):
         snapshot = await model_config_service.get_model_config_options(current_user.id)
         response_data = ModelConfigOptionsSnapshot.model_validate(snapshot)
         return ApiResponse(
@@ -129,11 +125,6 @@ async def get_model_config_options(
             message="Model config options retrieved successfully",
             data=response_data,
         )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve model config options: {str(e)}",
-        ) from e
 
 
 @router.patch("", response_model=ApiResponse[dict[str, dict[str, Any]]])
@@ -143,7 +134,10 @@ async def patch_model_config(
     model_config_service: ModelConfigService,
     current_user: User = Depends(get_current_user),  # noqa: B008
 ) -> ApiResponse[dict[str, dict[str, Any]]]:
-    try:
+    with translate_service_errors(
+        action="update model config",
+        value_error_status=status.HTTP_400_BAD_REQUEST,
+    ):
         updates = {
             agent_key: patch.model_dump(exclude_none=True)
             for agent_key, patch in (request.root or {}).items()
@@ -154,16 +148,6 @@ async def patch_model_config(
             message="Model config updated successfully",
             data=config,
         )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        ) from e
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update model config: {str(e)}",
-        ) from e
 
 
 @router.post("/reset", response_model=ApiResponse[dict[str, dict[str, Any]]])
@@ -172,7 +156,7 @@ async def reset_model_config(
     model_config_service: ModelConfigService,
     current_user: User = Depends(get_current_user),  # noqa: B008
 ) -> ApiResponse[dict[str, dict[str, Any]]]:
-    try:
+    with translate_service_errors(action="reset model config"):
         model_config_service.reset_configs(current_user.id)
         config = model_config_service.get_effective_model_config(current_user.id)
         return ApiResponse(
@@ -180,8 +164,3 @@ async def reset_model_config(
             message="Model config reset to defaults",
             data=config,
         )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to reset model config: {str(e)}",
-        ) from e

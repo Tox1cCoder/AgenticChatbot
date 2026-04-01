@@ -10,7 +10,7 @@ import secrets
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, DotEnvSettingsSource, PydanticBaseSettingsSource
 
 # Determine platform-appropriate default paths
@@ -220,20 +220,6 @@ class ClientSettings(BaseSettings):
     def _normalize_shell_list(cls, values: list[str]) -> list[str]:
         return [value.lower() for value in values]
 
-    @model_validator(mode="after")
-    def _post_validate(self) -> "ClientSettings":
-        # Ensure profile root exists
-        profile_path = Path(self.profile_root)
-        profile_path.mkdir(parents=True, exist_ok=True)
-
-        # Generate and persist the local session secret if not provided.
-        if not self.local_session_secret:
-            self.local_session_secret = _load_or_create_local_secret(
-                profile_path / ".local_session_secret"
-            )
-
-        return self
-
     def get_profile_path(self, *subpaths: str) -> Path:
         """Get a path within the profile directory."""
         return Path(self.profile_root).joinpath(*subpaths)
@@ -251,5 +237,33 @@ def get_client_settings() -> ClientSettings:
     return ClientSettings()
 
 
-# Global settings instance
-client_settings = get_client_settings()
+def initialize_client_environment(settings: ClientSettings | None = None) -> ClientSettings:
+    """Apply runtime-only filesystem setup for the client environment."""
+
+    resolved_settings = settings or get_client_settings()
+    profile_path = Path(resolved_settings.profile_root)
+    profile_path.mkdir(parents=True, exist_ok=True)
+
+    if not resolved_settings.local_session_secret:
+        resolved_settings.local_session_secret = _load_or_create_local_secret(
+            profile_path / ".local_session_secret"
+        )
+
+    return resolved_settings
+
+
+class _ClientSettingsProxy:
+    """Lazy proxy so importing config does not freeze a settings snapshot immediately."""
+
+    def __getattr__(self, name: str):
+        return getattr(get_client_settings(), name)
+
+    def __setattr__(self, name: str, value):
+        setattr(get_client_settings(), name, value)
+
+    def __repr__(self) -> str:
+        return repr(get_client_settings())
+
+
+# Global lazy settings proxy
+client_settings = _ClientSettingsProxy()

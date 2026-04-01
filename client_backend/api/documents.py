@@ -4,9 +4,9 @@ Document proxy endpoints for the local client backend.
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile, status
 
-from client_backend.api.common import raise_server_error
+from client_backend.api.common import proxy_server_request, raise_server_error
 from client_backend.core.auth import require_local_session
 from client_backend.core.security import LocalSessionPayload
 from client_backend.services.server_api import get_server_client
@@ -38,64 +38,54 @@ async def upload_document(
 @router.get("/task/{task_id}")
 async def get_document_task_status(
     task_id: str,
+    request: Request,
     _session: LocalSessionPayload = Depends(require_local_session),
-) -> dict[str, Any]:
+) -> Response:
     """Fetch background processing task status."""
-    try:
-        return await get_server_client().get_document_task_status(task_id)
-    except Exception as exc:
-        raise_server_error(exc)
+    return await proxy_server_request(request, upstream_path=f"/documents/task/{task_id}")
 
 
 @router.get("/{document_id}")
 async def get_document(
     document_id: str,
+    request: Request,
     _session: LocalSessionPayload = Depends(require_local_session),
-) -> dict[str, Any]:
+) -> Response:
     """Fetch a document by ID."""
-    try:
-        return await get_server_client().get_document_status(document_id)
-    except Exception as exc:
-        raise_server_error(exc)
+    return await proxy_server_request(request, upstream_path=f"/documents/{document_id}")
 
 
 @router.get("/conversation/{conversation_id}")
 async def list_conversation_documents(
     conversation_id: str,
+    request: Request,
     page: int = 1,
     page_size: int = 20,
     _session: LocalSessionPayload = Depends(require_local_session),
-) -> dict[str, Any]:
+) -> Response:
     """List documents for a conversation."""
-    try:
-        return await get_server_client().get(
-            f"/documents/conversation/{conversation_id}",
-            params={"page": page, "page_size": page_size},
-        )
-    except Exception as exc:
-        raise_server_error(exc)
+    return await proxy_server_request(
+        request,
+        upstream_path=f"/documents/conversation/{conversation_id}",
+        params_override={"page": page, "page_size": page_size},
+    )
 
 
 @router.put("/{document_id}")
 async def update_document(
     document_id: str,
-    payload: dict[str, Any],
+    request: Request,
     _session: LocalSessionPayload = Depends(require_local_session),
-) -> dict[str, Any]:
+) -> Response:
     """Update document metadata."""
-    try:
-        return await get_server_client().update_document(document_id, payload)
-    except Exception as exc:
-        raise_server_error(exc)
+    return await proxy_server_request(request, upstream_path=f"/documents/{document_id}")
 
 
 @router.delete("/{document_id}")
 async def delete_document(
     document_id: str,
+    request: Request,
     _session: LocalSessionPayload = Depends(require_local_session),
-) -> dict[str, Any]:
+) -> Response:
     """Delete a document."""
-    try:
-        return await get_server_client().delete_document(document_id)
-    except Exception as exc:
-        raise_server_error(exc)
+    return await proxy_server_request(request, upstream_path=f"/documents/{document_id}")

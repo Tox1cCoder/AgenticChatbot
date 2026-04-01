@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Depends, Query, status
 
+from app.core.auth import get_current_user
 from app.core.dependency_injection import AppAutoInjector
 from app.schemas.mcp import (
     MCPOperationResponse,
@@ -15,7 +16,11 @@ from app.schemas.mcp import (
 from app.schemas.responses import ApiResponse
 from app.services.mcp_service import MCPService
 
-router = APIRouter(prefix="/mcp", tags=["mcp"])
+router = APIRouter(
+    prefix="/mcp",
+    tags=["mcp"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 # ===== Server Endpoints =====

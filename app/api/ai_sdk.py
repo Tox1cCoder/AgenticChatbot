@@ -154,8 +154,10 @@ def _extract_data_from_candidate(value: Any) -> str | None:
         return None
 
     if payload.startswith("data:"):
-        _, _, b64 = payload.partition(",")
-        return b64.strip() or None
+        return payload
+
+    if payload.startswith(("http://", "https://", "blob:")):
+        return payload
 
     return payload
 
@@ -216,6 +218,7 @@ def _extract_user_attachments(messages: list[dict[str, Any]]) -> list[dict[str, 
                 item.get("data"),
                 item.get("base64"),
                 item.get("url"),
+                item.get("path"),
                 item.get("image"),
                 item.get("source"),
             ]
@@ -232,11 +235,16 @@ def _extract_user_attachments(messages: list[dict[str, Any]]) -> list[dict[str, 
             if not raw_data:
                 continue
 
-            # Best-effort sanity check that payload is decodable base64.
-            try:
-                base64.b64decode(raw_data, validate=False)
-            except Exception:
-                continue
+            if not raw_data.startswith(("data:", "http://", "https://", "blob:")):
+                # Skip obvious local path values (e.g. C:\fakepath\image.png).
+                if ":\\" in raw_data or raw_data.startswith(("/", "./", "../")):
+                    continue
+
+                # Best-effort sanity check that payload is decodable base64.
+                try:
+                    base64.b64decode(raw_data, validate=True)
+                except Exception:
+                    continue
 
             key = (mime, raw_data)
             if key in seen:

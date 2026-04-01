@@ -61,6 +61,31 @@ def _get_device_session(*, user_id: str | None, device_id: str | None):
     return session
 
 
+def _format_runtime_skill_error(response: dict[str, Any]) -> str:
+    error_context = response.get("error_context")
+    if isinstance(error_context, dict):
+        message = str(
+            error_context.get("message")
+            or response.get("error")
+            or "Unknown client-side skill error"
+        )
+        code = error_context.get("code")
+        detail = error_context.get("detail")
+        extras: list[str] = []
+        if code:
+            extras.append(f"code={code}")
+        if detail not in (None, "", {}):
+            extras.append("detail=" + json.dumps(detail, indent=2, ensure_ascii=False, default=str))
+        if extras:
+            return f"{message} ({'; '.join(extras)})"
+        return message
+
+    error_message = response.get("error")
+    if isinstance(error_message, str) and error_message:
+        return error_message
+    return "Unknown client-side skill error"
+
+
 def _get_server_skill_summaries() -> list[dict[str, Any]]:
     try:
         active_skills = get_skills_registry().get_active_skills()
@@ -155,7 +180,9 @@ def _resolve_skill_reference(
     device_id: str | None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     available_skills = get_available_skill_summaries(user_id=user_id, device_id=device_id)
-    available_names = [str(item.get("lookup_name") or item.get("name") or "") for item in available_skills]
+    available_names = [
+        str(item.get("lookup_name") or item.get("name") or "") for item in available_skills
+    ]
 
     exact_lookup_match = next(
         (
@@ -242,11 +269,7 @@ def create_activate_skill_tool(
                     "Only enabled skills can be activated."
                 )
 
-            return (
-                f"── Skill: {skill.name} ──\n\n"
-                f"{skill.content}\n\n"
-                f"── End Skill: {skill.name} ──"
-            )
+            return f"── Skill: {skill.name} ──\n\n{skill.content}\n\n── End Skill: {skill.name} ──"
 
         ctx = get_tool_context()
         context_device_id = str(ctx.device_id or bound_device_id or "")
@@ -279,8 +302,7 @@ def create_activate_skill_tool(
         )
 
         if not response.get("success", False):
-            error_message = response.get("error") or "Unknown client-side skill error"
-            return f"Error: {error_message}"
+            return f"Error: {_format_runtime_skill_error(response)}"
 
         result = response.get("result")
         if isinstance(result, str):

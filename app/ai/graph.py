@@ -18,6 +18,9 @@ from sentence_transformers import SentenceTransformer
 
 from ..core.config import settings
 from ..core.response_constants import NO_RESPONSE_GENERATED
+from ..interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
+from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
+from ..models.enums import PlanLifecycle
 from .agents.canvas_agent import CanvasAgent
 from .agents.chat_agent import ChatAgent
 from .agents.image_generator_agent import ImageGeneratorAgent
@@ -33,10 +36,13 @@ from .schemas import (
     AgentMessage,
     AgentResponse,
     AgentType,
+    ContinuationSignal,
     GraphState,
+    GraphStateView,
     InterruptDecision,
     MessageRole,
     TodoStatus,
+    WorkflowExecutionRequest,
 )
 from .summarization_middleware import summarize_for_state
 from .todo_actions import apply_write_todos_action
@@ -48,16 +54,12 @@ from .token_instrumentation import (
 from .tool_context import tool_execution_context
 from .tool_execution import (
     build_rejected_tool_artifacts,
-    build_tool_artifact,
     ensure_agent_tool_map,
     execute_tool_calls,
-    extract_images_from_tool_result,
-    invoke_tool,
 )
 from .utils import (
     apply_hitl_decisions,
     coerce_response_text,
-    extract_content_from_result,
     find_pending_tool_call_message,
     make_json_safe,
     normalize_tool_call,
@@ -71,27 +73,31 @@ if TYPE_CHECKING:
 _apply_decisions = apply_hitl_decisions
 
 
-class MultiAgentWorkflow:
+class MultiAgentWorkflow(IWorkflowRuntime):
     def __init__(
         self,
         qdrant_client: QdrantClient,
         embedding_model: SentenceTransformer,
         checkpointer: BaseCheckpointSaver | None = None,
         document_repository: Optional["DocumentRepository"] = None,
+        runtime_model_resolver: IRuntimeModelResolver | None = None,
     ):
         self.qdrant_client = qdrant_client
         self.router = Router()
-        self.chat_agent = ChatAgent()
+        self.chat_agent = ChatAgent(runtime_model_resolver=runtime_model_resolver)
         self.rag_agent = RAGAgent(
             settings=settings,
             qdrant_client=qdrant_client,
             embedding_model=embedding_model,
             collection_name=settings.qdrant_collection_name,
+            runtime_model_resolver=runtime_model_resolver,
         )
-        self.search_agent = SearchAgent()
-        self.image_generator_agent = ImageGeneratorAgent()
-        self.planning_agent = PlanningAgent()
-        self.canvas_agent = CanvasAgent()
+        self.search_agent = SearchAgent(runtime_model_resolver=runtime_model_resolver)
+        self.image_generator_agent = ImageGeneratorAgent(
+            runtime_model_resolver=runtime_model_resolver
+        )
+        self.planning_agent = PlanningAgent(runtime_model_resolver=runtime_model_resolver)
+        self.canvas_agent = CanvasAgent(runtime_model_resolver=runtime_model_resolver)
         self.agents = {
             "chat_agent": self.chat_agent,
             "rag_agent": self.rag_agent,
@@ -285,9 +291,9 @@ class MultiAgentWorkflow:
     def _merge_tool_artifacts(
         self, state: GraphState, response: AgentResponse, append_images: bool = False
     ) -> None:
-        context = state.get("context", {})
-        tool_artifacts = context.get("tool_artifacts", [])
-        tool_images = context.get("tool_images", [])
+        state_view = GraphStateView(state)
+        tool_artifacts = state_view.tool_artifacts()
+        tool_images = state_view.tool_images()
 
         if tool_artifacts:
             response.tool_artifacts = tool_artifacts
@@ -312,55 +318,39 @@ class MultiAgentWorkflow:
 
         return state
 
-    def _build_initial_state(
-        self,
-        message: str,
-        conversation_id: str | None = None,
-        user_id: str | None = None,
-        device_id: str | None = None,
-        persona: str | None = None,
-        attachments: list | None = None,
-        model_request: dict[str, Any] | None = None,
-        current_task: dict[str, Any] | None = None,
-        all_tasks: list[dict[str, Any]] | None = None,
-        planning_mode_enabled: bool = False,
-        has_existing_plan: bool = False,
-        existing_tasks: list[dict[str, Any]] | None = None,
-        plan_lifecycle: str | None = None,
-    ) -> GraphState:
+    def _build_initial_state_from_request(self, request: WorkflowExecutionRequest) -> GraphState:
+        tasks = list(request.planning.tasks)
         initial_state: GraphState = {
-            "messages": [HumanMessage(content=message)],
+            "messages": [HumanMessage(content=request.message)],
             "context": {},
         }
 
-        if conversation_id is not None:
-            initial_state["conversation_id"] = conversation_id
-        if user_id is not None:
-            initial_state["user_id"] = user_id
-        if device_id is not None:
-            initial_state["device_id"] = device_id
-        if model_request is not None:
-            initial_state["model_request"] = model_request
+        if request.conversation_id is not None:
+            initial_state["conversation_id"] = request.conversation_id
+        if request.user_id is not None:
+            initial_state["user_id"] = request.user_id
+        if request.device_id is not None:
+            initial_state["device_id"] = request.device_id
+        if request.model_request is not None:
+            initial_state["model_request"] = request.model_request
         initial_state["selected_agent"] = None
         initial_state["response"] = None
-        initial_state["persona"] = persona
+        initial_state["persona"] = request.persona
+        initial_state["planning_mode_enabled"] = request.planning.planning_mode_enabled
+        initial_state["has_existing_plan"] = request.planning.has_existing_plan
         initial_state["iteration_count"] = None
 
-        if current_task:
-            initial_state["current_task"] = current_task
-            initial_state["task_plan_id"] = current_task.get("id")
-        if all_tasks:
-            initial_state["all_tasks"] = all_tasks
+        if request.planning.current_task:
+            initial_state["current_task"] = request.planning.current_task
+            initial_state["task_plan_id"] = request.planning.current_task.get("id")
+        if tasks:
+            initial_state["all_tasks"] = tasks
 
-        if attachments:
-            initial_state["context"]["attachments"] = attachments
-
-        initial_state["context"]["planning_mode_enabled"] = planning_mode_enabled
-        initial_state["context"]["has_existing_plan"] = has_existing_plan
-        if existing_tasks:
-            initial_state["context"]["existing_tasks"] = existing_tasks
+        if request.attachments:
+            initial_state["attachments"] = request.attachments
+        if tasks:
             todos: list[dict[str, Any]] = []
-            for i, task in enumerate(existing_tasks):
+            for i, task in enumerate(tasks):
                 if not isinstance(task, dict):
                     continue
                 todos.append(
@@ -380,16 +370,113 @@ class MultiAgentWorkflow:
         # Derive planning_phase from persisted lifecycle:
         # If lifecycle is "executing", set execution phase so the planning agent
         # doesn't ask for confirmation again.
-        if plan_lifecycle == "executing":
+        if request.planning.plan_lifecycle == PlanLifecycle.executing:
             initial_state["planning_phase"] = "executing"
         else:
             # Default to "planning" phase - only switch to "executing" when user requests
             initial_state["planning_phase"] = "planning"
 
         # Persist lifecycle so agents can read execution state without prompt inference
-        initial_state["plan_lifecycle"] = plan_lifecycle
+        initial_state["plan_lifecycle"] = request.planning.plan_lifecycle
 
         return initial_state
+
+    @staticmethod
+    def _get_state_attachments(state: GraphState) -> list[Any]:
+        return GraphStateView(state).attachments()
+
+    @staticmethod
+    def _normalize_attachment_image_url(attachment: Any) -> str | None:
+        if not isinstance(attachment, dict):
+            return None
+
+        mime = (
+            attachment.get("mime")
+            or attachment.get("mimeType")
+            or attachment.get("mediaType")
+            or attachment.get("contentType")
+            or "image/jpeg"
+        )
+        mime = str(mime).strip() if mime else "image/jpeg"
+
+        candidate_values = [
+            attachment.get("data"),
+            attachment.get("url"),
+            attachment.get("path"),
+            attachment.get("image"),
+            attachment.get("source"),
+        ]
+
+        for candidate in candidate_values:
+            if isinstance(candidate, dict):
+                candidate = (
+                    candidate.get("url")
+                    or candidate.get("data")
+                    or candidate.get("base64")
+                    or candidate.get("path")
+                )
+            if not isinstance(candidate, str):
+                continue
+
+            raw_value = candidate.strip()
+            if not raw_value:
+                continue
+
+            if raw_value.startswith("data:"):
+                return raw_value
+
+            if raw_value.startswith(("http://", "https://", "blob:")):
+                return raw_value
+
+            # Guard against accidentally treating local file-system paths as base64.
+            if ":\\" in raw_value or raw_value.startswith(("/", "./", "../")):
+                continue
+
+            return f"data:{mime};base64,{raw_value}"
+
+        return None
+
+    def _build_chat_turn_messages_with_attachments(
+        self,
+        current_turn_messages: list[Any],
+        attachments: list[Any],
+    ) -> tuple[list[Any], bool]:
+        if not current_turn_messages:
+            current_turn_messages = [HumanMessage(content="")]
+
+        messages_copy = list(current_turn_messages)
+        last_human_idx = self._find_last_human_message_index(messages_copy)
+        if last_human_idx is None:
+            last_human_idx = len(messages_copy)
+            messages_copy.append(HumanMessage(content=""))
+
+        original_content = messages_copy[last_human_idx].content
+        user_text = coerce_response_text(original_content)
+
+        multimodal_parts: list[dict[str, Any]] = []
+        if user_text:
+            multimodal_parts.append({"type": "text", "text": user_text})
+
+        for attachment in attachments:
+            image_url = self._normalize_attachment_image_url(attachment)
+            if not image_url:
+                continue
+            multimodal_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                }
+            )
+
+        has_images = any(part.get("type") == "image_url" for part in multimodal_parts)
+        if has_images:
+            messages_copy[last_human_idx] = HumanMessage(content=multimodal_parts)
+
+        return messages_copy, has_images
+
+    @staticmethod
+    def _get_planning_flags(state: GraphState) -> tuple[bool, bool]:
+        return GraphStateView(state).planning_flags()
 
     def _find_first_pending_task(self, tasks: list[dict[str, Any]]) -> int | None:
         """Find the first pending or in-progress task index in the task list."""
@@ -576,72 +663,20 @@ class MultiAgentWorkflow:
         if not tool_map:
             return state
 
-        # Extract context for tool execution
-        conversation_id = state.get("conversation_id")
-        user_id = state.get("user_id")
-        agent_key = getattr(agent, "agent_config_key", None) or selected_agent_name
-
-        # Execute tools with context set for deferred tool loading support
-        with tool_execution_context(
-            conversation_id,
-            user_id,
-            agent_key,
-            state.get("device_id"),
-        ):
-            tool_outputs, tool_artifacts, all_images = await execute_tool_calls(
-                tool_calls=tool_calls_pending,
-                tool_map=tool_map,
-                capture_images=True,
-            )
-
-        # Get tool result truncation settings
-        max_chars = getattr(settings, "tool_result_max_chars", 0) or 0
-        truncation_suffix = getattr(
-            settings,
-            "tool_result_truncation_suffix",
-            "\n\n[Output truncated - full result available in tool artifacts]",
+        tool_outputs, tool_artifacts, all_images = await self._execute_agent_tool_calls(
+            state=state,
+            agent=agent,
+            tool_calls=tool_calls_pending,
+            tool_map=tool_map,
+            capture_images=True,
         )
-
-        for output in tool_outputs:
-            content = output["content"]
-
-            # Truncate tool result content if configured
-            # Full output is preserved in tool_artifacts for UI display
-            if max_chars > 0:
-                content, was_truncated = truncate_tool_result(
-                    content,
-                    max_chars=max_chars,
-                    truncation_suffix=truncation_suffix,
-                )
-                if was_truncated:
-                    logger.debug(
-                        "Truncated tool output for %s from %d to %d chars",
-                        output["name"],
-                        len(output["content"]),
-                        len(content),
-                    )
-
-            state.setdefault("messages", []).append(
-                ToolMessage(
-                    content=content,
-                    tool_call_id=output["tool_call_id"],
-                    name=output["name"],
-                )
-            )
-
-        current_iteration = state.get("iteration_count") or 0
-        state["iteration_count"] = current_iteration + 1
-
-        context = state.get("context", {})
-        if tool_artifacts:
-            existing_artifacts = context.get("tool_artifacts", [])
-            existing_artifacts.extend(tool_artifacts)
-            context["tool_artifacts"] = existing_artifacts
-        if all_images:
-            existing_images = context.get("tool_images", [])
-            existing_images.extend(all_images)
-            context["tool_images"] = existing_images
-        state["context"] = context
+        self._apply_tool_outputs_to_state(
+            state,
+            tool_outputs=tool_outputs,
+            tool_artifacts=tool_artifacts,
+            all_images=all_images,
+            truncate_outputs=True,
+        )
 
         # ── Inter-agent delegation (hand_off tool) ──────────────────────
         state = self._apply_hand_off_if_present(state, tool_outputs)
@@ -715,15 +750,15 @@ class MultiAgentWorkflow:
         fallback_tool_calls: list[Any],
     ) -> dict[str, Any]:
         """Recover the pending interrupt payload from checkpoint state."""
-        context = state_values.get("context", {}) if isinstance(state_values, dict) else {}
-        action_requests = context.get("pending_action_requests")
-        if not isinstance(action_requests, list):
+        state_view = GraphStateView(state_values)
+        action_requests = state_view.pending_action_requests()
+        if not action_requests:
             action_requests = [normalize_tool_call(tool_call) for tool_call in fallback_tool_calls]
 
         payload: dict[str, Any] = {"action_requests": action_requests}
 
-        interrupt_metadata = context.get("interrupt_metadata")
-        if isinstance(interrupt_metadata, dict) and interrupt_metadata:
+        interrupt_metadata = state_view.interrupt_metadata()
+        if interrupt_metadata:
             payload["metadata"] = interrupt_metadata
 
         return payload
@@ -737,16 +772,17 @@ class MultiAgentWorkflow:
         tool_map: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Attach device/runtime provenance to pending tool approvals."""
+        state_view = GraphStateView(state)
         normalized_calls = [normalize_tool_call(tool_call) for tool_call in tool_calls]
         if tool_map is None and agent is not None:
             tool_map = await ensure_agent_tool_map(
                 agent,
-                conversation_id=state.get("conversation_id"),
-                user_id=state.get("user_id"),
-                device_id=state.get("device_id"),
+                conversation_id=state_view.conversation_id(),
+                user_id=state_view.user_id(),
+                device_id=state_view.device_id(),
             )
 
-        device_id = state.get("device_id")
+        device_id = state_view.device_id()
         provenance: dict[str, dict[str, Any]] = {}
         enriched_calls: list[dict[str, Any]] = []
 
@@ -780,7 +816,7 @@ class MultiAgentWorkflow:
         if provenance:
             interrupt_metadata["tool_provenance"] = provenance
 
-        context = dict(state.get("context") or {})
+        context = state_view.context_copy()
         context["pending_action_requests"] = enriched_calls
         if interrupt_metadata:
             context["interrupt_metadata"] = interrupt_metadata
@@ -816,6 +852,9 @@ class MultiAgentWorkflow:
         state["context"] = context
 
         human_decisions = interrupt(interrupt_payload)
+        context = GraphStateView(state).context_copy()
+        context.pop("pause_reason", None)
+        state["context"] = context
 
         if not human_decisions:
             _, rejected_feedback = _apply_decisions(last_message.tool_calls, [])
@@ -869,7 +908,8 @@ class MultiAgentWorkflow:
         return "tools"
 
     def _route_tool_output(self, state: GraphState) -> str:
-        iteration_count = state.get("iteration_count", 0)
+        state_view = GraphStateView(state)
+        iteration_count = state_view.iteration_count()
         max_iterations = settings.react_agent_max_iterations
 
         # Soft-limit: if auto-continue is enabled, trigger continuation at
@@ -878,25 +918,38 @@ class MultiAgentWorkflow:
         if settings.auto_continue_enabled:
             soft_limit = int(max_iterations * settings.auto_continue_soft_limit_ratio)
             if iteration_count >= soft_limit:
-                context = dict(state.get("context") or {})
-                context["max_iterations_reached"] = True
-                context["auto_continue_requested"] = {
-                    "reason": "soft_budget",
-                    "iteration_count": iteration_count,
-                    "soft_limit": soft_limit,
-                }
-                state["context"] = context
+                self._set_continuation_signal(
+                    state,
+                    should_continue=True,
+                    reason="soft_budget",
+                    scope="runtime",
+                    count=iteration_count,
+                    limit=soft_limit,
+                )
                 return "end"
 
         if iteration_count >= max_iterations:
-            messages = state.get("messages", [])
-            if messages:
-                context = dict(state.get("context") or {})
-                context["max_iterations_reached"] = True
-                state["context"] = context
+            if settings.auto_continue_enabled and state_view.messages():
+                self._set_continuation_signal(
+                    state,
+                    should_continue=True,
+                    reason="max_iterations_reached",
+                    scope="runtime",
+                    count=iteration_count,
+                    limit=max_iterations,
+                )
+            else:
+                self._set_continuation_signal(
+                    state,
+                    should_continue=False,
+                    reason="max_iterations_reached",
+                    scope="runtime",
+                    count=iteration_count,
+                    limit=max_iterations,
+                )
             return "end"
 
-        selected_agent = state.get("selected_agent", "end")
+        selected_agent = state_view.selected_agent() or "end"
 
         if selected_agent != "end" and selected_agent not in self.agents:
             logger.warning(
@@ -916,7 +969,8 @@ class MultiAgentWorkflow:
             return None
 
         values = getattr(state_snapshot, "values", {})
-        messages = values.get("messages", [])
+        state_view = GraphStateView(values)
+        messages = state_view.messages()
         if not messages:
             return None
 
@@ -924,14 +978,14 @@ class MultiAgentWorkflow:
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return None
 
-        conversation_id = values.get("conversation_id") or fallback_conversation_id or ""
+        conversation_id = state_view.conversation_id() or fallback_conversation_id or ""
         interrupt_payload = self._get_interrupt_payload_from_state(
             values,
             last_message.tool_calls,
         )
         interrupt_response = build_interrupt_response(interrupt_payload, thread_id, conversation_id)
 
-        selected_agent = values.get("selected_agent", "search_agent")
+        selected_agent = state_view.selected_agent() or "search_agent"
 
         agent = self.agents.get(selected_agent)
         agent_type = (
@@ -975,15 +1029,12 @@ class MultiAgentWorkflow:
         if not messages:
             return state
 
-        context = state.get("context", {})
-
         last_message = messages[-1]
         content = last_message.content if hasattr(last_message, "content") else str(last_message)
         conversation_id = state.get("conversation_id")
         has_documents = self._conversation_has_documents(conversation_id)
 
-        planning_mode_enabled = context.get("planning_mode_enabled", False)
-        has_existing_plan = context.get("has_existing_plan", False)
+        planning_mode_enabled, has_existing_plan = self._get_planning_flags(state)
 
         agent_msg = AgentMessage(
             role=MessageRole.USER,
@@ -1030,6 +1081,222 @@ class MultiAgentWorkflow:
 
         return config or None
 
+    def _resolve_thread_id(
+        self,
+        thread_id: str | None,
+        conversation_id: str | None,
+    ) -> str | None:
+        """Return the checkpoint thread id, falling back to conversation id when omitted."""
+        if thread_id:
+            return thread_id
+        if conversation_id:
+            return conversation_id
+        return None
+
+    @staticmethod
+    def _set_continuation_signal(
+        state: GraphState,
+        *,
+        should_continue: bool,
+        reason: str,
+        scope: str,
+        count: int,
+        limit: int,
+    ) -> None:
+        context = GraphStateView(state).context_copy()
+        context["continuation_signal"] = {
+            "should_continue": should_continue,
+            "reason": reason,
+            "scope": scope,
+            "count": count,
+            "limit": limit,
+        }
+        state["context"] = context
+
+    @staticmethod
+    def _get_continuation_signal(
+        state_values: dict[str, Any] | None,
+    ) -> ContinuationSignal:
+        return GraphStateView(state_values).continuation_signal()
+
+    @classmethod
+    def _get_requested_continuation_reason(
+        cls,
+        state_values: dict[str, Any] | None,
+    ) -> str | None:
+        signal = cls._get_continuation_signal(state_values)
+        if not signal.get("should_continue"):
+            return None
+        reason = signal.get("reason")
+        return reason if isinstance(reason, str) else None
+
+    @classmethod
+    def _get_planning_pause_details(
+        cls,
+        state_values: dict[str, Any] | None,
+    ) -> tuple[str | None, bool]:
+        state_view = GraphStateView(state_values)
+        pause_reason = state_view.context().get("pause_reason")
+        signal = cls._get_continuation_signal(state_values)
+        signal_scope = signal.get("scope")
+        signal_reason = signal.get("reason")
+
+        if not pause_reason and signal_scope == "planning" and isinstance(signal_reason, str):
+            pause_reason = signal_reason
+
+        planning_budget_reached = (
+            signal_scope == "planning" and signal_reason == "max_iterations_reached"
+        )
+        return pause_reason, planning_budget_reached
+
+    @classmethod
+    def _attach_planning_state_metadata(
+        cls,
+        response: AgentResponse,
+        state_values: dict[str, Any] | None,
+    ) -> AgentResponse:
+        if not isinstance(state_values, dict):
+            return response
+
+        if response.metadata is None:
+            response.metadata = {}
+
+        state_view = GraphStateView(state_values)
+        todos = state_values.get("todos", [])
+        if todos:
+            response.metadata["todos"] = todos
+
+        response.metadata["planning_call_count"] = state_view.planning_call_count()
+
+        context = state_view.context()
+        if context.get("all_tasks_completed"):
+            response.metadata["all_tasks_completed"] = True
+
+        pause_reason, planning_budget_reached = cls._get_planning_pause_details(state_values)
+        if planning_budget_reached:
+            response.metadata["planning_budget_reached"] = True
+        if pause_reason:
+            response.metadata["pause_reason"] = pause_reason
+
+        return response
+
+    async def _execute_agent_tool_calls(
+        self,
+        *,
+        state: GraphState,
+        agent: Any,
+        tool_calls: list[Any],
+        tool_map: dict[str, Any] | None = None,
+        capture_images: bool = True,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
+        if not tool_calls:
+            return [], [], []
+
+        state_view = GraphStateView(state)
+        conversation_id = state_view.conversation_id()
+        user_id = state_view.user_id()
+        device_id = state_view.device_id()
+
+        if tool_map is None:
+            tool_map = await ensure_agent_tool_map(
+                agent,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                device_id=device_id,
+            )
+        if not tool_map:
+            return [], [], []
+
+        agent_key = (
+            getattr(agent, "agent_config_key", None)
+            or getattr(agent, "agent_id", None)
+            or "unknown"
+        )
+
+        with tool_execution_context(
+            conversation_id,
+            user_id,
+            agent_key,
+            device_id,
+        ):
+            return await execute_tool_calls(
+                tool_calls=tool_calls,
+                tool_map=tool_map,
+                capture_images=capture_images,
+                device_id=device_id,
+                agent=agent,
+                conversation_id=conversation_id,
+                user_id=user_id,
+            )
+
+    def _apply_tool_outputs_to_state(
+        self,
+        state: GraphState,
+        *,
+        tool_outputs: list[dict[str, Any]],
+        tool_artifacts: list[dict[str, Any]] | None = None,
+        all_images: list[dict[str, str]] | None = None,
+        truncate_outputs: bool = False,
+        mirror_to_response: bool = False,
+    ) -> None:
+        max_chars = getattr(settings, "tool_result_max_chars", 0) or 0
+        truncation_suffix = getattr(
+            settings,
+            "tool_result_truncation_suffix",
+            "\n\n[Output truncated - full result available in tool artifacts]",
+        )
+
+        for output in tool_outputs:
+            content = output["content"]
+            if truncate_outputs and max_chars > 0:
+                content, was_truncated = truncate_tool_result(
+                    content,
+                    max_chars=max_chars,
+                    truncation_suffix=truncation_suffix,
+                )
+                if was_truncated:
+                    logger.debug(
+                        "Truncated tool output for %s from %d to %d chars",
+                        output["name"],
+                        len(output["content"]),
+                        len(content),
+                    )
+
+            state.setdefault("messages", []).append(
+                ToolMessage(
+                    content=content,
+                    tool_call_id=output["tool_call_id"],
+                    name=output["name"],
+                )
+            )
+
+        state["iteration_count"] = (state.get("iteration_count") or 0) + 1
+
+        context = GraphStateView(state).context_copy()
+        if tool_artifacts:
+            existing_artifacts = list(context.get("tool_artifacts", []))
+            existing_artifacts.extend(tool_artifacts)
+            context["tool_artifacts"] = existing_artifacts
+        if all_images:
+            existing_images = list(context.get("tool_images", []))
+            existing_images.extend(all_images)
+            context["tool_images"] = existing_images
+        state["context"] = context
+
+        if mirror_to_response:
+            response = state.get("response")
+            if response and tool_outputs:
+                if response.tool_artifacts is None:
+                    response.tool_artifacts = []
+                for output in tool_outputs:
+                    response.tool_artifacts.append(
+                        {
+                            "tool": output["name"],
+                            "result": output["content"],
+                        }
+                    )
+                state["response"] = response
+
     async def _chat_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
         if not messages:
@@ -1037,50 +1304,35 @@ class MultiAgentWorkflow:
 
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
-        context = state.get("context", {})
         conversation_history = await self._get_conversation_history(
             conversation_id, user_id, agent_key="chat"
         )
 
-        attachments = context.get("attachments") or []
+        attachments = self._get_state_attachments(state)
         device_id = state.get("device_id")
+        current_turn_messages = self._get_current_turn_messages(messages)
+        has_images = False
         if attachments:
-            # Use attachment-aware chat flow for multimodal requests.
-            last_human_idx = self._find_last_human_message_index(messages)
-            user_content = (
-                messages[last_human_idx].content
-                if last_human_idx is not None
-                else (
-                    messages[-1].content if hasattr(messages[-1], "content") else str(messages[-1])
-                )
+            current_turn_messages, has_images = self._build_chat_turn_messages_with_attachments(
+                current_turn_messages,
+                attachments,
             )
 
-            agent_msg = AgentMessage(
-                role=MessageRole.USER,
-                content=user_content,
-                metadata={
-                    "persona": state.get("persona"),
-                    "history": conversation_history,
-                    "history_summary": state.get("history_summary"),
-                    "model_request": state.get("model_request"),
-                    "user_id": user_id,
-                    "device_id": device_id,
-                },
-                attachments=attachments,
-            )
-            response = await self.chat_agent.process_message(agent_msg, conversation_id)
-        else:
-            current_turn_messages = self._get_current_turn_messages(messages)
-            response = await self.chat_agent.invoke_model_with_history(
-                current_turn_messages,
-                conversation_history,
-                state.get("persona"),
-                conversation_id,
-                user_id=user_id,
-                device_id=device_id,
-                model_request=state.get("model_request"),
-                history_summary=state.get("history_summary"),
-            )
+        response = await self.chat_agent.invoke_model_with_history(
+            current_turn_messages,
+            conversation_history,
+            state.get("persona"),
+            conversation_id,
+            user_id=user_id,
+            device_id=device_id,
+            model_request=state.get("model_request"),
+            history_summary=state.get("history_summary"),
+        )
+
+        if has_images:
+            if response.metadata is None:
+                response.metadata = {}
+            response.metadata["has_images"] = True
 
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)
@@ -1100,8 +1352,6 @@ class MultiAgentWorkflow:
         )
         device_id = state.get("device_id")
 
-        context = state.get("context", {})
-
         last_human_idx = self._find_last_human_message_index(messages)
         original_query = messages[last_human_idx].content if last_human_idx is not None else content
 
@@ -1116,7 +1366,9 @@ class MultiAgentWorkflow:
             "history": conversation_history,
             "original_query": original_query,
             "tool_context": tool_context,
-            "agentic_images": context.get("agentic_images", []),  # Pass images for multimodal LLM
+            "agentic_images": state.get("context", {}).get(
+                "agentic_images", []
+            ),  # Pass images for multimodal LLM
             "model_request": state.get("model_request"),
             "user_id": user_id,
             "device_id": device_id,
@@ -1127,7 +1379,7 @@ class MultiAgentWorkflow:
             role=MessageRole.USER,
             content=original_query,
             metadata=metadata,
-            attachments=context.get("attachments"),
+            attachments=self._get_state_attachments(state),
         )
 
         response = await self.rag_agent.process_message(agent_msg, conversation_id)
@@ -1229,18 +1481,23 @@ class MultiAgentWorkflow:
                 # Extract context for tool execution
                 user_id = state.get("user_id")
                 agent_key = getattr(agent, "agent_config_key", None) if agent else "rag"
+                device_id = state.get("device_id")
 
                 # Execute tools with context set for deferred tool loading support
                 with tool_execution_context(
                     conversation_id,
                     user_id,
                     agent_key,
-                    state.get("device_id"),
+                    device_id,
                 ):
                     outputs, artifacts, images = await execute_tool_calls(
                         tool_calls=tool_calls_to_execute,
                         tool_map=tool_map,
                         capture_images=True,
+                        device_id=device_id,
+                        agent=agent,
+                        conversation_id=conversation_id,
+                        user_id=user_id,
                     )
                 for output in outputs:
                     if output.get("tool_call_id"):
@@ -1489,17 +1746,9 @@ class MultiAgentWorkflow:
             should_describe_plan=should_generate_plan_response,
         )
 
-        state["response"] = response
-
         # Check if agent switched to executing phase via response metadata
         if response.metadata.get("planning_phase"):
             state["planning_phase"] = response.metadata["planning_phase"]
-
-        # Add AI message to state (with tool calls if present)
-        ai_kwargs = {"content": response.message.content or ""}
-        if response.message.tool_calls:
-            ai_kwargs["tool_calls"] = response.message.tool_calls
-        state.setdefault("messages", []).append(AIMessage(**ai_kwargs))
 
         if response.metadata.get("todos"):
             state["todos"] = response.metadata["todos"]
@@ -1509,7 +1758,8 @@ class MultiAgentWorkflow:
             context["final_summary_generated"] = True
             state["context"] = context
 
-        return state
+        self._merge_tool_artifacts(state, response)
+        return self._finalize_agent_response(state, response)
 
     async def _planning_tools_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
@@ -1526,12 +1776,11 @@ class MultiAgentWorkflow:
         write_todos_actions: list[str] = []
 
         # Track errors for circuit breaker
-        context = state.get("context", {})
+        context = GraphStateView(state).context_copy()
         had_error = False
         max_todos = getattr(settings, "max_todos_per_plan", 50)
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
-        agent_key = getattr(self.planning_agent, "agent_config_key", "planning")
 
         tool_map = await ensure_agent_tool_map(
             self.planning_agent,
@@ -1568,6 +1817,9 @@ class MultiAgentWorkflow:
                     tool_map=tool_map,
                 )
                 human_decisions = interrupt(interrupt_payload)
+                _ctx = GraphStateView(state).context_copy()
+                _ctx.pop("pause_reason", None)
+                state["context"] = _ctx
 
                 if not human_decisions:
                     approved_external_calls, rejected_feedback = _apply_decisions(
@@ -1605,129 +1857,58 @@ class MultiAgentWorkflow:
                 )
             )
 
-        # Wrap tool execution with context for deferred tool loading support
-        with tool_execution_context(
-            conversation_id,
-            user_id,
-            agent_key,
-            state.get("device_id"),
-        ):
-            # Execute approved external tool calls
-            for tool_call_data in approved_external_calls:
-                tool_name = tool_call_data.get("name")
-                tool_id = tool_call_data.get("id")
-                tool_args = tool_call_data.get("args", {})
-
-                try:
-                    tool = tool_map.get(tool_name) if tool_name else None
-                    if tool is not None:
-                        result = await invoke_tool(tool, tool_args)
-                        result = extract_content_from_result(result)
-                        result_str = str(result) if result else "Tool executed successfully"
-                        tool_outputs.append(
-                            {
-                                "tool_call_id": tool_id,
-                                "name": tool_name,
-                                "content": result_str,
-                            }
-                        )
-                        # Collect artifacts and images for UI (BP-1)
-                        tool_artifacts.append(
-                            build_tool_artifact(
-                                tool_call_id=tool_id,
-                                tool_name=tool_name,
-                                tool_args=tool_args,
-                                output_text=result_str,
-                                error=None,
-                            )
-                        )
-                        found_images = extract_images_from_tool_result(result_str)
-                        if found_images:
-                            all_images.extend(found_images)
-                    else:
-                        error_msg = f"Tool not found: {tool_name}"
-                        tool_outputs.append(
-                            {
-                                "tool_call_id": tool_id,
-                                "name": tool_name,
-                                "content": error_msg,
-                            }
-                        )
-                        tool_artifacts.append(
-                            build_tool_artifact(
-                                tool_call_id=tool_id,
-                                tool_name=tool_name,
-                                tool_args=tool_args,
-                                output_text=None,
-                                error=error_msg,
-                            )
-                        )
-                except Exception as e:
-                    logger.error(f"Error executing MCP tool {tool_name}: {e}")
-                    error_msg = f"Error executing tool: {str(e)}"
-                    tool_outputs.append(
-                        {
-                            "tool_call_id": tool_id,
-                            "name": tool_name,
-                            "content": error_msg,
-                        }
-                    )
-                    tool_artifacts.append(
-                        build_tool_artifact(
-                            tool_call_id=tool_id,
-                            tool_name=tool_name,
-                            tool_args=tool_args,
-                            output_text=None,
-                            error=error_msg,
-                        )
-                    )
-                    had_error = True  # Mark error for circuit breaker
-
-            # Execute write_todos calls (always permitted — internal state mutations)
-            for tool_call_data in write_todos_calls:
-                tool_name = tool_call_data.get("name")
-                tool_id = tool_call_data.get("id")
-                tool_args = tool_call_data.get("args", {})
-
-                try:
-                    todos, current_task_index, result, action = apply_write_todos_action(
-                        todos=todos,
-                        current_task_index=current_task_index,
-                        tool_args=tool_args,
-                        max_todos=max_todos,
-                    )
-                    write_todos_actions.append(action)
-
-                    if action == "set_todos" and result.startswith("Error: Plan exceeds maximum"):
-                        requested = len(tool_args.get("todos", []) or [])
-                        logger.warning(
-                            "Rejected plan with %d todos (max: %d)",
-                            requested,
-                            max_todos,
-                        )
-
-                except Exception as e:
-                    raw_action = tool_args.get("action")
-                    action = raw_action.value if hasattr(raw_action, "value") else raw_action
-                    result = f"Error executing {action}: {str(e)}"
-                    had_error = True  # Mark error for circuit breaker
-
-                tool_outputs.append(
-                    {
-                        "tool_call_id": tool_id,
-                        "name": tool_name,
-                        "content": result,
-                    }
+        if approved_external_calls:
+            external_outputs, external_artifacts, external_images = (
+                await self._execute_agent_tool_calls(
+                    state=state,
+                    agent=self.planning_agent,
+                    tool_calls=approved_external_calls,
+                    tool_map=tool_map,
+                    capture_images=True,
                 )
+            )
+            tool_outputs.extend(external_outputs)
+            tool_artifacts.extend(external_artifacts)
+            all_images.extend(external_images)
+            had_error = had_error or any(
+                artifact.get("status") == "error" for artifact in external_artifacts
+            )
 
-        # Add tool messages to state
-        for output in tool_outputs:
-            state.setdefault("messages", []).append(
-                ToolMessage(
-                    content=output["content"],
-                    tool_call_id=output["tool_call_id"],
-                    name=output["name"],
+        # Execute write_todos calls (always permitted — internal state mutations)
+        for tool_call_data in write_todos_calls:
+            tool_name = tool_call_data.get("name")
+            tool_id = tool_call_data.get("id")
+            tool_args = tool_call_data.get("args", {})
+
+            try:
+                todos, current_task_index, result, action = apply_write_todos_action(
+                    todos=todos,
+                    current_task_index=current_task_index,
+                    tool_args=tool_args,
+                    max_todos=max_todos,
                 )
+                write_todos_actions.append(action)
+
+                if action == "set_todos" and result.startswith("Error: Plan exceeds maximum"):
+                    requested = len(tool_args.get("todos", []) or [])
+                    logger.warning(
+                        "Rejected plan with %d todos (max: %d)",
+                        requested,
+                        max_todos,
+                    )
+
+            except Exception as e:
+                raw_action = tool_args.get("action")
+                action = raw_action.value if hasattr(raw_action, "value") else raw_action
+                result = f"Error executing {action}: {str(e)}"
+                had_error = True  # Mark error for circuit breaker
+
+            tool_outputs.append(
+                {
+                    "tool_call_id": tool_id,
+                    "name": tool_name,
+                    "content": result,
+                }
             )
 
         # Update state with new todos
@@ -1747,36 +1928,16 @@ class MultiAgentWorkflow:
                 state["planning_phase"] = "executing"
                 logger.debug(f"Switched to executing phase due to {action} action")
         state["context"] = context
-
-        # Add tool artifacts to state context for UI visibility (BP-1)
-        if tool_artifacts:
-            existing_artifacts = context.get("tool_artifacts", [])
-            existing_artifacts.extend(tool_artifacts)
-            context["tool_artifacts"] = existing_artifacts
-        if all_images:
-            existing_images = context.get("tool_images", [])
-            existing_images.extend(all_images)
-            context["tool_images"] = existing_images
-
-        # Also attach to response object for backward compatibility
-        response = state.get("response")
-        if response and tool_outputs:
-            if response.tool_artifacts is None:
-                response.tool_artifacts = []
-            for output in tool_outputs:
-                response.tool_artifacts.append(
-                    {
-                        "tool": output["name"],
-                        "result": output["content"],
-                    }
-                )
-            state["response"] = response
-
-        # Increment iteration count for budget tracking
-        current_iteration = state.get("iteration_count") or 0
-        state["iteration_count"] = current_iteration + 1
+        self._apply_tool_outputs_to_state(
+            state,
+            tool_outputs=tool_outputs,
+            tool_artifacts=tool_artifacts,
+            all_images=all_images,
+            mirror_to_response=True,
+        )
 
         # Update consecutive_errors counter for circuit breaker
+        context = GraphStateView(state).context_copy()
         if had_error:
             context["consecutive_errors"] = context.get("consecutive_errors", 0) + 1
             logger.warning(f"Planning consecutive errors: {context['consecutive_errors']}")
@@ -1807,14 +1968,14 @@ class MultiAgentWorkflow:
         if settings.auto_continue_enabled:
             soft_limit = int(max_iterations * settings.auto_continue_soft_limit_ratio)
             if planning_call_count >= soft_limit:
-                context = dict(state.get("context") or {})
-                context["planning_budget_reached"] = True
-                context["auto_continue_requested"] = {
-                    "reason": "soft_budget",
-                    "planning_call_count": planning_call_count,
-                    "soft_limit": soft_limit,
-                }
-                state["context"] = context
+                self._set_continuation_signal(
+                    state,
+                    should_continue=True,
+                    reason="soft_budget",
+                    scope="planning",
+                    count=planning_call_count,
+                    limit=soft_limit,
+                )
                 logger.info(
                     "Planning soft-limit reached: %d >= %d, requesting auto-continue",
                     planning_call_count,
@@ -1824,28 +1985,42 @@ class MultiAgentWorkflow:
 
         # Check iteration budget (hard limit)
         if planning_call_count >= max_iterations:
-            context = dict(state.get("context") or {})
-            context["planning_budget_reached"] = True
+            context = GraphStateView(state).context_copy()
             context["pause_reason"] = "max_iterations_reached"
             state["context"] = context
+            self._set_continuation_signal(
+                state,
+                should_continue=settings.auto_continue_enabled,
+                reason="max_iterations_reached",
+                scope="planning",
+                count=planning_call_count,
+                limit=max_iterations,
+            )
             logger.warning(f"Planning budget exceeded: {planning_call_count} >= {max_iterations}")
             return "end"
 
         # Circuit breaker: check consecutive errors
-        context = state.get("context", {})
+        context = GraphStateView(state).context_copy()
         consecutive_errors = context.get("consecutive_errors", 0)
         max_consecutive_errors = settings.planning_consecutive_errors_limit
 
         if consecutive_errors >= max_consecutive_errors:
-            context["planning_budget_reached"] = True
             context["pause_reason"] = "consecutive_errors_limit"
             state["context"] = context
+            self._set_continuation_signal(
+                state,
+                should_continue=False,
+                reason="consecutive_errors_limit",
+                scope="planning",
+                count=consecutive_errors,
+                limit=max_consecutive_errors,
+            )
             logger.warning(
                 f"Planning circuit breaker triggered: {consecutive_errors} consecutive errors"
             )
             return "end"
 
-        context = state.get("context", {})
+        context = GraphStateView(state).context_copy()
         planning_phase = state.get("planning_phase", "planning")
 
         # If plan was just created/modified, return to agent for confirmation response
@@ -1941,12 +2116,9 @@ class MultiAgentWorkflow:
     def _attach_context_outputs(
         self, state: dict[str, Any], response: AgentResponse
     ) -> AgentResponse:
-        context = state.get("context", {}) if isinstance(state, dict) else {}
-        if not isinstance(context, dict):
-            return response
-
+        state_view = GraphStateView(state)
         tool_artifacts = self._merge_unique_items(
-            response.tool_artifacts, context.get("tool_artifacts")
+            response.tool_artifacts, state_view.tool_artifacts()
         )
         response.tool_artifacts = tool_artifacts or None
 
@@ -1954,7 +2126,7 @@ class MultiAgentWorkflow:
             response.metadata = {}
 
         images = self._merge_unique_items(
-            response.metadata.get("images"), context.get("tool_images")
+            response.metadata.get("images"), state_view.tool_images()
         )
         if images:
             response.metadata["images"] = images
@@ -2009,7 +2181,7 @@ class MultiAgentWorkflow:
         return self._attach_context_outputs(state, recovered_response)
 
     # ------------------------------------------------------------------
-    # Auto-Continue helpers
+    # Continuation helpers
     # ------------------------------------------------------------------
 
     def _build_continuation_state(
@@ -2024,7 +2196,8 @@ class MultiAgentWorkflow:
         counters so each round has a fresh budget, and clears "stop" flags
         that would immediately short-circuit the next round.
         """
-        state: dict[str, Any] = dict(previous_state or {})
+        state: GraphState = dict(previous_state or {})
+        state_view = GraphStateView(state)
 
         # Reset per-round counters so the next round has fresh budget.
         state["iteration_count"] = 0
@@ -2036,11 +2209,9 @@ class MultiAgentWorkflow:
 
         # Clear "stop" flags so they don't immediately short-circuit the
         # next round.
-        ctx = dict(state.get("context") or {})
-        ctx.pop("max_iterations_reached", None)
-        ctx.pop("planning_budget_reached", None)
+        ctx = state_view.context_copy()
         ctx.pop("pause_reason", None)
-        ctx.pop("auto_continue_requested", None)
+        ctx.pop("continuation_signal", None)
 
         # NOTE (P2 regression-check): `conversation_summarized` is deliberately
         # *not* popped here so the summarize node skips re-summarization in
@@ -2076,40 +2247,10 @@ class MultiAgentWorkflow:
                 logger.warning("Failed to capture checkpoint state for continuation: %s", exc)
         return dict(fallback_state) if fallback_state else {}
 
-    async def execute(
-        self,
-        message: str,
-        conversation_id: str | None = None,
-        user_id: str | None = None,
-        device_id: str | None = None,
-        thread_id: str | None = None,
-        persona: str | None = None,
-        attachments: list | None = None,
-        model_request: dict[str, Any] | None = None,
-        current_task: dict[str, Any] | None = None,
-        all_tasks: list[dict[str, Any]] | None = None,
-        planning_mode_enabled: bool = False,
-        has_existing_plan: bool = False,
-        existing_tasks: list[dict[str, Any]] | None = None,
-        plan_lifecycle: str | None = None,
-    ) -> AgentResponse | None:
-
-        initial_state = self._build_initial_state(
-            message=message,
-            conversation_id=conversation_id,
-            user_id=user_id,
-            device_id=device_id,
-            persona=persona,
-            attachments=attachments,
-            model_request=model_request,
-            current_task=current_task,
-            all_tasks=all_tasks,
-            planning_mode_enabled=planning_mode_enabled,
-            has_existing_plan=has_existing_plan,
-            existing_tasks=existing_tasks,
-            plan_lifecycle=plan_lifecycle,
-        )
-
+    async def execute_request(self, request: WorkflowExecutionRequest) -> AgentResponse | None:
+        initial_state = self._build_initial_state_from_request(request)
+        conversation_id = request.conversation_id
+        thread_id = self._resolve_thread_id(request.thread_id, conversation_id)
         config = self._build_graph_config(thread_id)
 
         # ── Auto-Continue outer loop ──────────────────────────────────
@@ -2147,19 +2288,9 @@ class MultiAgentWorkflow:
 
             # Detect soft-budget continuation signal from the result
             if not should_continue and result:
-                ctx = result.get("context", {})
-                if isinstance(ctx, dict) and ctx.get("auto_continue_requested"):
+                continue_reason = self._get_requested_continuation_reason(result)
+                if continue_reason:
                     should_continue = True
-                    continue_reason = (
-                        ctx.get("auto_continue_requested", {}).get("reason") or "soft_budget"
-                    )
-                elif (
-                    isinstance(ctx, dict)
-                    and ctx.get("max_iterations_reached")
-                    and settings.auto_continue_enabled
-                ):
-                    should_continue = True
-                    continue_reason = "max_iterations_reached"
 
             if not should_continue:
                 break  # Normal completion
@@ -2225,24 +2356,11 @@ class MultiAgentWorkflow:
             )
             agent_response = self._recover_terminal_response(final_state)
 
-        final_todos = final_state.get("todos", []) if isinstance(final_state, dict) else []
-        if agent_response and final_todos:
-            if agent_response.metadata is None:
-                agent_response.metadata = {}
-            agent_response.metadata["todos"] = final_todos
-            context = final_state.get("context", {}) if isinstance(final_state, dict) else {}
-            if context.get("all_tasks_completed"):
-                agent_response.metadata["all_tasks_completed"] = True
-            if context.get("planning_budget_reached"):
-                agent_response.metadata["planning_budget_reached"] = True
-            agent_response.metadata["planning_call_count"] = (
-                final_state.get("planning_call_count", 0) if isinstance(final_state, dict) else 0
-            )
-            # Surface the machine-readable stop reason so callers can distinguish
-            # budget exhaustion from errors, clarification requests, etc.
-            pause_reason = context.get("pause_reason")
-            if pause_reason:
-                agent_response.metadata["pause_reason"] = pause_reason
+        final_selected_agent = (
+            final_state.get("selected_agent") if isinstance(final_state, dict) else None
+        )
+        if agent_response and final_selected_agent == "planning_agent":
+            agent_response = self._attach_planning_state_metadata(agent_response, final_state)
 
         # Add continuation metadata when multiple rounds ran
         if agent_response and total_iterations > 0:
@@ -2675,19 +2793,9 @@ class MultiAgentWorkflow:
                 return
 
             if not should_continue and last_state_values:
-                ctx = (
-                    last_state_values.get("context", {})
-                    if isinstance(last_state_values, dict)
-                    else {}
-                )
-                if ctx.get("auto_continue_requested"):
+                continue_reason = self._get_requested_continuation_reason(last_state_values)
+                if continue_reason:
                     should_continue = True
-                    continue_reason = (
-                        ctx.get("auto_continue_requested", {}).get("reason") or "soft_budget"
-                    )
-                elif ctx.get("max_iterations_reached") and settings.auto_continue_enabled:
-                    should_continue = True
-                    continue_reason = "max_iterations_reached"
 
             if not should_continue:
                 break
@@ -2783,19 +2891,14 @@ class MultiAgentWorkflow:
                 ):
                     response.metadata["thinking_summary"] = accumulated_thinking
 
-                final_selected_agent = final_state.get("selected_agent") or selected_agent
+                response_state = final_state if final_state else last_state_values
+                final_selected_agent = (
+                    response_state.get("selected_agent")
+                    if isinstance(response_state, dict)
+                    else selected_agent
+                ) or selected_agent
                 if final_selected_agent == "planning_agent":
-                    final_todos = final_state.get("todos", [])
-                    if final_todos:
-                        response.metadata["todos"] = final_todos
-                    response.metadata["planning_call_count"] = final_state.get(
-                        "planning_call_count", 0
-                    )
-                    context = final_state.get("context", {})
-                    if context.get("all_tasks_completed"):
-                        response.metadata["all_tasks_completed"] = True
-                    if context.get("planning_budget_reached"):
-                        response.metadata["planning_budget_reached"] = True
+                    response = self._attach_planning_state_metadata(response, response_state)
 
                 if round_num > 1:
                     response.metadata["continuation_rounds"] = round_num
@@ -2941,40 +3044,15 @@ class MultiAgentWorkflow:
                 cp_err,
             )
 
-    async def execute_stream(
-        self,
-        message: str,
-        conversation_id: str | None = None,
-        user_id: str | None = None,
-        device_id: str | None = None,
-        thread_id: str | None = None,
-        persona: str | None = None,
-        attachments: list | None = None,
-        model_request: dict[str, Any] | None = None,
-        current_task: dict[str, Any] | None = None,
-        all_tasks: list[dict[str, Any]] | None = None,
-        planning_mode_enabled: bool = False,
-        has_existing_plan: bool = False,
-        existing_tasks: list[dict[str, Any]] | None = None,
-        plan_lifecycle: str | None = None,
-    ):
-        initial_state = self._build_initial_state(
-            message=message,
-            conversation_id=conversation_id,
-            user_id=user_id,
-            device_id=device_id,
-            persona=persona,
-            attachments=attachments,
-            model_request=model_request,
-            current_task=current_task,
-            all_tasks=all_tasks,
-            planning_mode_enabled=planning_mode_enabled,
-            has_existing_plan=has_existing_plan,
-            existing_tasks=existing_tasks,
-            plan_lifecycle=plan_lifecycle,
-        )
-
+    async def execute_request_stream(self, request: WorkflowExecutionRequest):
+        initial_state = self._build_initial_state_from_request(request)
+        conversation_id = request.conversation_id
+        thread_id = self._resolve_thread_id(request.thread_id, conversation_id)
         config = self._build_graph_config(thread_id)
+        user_id = request.user_id
+        message = request.message
+        persona = request.persona
+        attachments = request.attachments
 
         # Prefetch conversation history in parallel with the router LLM call.
         # By the time the agent node needs history, the cache will be warm.
@@ -3422,19 +3500,9 @@ class MultiAgentWorkflow:
 
             # ── Check if graph ended because we *want* to continue ─────
             if not should_continue and last_state_values:
-                ctx = (
-                    last_state_values.get("context", {})
-                    if isinstance(last_state_values, dict)
-                    else {}
-                )
-                if ctx.get("auto_continue_requested"):
+                continue_reason = self._get_requested_continuation_reason(last_state_values)
+                if continue_reason:
                     should_continue = True
-                    continue_reason = (
-                        ctx.get("auto_continue_requested", {}).get("reason") or "soft_budget"
-                    )
-                elif ctx.get("max_iterations_reached") and settings.auto_continue_enabled:
-                    should_continue = True
-                    continue_reason = "max_iterations_reached"
 
             if not should_continue:
                 break  # Normal completion — exit loop and finalize
@@ -3537,21 +3605,14 @@ class MultiAgentWorkflow:
                     ):
                         response.metadata["thinking_summary"] = accumulated_thinking
 
-                    # For planning agent, include todos in metadata
-                    final_selected_agent = final_state.get("selected_agent") or selected_agent
+                    response_state = final_state if final_state else last_state_values
+                    final_selected_agent = (
+                        response_state.get("selected_agent")
+                        if isinstance(response_state, dict)
+                        else selected_agent
+                    ) or selected_agent
                     if final_selected_agent == "planning_agent":
-                        final_todos = final_state.get("todos", [])
-                        if final_todos:
-                            response.metadata["todos"] = final_todos
-                        response.metadata["planning_call_count"] = final_state.get(
-                            "planning_call_count", 0
-                        )
-                        # Check context for completion status
-                        context = final_state.get("context", {})
-                        if context.get("all_tasks_completed"):
-                            response.metadata["all_tasks_completed"] = True
-                        if context.get("planning_budget_reached"):
-                            response.metadata["planning_budget_reached"] = True
+                        response = self._attach_planning_state_metadata(response, response_state)
 
                     # Add continuation metadata when multiple rounds ran
                     if round_num > 1:
@@ -3579,6 +3640,15 @@ class MultiAgentWorkflow:
                     and not response.metadata.get("thinking_summary")
                 ):
                     response.metadata["thinking_summary"] = accumulated_thinking
+
+                response_state = last_state_values
+                final_selected_agent = (
+                    response_state.get("selected_agent")
+                    if isinstance(response_state, dict)
+                    else selected_agent
+                ) or selected_agent
+                if final_selected_agent == "planning_agent":
+                    response = self._attach_planning_state_metadata(response, response_state)
 
                 if round_num > 1:
                     response.metadata["continuation_rounds"] = round_num
@@ -3626,6 +3696,7 @@ def create_workflow(
     embedding_model: SentenceTransformer,
     checkpointer: BaseCheckpointSaver | None = None,
     document_repository: Optional["DocumentRepository"] = None,
+    runtime_model_resolver: IRuntimeModelResolver | None = None,
 ) -> MultiAgentWorkflow:
     """
     Create multi-agent workflow with required shared dependencies.
@@ -3635,4 +3706,5 @@ def create_workflow(
         embedding_model=embedding_model,
         checkpointer=checkpointer,
         document_repository=document_repository,
+        runtime_model_resolver=runtime_model_resolver,
     )

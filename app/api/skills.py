@@ -1,7 +1,8 @@
 """REST API endpoints for the Skills system — mirrors app/api/mcp.py."""
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from app.core.auth import get_current_user
 from app.core.dependency_injection import AppAutoInjector
 from app.schemas.responses import ApiResponse
 from app.schemas.skills import (
@@ -11,7 +12,11 @@ from app.schemas.skills import (
 )
 from app.services.skills_service import SkillsService
 
-router = APIRouter(prefix="/skills", tags=["skills"])
+router = APIRouter(
+    prefix="/skills",
+    tags=["skills"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 @router.get("")

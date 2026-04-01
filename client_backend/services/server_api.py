@@ -6,7 +6,7 @@ This module provides an async HTTP client wrapper for all server API calls.
 
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import urlencode, urlparse, urlunparse
 from uuid import UUID
 
@@ -15,8 +15,10 @@ from pydantic import BaseModel
 
 from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
+from client_backend.schemas.runtime import CatalogSyncResult, DeviceRegistrationResult
 
 logger = get_logger(__name__)
+TModel = TypeVar("TModel", bound=BaseModel)
 
 
 class ServerAPIError(Exception):
@@ -49,6 +51,12 @@ class TokenPair(BaseModel):
     user_id: str | None = None
     expires_in: int | None = None
     expires_at: datetime | None = None
+
+
+class OperationResult(BaseModel):
+    """Normalized status payload for side-effect-oriented upstream operations."""
+
+    message: str
 
 
 class ServerAPIClient:
@@ -105,6 +113,33 @@ class ServerAPIClient:
                 detail=payload,
             )
         return data
+
+    @classmethod
+    def _parse_typed_payload(
+        cls,
+        payload: dict[str, Any],
+        *,
+        model: type[TModel],
+        context: str,
+    ) -> TModel:
+        """Validate a direct payload or ApiResponse envelope into one typed runtime model."""
+        normalized_payload = payload
+        if any(key in payload for key in ("success", "data", "error")):
+            normalized_payload = cls._unwrap_api_data(payload, context=context)
+
+        if not isinstance(normalized_payload, dict):
+            raise ServerAPIError(
+                f"Server response for {context} did not contain an object payload",
+                detail=payload,
+            )
+
+        try:
+            return model.model_validate(normalized_payload)
+        except Exception as exc:
+            raise ServerAPIError(
+                f"Server response for {context} did not match {model.__name__}",
+                detail=normalized_payload,
+            ) from exc
 
     async def request_response(
         self,
@@ -261,7 +296,7 @@ class ServerAPIClient:
 
     # ── Authentication Methods ──────────────────────────────────────────
 
-    async def login(self, email: str, password: str) -> dict[str, Any]:
+    async def login(self, email: str, password: str) -> TokenPair:
         """
         Authenticate with the server.
 
@@ -270,7 +305,7 @@ class ServerAPIClient:
             password: User's password.
 
         Returns:
-            The wrapped upstream ApiResponse payload.
+            The normalized active token pair.
         """
         response = await self.post(
             "/auth/login",
@@ -288,14 +323,14 @@ class ServerAPIClient:
         )
 
         logger.info("Logged in as %s", email)
-        return response
+        return self._tokens
 
-    async def refresh_token(self) -> dict[str, Any]:
+    async def refresh_token(self) -> TokenPair:
         """
         Refresh the access token using the refresh token.
 
         Returns:
-            The wrapped upstream ApiResponse payload.
+            The normalized active token pair.
 
         Raises:
             AuthenticationError: If refresh fails.
@@ -331,17 +366,23 @@ class ServerAPIClient:
         )
 
         logger.debug("Token refreshed successfully")
-        return response
+        return self._tokens
 
-    async def logout(self) -> None:
-        """Log out and clear tokens."""
+    async def logout(self) -> OperationResult:
+        """Log out, clear local tokens, and return a normalized operation result."""
+        message = "Successfully logged out. Please discard your tokens."
         if self._tokens:
             try:
-                await self.post("/auth/logout")
+                response = await self.post("/auth/logout")
+                if isinstance(response, dict):
+                    response_message = response.get("message")
+                    if isinstance(response_message, str) and response_message:
+                        message = response_message
             except Exception as e:
                 logger.warning(f"Logout request failed: {e}")
             finally:
                 self._tokens = None
+        return OperationResult(message=message)
 
     def set_tokens(self, tokens: TokenPair | None) -> None:
         """Set authentication tokens directly (e.g., from stored credentials)."""
@@ -357,56 +398,7 @@ class ServerAPIClient:
 
     # ── Conversation Methods ────────────────────────────────────────────
 
-    async def list_conversations(
-        self,
-        page: int = 1,
-        limit: int = 20,
-    ) -> dict[str, Any]:
-        """List user's conversations."""
-        return await self.get(
-            "/conversations/",
-            params={"page": page, "limit": limit},
-        )
-
-    async def get_conversation(self, conversation_id: str) -> dict[str, Any]:
-        """Get a specific conversation."""
-        return await self.get(f"/conversations/{conversation_id}")
-
-    async def create_conversation(self, title: str | None = None) -> dict[str, Any]:
-        """Create a new conversation."""
-        return await self.post(
-            "/conversations/",
-            json={"title": title} if title else {},
-        )
-
-    async def update_conversation(
-        self,
-        conversation_id: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Update a conversation."""
-        return await self.patch(
-            f"/conversations/{conversation_id}",
-            json=payload,
-        )
-
-    async def delete_conversation(self, conversation_id: str) -> None:
-        """Delete a conversation."""
-        await self.delete(f"/conversations/{conversation_id}")
-
     # ── Message Methods ─────────────────────────────────────────────────
-
-    async def get_messages(
-        self,
-        conversation_id: str,
-        page: int = 1,
-        limit: int = 50,
-    ) -> dict[str, Any]:
-        """Get messages in a conversation."""
-        return await self.get(
-            f"/conversations/{conversation_id}/messages",
-            params={"page": page, "limit": limit},
-        )
 
     async def create_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create a message."""
@@ -499,9 +491,9 @@ class ServerAPIClient:
         app_version: str,
         runtime_version: str,
         capabilities: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Register the current local runtime as an active client device."""
-        return await self.post(
+    ) -> DeviceRegistrationResult:
+        """Register the current local runtime and return the normalized runtime session payload."""
+        response = await self.post(
             "/client-devices/register",
             json={
                 "device_identifier": device_identifier,
@@ -512,17 +504,27 @@ class ServerAPIClient:
                 "capabilities": capabilities or {},
             },
         )
+        return self._parse_typed_payload(
+            response,
+            model=DeviceRegistrationResult,
+            context="register device",
+        )
 
     async def update_device_tool_catalog(
         self,
         *,
         device_id: str,
         catalog: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Sync the sanitized local tool catalog to the server."""
-        return await self.put(
+    ) -> CatalogSyncResult:
+        """Sync the sanitized local tool catalog and return the normalized sync result."""
+        response = await self.put(
             f"/client-devices/{device_id}/tool-catalog",
             json={"device_id": device_id, "catalog": catalog},
+        )
+        return self._parse_typed_payload(
+            response,
+            model=CatalogSyncResult,
+            context="update device tool catalog",
         )
 
     async def update_device_skill_catalog(
@@ -530,11 +532,16 @@ class ServerAPIClient:
         *,
         device_id: str,
         catalog: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Sync the local skill catalog to the server."""
-        return await self.put(
+    ) -> CatalogSyncResult:
+        """Sync the local skill catalog and return the normalized sync result."""
+        response = await self.put(
             f"/client-devices/{device_id}/skill-catalog",
             json={"device_id": device_id, "catalog": catalog},
+        )
+        return self._parse_typed_payload(
+            response,
+            model=CatalogSyncResult,
+            context="update device skill catalog",
         )
 
     def build_runtime_websocket_url(
@@ -602,26 +609,6 @@ class ServerAPIClient:
             filename=filename or path.name,
             content=path.read_bytes(),
         )
-
-    async def get_documents(self, conversation_id: str) -> dict[str, Any]:
-        """Get documents in a conversation."""
-        return await self.get(f"/documents/conversation/{conversation_id}")
-
-    async def get_document_status(self, document_id: str) -> dict[str, Any]:
-        """Get a document by ID."""
-        return await self.get(f"/documents/{document_id}")
-
-    async def get_document_task_status(self, task_id: str) -> dict[str, Any]:
-        """Get document background task status."""
-        return await self.get(f"/documents/task/{task_id}")
-
-    async def update_document(self, document_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """Update a document."""
-        return await self.put(f"/documents/{document_id}", json=payload)
-
-    async def delete_document(self, document_id: str) -> dict[str, Any]:
-        """Delete a document."""
-        return await self.delete(f"/documents/{document_id}")
 
 
 # Global client instance

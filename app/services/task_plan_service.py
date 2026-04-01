@@ -3,9 +3,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from app.ai.agents.planning_agent import PlanningAgent
-from app.ai.schemas import AgentMessage, MessageRole
 from app.core.exceptions import ResourceNotFoundException
+from app.interfaces.planning_runtime_interface import IPlanningRuntimeService
 from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.models.conversation import Conversation
 from app.models.enums import PlanLifecycle, TaskStatus
@@ -14,6 +13,7 @@ from app.repositories.conversation import ConversationRepository
 from app.repositories.task_plan import TaskPlanRepository
 from app.schemas.conversation import ConversationUpdate
 from app.schemas.task_plan import (
+    PlanningRuntimeRequest,
     PlanningStatusResponse,
     TaskPlanRead,
     TaskPlanUpdate,
@@ -30,13 +30,13 @@ class TaskPlanService(ITaskPlanService):
         task_plan_repository: TaskPlanRepository,
         conversation_validation_utils: ConversationValidationUtils,
         task_plan_validation_utils: TaskPlanValidationUtils,
-        planning_agent: PlanningAgent,
+        planning_runtime: IPlanningRuntimeService,
         conversation_repository: ConversationRepository,
     ):
         self.task_plan_repository = task_plan_repository
         self.conversation_validation_utils = conversation_validation_utils
         self.task_plan_validation_utils = task_plan_validation_utils
-        self.planning_agent = planning_agent
+        self.planning_runtime = planning_runtime
         self.conversation_repository = conversation_repository
 
     def _ensure_planning_mode_enabled(self, conversation_id: UUID) -> None:
@@ -309,14 +309,6 @@ class TaskPlanService(ITaskPlanService):
             )
             return [TaskPlanRead.model_validate(task) for task in stored_tasks]
 
-    @staticmethod
-    def _extract_agent_todos(response: Any) -> list[dict[str, Any]]:
-        metadata = getattr(response, "metadata", None) or {}
-        todos = metadata.get("todos")
-        if not isinstance(todos, list):
-            raise ValueError("Planning agent did not return a todo payload")
-        return todos
-
     async def create_task_plan(
         self,
         conversation_id: UUID,
@@ -331,21 +323,14 @@ class TaskPlanService(ITaskPlanService):
         if existing_tasks:
             return await self.modify_task_plan(conversation_id, user_message, user_id)
 
-        agent_message = AgentMessage(
-            role=MessageRole.USER,
-            content=user_message,
-            metadata={"user_id": str(user_id)},
+        planning_result = await self.planning_runtime.generate_plan(
+            PlanningRuntimeRequest(
+                user_message=user_message,
+                conversation_id=str(conversation_id),
+                user_id=str(user_id),
+            )
         )
-
-        response = await self.planning_agent.generate_plan(
-            message=agent_message,
-            conversation_id=str(conversation_id),
-        )
-
-        if response.error:
-            raise ValueError(response.error)
-
-        todos = self._extract_agent_todos(response)
+        todos = planning_result.todos
         if not self._normalize_todos(todos):
             raise ValueError("Failed to generate task plan from the request")
 
@@ -376,25 +361,15 @@ class TaskPlanService(ITaskPlanService):
 
         existing_tasks_dict = [self._task_to_agent_dict(task) for task in existing_tasks]
 
-        agent_message = AgentMessage(
-            role=MessageRole.USER,
-            content=user_message,
-            metadata={
-                "existing_tasks": existing_tasks_dict,
-                "user_id": str(user_id),
-            },
+        planning_result = await self.planning_runtime.modify_plan(
+            PlanningRuntimeRequest(
+                user_message=user_message,
+                conversation_id=str(conversation_id),
+                user_id=str(user_id),
+                existing_tasks=existing_tasks_dict,
+            )
         )
-
-        response = await self.planning_agent.modify_plan(
-            message=agent_message,
-            existing_tasks=existing_tasks_dict,
-            conversation_id=str(conversation_id),
-        )
-
-        if response.error:
-            raise ValueError(response.error)
-
-        todos = self._extract_agent_todos(response)
+        todos = planning_result.todos
         if not self._normalize_todos(todos):
             raise ValueError("Failed to modify task plan from the request")
 

@@ -3,12 +3,14 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 from client_backend.api import mcp as mcp_api
 from client_backend.core.auth import require_local_session
 from client_backend.core.config import client_settings
+from client_backend.core.paths import get_profile_subdir
 from client_backend.core.security import LocalSessionPayload
 from client_backend.main import app
 from client_backend.services import local_mcp_manager as local_mcp_manager_module
@@ -69,6 +71,38 @@ async def test_local_mcp_manager_loads_real_fastmcp_stdio_server(tmp_path):
     await manager.shutdown()
 
 
+async def test_local_mcp_manager_reloads_user_scoped_profile_config(tmp_path, monkeypatch):
+    original_mcp_config_path = client_settings.mcp_config_path
+    original_profile_root = client_settings.profile_root
+    client_settings.mcp_config_path = ""
+    client_settings.profile_root = str(tmp_path / "profiles")
+
+    auth_state = SimpleNamespace(current_user_id="user-a")
+    monkeypatch.setattr(
+        local_mcp_manager_module,
+        "get_upstream_auth_service",
+        lambda: SimpleNamespace(get_current_user_id=lambda: auth_state.current_user_id),
+    )
+
+    user_a_path = get_profile_subdir("user-a", "mcp") / "mcp_config.json"
+    user_b_path = get_profile_subdir("user-b", "mcp") / "mcp_config.json"
+    user_a_path.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    user_b_path.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+
+    manager = LocalMCPManager()
+    try:
+        await manager.initialize()
+        assert manager.config_path == user_a_path.resolve()
+
+        auth_state.current_user_id = "user-b"
+        await manager.initialize()
+        assert manager.config_path == user_b_path.resolve()
+    finally:
+        await manager.shutdown()
+        client_settings.mcp_config_path = original_mcp_config_path
+        client_settings.profile_root = original_profile_root
+
+
 def test_parse_server_url_payload_normalizes_http_transport():
     name, config = mcp_api._parse_server_url_payload({"url": "https://example.com/mcp"})
 
@@ -87,6 +121,29 @@ def test_local_mcp_manager_preserves_scoped_npm_package_args(tmp_path):
     )
 
     assert resolved == "@wonderwhy-er/desktop-commander@latest"
+
+
+def test_tool_records_from_loaded_tools_do_not_mutate_foreign_schemas(tmp_path):
+    manager = LocalMCPManager(config_path=tmp_path / "mcp" / "mcp_config.json")
+    raw_schema = {
+        "$schema": "https://example.com/schema.json",
+        "type": "object",
+        "properties": {
+            "mode": {
+                "type": "string",
+                "enum": ["safe", 1],
+            }
+        },
+    }
+    tool = SimpleNamespace(name="demo:inspect", description="Inspect", args_schema=raw_schema)
+
+    records = manager._tool_records_from_loaded_tools("demo-server", [tool])
+
+    assert tool.args_schema is raw_schema
+    assert tool.args_schema["$schema"] == "https://example.com/schema.json"
+    assert records[0].name == "inspect"
+    assert "$schema" not in records[0].input_schema
+    assert "enum" not in records[0].input_schema["properties"]["mode"]
 
 
 def test_add_mcp_server_endpoint_loads_tools_after_save(tmp_path):

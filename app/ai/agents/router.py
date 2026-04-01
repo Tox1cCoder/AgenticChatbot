@@ -82,17 +82,25 @@ class Router:
 
     async def _call_llm(self, prompt: str, available_agents: list[str]) -> str | None:
         """Invoke Gemini and parse the response into an agent name."""
-        response = await asyncio.to_thread(
-            self.gemini_client.models.generate_content,
-            model=self.model_name,
-            contents=prompt,
-            config=build_gemini_generate_config(
-                model_name=self.model_name,
-                include_thinking=False,
-            ),
-        )
-        response_text = response.text if hasattr(response, "text") else str(response)
-        return self._extract_agent_name(response_text, available_agents)
+        if self.gemini_client is None:
+            logger.warning("Router fallback: Gemini client unavailable, defaulting to chat_agent")
+            return None
+
+        try:
+            response = await asyncio.to_thread(
+                self.gemini_client.models.generate_content,
+                model=self.model_name,
+                contents=prompt,
+                config=build_gemini_generate_config(
+                    model_name=self.model_name,
+                    include_thinking=False,
+                ),
+            )
+            response_text = response.text if hasattr(response, "text") else str(response)
+            return self._extract_agent_name(response_text, available_agents)
+        except Exception as exc:
+            logger.warning("Router fallback: Gemini routing failed: %s", exc)
+            return None
 
     def _build_prompt(
         self,
@@ -137,9 +145,7 @@ class Router:
                 )
                 for skill in active_skills
             )
-            prompt_parts.append(
-                f"\nActive skills available for this request:\n{skills_context}"
-            )
+            prompt_parts.append(f"\nActive skills available for this request:\n{skills_context}")
 
         prompt_parts.append(f"\n\nUser message: {content}")
         return "\n".join(prompt_parts)

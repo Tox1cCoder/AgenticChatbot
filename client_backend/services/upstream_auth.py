@@ -7,7 +7,6 @@ Handles token storage, refresh, and credential management for the server connect
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel
 
@@ -17,6 +16,7 @@ from client_backend.core.paths import get_profile_subdir
 from client_backend.core.security import decrypt_local_secret, encrypt_local_secret
 from client_backend.services.server_api import (
     AuthenticationError,
+    OperationResult,
     ServerAPIClient,
     TokenPair,
     get_server_client,
@@ -99,7 +99,7 @@ class UpstreamAuthService:
             path.unlink()
             logger.debug(f"Cleared credentials for user {user_id}")
 
-    async def login(self, email: str, password: str) -> dict[str, Any]:
+    async def login(self, email: str, password: str) -> TokenPair:
         """
         Login to the upstream server.
 
@@ -108,14 +108,13 @@ class UpstreamAuthService:
             password: User password.
 
         Returns:
-            Wrapped login response from the upstream server.
+            The normalized active token pair.
 
         Raises:
             AuthenticationError: If login fails.
         """
-        response = await self._client.login(email, password)
-        tokens = self._client.get_tokens()
-        if tokens is None or not tokens.user_id:
+        tokens = await self._client.login(email, password)
+        if not tokens.user_id:
             raise AuthenticationError("Login succeeded but no user ID was returned by the server")
 
         user_id = str(tokens.user_id)
@@ -132,23 +131,22 @@ class UpstreamAuthService:
         self._save_credentials(self._credentials)
 
         logger.info("Logged in as %s (user_id: %s)", email, user_id)
-        return response
+        return tokens
 
-    async def logout(self) -> dict[str, Any] | None:
+    async def logout(self) -> OperationResult:
         """Logout from the upstream server."""
         if self._current_user_id:
-            response: dict[str, Any] | None = None
+            response = OperationResult(
+                message="Successfully logged out. Please discard your tokens."
+            )
             if self._client.is_authenticated():
-                try:
-                    response = await self._client.post("/auth/logout")
-                finally:
-                    self._client.set_tokens(None)
+                response = await self._client.logout()
             self._clear_credentials(self._current_user_id)
             self._current_user_id = None
             self._credentials = None
             logger.info("Logged out")
             return response
-        return None
+        return OperationResult(message="Successfully logged out. Please discard your tokens.")
 
     async def restore_session(self, user_id: str) -> bool:
         """
@@ -223,20 +221,16 @@ class UpstreamAuthService:
         except AuthenticationError:
             return False
 
-    async def refresh(self) -> dict[str, Any]:
+    async def refresh(self) -> TokenPair:
         """Refresh the current upstream access token and persist the new value."""
         if not self._credentials:
             raise AuthenticationError("No active session to refresh")
 
-        response = await self._client.refresh_token()
-        new_tokens = self._client.get_tokens()
-        if new_tokens is None:
-            raise AuthenticationError("Token refresh did not yield active credentials")
-
+        new_tokens = await self._client.refresh_token()
         self._credentials.tokens = new_tokens
         self._credentials.stored_at = datetime.now(timezone.utc)
         self._save_credentials(self._credentials)
-        return response
+        return new_tokens
 
     def get_current_user_id(self) -> str | None:
         """Get the current authenticated user ID."""

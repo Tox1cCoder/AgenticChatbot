@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
-    from ..ai.schemas import AgentResponse
+    from ..schemas.workflow import WorkflowResponse
 
 
 # === Response Fallback Messages ===
@@ -45,10 +45,10 @@ def _extract_metadata_message(metadata: dict[str, Any] | None) -> str:
 
 
 def extract_response_content(
-    response: Optional["AgentResponse"],
+    response: Optional["WorkflowResponse"],
     fallback: str = NO_RESPONSE_GENERATED,
 ) -> str:
-    """Extract content from AgentResponse with fallback."""
+    """Extract content from a service-owned workflow response with fallback."""
     if response and response.message:
         metadata: dict[str, Any] = {}
         if isinstance(getattr(response, "metadata", None), dict):
@@ -86,10 +86,10 @@ def normalize_message_content(
 
 
 def build_bot_metadata(
-    response: Optional["AgentResponse"],
+    response: Optional["WorkflowResponse"],
     persona: str | None = None,
 ) -> dict[str, Any]:
-    """Build standard bot response metadata from AgentResponse."""
+    """Build standard bot response metadata from a workflow response."""
     metadata: dict[str, Any] = {}
 
     if response and response.metadata:

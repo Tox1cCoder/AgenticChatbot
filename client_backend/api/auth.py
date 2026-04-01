@@ -19,7 +19,7 @@ from client_backend.core.security import (
     verify_local_session_token,
 )
 from client_backend.services.runtime_bridge import get_runtime_bridge
-from client_backend.services.server_api import get_server_client
+from client_backend.services.server_api import TokenPair, get_server_client
 from client_backend.services.upstream_auth import get_upstream_auth_service
 
 logger = get_logger(__name__)
@@ -78,6 +78,21 @@ def _augment_auth_response(
     return augmented
 
 
+def _build_auth_payload(tokens: TokenPair, *, message: str) -> dict[str, Any]:
+    return {
+        "success": True,
+        "message": message,
+        "data": {
+            "accessToken": tokens.access_token,
+            "refreshToken": tokens.refresh_token,
+            "tokenType": tokens.token_type,
+            "expiresIn": tokens.expires_in,
+            "userId": tokens.user_id,
+        },
+        "error": None,
+    }
+
+
 async def _start_runtime_bridge_after_auth() -> None:
     """Start the runtime bridge and wait briefly for initial registration."""
     bridge = get_runtime_bridge()
@@ -119,9 +134,12 @@ async def login(request: LoginRequest) -> dict[str, Any]:
     auth_service = get_upstream_auth_service()
 
     try:
-        result = await auth_service.login(request.resolved_email(), request.password)
+        tokens = await auth_service.login(request.resolved_email(), request.password)
         await _start_runtime_bridge_after_auth()
-        return _augment_auth_response(result, include_local_session=True)
+        return _augment_auth_response(
+            _build_auth_payload(tokens, message="Login successful"),
+            include_local_session=True,
+        )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
     except Exception as exc:
@@ -153,8 +171,11 @@ async def refresh(authorization: str | None = Header(default=None)) -> dict[str,
             )
 
     try:
-        result = await auth_service.refresh()
-        return _augment_auth_response(result, include_local_session=True)
+        tokens = await auth_service.refresh()
+        return _augment_auth_response(
+            _build_auth_payload(tokens, message="Token refreshed successfully"),
+            include_local_session=True,
+        )
     except Exception as exc:
         raise_server_error(exc)
 
@@ -168,15 +189,13 @@ async def logout() -> dict[str, Any]:
 
     try:
         await get_runtime_bridge().stop()
-        upstream_response = await auth_service.logout()
-        if upstream_response is None:
-            upstream_response = {
-                "success": True,
-                "message": "Successfully logged out. Please discard your tokens.",
-                "data": None,
-                "error": None,
-            }
-        return upstream_response
+        operation = await auth_service.logout()
+        return {
+            "success": True,
+            "message": operation.message,
+            "data": None,
+            "error": None,
+        }
     except Exception as exc:
         raise_server_error(exc)
 

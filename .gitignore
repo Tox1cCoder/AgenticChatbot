@@ -49,6 +49,7 @@ htmlcov/
 # Build
 build/
 dist/
+.desloppify/
 *.egg-info/
 .eggs/
 WARP.md

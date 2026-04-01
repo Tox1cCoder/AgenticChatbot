@@ -260,15 +260,39 @@ def normalize_tool_call(tool_call: Any) -> dict[str, Any]:
             - tool_call_id (str): Alternative ID field (same as id)
     """
     if isinstance(tool_call, dict):
-        # Extract name from various possible keys
+        function_block = tool_call.get("function")
+        # Extract name from various possible keys and OpenAI-style nested function blocks.
         name = (
-            tool_call.get("name") or tool_call.get("action") or tool_call.get("tool") or "unknown"
+            tool_call.get("name")
+            or tool_call.get("action")
+            or tool_call.get("tool")
+            or (
+                function_block.get("name")
+                if isinstance(function_block, dict)
+                else getattr(function_block, "name", None)
+            )
+            or "unknown"
         )
 
-        # Extract args from various possible keys
-        args = (
-            tool_call.get("args") or tool_call.get("tool_input") or tool_call.get("arguments") or {}
-        )
+        # Extract args from common variants, then fall back to nested function/input shapes.
+        args = tool_call.get("args")
+        if args is None:
+            args = tool_call.get("tool_input")
+        if args is None:
+            args = tool_call.get("arguments")
+        if args is None:
+            args = tool_call.get("input")
+        if args is None and function_block is not None:
+            if isinstance(function_block, dict):
+                args = function_block.get("arguments")
+                if args is None:
+                    args = function_block.get("input")
+            else:
+                args = getattr(function_block, "arguments", None)
+                if args is None:
+                    args = getattr(function_block, "input", None)
+        if args is None:
+            args = {}
 
         # Extract ID from various possible keys
         tool_id = (
@@ -276,19 +300,37 @@ def normalize_tool_call(tool_call: Any) -> dict[str, Any]:
         )
     else:
         # Handle object with attributes
+        function_block = getattr(tool_call, "function", None)
         name = (
             getattr(tool_call, "name", None)
             or getattr(tool_call, "action", None)
             or getattr(tool_call, "tool", None)
+            or (
+                function_block.get("name")
+                if isinstance(function_block, dict)
+                else getattr(function_block, "name", None)
+            )
             or "unknown"
         )
 
-        args = (
-            getattr(tool_call, "args", None)
-            or getattr(tool_call, "tool_input", None)
-            or getattr(tool_call, "arguments", None)
-            or {}
-        )
+        args = getattr(tool_call, "args", None)
+        if args is None:
+            args = getattr(tool_call, "tool_input", None)
+        if args is None:
+            args = getattr(tool_call, "arguments", None)
+        if args is None:
+            args = getattr(tool_call, "input", None)
+        if args is None and function_block is not None:
+            if isinstance(function_block, dict):
+                args = function_block.get("arguments")
+                if args is None:
+                    args = function_block.get("input")
+            else:
+                args = getattr(function_block, "arguments", None)
+                if args is None:
+                    args = getattr(function_block, "input", None)
+        if args is None:
+            args = {}
 
         tool_id = (
             getattr(tool_call, "id", None)

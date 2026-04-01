@@ -24,14 +24,14 @@ from qdrant_client.models import (
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from ...core.config import Settings, settings
+from ...core.runtime_modeling import ResolvedRuntimeModelConfig
 from ...database.session import SessionLocal
+from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ...repositories.document_image import DocumentImageRepository
-from ...services.model_config_service import ResolvedRuntimeModelConfig
 from ..agent_config import (
     build_gemini_generate_config,
 )
-from ..mcp_integration import get_global_mcp_manager
-from ..mcp_registry import get_mcp_tools_generation
+from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_factory import ModelFactory
 from ..prompts import AGENTIC_RAG_SYSTEM_PROMPT, build_rag_prompt
 from ..rag_tools import create_search_documents_tool
@@ -53,10 +53,14 @@ class RAGAgent(BaseAgent):
         qdrant_client: QdrantClient,
         embedding_model: SentenceTransformer,
         collection_name: str = "documents_gemma",
+        runtime_model_resolver: IRuntimeModelResolver | None = None,
     ):
         # Initialise BaseAgent (sets model_name, gemini_client, langchain_model,
         # mcp_manager, tools, skills tracking, etc.)
-        super().__init__(agent_config_key="rag")
+        super().__init__(
+            agent_config_key="rag",
+            runtime_model_resolver=runtime_model_resolver,
+        )
 
         # RAG-specific fields
         self.settings = settings

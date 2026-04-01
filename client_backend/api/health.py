@@ -28,12 +28,6 @@ def get_runtime_state() -> RuntimeState:
     return get_runtime_bridge().get_runtime_state()
 
 
-def set_runtime_state(state: RuntimeState) -> None:
-    """Compatibility shim kept for older callers."""
-    bridge = get_runtime_bridge()
-    bridge._state = state
-
-
 @router.get("/health", response_model=HealthCheckResponse)
 async def health_check() -> HealthCheckResponse:
     """

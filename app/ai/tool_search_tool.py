@@ -1,5 +1,15 @@
 """
 Tool Search Tool - Claude-style deferred MCP tool discovery.
+
+This module provides unified tool search across BOTH server-side MCP tools
+AND client device tools. The search behavior is consistent regardless of
+tool origin - the only difference is the tool list available on each device.
+
+Key features:
+- Searches server MCP tools (from McpToolCatalog)
+- Searches client device tools (from ClientToolCatalog) when a device is connected
+- Results include origin information (server_mcp, client_mcp, client_native)
+- Autoloading works for both server and client tools
 """
 
 import json
@@ -11,9 +21,9 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from ..core.config import settings
+from .client_tool_catalog import ClientToolReference, get_client_tool_catalog
 from .deferred_tool_state import get_deferred_tool_state
-from .mcp_integration import get_global_mcp_manager
-from .mcp_registry import get_mcp_tools_generation
+from .mcp_registry import get_global_mcp_manager
 from .mcp_tool_catalog import (
     ToolReference,
     get_tool_catalog,
@@ -52,33 +62,23 @@ class ToolSearchInput(BaseModel):
 class ToolSearchResult(BaseModel):
     """Individual tool result from search."""
 
-    tool_name: str = Field(description="The name to use when calling this tool")
-    server_name: str = Field(description="The MCP server providing this tool")
-    display_name: str = Field(description="Human-readable name with server prefix")
+    tool_name: str = Field(description="The exact name to use when calling this tool")
     description: str = Field(description="What the tool does")
     arg_hints: str = Field(description="Summary of arguments (* = required)")
-    call_as: str = Field(description="The exact name to use in a tool call")
+    is_loaded: bool = Field(
+        default=False, description="True if this tool was autoloaded and is ready for immediate use"
+    )
 
 
 class ToolSearchOutput(BaseModel):
     """Output schema for the tool_search tool."""
 
     query: str | None = Field(description="The search query used")
-    top_k: int = Field(description="The top_k value used")
-    server_filter: str | None = Field(description="Server filter applied, if any")
     results: list[ToolSearchResult] = Field(description="List of matching tools")
-    autoloaded: list[dict[str, str]] = Field(
-        description="Tools that were automatically loaded for immediate use"
+    loaded_count: int = Field(
+        description="Number of tools that were autoloaded and ready for immediate use"
     )
-    generation: int = Field(description="MCP tools generation (for cache tracking)")
-    latency_ms: float = Field(description="Search latency in milliseconds")
-    truncated: bool = Field(description="True if more results exist beyond top_k")
-    total_available: int = Field(
-        description="Total tools available (optionally filtered by server)"
-    )
-    unavailable_servers: list[str] = Field(
-        default_factory=list, description="Servers that could not be queried (errors)"
-    )
+    more_available: bool = Field(description="True if more results exist beyond the returned list")
 
 
 async def _execute_tool_search(
@@ -89,6 +89,9 @@ async def _execute_tool_search(
 ) -> dict[str, Any]:
     """
     Core implementation of tool search logic.
+
+    Searches BOTH server MCP tools AND client device tools (if a device is connected).
+    Results are merged and ranked by relevance.
 
     Args:
         query: Search query (None for list all)
@@ -113,115 +116,222 @@ async def _execute_tool_search(
     ctx = get_tool_context()
     conversation_id = ctx.conversation_id
     agent_key = ctx.agent_key
+    device_id = ctx.device_id
+    user_id = ctx.user_id
 
     # Log query if enabled
     if settings.mcp_tool_search_log_queries:
         logger.info(
-            "tool_search: query=%r top_k=%d server=%s conversation=%s agent=%s",
+            "tool_search: query=%r top_k=%d server=%s conversation=%s agent=%s device=%s",
             query,
             effective_top_k,
             server_name,
             conversation_id,
             agent_key,
+            device_id[:8] if device_id else None,
         )
 
-    # Get the MCP manager and catalog
+    # Get the MCP manager and catalog for SERVER tools
     unavailable_servers: list[str] = []
+    server_results = []
+    catalog = None
     try:
         mcp_manager = await get_global_mcp_manager()
         catalog = await get_tool_catalog(mcp_manager)
-    except Exception as e:
-        logger.error("Failed to get tool catalog: %s", e)
-        return {
-            "query": query,
-            "top_k": effective_top_k,
-            "server_filter": server_name,
-            "results": [],
-            "autoloaded": [],
-            "generation": get_mcp_tools_generation(),
-            "latency_ms": (time.time() - start_time) * 1000,
-            "truncated": False,
-            "total_available": 0,
-            "unavailable_servers": ["all"],
-            "error": str(e),
-        }
 
-    # Search the catalog
-    results = catalog.search(
+        # Search server tools
+        server_results = catalog.search(
+            query=query,
+            top_k=effective_top_k * 2,  # Request extra for merging
+            server_name=server_name,
+            allowlist=allowlist,
+        )
+    except Exception as e:
+        logger.error("Failed to get server tool catalog: %s", e)
+        unavailable_servers.append("all_server")
+
+    # Get CLIENT tools if device is connected
+    client_results = []
+    client_catalog = None
+
+    if device_id and user_id:
+        try:
+            client_catalog = get_client_tool_catalog(device_id, user_id)
+            if client_catalog.tool_count > 0:
+                client_results = client_catalog.search(
+                    query=query,
+                    top_k=effective_top_k * 2,  # Request extra for merging
+                    server_name=server_name,
+                    allowlist=allowlist,
+                )
+                logger.debug(
+                    "tool_search: found %d client tools from device %s",
+                    len(client_results),
+                    device_id[:8],
+                )
+        except Exception as e:
+            logger.warning("Failed to search client tool catalog: %s", e)
+
+    # Merge and rank results from both sources
+    # Returns both public (for model) and internal (for autoloading) versions
+    public_results, internal_results = _merge_search_results(
+        server_results=server_results,
+        client_results=client_results,
         query=query,
         top_k=effective_top_k + 1,  # Request one extra to detect truncation
-        server_name=server_name,
-        allowlist=allowlist,
     )
 
     # Check if truncated
-    truncated = len(results) > effective_top_k
+    truncated = len(public_results) > effective_top_k
     if truncated:
-        results = results[:effective_top_k]
+        public_results = public_results[:effective_top_k]
+        internal_results = internal_results[:effective_top_k]
 
-    # Get total count for "list all" queries
-    total_available = len(catalog.list_all(allowlist=allowlist))
-    if server_name:
-        total_available = len(
-            [t for t in catalog.list_all(allowlist=allowlist) if t.server_name == server_name]
-        )
+    # Determine which tools to autoload (using internal results with server_name)
+    autoload_server_refs: list[ToolReference] = []
+    autoload_client_refs: list[ClientToolReference] = []
+    autoloaded_tool_names: set[str] = set()
 
-    # Determine which tools to autoload
-    autoload_candidates: list[ToolReference] = []
-    for desc in results[:autoload_top_k]:
-        # Skip autoloading ambiguous tools unless server_name is specified
-        if catalog.is_ambiguous(desc.tool_name) and not server_name:
-            logger.debug(
-                "Skipping autoload for ambiguous tool '%s' (multiple servers)",
-                desc.tool_name,
+    for internal in internal_results[:autoload_top_k]:
+        is_client = internal.get("is_client_tool", False)
+        tool_name = internal.get("tool_name", "")
+        srv_name = internal.get("server_name", "")
+
+        if is_client:
+            # Client tool
+            autoload_client_refs.append(
+                ClientToolReference(
+                    tool_name=tool_name,
+                    server_name=srv_name,
+                    device_id=internal.get("device_id", device_id or ""),
+                )
             )
-            continue
-        autoload_candidates.append(
-            ToolReference(tool_name=desc.tool_name, server_name=desc.server_name)
-        )
+            autoloaded_tool_names.add(tool_name)
+        else:
+            # Server tool - skip autoloading ambiguous tools unless server_name specified
+            if catalog and catalog.is_ambiguous(tool_name) and not server_name:
+                logger.debug(
+                    "Skipping autoload for ambiguous tool '%s' (multiple servers)",
+                    tool_name,
+                )
+                continue
+            autoload_server_refs.append(ToolReference(tool_name=tool_name, server_name=srv_name))
+            autoloaded_tool_names.add(tool_name)
 
     # Autoload tools into deferred state
-    autoloaded: list[dict[str, str]] = []
-    if autoload_candidates and conversation_id:
+    loaded_count = 0
+    if conversation_id and (autoload_server_refs or autoload_client_refs):
         state = get_deferred_tool_state()
-        loaded_refs = state.autoload(
-            conversation_id=conversation_id,
-            agent_key=agent_key,
-            references=autoload_candidates,
-        )
-        autoloaded = [
-            {"tool_name": ref.tool_name, "server_name": ref.server_name} for ref in loaded_refs
-        ]
 
-    # Format results
-    formatted_results = [desc.to_search_result() for desc in results]
+        # Autoload server tools
+        if autoload_server_refs:
+            loaded_refs = state.autoload(
+                conversation_id=conversation_id,
+                agent_key=agent_key,
+                references=autoload_server_refs,
+            )
+            loaded_count += len(loaded_refs)
+
+        # Autoload client tools
+        if autoload_client_refs:
+            loaded_client_refs = state.autoload_client_tools(
+                conversation_id=conversation_id,
+                agent_key=agent_key,
+                references=autoload_client_refs,
+                device_id=device_id,
+            )
+            loaded_count += len(loaded_client_refs)
+
+    # Mark which tools in the public results are loaded
+    for result in public_results:
+        if result["tool_name"] in autoloaded_tool_names:
+            result["is_loaded"] = True
 
     latency_ms = (time.time() - start_time) * 1000
 
-    # Log search completion with metrics
+    # Log search completion with metrics (internal logging only)
     logger.debug(
-        "tool_search completed: latency=%.1fms results=%d autoloaded=%d "
-        "truncated=%s conversation=%s agent=%s",
+        "tool_search completed: latency=%.1fms results=%d (server=%d, client=%d) "
+        "loaded=%d truncated=%s conversation=%s agent=%s",
         latency_ms,
-        len(results),
-        len(autoloaded),
+        len(public_results),
+        len(server_results),
+        len(client_results),
+        loaded_count,
         truncated,
         conversation_id,
         agent_key,
     )
 
+    # Return clean results for model consumption
+    # NO internal metadata like server_name, origin, generation, etc.
     return {
         "query": query,
-        "top_k": effective_top_k,
-        "server_filter": server_name,
-        "results": formatted_results,
-        "autoloaded": autoloaded,
-        "generation": get_mcp_tools_generation(),
-        "latency_ms": round(latency_ms, 2),
-        "truncated": truncated,
-        "total_available": total_available,
-        "unavailable_servers": unavailable_servers,
+        "results": public_results,
+        "loaded_count": loaded_count,
+        "more_available": truncated,
     }
+
+
+def _merge_search_results(
+    server_results: list,
+    client_results: list,
+    query: str | None,
+    top_k: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Merge search results from server and client catalogs.
+
+    Results are interleaved by relevance score (implicit from ordering)
+    and then truncated to top_k.
+
+    Args:
+        server_results: Results from McpToolCatalog.search()
+        client_results: Results from ClientToolCatalog.search()
+        query: The original search query
+        top_k: Maximum results to return
+
+    Returns:
+        Tuple of (public_results, internal_results):
+        - public_results: Clean results for model consumption (no internal metadata)
+        - internal_results: Full results with server_name etc. for autoloading
+    """
+    # Convert to internal result dicts with scoring
+    merged: list[tuple[float, int, dict, dict]] = []  # (score, source, public, internal)
+
+    # Process server results (already sorted by relevance)
+    for idx, desc in enumerate(server_results):
+        public_dict = desc.to_search_result()
+        internal_dict = desc._to_internal_result()
+        # Use position as implicit score (lower position = higher score)
+        score = 1000 - idx
+        merged.append((score, 0, public_dict, internal_dict))  # 0 = server (prefer on tie)
+
+    # Process client results
+    for idx, desc in enumerate(client_results):
+        public_dict = desc.to_search_result()
+        internal_dict = desc._to_internal_result()
+        score = 1000 - idx
+        merged.append((score, 1, public_dict, internal_dict))  # 1 = client
+
+    # Sort by score descending, then by source (server first on tie)
+    merged.sort(key=lambda x: (-x[0], x[1]))
+
+    # Deduplicate by tool_name (prefer server if same name exists)
+    seen_names: set[str] = set()
+    public_results: list[dict] = []
+    internal_results: list[dict] = []
+
+    for _, _, public, internal in merged:
+        name = public["tool_name"]
+        if name not in seen_names:
+            seen_names.add(name)
+            public_results.append(public)
+            internal_results.append(internal)
+        if len(public_results) >= top_k:
+            break
+
+    return public_results, internal_results
 
 
 @tool(args_schema=ToolSearchInput)

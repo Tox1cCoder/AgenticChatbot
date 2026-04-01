@@ -89,17 +89,19 @@
       ],
       "enabled": false
     },
-    "openbrowser": {
+    "excel": {
       "transport": "stdio",
-      "command": "uvx",
+      "command": "cmd",
       "args": [
-        "openbrowser-ai",
-        "--mcp"
+        "/c",
+        "npx",
+        "--yes",
+        "@negokaz/excel-mcp-server"
       ],
       "env": {
-        "OPENBROWSER_HEADLESS": "true"
+        "EXCEL_MCP_PAGING_CELLS_LIMIT": "4000"
       },
-      "enabled": false
+      "enabled": true
     }
   }
 }

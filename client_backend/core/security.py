@@ -14,7 +14,7 @@ from typing import Any
 import jwt
 from pydantic import BaseModel
 
-from client_backend.core.config import client_settings
+from client_backend.core.config import client_settings, initialize_client_environment
 
 
 class LocalSessionPayload(BaseModel):
@@ -32,6 +32,11 @@ class LocalSessionError(Exception):
     """Raised when local session operations fail."""
 
     pass
+
+
+def _get_local_session_secret() -> str:
+    settings = initialize_client_environment()
+    return settings.local_session_secret
 
 
 def create_local_session_token(
@@ -67,7 +72,7 @@ def create_local_session_token(
 
     return jwt.encode(
         payload,
-        client_settings.local_session_secret,
+        _get_local_session_secret(),
         algorithm="HS256",
     )
 
@@ -88,7 +93,7 @@ def verify_local_session_token(token: str) -> LocalSessionPayload:
     try:
         payload = jwt.decode(
             token,
-            client_settings.local_session_secret,
+            _get_local_session_secret(),
             algorithms=["HS256"],
         )
         return LocalSessionPayload(
@@ -145,7 +150,7 @@ class LocalSecretStorageError(Exception):
 
 
 def _derive_local_storage_key() -> bytes:
-    digest = hashlib.sha256(client_settings.local_session_secret.encode("utf-8")).digest()
+    digest = hashlib.sha256(_get_local_session_secret().encode("utf-8")).digest()
     return base64.urlsafe_b64encode(digest)
 
 
