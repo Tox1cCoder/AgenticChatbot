@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import uuid
 from collections.abc import Iterable
 from textwrap import dedent
@@ -21,6 +20,7 @@ from ..schemas import (
     MessageRole,
     TodoStatus,
 )
+from ..text_normalization import tokenize_text
 from ..todo_actions import apply_write_todos_action
 from ..utils import coerce_response_text, normalize_tool_call
 from .base_agent import BaseAgent
@@ -472,33 +472,22 @@ class PlanningAgent(BaseAgent):
     # Minimum character length a task description must meet.
     _MIN_DESC_LEN: int = 20
 
-    # Token patterns that signal an action verb at the start of the description
-    # or anywhere in it.  Intentionally broad; quality check, not NLP parsing.
-    _ACTION_VERB_RE = re.compile(
-        r"\b(?:add|analyze|apply|authenticate|build|calculate|check|clean|"
-        r"compile|configure|connect|create|debug|define|delete|deploy|design|"
-        r"document|download|enable|evaluate|execute|extract|fetch|fix|generate|"
-        r"get|implement|import|initialize|install|integrate|list|load|log|make|"
-        r"migrate|mock|move|open|optimize|parse|process|publish|read|refactor|"
-        r"register|remove|render|replace|research|resolve|review|run|save|send|"
-        r"set|setup|start|store|sync|test|trace|update|upload|validate|verify|"
-        r"write)\b",
-        re.IGNORECASE,
-    )
-
     def _validate_task_descriptions(self, todos: list[dict[str, Any]]) -> list[tuple[int, str]]:
         """Return (0-based index, reason) for every invalid task description.
 
         A description is considered invalid if it is shorter than
-        ``_MIN_DESC_LEN`` characters or contains no recognisable action verb.
+        ``_MIN_DESC_LEN`` characters or does not contain enough substance
+        to stand alone as an actionable task.
         """
         issues: list[tuple[int, str]] = []
         for i, todo in enumerate(todos):
             desc = str(todo.get("description", "")).strip()
             if len(desc) < self._MIN_DESC_LEN:
                 issues.append((i, f"too short ({len(desc)} chars, min {self._MIN_DESC_LEN})"))
-            elif not self._ACTION_VERB_RE.search(desc):
-                issues.append((i, "no recognisable action verb found"))
+                continue
+
+            if len(tokenize_text(desc)) < 3:
+                issues.append((i, "too little detail for an actionable task"))
         return issues
 
     def _format_plan_summary(

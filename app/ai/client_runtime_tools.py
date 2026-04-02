@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
@@ -13,6 +12,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from app.core.config import settings
 from app.services.client_device_service import ClientDeviceService
 
+from .text_normalization import sanitize_identifier
 from .tool_context import get_tool_context
 
 logger = logging.getLogger(__name__)
@@ -57,8 +57,7 @@ class ClientRuntimeToolSpec:
 
 
 def _sanitize_name_token(value: str | None) -> str:
-    token = re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "").strip()).strip("_").lower()
-    return token or "tool"
+    return sanitize_identifier(value)
 
 
 def _normalize_input_schema(schema: Any) -> dict[str, Any]:

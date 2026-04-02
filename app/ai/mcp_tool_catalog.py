@@ -17,13 +17,13 @@ and client tools - the only difference is the tool list available.
 import hashlib
 import json
 import logging
-import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
 from .mcp_registry import get_mcp_tools_generation
+from .text_normalization import tokenize_text
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,7 @@ class ToolDescriptor:
         return {
             "tool_name": self.tool_name,
             "server_name": self.server_name,
+            "qualified_tool_id": f"{self.server_name}::{self.tool_name}",
             "description": self.description[:200] if self.description else "",
             "arg_hints": self.arg_hints,
             "origin": self.origin,
@@ -144,9 +145,7 @@ def tokenize(text: str) -> list[str]:
 
     Splits on non-alphanumeric characters and lowercases.
     """
-    if not text:
-        return []
-    return [tok.lower() for tok in re.split(r"[^a-zA-Z0-9]+", text) if tok]
+    return tokenize_text(text)
 
 
 class McpToolCatalog:

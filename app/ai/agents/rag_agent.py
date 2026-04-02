@@ -170,29 +170,6 @@ class RAGAgent(BaseAgent):
             if search_documents_tool.name not in tool_names:
                 self.tools.insert(0, search_documents_tool)
 
-        # Log status if MCP manager is available
-        if self.mcp_manager:
-            server_status = self.mcp_manager.get_servers_status()
-            active_servers = [
-                name for name, status in server_status.items() if status.get("enabled")
-            ]
-            if self.tools:
-                logger.debug(
-                    "RAG tools refreshed (generation=%s): %d tools from %d servers",
-                    current_generation,
-                    len(self.tools),
-                    len(active_servers),
-                )
-            else:
-                logger.warning("No MCP tools available for RAGAgent; running without tools")
-        else:
-            # MCP failed but we should still have search_documents for agentic mode
-            if self.tools:
-                logger.debug(
-                    "RAGAgent running with %d tools (MCP unavailable)",
-                    len(self.tools),
-                )
-
     def _create_agent_executor(self, llm: Any, tools: list[BaseTool], system_prompt: str):
 
         tool_choice = settings.tool_choice_mode if hasattr(settings, "tool_choice_mode") else "auto"
@@ -638,27 +615,13 @@ class RAGAgent(BaseAgent):
         doc_grouping: dict[str, Any],
     ) -> list[dict[str, Any]] | None:
         try:
-            citation_patterns = [
-                r"\[Document\s+(\d+)\]",  # [Document 1]
-                r"Document\s+(\d+)",  # Document 1
-                r"\[(\d+)\]",  # [1]
-                r"\(Document\s+(\d+)\)",  # (Document 1)
-                r"\((\d+)\)",  # (1)
-            ]
-
             referenced_doc_numbers = set()
 
-            # Try each pattern to find document references
-            for pattern in citation_patterns:
-                matches = re.finditer(pattern, response_text, re.IGNORECASE)
-                for match in matches:
-                    try:
-                        doc_num = int(match.group(1))
-                        # Document numbers are 1-indexed in text
-                        if 1 <= doc_num <= len(doc_grouping):
-                            referenced_doc_numbers.add(doc_num)
-                    except (ValueError, IndexError):
-                        continue
+            for doc_num in self._extract_referenced_document_numbers(
+                response_text,
+                max_doc_number=len(doc_grouping),
+            ):
+                referenced_doc_numbers.add(doc_num)
 
             if not referenced_doc_numbers:
                 if self.settings.min_citation_coverage > 0:
@@ -1381,6 +1344,59 @@ class RAGAgent(BaseAgent):
 
         except re.error as e:
             return f"Error: Invalid regex pattern - {e}"
+
+    @staticmethod
+    def _extract_referenced_document_numbers(
+        response_text: str,
+        *,
+        max_doc_number: int,
+    ) -> set[int]:
+        tokens: list[str] = []
+        current: list[str] = []
+
+        for char in response_text.lower():
+            if char.isalnum():
+                current.append(char)
+                continue
+
+            if current:
+                tokens.append("".join(current))
+                current.clear()
+
+            if char in "[]()":
+                tokens.append(char)
+
+        if current:
+            tokens.append("".join(current))
+
+        referenced: set[int] = set()
+
+        def maybe_add(raw_value: str) -> None:
+            if not raw_value.isdigit():
+                return
+            doc_num = int(raw_value)
+            if 1 <= doc_num <= max_doc_number:
+                referenced.add(doc_num)
+
+        for index, token in enumerate(tokens):
+            if token == "document" and index + 1 < len(tokens):
+                maybe_add(tokens[index + 1])
+                continue
+
+            if token in {"[", "("} and index + 2 < len(tokens):
+                next_token = tokens[index + 1]
+                closing = tokens[index + 2]
+                if closing == ("]" if token == "[" else ")"):
+                    maybe_add(next_token)
+                    continue
+
+            if token in {"[", "("} and index + 3 < len(tokens) and tokens[index + 1] == "document":
+                next_token = tokens[index + 2]
+                closing = tokens[index + 3]
+                if closing == ("]" if token == "[" else ")"):
+                    maybe_add(next_token)
+
+        return referenced
 
     async def scan_all_documents(self, conversation_id: str) -> str:
         """

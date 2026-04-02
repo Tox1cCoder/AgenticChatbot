@@ -14,7 +14,6 @@ Key features:
 
 import json
 import logging
-import re
 import time
 from typing import Any
 
@@ -33,57 +32,47 @@ from .tool_context import get_tool_context
 
 logger = logging.getLogger(__name__)
 
-_TOOL_SEARCH_QUERY_SYNONYMS: dict[str, tuple[str, ...]] = {
-    "computer": ("local", "device", "client"),
-    "machine": ("local", "device", "client"),
-    "pc": ("local", "device", "client"),
-    "local": ("device", "client"),
-    "device": ("local", "client"),
-    "file": ("files", "filesystem", "path"),
-    "files": ("file", "filesystem", "directory", "folder", "path"),
-    "folder": ("directory", "filesystem", "path"),
-    "directory": ("folder", "filesystem", "path"),
-    "edit": ("write", "update", "modify"),
-    "write": ("edit", "save", "create"),
-    "read": ("open", "view", "inspect"),
-    "search": ("find", "lookup"),
-    "find": ("search", "lookup"),
-    "shell": ("terminal", "command", "execute", "run"),
-    "terminal": ("shell", "command", "execute", "run"),
-    "command": ("shell", "terminal", "execute", "run"),
-    "run": ("execute", "shell", "command"),
-}
 
-
-def _expand_tool_search_query(query: str | None) -> str | None:
+def _search_results_refer_to_same_capability(
+    public_a: dict[str, Any],
+    internal_a: dict[str, Any],
+    public_b: dict[str, Any],
+    internal_b: dict[str, Any],
+) -> bool:
     """
-    Expand a natural-language tool query with a few capability aliases.
+    Return True when two search results represent the same underlying tool.
 
-    This keeps tool_search flexible when users or agents describe local-device
-    work in different words, such as "computer" vs "device" or "edit" vs
-    "write", without hard-coding specific tool names.
+    Exact public-name duplicates are always treated as the same result. In
+    addition, a client-side tool and a server-side tool may refer to the same
+    underlying MCP capability even though the client version is exposed with a
+    `client__...` prefix. In that case we detect duplicates via the shared
+    qualified tool id (for example `desktop_commander::edit_block`).
     """
-    if not query or not query.strip():
-        return query
+    if public_a.get("tool_name") == public_b.get("tool_name"):
+        return True
 
-    tokens = [tok.lower() for tok in re.split(r"[^a-zA-Z0-9_]+", query) if tok]
-    if not tokens:
-        return query
+    if bool(internal_a.get("is_client_tool")) == bool(internal_b.get("is_client_tool")):
+        return False
 
-    expanded_tokens: list[str] = []
-    seen: set[str] = set()
+    qualified_a = str(internal_a.get("qualified_tool_id") or "").strip().lower()
+    qualified_b = str(internal_b.get("qualified_tool_id") or "").strip().lower()
+    return bool(qualified_a and qualified_b and qualified_a == qualified_b)
 
-    for token in tokens:
-        if token not in seen:
-            expanded_tokens.append(token)
-            seen.add(token)
 
-        for alias in _TOOL_SEARCH_QUERY_SYNONYMS.get(token, ()):
-            if alias not in seen:
-                expanded_tokens.append(alias)
-                seen.add(alias)
+def _prefer_search_result_candidate(
+    candidate_internal: dict[str, Any],
+    existing_internal: dict[str, Any],
+) -> bool:
+    """
+    Decide whether a duplicate candidate should replace the existing result.
 
-    return " ".join(expanded_tokens)
+    When the same underlying capability exists both on the connected client
+    device and on the server, prefer the client-scoped variant so agents are
+    nudged toward interacting with the user's actual device when available.
+    """
+    candidate_is_client = bool(candidate_internal.get("is_client_tool"))
+    existing_is_client = bool(existing_internal.get("is_client_tool"))
+    return candidate_is_client and not existing_is_client
 
 
 class ToolSearchInput(BaseModel):
@@ -166,8 +155,6 @@ async def _execute_tool_search(
 
     effective_top_k = top_k if top_k is not None else default_top_k
     effective_top_k = max(1, min(effective_top_k, max_top_k))
-    expanded_query = _expand_tool_search_query(query)
-
     # Get tool context for conversation-scoped loading
     ctx = get_tool_context()
     conversation_id = ctx.conversation_id
@@ -178,9 +165,8 @@ async def _execute_tool_search(
     # Log query if enabled
     if settings.mcp_tool_search_log_queries:
         logger.info(
-            "tool_search: query=%r expanded=%r top_k=%d server=%s conversation=%s agent=%s device=%s",
+            "tool_search: query=%r top_k=%d server=%s conversation=%s agent=%s device=%s",
             query,
-            expanded_query,
             effective_top_k,
             server_name,
             conversation_id,
@@ -198,7 +184,7 @@ async def _execute_tool_search(
 
         # Search server tools
         server_results = catalog.search(
-            query=expanded_query,
+            query=query,
             top_k=effective_top_k * 2,  # Request extra for merging
             server_name=server_name,
             allowlist=allowlist,
@@ -216,7 +202,7 @@ async def _execute_tool_search(
             client_catalog = get_client_tool_catalog(device_id, user_id)
             if client_catalog.tool_count > 0:
                 client_results = client_catalog.search(
-                    query=expanded_query,
+                    query=query,
                     top_k=effective_top_k * 2,  # Request extra for merging
                     server_name=server_name,
                     allowlist=allowlist,
@@ -234,7 +220,7 @@ async def _execute_tool_search(
     public_results, internal_results = _merge_search_results(
         server_results=server_results,
         client_results=client_results,
-        query=expanded_query,
+        query=query,
         top_k=effective_top_k + 1,  # Request one extra to detect truncation
     )
 
@@ -339,8 +325,9 @@ def _merge_search_results(
     """
     Merge search results from server and client catalogs.
 
-    Results are interleaved by relevance score (implicit from ordering)
-    and then truncated to top_k.
+    Results are interleaved by relevance score (implicit from ordering),
+    duplicate capabilities are collapsed, and then the final list is
+    truncated to top_k.
 
     Args:
         server_results: Results from McpToolCatalog.search()
@@ -374,20 +361,31 @@ def _merge_search_results(
     # Sort by score descending, then by source (server first on tie)
     merged.sort(key=lambda x: (-x[0], x[1]))
 
-    # Deduplicate by tool_name (prefer server if same name exists)
-    seen_names: set[str] = set()
-    public_results: list[dict] = []
-    internal_results: list[dict] = []
+    chosen_results: list[tuple[dict[str, Any], dict[str, Any]]] = []
 
     for _, _, public, internal in merged:
-        name = public["tool_name"]
-        if name not in seen_names:
-            seen_names.add(name)
-            public_results.append(public)
-            internal_results.append(internal)
-        if len(public_results) >= top_k:
-            break
+        duplicate_index = None
+        for idx, (existing_public, existing_internal) in enumerate(chosen_results):
+            if _search_results_refer_to_same_capability(
+                public,
+                internal,
+                existing_public,
+                existing_internal,
+            ):
+                duplicate_index = idx
+                break
 
+        if duplicate_index is None:
+            chosen_results.append((public, internal))
+            continue
+
+        existing_public, existing_internal = chosen_results[duplicate_index]
+        if _prefer_search_result_candidate(internal, existing_internal):
+            chosen_results[duplicate_index] = (public, internal)
+
+    chosen_results = chosen_results[:top_k]
+    public_results = [public for public, _ in chosen_results]
+    internal_results = [internal for _, internal in chosen_results]
     return public_results, internal_results
 
 

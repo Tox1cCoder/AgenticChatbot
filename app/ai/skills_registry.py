@@ -14,7 +14,6 @@ import contextlib
 import json
 import logging
 import os
-import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -159,11 +158,6 @@ class SkillsRegistry:
     # Front-matter parser (built-in, no external dependency)
     # ------------------------------------------------------------------
 
-    _FRONT_MATTER_RE = re.compile(
-        r"\A\s*---\s*\n(.*?)\n---\s*\n(.*)",
-        re.DOTALL,
-    )
-
     def _parse_skill(self, skill_file: Path, folder: Path) -> SkillMeta | None:
         """Parse a SKILL.md file into a SkillMeta, or None on error."""
         try:
@@ -172,13 +166,12 @@ class SkillsRegistry:
             logger.warning("Failed to read %s: %s", skill_file, exc)
             return None
 
-        match = self._FRONT_MATTER_RE.match(raw)
-        if not match:
+        split_content = self._split_front_matter(raw)
+        if split_content is None:
             logger.warning("No valid YAML front-matter in %s — skipping", skill_file)
             return None
 
-        yaml_block = match.group(1)
-        body = match.group(2).strip()
+        yaml_block, body = split_content
 
         # Minimal YAML parser — extracts name and description
         name = self._extract_yaml_value(yaml_block, "name")
@@ -200,6 +193,29 @@ class SkillsRegistry:
         )
 
     @staticmethod
+    def _split_front_matter(raw: str) -> tuple[str, str] | None:
+        stripped = raw.lstrip()
+        if not stripped.startswith("---"):
+            return None
+
+        lines = stripped.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return None
+
+        end_index = None
+        for i, line in enumerate(lines[1:], start=1):
+            if line.strip() == "---":
+                end_index = i
+                break
+
+        if end_index is None:
+            return None
+
+        yaml_block = "\n".join(lines[1:end_index])
+        body = "\n".join(lines[end_index + 1 :]).strip()
+        return yaml_block, body
+
+    @staticmethod
     def _extract_yaml_value(yaml_block: str, key: str) -> str | None:
         """
         Extract a simple scalar or multi-line '>' value from a YAML block.
@@ -212,12 +228,18 @@ class SkillsRegistry:
         """
         lines = yaml_block.split("\n")
         for i, line in enumerate(lines):
-            # Match key: value
-            pattern = re.match(rf"^{re.escape(key)}\s*:\s*(.*)", line)
-            if not pattern:
+            if line[:1].isspace():
                 continue
 
-            value = pattern.group(1).strip()
+            separator_index = line.find(":")
+            if separator_index < 0:
+                continue
+
+            line_key = line[:separator_index].strip()
+            if line_key != key:
+                continue
+
+            value = line[separator_index + 1 :].strip()
 
             # Simple scalar value (not a folded/literal block indicator)
             if value and value not in (">", "|", ">-", "|-"):

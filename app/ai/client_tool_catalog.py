@@ -12,7 +12,6 @@ Key features:
 """
 
 import logging
-import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -25,6 +24,7 @@ from .client_runtime_tools import (
     TOOL_ORIGIN_CLIENT_MCP,
     TOOL_ORIGIN_CLIENT_NATIVE,
 )
+from .text_normalization import sanitize_identifier, tokenize_text
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,7 @@ class ClientToolDescriptor:
         return {
             "tool_name": self.tool_name,
             "server_name": self.server_name,
+            "qualified_tool_id": self.qualified_tool_id,
             "description": self.description[:200] if self.description else "",
             "arg_hints": self.arg_hints,
             "origin": self.origin,
@@ -122,9 +123,7 @@ def _extract_arg_info(args_schema: dict[str, Any]) -> tuple[list[str], list[str]
 
 def _tokenize(text: str) -> list[str]:
     """Tokenize text for search matching."""
-    if not text:
-        return []
-    return [tok.lower() for tok in re.split(r"[^a-zA-Z0-9]+", text) if tok]
+    return tokenize_text(text)
 
 
 class ClientToolCatalog:
@@ -233,7 +232,7 @@ class ClientToolCatalog:
                 tool_origin = TOOL_ORIGIN_CLIENT_NATIVE
 
             # Sanitize exposed name
-            exposed_name = re.sub(r"[^a-zA-Z0-9_]+", "_", exposed_name).strip("_")
+            exposed_name = sanitize_identifier(exposed_name)
 
             arg_names, required_args = _extract_arg_info(input_schema)
 

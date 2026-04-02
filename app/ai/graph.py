@@ -376,7 +376,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             # Default to "planning" phase - only switch to "executing" when user requests
             initial_state["planning_phase"] = "planning"
 
-        # Persist lifecycle so agents can read execution state without prompt inference
+        # Persist lifecycle
         initial_state["plan_lifecycle"] = request.planning.plan_lifecycle
 
         return initial_state
@@ -3004,11 +3004,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 },
             )
             return new_summary
-        except Exception as e:
-            logger.warning(
-                "Fast-path summarization/checkpoint read failed (continuing without summary): %s",
-                e,
-            )
+        except Exception:
             return None
 
     async def _persist_fast_path_turn(

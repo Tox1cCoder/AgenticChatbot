@@ -1529,7 +1529,7 @@ st.markdown(IMAGE_LIGHTBOX_JS, unsafe_allow_html=True)
 initialize_session_state()
 
 # ── localStorage session-persistence bridge ──────────────────────────────────
-# Allows the auth token to survive F5 / browser refresh without extra packages.
+# Allows the auth token to survive F5 / browser refresh.
 import contextlib  # noqa: E402
 import json as _json  # noqa: E402
 

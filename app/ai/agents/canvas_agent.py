@@ -23,7 +23,6 @@ canvas_artifact shape (stored in AgentResponse.metadata["canvas_artifact"]):
 """
 
 import logging
-import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -85,14 +84,44 @@ Re-output the **complete updated document** — do NOT produce a diff or partial
 # Helpers
 # ---------------------------------------------------------------------------
 
-_CODE_FENCE_RE = re.compile(
-    r"```(?P<lang>html|svg|jsx?|react|tsx?|javascript|js|css)?\s*\n"
-    r"(?P<code>[\s\S]*?)"
-    r"```",
-    re.IGNORECASE,
-)
+_CODE_FENCE = "```"
+_REACT_LANGUAGE_HINTS = {"jsx", "js", "tsx", "ts", "react", "javascript"}
 
-_TITLE_RE = re.compile(r"<title>(?P<t>[^<]{1,120})</title>", re.IGNORECASE)
+
+def _find_first_code_block(text: str) -> tuple[str, str, int, int] | None:
+    start = text.find(_CODE_FENCE)
+    if start < 0:
+        return None
+
+    info_start = start + len(_CODE_FENCE)
+    newline_index = text.find("\n", info_start)
+    if newline_index < 0:
+        return None
+
+    end = text.find(_CODE_FENCE, newline_index + 1)
+    if end < 0:
+        return None
+
+    language_hint = text[info_start:newline_index].strip().lower()
+    code = text[newline_index + 1 : end].strip()
+    return language_hint, code, start, end + len(_CODE_FENCE)
+
+
+def _extract_title(code: str) -> str:
+    lowered = code.lower()
+    open_tag = "<title>"
+    close_tag = "</title>"
+    start = lowered.find(open_tag)
+    if start < 0:
+        return "Canvas"
+
+    content_start = start + len(open_tag)
+    end = lowered.find(close_tag, content_start)
+    if end < 0:
+        return "Canvas"
+
+    title = code[content_start:end].strip()
+    return title[:120] if title else "Canvas"
 
 
 def _extract_artifact(text: str) -> dict[str, Any] | None:
@@ -101,18 +130,17 @@ def _extract_artifact(text: str) -> dict[str, Any] | None:
 
     Returns a ``canvas_artifact`` dict, or ``None`` when no code block is found.
     """
-    match = _CODE_FENCE_RE.search(text)
-    if not match:
+    block = _find_first_code_block(text)
+    if block is None:
         return None
 
-    lang_hint = (match.group("lang") or "html").lower()
-    code = match.group("code").strip()
+    lang_hint, code, _, _ = block
 
     if not code:
         return None
 
     # Normalise language label
-    if lang_hint in {"jsx", "tsx", "react"}:
+    if lang_hint in _REACT_LANGUAGE_HINTS:
         language = "react"
     elif lang_hint == "svg":
         language = "svg"
@@ -120,8 +148,7 @@ def _extract_artifact(text: str) -> dict[str, Any] | None:
         language = "html"
 
     # Try to derive a title from <title> tag; fall back to generic label
-    title_match = _TITLE_RE.search(code)
-    title = title_match.group("t").strip() if title_match else "Canvas"
+    title = _extract_title(code)
 
     return {
         "content": code,
@@ -133,7 +160,12 @@ def _extract_artifact(text: str) -> dict[str, Any] | None:
 
 def _strip_code_block(text: str) -> str:
     """Return the text with the code fence removed (the conversational description)."""
-    return _CODE_FENCE_RE.sub("", text).strip()
+    block = _find_first_code_block(text)
+    if block is None:
+        return text.strip()
+
+    _, _, start, end = block
+    return f"{text[:start]}{text[end:]}".strip()
 
 
 def _extract_previous_artifact(conversation_history: list[Any]) -> str | None:

@@ -22,7 +22,7 @@ DELEGATABLE_AGENTS = (
 )
 
 # Maximum number of inter-agent delegations per user turn.
-MAX_DELEGATION_DEPTH = 3
+MAX_DELEGATION_DEPTH = 5
 
 
 @tool

@@ -138,11 +138,6 @@ def _validate_client_tool_device_binding(
 
     bound_device_id = get_client_tool_device_id(tool)
     if not bound_device_id:
-        # Client tool without device binding - this shouldn't happen
-        logger.warning(
-            "Client tool '%s' has no device_id binding in metadata",
-            tool_name,
-        )
         return None
 
     if not context_device_id:

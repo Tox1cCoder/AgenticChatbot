@@ -1,32 +1,16 @@
 import pytest
 
+from app.ai.client_tool_catalog import ClientToolDescriptor
+from app.ai.mcp_tool_catalog import ToolDescriptor
 from app.ai.tool_context import ToolContext
-from app.ai.tool_search_tool import _execute_tool_search, _expand_tool_search_query
-
-
-def test_expand_tool_search_query_adds_local_file_aliases():
-    expanded = _expand_tool_search_query("edit a file on my computer")
-
-    assert expanded is not None
-    tokens = set(expanded.split())
-
-    assert {"edit", "write", "update", "modify"} <= tokens
-    assert {"file", "files", "filesystem", "path"} <= tokens
-    assert {"computer", "local", "device", "client"} <= tokens
-
-
-def test_expand_tool_search_query_deduplicates_shell_aliases():
-    expanded = _expand_tool_search_query("run shell command")
-
-    assert expanded is not None
-    tokens = expanded.split()
-
-    assert len(tokens) == len(set(tokens))
-    assert {"run", "execute", "shell", "terminal", "command"} <= set(tokens)
+from app.ai.tool_search_tool import (
+    _execute_tool_search,
+    _merge_search_results,
+)
 
 
 @pytest.mark.asyncio
-async def test_execute_tool_search_uses_expanded_query(monkeypatch):
+async def test_execute_tool_search_passes_query_through_unchanged(monkeypatch):
     class FakeCatalog:
         def __init__(self):
             self.query = None
@@ -62,7 +46,77 @@ async def test_execute_tool_search_uses_expanded_query(monkeypatch):
     result = await _execute_tool_search(query="edit file on my computer")
 
     assert result["query"] == "edit file on my computer"
-    assert fake_catalog.query is not None
+    assert fake_catalog.query == "edit file on my computer"
 
-    expanded_tokens = set(fake_catalog.query.split())
-    assert {"edit", "write", "file", "filesystem", "computer", "local"} <= expanded_tokens
+
+def test_merge_search_results_prefers_client_variant_for_same_qualified_tool():
+    server_results = [
+        ToolDescriptor(
+            tool_name="edit_block",
+            server_name="desktop_commander",
+            description="Apply surgical edits to files.",
+            arg_names=["file_path", "old_string", "new_string"],
+            required_arg_names=["file_path"],
+            schema_fingerprint="server-fingerprint",
+        )
+    ]
+    client_results = [
+        ClientToolDescriptor(
+            tool_name="client__desktop_commander__edit_block",
+            server_name="desktop_commander",
+            description="Apply surgical edits to files.",
+            arg_names=["file_path", "old_string", "new_string"],
+            required_arg_names=["file_path"],
+            qualified_tool_id="desktop_commander::edit_block",
+            origin="client_mcp",
+            device_id="device-123",
+        )
+    ]
+
+    public_results, internal_results = _merge_search_results(
+        server_results=server_results,
+        client_results=client_results,
+        query="edit file",
+        top_k=5,
+    )
+
+    assert len(public_results) == 1
+    assert public_results[0]["tool_name"] == "client__desktop_commander__edit_block"
+    assert internal_results[0]["is_client_tool"] is True
+
+
+def test_merge_search_results_keeps_distinct_tools_when_qualified_ids_differ():
+    server_results = [
+        ToolDescriptor(
+            tool_name="edit_block",
+            server_name="server_editor",
+            description="Apply surgical edits to files.",
+            arg_names=["file_path", "old_string", "new_string"],
+            required_arg_names=["file_path"],
+            schema_fingerprint="server-fingerprint",
+        )
+    ]
+    client_results = [
+        ClientToolDescriptor(
+            tool_name="client__desktop_commander__edit_block",
+            server_name="desktop_commander",
+            description="Apply surgical edits to files.",
+            arg_names=["file_path", "old_string", "new_string"],
+            required_arg_names=["file_path"],
+            qualified_tool_id="desktop_commander::edit_block",
+            origin="client_mcp",
+            device_id="device-123",
+        )
+    ]
+
+    public_results, _ = _merge_search_results(
+        server_results=server_results,
+        client_results=client_results,
+        query="edit file",
+        top_k=5,
+    )
+
+    assert [result["tool_name"] for result in public_results] == [
+        "edit_block",
+        "client__desktop_commander__edit_block",
+    ]

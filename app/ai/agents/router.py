@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import re
 
 from google import genai
 
@@ -9,6 +8,7 @@ from ..agent_config import build_gemini_generate_config
 from ..prompts import ROUTER_SYSTEM_PROMPT
 from ..schemas import AgentMessage
 from ..skills_tool import get_available_skill_summaries
+from ..text_normalization import tokenize_text
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,7 @@ class Router:
             return "chat_agent"
 
         content = (message.content or "").strip()
+
         metadata = message.metadata or {}
         persona = metadata.get("persona")
         request_user_id = metadata.get("user_id")
@@ -157,8 +158,7 @@ class Router:
 
         normalized_lines = [line.strip() for line in response_text.splitlines() if line.strip()]
         for line in normalized_lines:
-            cleaned_line = re.sub(r"[^a-z0-9_]+", " ", line.lower())
-            tokens = cleaned_line.replace("-", "_").split()
+            tokens = tokenize_text(line.replace("-", "_"), preserve_underscore=True)
             for token in tokens:
                 if token in available_agents:
                     return token
