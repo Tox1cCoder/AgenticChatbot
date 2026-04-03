@@ -1,7 +1,7 @@
 # Client Backend / Server Split Implementation Plan
 
 Status: In Progress
-Date: 2026-03-23
+Date: 2026-04-02
 Repo scope: Same repository, new local-runtime folder
 
 ## Implementation Progress
@@ -17,7 +17,7 @@ Repo scope: Same repository, new local-runtime folder
   - **Verified**: All models import successfully, columns match migration schema
 - [x] **Add feature flags for client-runtime bridge** (2026-03-23)
   - Added to `app/core/config.py`:
-    - `enable_client_runtime_bridge`: Master toggle (default: False)
+    - `enable_client_runtime_bridge`: Master toggle (default: True)
     - `client_runtime_ws_timeout_seconds`: WebSocket operation timeout (default: 60s)
     - `client_runtime_catalog_cache_ttl_seconds`: Tool/skill catalog cache TTL (default: 300s)
     - `client_runtime_require_connected_device_for_local_tools`: Strict mode toggle (default: True)
@@ -60,7 +60,7 @@ Repo scope: Same repository, new local-runtime folder
   - Includes stale device cleanup mechanism
 - [x] **Implement client_devices service on server** (2026-03-23)
   - Created `app/services/client_device_service.py` with device session management
-  - Manages in-memory active sessions with heartbeat tracking
+  - Manages shared runtime sessions with heartbeat tracking and Redis-compatible coordination
   - Handles tool and skill catalog caching per device session
   - Provides automatic stale session cleanup
   - Supports multiple devices per user
@@ -115,12 +115,12 @@ Repo scope: Same repository, new local-runtime folder
 
 ### Phase 4: Server Tool Dispatch Integration
 - [x] **Add device-scoped remote tool catalog cache on server** (2026-03-23)
-  - Refactored `app/services/client_device_service.py` to use a process-wide active-session registry instead of per-request in-memory state
+  - Refactored `app/services/client_device_service.py` to use a shared runtime store instead of per-process in-memory state
   - Added one-time runtime `session_id` issuance/consumption so the WebSocket connect flow is tied to the registration response
   - Added per-session tool/skill catalog generation counters and timestamps to support cache invalidation for device-local bindings
   - Added helper accessors for user/device-scoped tool and skill catalogs
   - Updated server registration and WebSocket endpoints to issue and validate runtime session IDs through the shared registry
-  - **Design decision**: Keep the catalog cache in-memory and keyed by active runtime session for Phase 4 so device-local capability state tracks the live WebSocket session rather than stale DB metadata
+  - **Design decision**: Keep the catalog cache keyed by active runtime session in the shared runtime store so device-local capability state tracks the live WebSocket session rather than stale DB metadata
   - **Verified**: Cross-instance session visibility works and tool/skill catalog versions increment with deterministic cache keys
 - [x] **Merge remote tools into server binding path** (2026-03-23)
   - Added `app/ai/client_runtime_tools.py` to build cached LangChain `StructuredTool` wrappers from synced client catalogs
@@ -146,6 +146,24 @@ Repo scope: Same repository, new local-runtime folder
   - **Design decision**: Store client-tool provenance in interrupt metadata keyed by `tool_call_id`, then fan that metadata back into `tool_approvals` on resume so HITL audit stays additive and does not require schema changes to the interrupt response model
   - **Verified**: `execute_tool_calls` returned a client-local wrapper result as a normal success output/artifact, and a focused audit smoke test confirmed resume decisions persisted `device_id=...`, `tool_origin=client_native`, and `qualified_tool_id=native::shell_execute`
 - **Exit criteria met**: A server-run conversation can bind client-local tools, dispatch them over the device runtime channel, and recover device-aware HITL provenance without rewriting the existing graph flow
+
+### Production Hardening Pass
+- [x] **Replace process-local sidecar session state with a shared runtime store** (2026-04-02)
+  - Added `app/services/client_runtime_store.py` with Redis-backed coordination for runtime sessions, request queues, pending-request tracking, and result delivery
+  - Kept an in-memory fallback for local development/tests when Redis or the `redis` package is unavailable
+  - Moved `ClientDeviceService` and the WebSocket gateway onto the shared runtime store so multiple server workers can address the same connected sidecar
+  - Added stale-session cleanup on FastAPI lifespan startup/shutdown
+  - **Verified**: runtime state no longer depends on a single Python worker process, and disconnects now fail pending tool calls instead of silently timing out
+- [x] **Finish device/session isolation for tools, skills, and interrupt resume** (2026-04-02)
+  - Fixed deferred loading so client-local tools are only bound after `tool_search` loads them for the active conversation/device
+  - Enforced client-side HITL approval by default for `client__...` tools even when the explicit allowlist is empty
+  - Added `device_id` validation for interrupt resume paths so a paused tool approval cannot be resumed from the wrong sidecar
+  - Hardened client tool/skill catalog lookups to reject mismatched user/device sessions
+  - **Verified**: new regression tests cover sidecar tool isolation, deferred client-tool binding, HITL defaults, stale-session cleanup, and device-bound interrupt resume
+- [x] **Stabilize client runtime shutdown semantics** (2026-04-02)
+  - Updated the client runtime bridge to wait for the canonical backend to observe disconnects before reporting the sidecar as fully stopped
+  - Preserved the existing outbound WebSocket model and NAT-safe transport assumptions from the plan's Mermaid diagrams
+  - **Verified**: live runtime integration now passes cleanly through connect, server visibility, disconnect, and post-disconnect cleanup
 
 ## 1. Objective
 
@@ -219,7 +237,8 @@ But the ORM/services do not yet fully implement these models/fields. This must b
 
 ### 3.4 Important Gaps
 
-- No meaningful automated test suite exists yet.
+- Focused automated coverage now exists for the client-backend bridge, unified tool search, and sidecar isolation/resume edge cases.
+- Broader server integration coverage is still selective rather than exhaustive.
 - `document_parse_artifacts` exists in migrations but parse artifacts are not yet being persisted as first-class records.
 - `conversation_device_bindings` implies one conversation -> one device, which conflicts with the desired ChatGPT-like user-owned conversation model.
 
@@ -325,6 +344,11 @@ flowchart LR
 8. The server streams assistant/tool/HITL events back through the normal response stream; the client backend relays those events to the desktop UI.
 
 This keeps execution state centralized on the server while moving only local side effects to the device.
+
+Production note:
+- live runtime session metadata and queued tool requests must be stored in a shared coordinator, not process-local Python memory
+- Redis is the preferred production backend for that coordination layer
+- in-memory runtime state is acceptable only for local development and tests
 
 ## 6. Recommended Repo Layout
 
@@ -643,7 +667,7 @@ Recommended server additions:
 - `GET /client-devices/me`
 - `PUT /client-devices/{device_id}/tool-catalog`
 - `PUT /client-devices/{device_id}/skill-catalog`
-- `WS /client-devices/{device_id}/connect`
+- `WS /device-runtime/{device_id}/connect`
 - `GET /documents/{document_id}/artifacts`
 - `GET /documents/{document_id}/artifacts/{artifact_id}`
 
@@ -695,6 +719,11 @@ Introduce a device-scoped tool catalog cache keyed by:
 - catalog generation/version
 
 This cache should feed model binding for a request that originated from that device.
+
+Implementation note:
+- the cache must be backed by the shared runtime store so any server worker can resolve the active sidecar session
+- queued tool dispatch and pending request tracking must live beside the session metadata to survive cross-worker routing
+- deferred loading applies to client-local tools as well as server MCP tools; unloaded client tools must not be eagerly rebound
 
 ### 14.3 HITL and Resume
 

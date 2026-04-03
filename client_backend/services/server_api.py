@@ -544,6 +544,10 @@ class ServerAPIClient:
             context="update device skill catalog",
         )
 
+    async def list_connected_devices(self) -> dict[str, Any]:
+        """Return the authenticated user's currently connected runtime devices."""
+        return await self.get("/device-runtime/connected-devices")
+
     def build_runtime_websocket_url(
         self,
         *,

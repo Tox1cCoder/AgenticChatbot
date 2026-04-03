@@ -91,6 +91,7 @@ class IMessageService(ABC):
         user_id: UUID,
         decisions: list[InterruptDecision],
         interrupt_id: str | None = None,
+        device_id: UUID | None = None,
         bot_message_id: UUID | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Resume an interrupted workflow and stream the assistant response"""

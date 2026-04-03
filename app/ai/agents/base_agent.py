@@ -257,6 +257,20 @@ class BaseAgent(ABC):
                 internal_tools=internal_tools,
                 allowlist=self._get_allowlist(),
             )
+            if conversation_id and remote_tools:
+                from ..deferred_tool_state import get_deferred_tool_state
+
+                loaded_client_names = {
+                    loaded.tool_name
+                    for loaded in get_deferred_tool_state().get_loaded_client_tools(
+                        conversation_id,
+                        self.agent_config_key,
+                    )
+                    if not device_id or str(loaded.device_id) == str(device_id)
+                }
+                remote_tools = [tool for tool in remote_tools if tool.name in loaded_client_names]
+            else:
+                remote_tools = []
         else:
             # Traditional mode: return all tools (with internal tools prepended)
             if internal_tools:

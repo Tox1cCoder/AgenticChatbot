@@ -142,6 +142,7 @@ class RuntimeBridgeService:
         """Stop the runtime bridge and close all local runtime resources."""
         self._stop_requested = True
         self._connected_event.clear()
+        device_id = self._device_id
 
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
@@ -159,6 +160,9 @@ class RuntimeBridgeService:
             with suppress(asyncio.CancelledError):
                 await self._runtime_task
             self._runtime_task = None
+
+        if device_id and self._server_client.is_authenticated():
+            await self._wait_for_server_disconnect(device_id)
 
         await shutdown_mcp_manager()
 
@@ -281,6 +285,28 @@ class RuntimeBridgeService:
         with suppress(Exception):
             await get_mcp_manager().initialize()
         await initialize_skills_registry()
+
+    async def _wait_for_server_disconnect(self, device_id: str) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 5.0
+
+        while loop.time() < deadline:
+            try:
+                payload = await self._server_client.list_connected_devices()
+            except Exception as exc:
+                logger.debug("Runtime bridge disconnect verification failed: %s", exc)
+                return
+
+            if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+                payload = payload["data"]
+
+            connected_devices = (
+                payload.get("connected_devices", []) if isinstance(payload, dict) else []
+            )
+            if all(str(item.get("device_id") or "") != device_id for item in connected_devices):
+                return
+
+            await asyncio.sleep(0.2)
 
     async def _register_device(self) -> DeviceRegistrationResult:
         capabilities = {

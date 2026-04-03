@@ -166,6 +166,10 @@ class InterruptResumeRequest(BaseModel):
         default=None, description="Interrupt ID returned from the HITL middleware"
     )
     conversation_id: UUID = Field(..., description="Conversation ID")
+    device_id: UUID | None = Field(
+        default=None,
+        description="Optional client device ID used to validate sidecar-scoped interrupt resumes.",
+    )
     decisions: list[InterruptDecision] = Field(..., description="Approval/rejection/edit decisions")
 
     @field_validator("decisions", mode="before")

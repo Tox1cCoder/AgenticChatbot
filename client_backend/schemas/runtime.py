@@ -6,6 +6,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.schemas.runtime_protocol import (
+    RuntimeErrorContext,
+    ToolDispatchRequest,
+    ToolDispatchResult,
+)
+
 
 class RuntimeStatus(str, Enum):
     """Status of the client runtime."""
@@ -96,3 +102,19 @@ class CatalogSyncResult(BaseModel):
     status: str
     tool_count: int | None = None
     skill_count: int | None = None
+
+
+__all__ = [
+    "CatalogSyncResult",
+    "DeviceInfo",
+    "DeviceRegistrationResult",
+    "HealthCheckResponse",
+    "HealthStatus",
+    "RuntimeErrorContext",
+    "RuntimeState",
+    "RuntimeStatus",
+    "ToolCatalog",
+    "ToolCatalogEntry",
+    "ToolDispatchRequest",
+    "ToolDispatchResult",
+]

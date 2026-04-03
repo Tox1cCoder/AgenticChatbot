@@ -31,7 +31,7 @@ class SummarizationConfig:
 
     # Summarization model
     model: str = "gemini-3-flash-preview"
-    temperature: float = 0.2
+    temperature: float = 1.0
 
     # Hard cap on the rolling summary (estimated tokens ≈ chars / 4).
     max_summary_tokens: int = 1500
@@ -75,7 +75,7 @@ def _get_config() -> SummarizationConfig:
         keep_messages=settings.summarization_keep_messages,
         model_context_size=settings.summarization_model_context_size,
         model=settings.summarization_model,
-        temperature=0.2,
+        temperature=1.0,
         max_summary_tokens=settings.summarization_max_summary_tokens,
     )
 

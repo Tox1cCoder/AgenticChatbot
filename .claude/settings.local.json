@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import sys; sys.path.insert\\(0, '.'\\); from client_backend.main import app; print\\('OK'\\)\")"
+    ]
+  }
+}

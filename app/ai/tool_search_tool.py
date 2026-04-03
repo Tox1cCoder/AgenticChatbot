@@ -282,6 +282,7 @@ async def _execute_tool_search(
                 agent_key=agent_key,
                 references=autoload_client_refs,
                 device_id=device_id,
+                user_id=user_id,
             )
             loaded_count += len(loaded_client_refs)
 

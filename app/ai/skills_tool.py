@@ -16,7 +16,7 @@ import json
 import logging
 from collections import Counter
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -289,16 +289,14 @@ def create_activate_skill_tool(
                 "Retry from the active device session."
             )
 
-        gateway = session.websocket
-        if gateway is None or not hasattr(gateway, "dispatch_tool_call"):
-            return "Error: client runtime gateway is not available for skill activation."
-
-        response = await gateway.dispatch_tool_call(
-            request_id=str(uuid4()),
+        response = await ClientDeviceService.dispatch_tool_call(
+            user_id=bound_user_id,
+            device_id=bound_device_id,
             tool_name="activate_skill",
             qualified_tool_id="native::activate_skill",
             arguments={"skill_name": str(resolved_skill["name"])},
             timeout_seconds=settings.client_runtime_ws_timeout_seconds,
+            bound_session_id=bound_session_id,
         )
 
         if not response.get("success", False):

@@ -469,6 +469,7 @@ class DeferredToolState:
         agent_key: str | None,
         references: list,  # List of ClientToolReference
         device_id: str | None,
+        user_id: str | None = None,
         max_tools: int | None = None,
     ) -> list:
         """
@@ -498,7 +499,7 @@ class DeferredToolState:
         catalog_version = 0
         if device_id:
             try:
-                catalog = get_client_tool_catalog(device_id, "")
+                catalog = get_client_tool_catalog(device_id, user_id or "")
                 catalog_version = catalog.catalog_version
             except Exception:
                 pass

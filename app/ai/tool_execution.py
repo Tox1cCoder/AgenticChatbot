@@ -213,6 +213,7 @@ async def ensure_agent_tool_map(
         except TypeError:
             # Backward-compat fallback for non-keyword signatures.
             tools = agent._get_tools_for_binding(conversation_id)
+        manages_client_tools = True
     elif settings.mcp_tool_search_enabled:
         # Safety fallback for custom agents that don't implement binding helpers.
         agent_key = getattr(agent, "agent_config_key", None)
@@ -224,9 +225,12 @@ async def ensure_agent_tool_map(
         tools = list(initialized_tools)
         if not any(getattr(t, "name", None) == tool_search.name for t in tools):
             tools.append(tool_search)
+        manages_client_tools = False
+    else:
+        manages_client_tools = False
 
     # Add client runtime tools (device-scoped, separate from server MCP tools)
-    if hasattr(agent, "_get_client_runtime_tools"):
+    if not manages_client_tools and hasattr(agent, "_get_client_runtime_tools"):
         try:
             remote_tools = agent._get_client_runtime_tools(user_id=user_id, device_id=device_id)
         except TypeError:

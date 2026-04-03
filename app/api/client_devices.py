@@ -119,7 +119,7 @@ async def register_device(
 
     # Generate a session ID
     session_id = secrets.token_urlsafe(32)
-    service.issue_runtime_session_id(device.id, session_id)
+    await service.issue_runtime_session_id(device.id, session_id)
 
     return DeviceRegistrationResponse(
         device_id=str(device.id),

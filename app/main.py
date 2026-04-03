@@ -1,8 +1,12 @@
 import asyncio
 import logging
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
+
+# psycopg3 async requires SelectorEventLoop on Windows; set this before uvicorn creates its loop
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 import uvicorn
 from fastapi import FastAPI
@@ -32,12 +36,15 @@ from app.core.container import (
 )
 from app.core.events import DocumentEvent, get_event_bus
 from app.database.migrations import upgrade_database
-from app.database.session import get_engine
+from app.database.session import SessionLocal, get_engine
+from app.services.client_device_service import periodic_session_cleanup_task
+from app.services.client_runtime_store import close_client_runtime_store
 from app.services.document_event_listener import DocumentEventLogger
 from app.utils.exception_handler import register_exception_handlers
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
+_client_runtime_cleanup_task: asyncio.Task | None = None
 
 
 async def init_database_migrations():
@@ -51,10 +58,12 @@ async def init_checkpoint_tables():
         logger.info("LangGraph checkpoints disabled in settings")
         return
 
-    container = get_container()
-    checkpoint_manager = container.checkpoint_manager()
-
-    await checkpoint_manager.setup()
+    try:
+        container = get_container()
+        checkpoint_manager = container.checkpoint_manager()
+        await checkpoint_manager.setup()
+    except Exception as e:
+        logger.warning(f"Checkpoint table setup failed (non-fatal): {e}")
 
 
 async def init_agents():
@@ -84,13 +93,26 @@ async def init_skills():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
+    global _client_runtime_cleanup_task
     # Startup
     await init_database_migrations()
     await init_checkpoint_tables()
     await init_agents()
     await init_skills()
+    if settings.enable_client_runtime_bridge:
+        _client_runtime_cleanup_task = asyncio.create_task(
+            periodic_session_cleanup_task(
+                SessionLocal,
+                interval_seconds=settings.client_runtime_heartbeat_interval_seconds,
+            )
+        )
     yield
     # Shutdown
+    if _client_runtime_cleanup_task is not None:
+        _client_runtime_cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _client_runtime_cleanup_task
+        _client_runtime_cleanup_task = None
     try:
         from app.ai.mcp_registry import get_global_mcp_manager
 
@@ -100,6 +122,10 @@ async def lifespan(app: FastAPI):
             logger.info("MCP sessions closed cleanly")
     except Exception as e:
         logger.debug(f"MCP cleanup during shutdown (non-fatal): {e}")
+    try:
+        await close_client_runtime_store()
+    except Exception as e:
+        logger.debug(f"Client runtime store cleanup during shutdown (non-fatal): {e}")
 
 
 def create_app() -> FastAPI:

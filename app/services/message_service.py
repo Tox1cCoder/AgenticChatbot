@@ -7,7 +7,10 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-import redis
+try:
+    import redis
+except ImportError:  # pragma: no cover - exercised in environments without redis installed
+    redis = None
 
 from app.ai.suggestion_generator import generate_follow_up_suggestions
 from app.core.config import settings
@@ -70,7 +73,7 @@ class MessageService(IMessageService):
 
     def _init_redis_client(self):
         redis_url = getattr(settings, "redis_url", "") or ""
-        if not redis_url.strip():
+        if redis is None or not redis_url.strip():
             return None
         return redis.from_url(redis_url)
 
@@ -633,18 +636,14 @@ class MessageService(IMessageService):
                     elif event_type == "complete":
                         # Store final response
                         bot_response = event.get("response")
-                        extract_response_content(
-                            bot_response, NO_RESPONSE_GENERATED
-                        )
+                        extract_response_content(bot_response, NO_RESPONSE_GENERATED)
                         break
 
                     elif event_type == "error":
                         # Handle error
                         bot_response = event.get("response")
                         error_msg = event.get("error", UNKNOWN_ERROR)
-                        extract_response_content(
-                            bot_response, f"Error: {error_msg}"
-                        )
+                        extract_response_content(bot_response, f"Error: {error_msg}")
                         break
 
                 # ---- Handle cancellation after the loop exits ----
@@ -760,6 +759,7 @@ class MessageService(IMessageService):
         conversation_id: UUID,
         user_id: UUID,
         interrupt_id: str | None,
+        device_id: UUID | None,
     ) -> Any:
         from fastapi import status as http_status
 
@@ -789,6 +789,16 @@ class MessageService(IMessageService):
                     status_code=http_status.HTTP_409_CONFLICT,
                     detail="Thread ID does not match the pending interrupt state.",
                     error_code="INTERRUPT_THREAD_MISMATCH",
+                )
+            if (
+                device_id is not None
+                and record.device_id is not None
+                and record.device_id != device_id
+            ):
+                raise CustomHTTPException(
+                    status_code=http_status.HTTP_409_CONFLICT,
+                    detail="Device ID does not match the pending interrupt state.",
+                    error_code="INTERRUPT_DEVICE_MISMATCH",
                 )
             now = datetime.now(timezone.utc)
             if record.status == HITLInterruptStatus.EXPIRED or (
@@ -963,6 +973,7 @@ class MessageService(IMessageService):
         user_id: UUID,
         decisions: list[InterruptDecision],
         interrupt_id: str | None = None,
+        device_id: UUID | None = None,
         bot_message_id: UUID | None = None,
     ):
         fetched_interrupt_record = self._validate_and_claim_interrupt_resume(
@@ -970,6 +981,7 @@ class MessageService(IMessageService):
             conversation_id=conversation_id,
             user_id=user_id,
             interrupt_id=interrupt_id,
+            device_id=device_id,
         )
 
         user_id, persona = self._get_conversation_context(conversation_id, user_id)

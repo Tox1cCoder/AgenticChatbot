@@ -4,7 +4,7 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from cachetools import TTLCache
 from langchain_core.tools import BaseTool, StructuredTool
@@ -196,16 +196,14 @@ def _build_tool(
                 "Client device session changed after tool binding. Retry from the active device."
             )
 
-        gateway = session.websocket
-        if gateway is None or not hasattr(gateway, "dispatch_tool_call"):
-            raise RuntimeError("Client runtime gateway is not available for tool dispatch.")
-
-        response = await gateway.dispatch_tool_call(
-            request_id=str(uuid4()),
+        response = await ClientDeviceService.dispatch_tool_call(
+            user_id=bound_user_id,
+            device_id=bound_device_id,
             tool_name=spec.name,
             qualified_tool_id=spec.qualified_tool_id,
             arguments=kwargs,
             timeout_seconds=settings.client_runtime_ws_timeout_seconds,
+            bound_session_id=bound_session_id,
         )
 
         if not response.get("success", False):

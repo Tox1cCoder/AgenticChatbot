@@ -32,6 +32,11 @@ def requires_human_approval(tool_names: list[str]) -> bool:
     if not is_hitl_enabled():
         return False
 
+    # Client-side tools execute on a user's device and should always require
+    # explicit approval unless HITL is disabled globally.
+    if any(str(name or "").startswith("client__") for name in tool_names):
+        return True
+
     approval_list = get_tools_requiring_approval()
     if not approval_list:
         # Empty list means no tools require approval

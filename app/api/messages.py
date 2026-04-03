@@ -205,6 +205,7 @@ async def resume_interrupt(
             conversation_id=resume_request.conversation_id,
             user_id=user_id,
             interrupt_id=resume_request.interrupt_id,
+            device_id=resume_request.device_id,
             decisions=resume_request.decisions,
         ),
         request,

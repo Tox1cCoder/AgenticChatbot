@@ -179,6 +179,18 @@ class ClientToolCatalog:
                 self._clear()
             return False
 
+        if str(session.user_id) != str(self._user_id):
+            logger.warning(
+                "Ignoring client tool catalog refresh for device %s because it is bound to user %s, "
+                "not user %s",
+                self._device_id,
+                session.user_id,
+                self._user_id,
+            )
+            if self._tools:
+                self._clear()
+            return False
+
         # Check if catalog version changed
         if session.tool_catalog_version == self._catalog_version:
             return False

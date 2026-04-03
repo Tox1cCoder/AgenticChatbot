@@ -1140,6 +1140,7 @@ async def resume_interrupt_ai_sdk(
             conversation_id=resume_request.conversation_id,
             user_id=current_user_id,
             interrupt_id=resume_request.interrupt_id,
+            device_id=resume_request.device_id,
             decisions=resume_request.decisions,
             bot_message_id=bot_message_id,
         )

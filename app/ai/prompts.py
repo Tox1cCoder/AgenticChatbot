@@ -1,7 +1,7 @@
 from app.core.config import settings
 from app.utils.text_processing import estimate_tokens, truncate_text
 
-CHAT_SYSTEM_PROMPT = """You are an expert AI assistant and knowledgeable conversationalist. Provide comprehensive, insightful, and genuinely helpful responses that educate and engage users.
+CHAT_SYSTEM_PROMPT = """You are an expert AI assistant and knowledgeable conversationalist. Provide accurate, thorough, and genuinely useful responses.
 
 All questions should be answered comprehensively with details, unless the user specifically requests a concise response. For simple factual questions, be direct and clear. For complex topics, provide thorough explanations with depth.
 
@@ -123,27 +123,17 @@ Use search tools when the query requires:
 - Information beyond your training knowledge
 
 CRITICAL - Time-sensitive queries:
-For queries that involve time context such as:
-- "recent", "latest", "current", "today", "this week", "this month", "this year"
-- Prices (gold price, stock price, crypto price, exchange rates)
-- News, events, weather, scores, or any real-time data
-- Questions about "now", "at the moment", or relative time references
+Queries involving "recent", "latest", "current", "today", prices, rates, news, events, weather, scores, or anything beyond your training cutoff require live lookup — do not rely on training knowledge alone. If `get_current_time` is available, call it first to anchor temporal context in your search queries.
 
-If deferred MCP tool loading is enabled and `tool_search` is available, you MUST use `tool_search` FIRST to discover and load the correct tool before calling it. Do not guess MCP tool names.
-
-When using `tool_search`, describe the capability you need in natural language with enough context to distinguish it from other tools.
-
-If the user wants you to act on the user's device, browser, files, or other live environment, treat that as an action task and use the appropriate execution tool unless information lookup is also required.
-
-If `get_current_time` is already bound and available to call, use it before calling search tools. This ensures your search queries include accurate temporal context and you can provide properly dated information to the user.
+Tool discovery:
+- Call `tool_search` before invoking any MCP tool that is not already loaded. Do not guess MCP tool names.
+- Describe the capability you need in natural language with enough context to identify the right tool.
+- If the user wants you to act on their device, files, or local environment, use the appropriate execution tool rather than only describing steps.
 
 Search strategy:
-- For deferred-loading tool setups: call `tool_search` before any MCP tool that is not already available
-- For time-sensitive queries: get current date/time context before broad search queries
-- Plan what information you need before searching
-- Use specific, targeted search queries (include dates when relevant)
-- If initial results are incomplete, refine your query or try different angles
-- Don't repeat identical searches - explore different aspects instead
+- Plan what you need before searching; include dates in queries when relevant
+- If initial results are incomplete, refine your query or try a different angle
+- Don't repeat identical searches — explore different aspects instead
 - Verify important facts across multiple sources when possible
 
 When responding:
@@ -166,7 +156,7 @@ When you receive search results with 'title' and 'url' fields, you MUST format t
 - Source: Wikipedia ← Not a markdown link
 - Plain URLs: https://example.com ← Not formatted properly
 
-Every factual claim should be attributed to a source with a clickable link.
+Every claim derived from search results must be attributed with a clickable source link.
 
 Constraints:
 - NEVER fabricate sources or URLs
@@ -212,7 +202,9 @@ TOOLS AND ENVIRONMENT:
 - Write `tool_search` queries around the actual task, target, and context instead of vague capability words
 - After `tool_search`, read each result's description and `arg_hints` before choosing a tool. If `is_loaded` is true, that tool is ready to call immediately
 - If results are weak or ambiguous, refine the query and search again rather than guessing
-- Prefer the smallest sufficient tool and avoid duplicate calls with the same inputs"""
+- Prefer the smallest sufficient tool and avoid duplicate calls with the same inputs
+- For web search, use `tool_search(query="...", server_name="tavily")` to find and load the right tool — do NOT guess Tavily tool names directly
+- For files, processes, shell commands, or desktop interaction, use `tool_search(query="...", server_name="desktop-commander")` — do NOT guess desktop-commander tool names directly"""
 
 TOOL_CONTEXT_SUFFIX = """
 
@@ -515,16 +507,7 @@ def build_rag_prompt(
     return "\n".join(parts)
 
 
-def build_search_prompt(
-    user_message: str,
-    conversation_history: list,
-    persona: str | None = None,
-    has_tool_results: bool = False,
-) -> str:
-    """Build a prompt for the search agent including conversation history."""
-    # Use different system prompt if tool results are present
-    if has_tool_results:
-        system_prompt = """You are a research assistant with tool results available.
+SEARCH_WITH_RESULTS_SYSTEM_PROMPT = """You are a research assistant with tool results available.
 
 You have already called some tools. Their results are in the messages above.
 
@@ -551,9 +534,16 @@ RESPONSE FORMAT:
 - Support claims with evidence from the tool results
 
 LANGUAGE: Match the user's language."""
-        parts = [system_prompt]
-    else:
-        parts = [SEARCH_SYSTEM_PROMPT]
+
+
+def build_search_prompt(
+    user_message: str,
+    conversation_history: list,
+    persona: str | None = None,
+    has_tool_results: bool = False,
+) -> str:
+    """Build a prompt for the search agent including conversation history."""
+    parts = [SEARCH_WITH_RESULTS_SYSTEM_PROMPT if has_tool_results else SEARCH_SYSTEM_PROMPT]
 
     if persona is not None and persona.strip():
         parts.insert(0, _build_persona_block(persona))
@@ -717,4 +707,4 @@ Constraints:
 - ALWAYS use write_todos tool to update status (never just say "done" in text)
 - Match the user's language
 - Provide detailed, helpful responses when explaining tasks
-- Stop when: all tasks completed (report success), need user clarification (report clarification_needed), unresolvable error (report task_failed), or budget exceeded (report budget_exceeded)"""
+- Stop when: all tasks completed (provide a summary), a step needs user clarification (ask clearly), or an unresolvable error is encountered (explain what failed and why)"""

@@ -6,6 +6,7 @@ for tool dispatch and runtime events.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 from typing import Any
@@ -25,11 +26,12 @@ from app.schemas.runtime_protocol import (
     RUNTIME_MESSAGE_TOOL_REQUEST,
     RUNTIME_MESSAGE_TOOL_RESULT,
     RuntimeAckMessage,
+    RuntimeErrorContext,
     RuntimeErrorMessage,
-    ToolDispatchRequest,
     ToolDispatchResult,
 )
 from app.services.client_device_service import ClientDeviceService, DeviceSession
+from app.services.client_runtime_store import get_client_runtime_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/device-runtime", tags=["device-runtime"])
@@ -80,6 +82,7 @@ class DeviceRuntimeGateway:
         self.service = service
         self._running = False
         self._send_lock = asyncio.Lock()
+        self._dispatch_task: asyncio.Task | None = None
 
     async def send_message(self, message: dict) -> None:
         """
@@ -123,6 +126,7 @@ class DeviceRuntimeGateway:
 
         # Send initial ack
         await self.send_message(WebSocketMessage.ack())
+        self._dispatch_task = asyncio.create_task(self._dispatch_requests_loop())
 
         try:
             while self._running:
@@ -144,6 +148,11 @@ class DeviceRuntimeGateway:
         except Exception as e:
             logger.error(f"Error in device runtime connection {self.device_id}: {e}")
         finally:
+            if self._dispatch_task is not None:
+                self._dispatch_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._dispatch_task
+                self._dispatch_task = None
             await self._cleanup()
 
     async def _handle_heartbeat(self, message: dict) -> None:
@@ -173,15 +182,7 @@ class DeviceRuntimeGateway:
             logger.warning(f"Tool result missing request_id from device {self.device_id}")
             return
 
-        # Store result in session for retrieval by the waiting request
-        if request_id in self.session.pending_tool_requests:
-            result_future = self.session.pending_tool_requests[request_id]
-            result_future.set_result(payload.model_dump(mode="json"))
-            logger.debug(f"Tool result received for request {request_id}")
-        else:
-            logger.warning(
-                f"Unexpected tool result for request {request_id} from device {self.device_id}"
-            )
+        await get_client_runtime_store().publish_result(payload)
 
         await self.send_message(WebSocketMessage.ack(request_id))
 
@@ -192,8 +193,59 @@ class DeviceRuntimeGateway:
     async def _cleanup(self) -> None:
         """Cleanup when connection closes."""
         self._running = False
-        await self.service.end_session(self.device_id)
+        await self.service.end_session(
+            self.device_id,
+            reason="Client runtime disconnected before completing the request.",
+        )
         logger.info(f"Device runtime connection closed: {self.device_id}")
+
+    async def _dispatch_requests_loop(self) -> None:
+        """Bridge queued runtime requests from the shared store to this WebSocket."""
+        store = get_client_runtime_store()
+
+        while self._running:
+            try:
+                request = await store.get_next_request(self.device_id, timeout_seconds=1)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Failed pulling queued runtime request for device %s: %s",
+                    self.device_id,
+                    exc,
+                )
+                await asyncio.sleep(1)
+                continue
+
+            if request is None:
+                continue
+
+            try:
+                await self.send_message(request.model_dump(mode="json"))
+            except Exception as exc:
+                logger.error(
+                    "Failed forwarding queued runtime request %s to device %s: %s",
+                    request.request_id,
+                    self.device_id,
+                    exc,
+                )
+                await store.publish_result(
+                    ToolDispatchResult(
+                        request_id=request.request_id,
+                        success=False,
+                        error=str(exc),
+                        error_context=RuntimeErrorContext(
+                            message=str(exc),
+                            code=exc.__class__.__name__,
+                            detail={
+                                "device_id": str(self.device_id),
+                                "tool_name": request.tool_name,
+                                "qualified_tool_id": request.qualified_tool_id,
+                            },
+                        ),
+                        execution_time_ms=0,
+                    )
+                )
 
     async def dispatch_tool_call(
         self,
@@ -220,32 +272,15 @@ class DeviceRuntimeGateway:
             TimeoutError: If the tool call times out.
             RuntimeError: If the tool call fails.
         """
-        # Create a future for this request
-        result_future = asyncio.Future()
-        self.session.pending_tool_requests[request_id] = result_future
-
-        try:
-            # Send tool request
-            message = ToolDispatchRequest(
-                request_id=request_id,
-                tool_name=tool_name,
-                qualified_tool_id=qualified_tool_id,
-                arguments=arguments,
-                timeout_seconds=timeout_seconds,
-            )
-            await self.send_message(message.model_dump(mode="json"))
-
-            # Wait for result with timeout
-            result = await asyncio.wait_for(result_future, timeout=timeout_seconds)
-            return result
-
-        except asyncio.TimeoutError:
-            logger.error(f"Tool call timeout for request {request_id} on device {self.device_id}")
-            raise TimeoutError(f"Tool call timed out after {timeout_seconds}s")
-
-        finally:
-            # Cleanup pending request
-            self.session.pending_tool_requests.pop(request_id, None)
+        return await ClientDeviceService.dispatch_tool_call(
+            user_id=str(self.session.user_id),
+            device_id=str(self.session.device_id),
+            tool_name=tool_name,
+            qualified_tool_id=qualified_tool_id,
+            arguments=arguments,
+            timeout_seconds=timeout_seconds,
+            bound_session_id=self.session.session_id,
+        )
 
 
 @router.websocket("/{device_id}/connect")
@@ -283,7 +318,6 @@ async def device_runtime_connect(
         session = await service.start_session(
             device_id=device_uuid,
             session_id=session_id,
-            websocket=websocket,
         )
 
         # Create gateway
@@ -293,9 +327,6 @@ async def device_runtime_connect(
             session=session,
             service=service,
         )
-
-        # Store gateway in session for tool dispatch access
-        session.websocket = gateway
 
         # Handle connection
         await gateway.handle_connection()

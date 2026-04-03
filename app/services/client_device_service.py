@@ -9,110 +9,75 @@ This service handles:
 """
 
 import asyncio
-import threading
-from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.client_device import ClientDevice, DeviceStatus
 from app.repositories.client_device import ClientDeviceRepository
+from app.schemas.runtime_protocol import ToolDispatchRequest
+from app.services.client_runtime_store import (
+    DeviceSessionRecord,
+    get_client_runtime_store,
+)
 
-
-class DeviceSession:
-    """
-    Represents an active device runtime session.
-
-    Tracks WebSocket connection state and catalog information.
-    """
-
-    def __init__(
-        self,
-        device_id: UUID,
-        session_id: str,
-        user_id: UUID,
-        websocket=None,
-    ):
-        self.device_id = device_id
-        self.session_id = session_id
-        self.user_id = user_id
-        self.websocket = websocket
-        self.connected_at = datetime.now(timezone.utc)
-        self.last_heartbeat = self.connected_at
-        self.tool_catalog: dict = {}
-        self.skill_catalog: dict = {}
-        self.pending_tool_requests: dict = {}
-        self.tool_catalog_version: int = 0
-        self.skill_catalog_version: int = 0
-        self.tool_catalog_updated_at: datetime | None = None
-        self.skill_catalog_updated_at: datetime | None = None
-
-    def is_alive(self) -> bool:
-        """Check if the session is still consider alive based on heartbeat."""
-        timeout = settings.client_runtime_heartbeat_interval_seconds * 2
-        elapsed = (datetime.now(timezone.utc) - self.last_heartbeat).total_seconds()
-        return elapsed < timeout
-
-    def update_heartbeat(self) -> None:
-        """Update the last heartbeat timestamp."""
-        self.last_heartbeat = datetime.now(timezone.utc)
-
-    def update_tool_catalog(self, catalog: dict) -> None:
-        """Store a new device-local tool catalog and bump its generation."""
-        self.tool_catalog = catalog
-        self.tool_catalog_version += 1
-        self.tool_catalog_updated_at = datetime.now(timezone.utc)
-
-    def update_skill_catalog(self, catalog: dict) -> None:
-        """Store a new device-local skill catalog and bump its generation."""
-        self.skill_catalog = catalog
-        self.skill_catalog_version += 1
-        self.skill_catalog_updated_at = datetime.now(timezone.utc)
-
-    def get_tool_cache_key(self) -> tuple[str, str, str, int]:
-        """Return a stable cache key for server-side client-tool bindings."""
-        return (
-            str(self.user_id),
-            str(self.device_id),
-            self.session_id,
-            self.tool_catalog_version,
-        )
+DeviceSession = DeviceSessionRecord
 
 
 class ClientDeviceService:
     """Service for managing client devices."""
-
-    _active_sessions: dict[UUID, DeviceSession] = {}
-    _issued_session_ids: dict[UUID, str] = {}
-    _registry_lock = threading.RLock()
 
     def __init__(self, session: Session):
         self.session = session
         self.repository = ClientDeviceRepository(session)
 
     @classmethod
-    def issue_runtime_session_id(cls, device_id: UUID, session_id: str) -> None:
+    async def issue_runtime_session_id(cls, device_id: UUID, session_id: str) -> None:
         """Register a one-time session token that authorizes a runtime connect."""
-        with cls._registry_lock:
-            cls._issued_session_ids[device_id] = session_id
+        await get_client_runtime_store().issue_runtime_session_id(device_id, session_id)
 
     @classmethod
-    def consume_runtime_session_id(cls, device_id: UUID, session_id: str) -> bool:
+    async def consume_runtime_session_id(cls, device_id: UUID, session_id: str) -> bool:
         """Validate and consume a pending runtime session token."""
-        with cls._registry_lock:
-            expected = cls._issued_session_ids.get(device_id)
-            if expected != session_id:
-                return False
-            cls._issued_session_ids.pop(device_id, None)
-            return True
+        return await get_client_runtime_store().consume_runtime_session_id(device_id, session_id)
 
     @classmethod
     def lookup_active_session(cls, device_id: UUID) -> DeviceSession | None:
         """Class-level access to an active device session."""
-        with cls._registry_lock:
-            return cls._active_sessions.get(device_id)
+        return get_client_runtime_store().get_session(device_id)
+
+    @classmethod
+    async def dispatch_tool_call(
+        cls,
+        *,
+        user_id: str,
+        device_id: str,
+        tool_name: str,
+        qualified_tool_id: str,
+        arguments: dict[str, Any],
+        timeout_seconds: int,
+        bound_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Dispatch a tool call to the correct sidecar session."""
+        session = cls.lookup_active_session(UUID(str(device_id)))
+        if session is None or str(session.user_id) != str(user_id):
+            raise RuntimeError("Client device is not connected for this user.")
+
+        if bound_session_id and session.session_id != bound_session_id:
+            raise RuntimeError(
+                "Client device session changed after tool binding. Retry from the active device."
+            )
+
+        request = ToolDispatchRequest(
+            request_id=str(uuid4()),
+            tool_name=tool_name,
+            qualified_tool_id=qualified_tool_id,
+            arguments=arguments,
+            timeout_seconds=timeout_seconds,
+        )
+        return await get_client_runtime_store().dispatch_request(session, request, timeout_seconds)
 
     async def register_or_update_device(
         self,
@@ -169,7 +134,6 @@ class ClientDeviceService:
         self,
         device_id: UUID,
         session_id: str,
-        websocket=None,
     ) -> DeviceSession:
         """
         Start a new device runtime session.
@@ -177,12 +141,10 @@ class ClientDeviceService:
         Args:
             device_id: The device ID.
             session_id: Unique session identifier.
-            websocket: Optional WebSocket connection.
-
         Returns:
             The DeviceSession instance.
         """
-        if not self.consume_runtime_session_id(device_id, session_id):
+        if not await self.consume_runtime_session_id(device_id, session_id):
             raise ValueError("Invalid or expired runtime session ID")
 
         # Mark device as online
@@ -195,15 +157,12 @@ class ClientDeviceService:
             device_id=device_id,
             session_id=session_id,
             user_id=device.user_id,
-            websocket=websocket,
         )
-
-        with self._registry_lock:
-            self._active_sessions[device_id] = session
+        await get_client_runtime_store().put_session(session)
 
         return session
 
-    async def end_session(self, device_id: UUID) -> bool:
+    async def end_session(self, device_id: UUID, *, reason: str | None = None) -> bool:
         """
         End a device runtime session.
 
@@ -213,12 +172,16 @@ class ClientDeviceService:
         Returns:
             True if session was ended, False if not found.
         """
-        with self._registry_lock:
-            if device_id not in self._active_sessions:
-                return False
+        store = get_client_runtime_store()
+        session = store.get_session(device_id)
+        if session is None:
+            return False
 
-            # Remove from active sessions
-            del self._active_sessions[device_id]
+        await store.fail_pending_requests(
+            device_id,
+            reason or "Client runtime disconnected before completing the request.",
+        )
+        await store.delete_session(device_id)
 
         # Mark device as offline
         self.repository.update_status(device_id, DeviceStatus.OFFLINE)
@@ -235,11 +198,9 @@ class ClientDeviceService:
         Returns:
             True if heartbeat updated, False if session not found.
         """
-        session = self.get_active_session(device_id)
+        session = await get_client_runtime_store().update_heartbeat(device_id)
         if not session:
             return False
-
-        session.update_heartbeat()
 
         # Also update last_seen_at in database
         self.repository.update_status(device_id, DeviceStatus.ONLINE)
@@ -248,15 +209,11 @@ class ClientDeviceService:
 
     def get_active_session(self, device_id: UUID) -> DeviceSession | None:
         """Get an active session by device ID."""
-        with self._registry_lock:
-            return self._active_sessions.get(device_id)
+        return get_client_runtime_store().get_session(device_id)
 
     def get_active_sessions_for_user(self, user_id: UUID) -> list[DeviceSession]:
         """Get all active sessions for a user."""
-        with self._registry_lock:
-            return [
-                session for session in self._active_sessions.values() if session.user_id == user_id
-            ]
+        return get_client_runtime_store().list_sessions_for_user(user_id)
 
     def get_device_tool_catalog(
         self,
@@ -297,12 +254,8 @@ class ClientDeviceService:
         Returns:
             True if updated, False if session not found.
         """
-        session = self.get_active_session(device_id)
-        if not session:
-            return False
-
-        session.update_tool_catalog(catalog)
-        return True
+        session = await get_client_runtime_store().update_tool_catalog(device_id, catalog)
+        return session is not None
 
     async def update_skill_catalog(
         self,
@@ -319,12 +272,8 @@ class ClientDeviceService:
         Returns:
             True if updated, False if session not found.
         """
-        session = self.get_active_session(device_id)
-        if not session:
-            return False
-
-        session.update_skill_catalog(catalog)
-        return True
+        session = await get_client_runtime_store().update_skill_catalog(device_id, catalog)
+        return session is not None
 
     async def cleanup_stale_sessions(self) -> int:
         """
@@ -333,24 +282,14 @@ class ClientDeviceService:
         Returns:
             Number of sessions cleaned up.
         """
-        stale_devices = []
-
-        with self._registry_lock:
-            active_sessions = list(self._active_sessions.items())
-
-        for device_id, session in active_sessions:
-            if not session.is_alive():
-                stale_devices.append(device_id)
-
-        for device_id in stale_devices:
-            await self.end_session(device_id)
+        store_stale_count = await get_client_runtime_store().cleanup_stale_sessions()
 
         # Also mark stale devices as offline in database
-        self.repository.mark_stale_devices_offline(
+        db_stale_count = self.repository.mark_stale_devices_offline(
             settings.client_runtime_heartbeat_interval_seconds * 2
         )
 
-        return len(stale_devices)
+        return max(store_stale_count, db_stale_count)
 
     async def list_user_devices(
         self,
@@ -358,22 +297,30 @@ class ClientDeviceService:
         include_offline: bool = True,
     ) -> list[ClientDevice]:
         """List all devices for a user."""
+        self.repository.mark_stale_devices_offline(
+            settings.client_runtime_heartbeat_interval_seconds * 2
+        )
         return self.repository.list_by_user(user_id, include_offline)
 
 
 # Background task for periodic session cleanup
-async def periodic_session_cleanup_task(service: ClientDeviceService, interval_seconds: int = 60):
+async def periodic_session_cleanup_task(session_factory: callable, interval_seconds: int = 60):
     """
     Background task to periodically clean up stale sessions.
 
     Args:
-        service: The ClientDeviceService instance.
+        session_factory: Callable returning a new SQLAlchemy session.
         interval_seconds: Cleanup interval in seconds.
     """
     while True:
         try:
             await asyncio.sleep(interval_seconds)
-            count = await service.cleanup_stale_sessions()
+            db_session = session_factory()
+            try:
+                service = ClientDeviceService(db_session)
+                count = await service.cleanup_stale_sessions()
+            finally:
+                db_session.close()
             if count > 0:
                 print(f"Cleaned up {count} stale device sessions")
         except asyncio.CancelledError:
