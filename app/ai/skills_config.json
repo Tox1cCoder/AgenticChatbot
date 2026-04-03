@@ -1,0 +1,16 @@
+{
+  "skills": {
+    "AutoCAD TNF Layout": {
+      "enabled": false
+    },
+    "example-skill": {
+      "enabled": false
+    },
+    "playwright-cli": {
+      "enabled": false
+    },
+    "take100-timesheet": {
+      "enabled": true
+    }
+  }
+}

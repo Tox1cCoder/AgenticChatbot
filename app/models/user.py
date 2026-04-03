@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, String, Text, DateTime, func
+from sqlalchemy import Column, DateTime, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -25,6 +25,8 @@ class User(Base):
     # Relationships
     conversations = relationship("Conversation", back_populates="user")
     feedback = relationship("Feedback", back_populates="user")
+    model_providers = relationship("ModelProvider", back_populates="user")
+    agent_model_configs = relationship("AgentModelConfig", back_populates="user")
 
     def __repr__(self) -> str:
         return f"<User(id={self.id}, username='{self.username}', email='{self.email}')>"

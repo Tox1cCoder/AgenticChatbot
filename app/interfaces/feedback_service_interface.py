@@ -3,19 +3,16 @@ Feedback service interface definition
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
 from uuid import UUID
 
-from app.schemas.feedback import FeedbackCreate, FeedbackUpdate, FeedbackRead
+from app.schemas.feedback import FeedbackCreate, FeedbackRead, FeedbackUpdate
 
 
 class IFeedbackService(ABC):
     """Interface for Feedback service operations"""
 
     @abstractmethod
-    def create_feedback(
-        self, feedback_create_data: FeedbackCreate, user_id: UUID
-    ) -> FeedbackRead:
+    def create_feedback(self, feedback_create_data: FeedbackCreate, user_id: UUID) -> FeedbackRead:
         """Create new feedback with validation"""
         pass
 
@@ -25,19 +22,17 @@ class IFeedbackService(ABC):
         pass
 
     @abstractmethod
-    def get_by_message(self, message_id: UUID) -> Optional[FeedbackRead]:
+    def get_by_message(self, message_id: UUID) -> FeedbackRead | None:
         """Get feedback for a message (1-1 relationship per ERD)"""
         pass
 
     @abstractmethod
-    def get_by_user(self, user_id: UUID) -> List[FeedbackRead]:
+    def get_by_user(self, user_id: UUID) -> list[FeedbackRead]:
         """Get all feedback by a user (no pagination needed for user's own feedback)"""
         pass
 
     @abstractmethod
-    def get_user_feedback_for_message(
-        self, message_id: UUID, user_id: UUID
-    ) -> Optional[FeedbackRead]:
+    def get_user_feedback_for_message(self, message_id: UUID, user_id: UUID) -> FeedbackRead | None:
         """Get specific user's feedback for a message"""
         pass
 

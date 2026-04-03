@@ -1,12 +1,12 @@
-from functools import lru_cache
-from typing import List
+import logging
 import os
-
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings
-
+import secrets
+from functools import lru_cache
 from pathlib import Path
+
 from dotenv import load_dotenv
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings
 
 # Load .env from the workspace root
 dotenv_path = Path(__file__).parent.parent.parent / ".env"
@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     }
     # Database settings
     database_url: str = Field(
-        default="postgresql://postgres:123123123@localhost:5432/chatbot",
+        default="postgresql://localhost:5432/chatbot",
         description="Database URL for PostgreSQL connection",
     )
 
@@ -43,7 +43,7 @@ class Settings(BaseSettings):
         description="API port",
     )
     api_debug: bool = Field(
-        default=True,
+        default=False,
         description="Debug mode",
     )
 
@@ -55,7 +55,7 @@ class Settings(BaseSettings):
 
     # Security
     secret_key: str = Field(
-        default="secret-key",
+        default="",
         description="Secret key for security",
     )
     jwt_algorithm: str = Field(
@@ -72,8 +72,8 @@ class Settings(BaseSettings):
     )
 
     # CORS settings
-    cors_origins: List[str] = Field(
-        default=["http://localhost:3000", "http://localhost:8080"],
+    cors_origins: list[str] = Field(
+        default=[],
         description="CORS allowed origins",
     )
 
@@ -89,6 +89,24 @@ class Settings(BaseSettings):
     smithery_api_key: str = Field(
         default="",
         description="Smithery API Key for MCP server access",
+    )
+
+    # Multi-Provider Configuration
+    model_encryption_key: str = Field(
+        default="",
+        description="Fernet encryption key for storing provider API keys (32 url-safe base64-encoded bytes)",
+    )
+    openai_request_timeout_seconds: int = Field(
+        default=60,
+        description="Timeout for OpenAI API requests in seconds",
+    )
+    provider_retry_attempts: int = Field(
+        default=3,
+        description="Number of retry attempts for provider API calls before fallback",
+    )
+    provider_retry_delay_seconds: float = Field(
+        default=1.0,
+        description="Base delay in seconds between retry attempts (uses exponential backoff)",
     )
 
     # LangSmith Configuration
@@ -114,6 +132,10 @@ class Settings(BaseSettings):
     media_resolution: str = Field(
         default="high",
         description="Media resolution for vision models: low, medium, high (Gemini 3 supports per-part resolution)",
+    )
+    enable_gemini_code_execution: bool = Field(
+        default=True,
+        description="Enable Gemini code execution tool for agentic vision workflows across agents",
     )
 
     # Image Generation Configuration
@@ -170,22 +192,22 @@ class Settings(BaseSettings):
     )
     memory_load_batch_size: int = Field(
         default=100,
-        description="Number of messages to load per batch when hydrating memory from the database",
+        description="Number of messages to load per batch when hydrating memory from the database (max 100)",
     )
     chat_history_max_messages: int = Field(
-        default=0,
+        default=24,
         description="Maximum prior messages to include when building chat prompts (0 = no limit)",
     )
     chat_history_max_tokens: int = Field(
-        default=0,
+        default=9000,
         description="Approximate maximum tokens of chat history to include in prompts (0 = no limit)",
     )
     rag_history_max_messages: int = Field(
-        default=0,
+        default=12,
         description="Maximum prior messages to include when building RAG prompts (0 = no limit)",
     )
     rag_history_max_tokens: int = Field(
-        default=0,
+        default=3000,
         description="Approximate maximum tokens of RAG history to include in prompts (0 = no limit)",
     )
 
@@ -195,20 +217,45 @@ class Settings(BaseSettings):
         description="Enable automatic conversation summarization for long conversations",
     )
     summarization_trigger_tokens: int = Field(
-        default=8000,
+        default=18000,
         description="Trigger summarization when estimated tokens exceed this threshold",
     )
     summarization_trigger_messages: int = Field(
-        default=20,
+        default=60,
         description="Trigger summarization when message count exceeds this threshold",
     )
+    summarization_trigger_fraction: float = Field(
+        default=0.55,
+        description="Trigger summarization when context usage exceeds this fraction of model's context window (0.0-1.0)",
+    )
+    summarization_model_context_size: int = Field(
+        default=128000,
+        description="Model context window size in tokens (cross-provider practical baseline)",
+    )
     summarization_keep_messages: int = Field(
-        default=10,
+        default=8,
         description="Number of recent messages to keep after summarization",
     )
     summarization_model: str = Field(
         default="gemini-3-flash-preview",
         description="Model to use for generating conversation summaries",
+    )
+    summarization_max_summary_tokens: int = Field(
+        default=1500,
+        description="Hard cap on rolling summary size in estimated tokens. "
+        "Summaries exceeding this limit are truncated to stay within budget. "
+        "Set to 0 for unlimited (no truncation).",
+    )
+    summarization_timeout_seconds: int = Field(
+        default=30,
+        description="Maximum seconds to wait for a summarization model call before timing out. "
+        "On timeout the original state is returned unchanged (fail-closed).",
+    )
+    suppress_internal_stream_chunks: bool = Field(
+        default=True,
+        description="When True, stream chunks tagged as 'internal' (e.g. summarization node output) "
+        "are silently dropped before being forwarded to clients. "
+        "Disable only for debugging.",
     )
 
     # Redis Configuration
@@ -247,6 +294,17 @@ class Settings(BaseSettings):
     mineru_timeout: int = Field(
         default=300,
         description="Timeout for MinerU subprocess in seconds",
+    )
+    mineru_backend: str = Field(
+        default="pipeline",
+        description=(
+            "MinerU processing backend: 'pipeline' (fast, no large VLM download) "
+            "or 'vlm' (high-quality, requires ~7GB VLM model — run scripts/warm_mineru.py first)"
+        ),
+    )
+    mineru_extra_args: list[str] = Field(
+        default=[],
+        description="Extra CLI arguments forwarded verbatim to the mineru command (e.g. ['--device', 'cpu'])",
     )
     document_images_storage_path: str = Field(
         default="app/storage/document_images",
@@ -314,17 +372,27 @@ class Settings(BaseSettings):
 
     # Search Agent Configuration
     search_history_max_messages: int = Field(
-        default=0,
+        default=16,
         description="Maximum prior messages to include when building search prompts (0 = no limit)",
     )
     search_history_max_tokens: int = Field(
-        default=0,
+        default=5000,
         description="Approximate maximum tokens of search history to include in prompts (0 = no limit)",
+    )
+
+    # Planning Agent History Configuration
+    planning_history_max_messages: int = Field(
+        default=16,
+        description="Maximum prior messages to include when building planning prompts (0 = no limit)",
+    )
+    planning_history_max_tokens: int = Field(
+        default=5000,
+        description="Approximate maximum tokens of planning history to include in prompts (0 = no limit)",
     )
 
     # ReAct Agent Configuration
     react_agent_max_iterations: int = Field(
-        default=24,
+        default=50,
         description="Maximum number of refinement iterations before stopping",
     )
     react_agent_quality_threshold: float = Field(
@@ -332,7 +400,7 @@ class Settings(BaseSettings):
         description="Minimum quality score (0.0-1.0) to accept response without refinement",
     )
     react_agent_recursion_limit: int = Field(
-        default=50,
+        default=101,
         description="LangGraph recursion limit for agent execution. Should be set to 2 * react_agent_max_iterations + 1 per LangGraph best practices",
     )
     tool_choice_mode: str = Field(
@@ -362,6 +430,35 @@ class Settings(BaseSettings):
     tool_validation_enabled: bool = Field(
         default=True,
         description="Enable/disable Pydantic validation for tool arguments and results",
+    )
+
+    # Tool Result Token Management
+    tool_result_max_chars: int = Field(
+        default=16000,
+        description="Maximum characters to include in ToolMessage content sent to model (0 = no limit). Full output is preserved in artifacts for UI.",
+    )
+    tool_result_truncation_suffix: str = Field(
+        default="\n\n[Output truncated - full result available in tool artifacts]",
+        description="Suffix to append when tool result is truncated",
+    )
+
+    # Per-Agent Tool Allowlists
+    # Empty list means bind all available tools; non-empty list restricts to specified tools/servers
+    chat_agent_allowed_tools: list[str] = Field(
+        default=[],
+        description="Tool names or server names that chat agent can use. Empty = all tools.",
+    )
+    search_agent_allowed_tools: list[str] = Field(
+        default=[],
+        description="Tool names or server names that search agent can use. Empty = all tools.",
+    )
+    rag_agent_allowed_tools: list[str] = Field(
+        default=[],
+        description="Tool names or server names that RAG agent can use. Empty = all tools.",
+    )
+    planning_agent_allowed_tools: list[str] = Field(
+        default=[],
+        description="Tool names or server names that planning agent can use. Empty = all tools.",
     )
 
     # Hallucination Prevention Configuration
@@ -423,17 +520,9 @@ class Settings(BaseSettings):
         default=True,
         description="Toggle to enable/disable human-in-the-loop globally",
     )
-    hitl_default_allow_edit: bool = Field(
-        default=True,
-        description="Whether to allow editing tool arguments by default",
-    )
-    hitl_default_allow_respond: bool = Field(
-        default=True,
-        description="Whether to allow responding with feedback by default",
-    )
-    hitl_tools_require_approval: List[str] = Field(
+    hitl_tools_require_approval: list[str] = Field(
         default=[],
-        description="List of tool names that require human approval. Empty list means all tools require approval when HITL is enabled.",
+        description="List of tool names that require human approval. Empty list means NO tools require approval when HITL is enabled.",
     )
     hitl_approval_timeout_minutes: int = Field(
         default=30,
@@ -458,8 +547,219 @@ class Settings(BaseSettings):
         description="Thinking budget for Gemini 2.5 models (-1 for dynamic, 0 to disable, or specific token count like 1024).",
     )
 
+    # Agentic RAG Configuration
+    agentic_rag_enabled: bool = Field(
+        default=False,
+        description="Enable agentic document exploration mode for RAG (three-phase: scan, deep dive, backtrack)",
+    )
+    agentic_max_iterations: int = Field(
+        default=10,
+        description="Maximum tool calls in agentic RAG mode before forcing final answer",
+    )
+    agentic_preview_chars: int = Field(
+        default=1500,
+        description="Characters to include in document preview during scan phase (~1 page)",
+    )
 
-@lru_cache()
+    # Auto-Continue Configuration
+    auto_continue_enabled: bool = Field(
+        default=True,
+        description="Enable automatic continuation when agent hits iteration limits",
+    )
+    auto_continue_max_rounds: int = Field(
+        default=5,
+        description="Maximum number of continuation rounds per user message (safety cap)",
+    )
+    auto_continue_soft_limit_ratio: float = Field(
+        default=0.8,
+        description="Fraction of the loop budget to consume per round before rolling to the next round (0.1-1.0)",
+    )
+    auto_continue_emit_events: bool = Field(
+        default=False,
+        description="Emit continuation_start events during streaming (debug/UX)",
+    )
+    auto_continue_max_total_iterations: int = Field(
+        default=200,
+        description="Absolute max iterations across all continuation rounds",
+    )
+    auto_continue_timeout_seconds: int = Field(
+        default=300,
+        description="Maximum wall-clock time for all continuation rounds (seconds)",
+    )
+
+    # Planning Agent Explicit Settings (promoted from getattr defaults)
+    planning_max_iterations: int = Field(
+        default=20,
+        description="Maximum planning tool calls before pausing for user",
+    )
+    planning_consecutive_errors_limit: int = Field(
+        default=3,
+        description="Maximum consecutive planning tool errors before stopping",
+    )
+
+    # MCP Tool Search Configuration (Deferred Loading)
+    mcp_tool_search_enabled: bool = Field(
+        default=True,
+        description="Enable deferred MCP tool loading via tool_search. When enabled, only tool_search + pinned tools are bound by default.",
+    )
+    mcp_tool_search_default_top_k: int = Field(
+        default=5,
+        description="Default number of tools to return from tool_search queries.",
+    )
+    mcp_tool_search_max_top_k: int = Field(
+        default=100,
+        description="Maximum allowed top_k value for tool_search (clamped to this).",
+    )
+    mcp_tool_search_autoload_top_k: int = Field(
+        default=5,
+        description="Number of top-ranked tools to automatically load/bind after tool_search (hard cap per Anthropic guidance).",
+    )
+    mcp_tool_search_pinned_tools: list[str] = Field(
+        default=[],
+        description="Tool names (or server::tool_name) that are always bound, not deferred. Recommended 3-5 high-frequency tools.",
+    )
+    mcp_tool_search_max_pinned_tools: int = Field(
+        default=5,
+        description="Safety cap on pinned tools to prevent schema bloat.",
+    )
+    mcp_tool_search_max_loaded_tools_per_conversation: int = Field(
+        default=8,
+        description="Maximum deferred tools that can be loaded per conversation.",
+    )
+    mcp_tool_search_loaded_tools_ttl_minutes: int = Field(
+        default=30,
+        description="TTL in minutes for loaded deferred tools (evicted after expiry).",
+    )
+    mcp_tool_search_log_queries: bool = Field(
+        default=False,
+        description="Log tool_search queries (disable in production to avoid logging sensitive queries).",
+    )
+
+    # Client Runtime Bridge Configuration
+    enable_client_runtime_bridge: bool = Field(
+        default=True,
+        description="Enable the client-runtime bridge for per-device client backends. "
+        "When enabled, the server can dispatch tool calls to connected client devices.",
+    )
+    client_runtime_ws_timeout_seconds: int = Field(
+        default=60,
+        description="Timeout in seconds for client runtime WebSocket operations (tool dispatch, heartbeat).",
+    )
+    client_runtime_catalog_cache_ttl_seconds: int = Field(
+        default=300,
+        description="TTL in seconds for caching client device tool/skill catalogs. "
+        "Catalogs are refreshed when a device reconnects or explicitly syncs.",
+    )
+    client_runtime_require_connected_device_for_local_tools: bool = Field(
+        default=True,
+        description="When True, tool calls targeting client-local tools fail if no device is connected. "
+        "When False, such calls return a recoverable error allowing the model to adapt.",
+    )
+    client_runtime_heartbeat_interval_seconds: int = Field(
+        default=30,
+        description="Expected heartbeat interval from connected client devices. "
+        "Devices not sending heartbeats within 2x this interval are marked offline.",
+    )
+    client_runtime_max_tool_result_size_bytes: int = Field(
+        default=1048576,
+        description="Maximum size in bytes for tool results returned from client devices (1MB default). "
+        "Results exceeding this are truncated with a warning.",
+    )
+
+    # ── Validators ──────────────────────────────────────────────────────
+
+    @field_validator(
+        "chat_history_max_messages",
+        "chat_history_max_tokens",
+        "rag_history_max_messages",
+        "rag_history_max_tokens",
+        "search_history_max_messages",
+        "search_history_max_tokens",
+        "planning_history_max_messages",
+        "planning_history_max_tokens",
+        "summarization_trigger_tokens",
+        "summarization_trigger_messages",
+        "summarization_keep_messages",
+        "summarization_model_context_size",
+        "memory_max_messages",
+        "memory_load_batch_size",
+        "tool_result_max_chars",
+        "summarization_max_summary_tokens",
+        "summarization_timeout_seconds",
+        mode="before",
+    )
+    @classmethod
+    def _non_negative_int(cls, v: int) -> int:
+        v = int(v)
+        if v < 0:
+            raise ValueError("Value must be non-negative")
+        return v
+
+    @field_validator(
+        "summarization_trigger_fraction",
+        "auto_continue_soft_limit_ratio",
+        mode="before",
+    )
+    @classmethod
+    def _validate_fraction_fields(cls, v: float) -> float:
+        v = float(v)
+        if not (0.0 < v <= 1.0):
+            raise ValueError("Value must be in the range (0.0, 1.0]")
+        return v
+
+    @model_validator(mode="after")
+    def _cross_field_checks(self) -> "Settings":
+        if not self.secret_key or self.secret_key == "secret-key":
+            if self.environment == "development":
+                self.secret_key = secrets.token_urlsafe(48)
+                logging.getLogger(__name__).warning(
+                    "SECRET_KEY is not set; generated ephemeral development key. "
+                    "Set SECRET_KEY in .env for stable local auth sessions."
+                )
+            else:
+                raise ValueError("secret_key must be set to a strong value outside development")
+        if self.environment != "development" and self.api_debug:
+            raise ValueError("api_debug must be disabled outside development")
+        if self.summarization_keep_messages >= self.summarization_trigger_messages:
+            raise ValueError(
+                f"summarization_keep_messages ({self.summarization_keep_messages}) "
+                f"must be less than summarization_trigger_messages ({self.summarization_trigger_messages})"
+            )
+        if self.summarization_model_context_size < self.summarization_trigger_tokens:
+            raise ValueError(
+                f"summarization_model_context_size ({self.summarization_model_context_size}) "
+                f"must be >= summarization_trigger_tokens ({self.summarization_trigger_tokens})"
+            )
+        return self
+
+
+def _log_startup_warnings(s: "Settings") -> None:
+    """Log warnings for settings that may indicate misconfiguration."""
+    _logger = logging.getLogger(__name__)
+    zero_budget_fields = []
+    for attr in (
+        "chat_history_max_messages",
+        "chat_history_max_tokens",
+        "rag_history_max_messages",
+        "rag_history_max_tokens",
+        "search_history_max_messages",
+        "search_history_max_tokens",
+        "planning_history_max_messages",
+        "planning_history_max_tokens",
+    ):
+        if getattr(s, attr, 0) == 0:
+            zero_budget_fields.append(attr)
+
+    if zero_budget_fields and s.environment != "development":
+        _logger.warning(
+            "History budget(s) set to 0 (unlimited) in '%s' environment — "
+            "this may cause unbounded prompt growth: %s",
+            s.environment,
+            ", ".join(zero_budget_fields),
+        )
+
+
+@lru_cache
 def get_settings() -> Settings:
     """
     Get application settings with caching.
@@ -472,3 +772,6 @@ def get_settings() -> Settings:
 
 # Create a global settings instance
 settings = get_settings()
+
+# Emit startup warnings for potentially misconfigured budgets
+_log_startup_warnings(settings)

@@ -1,17 +1,16 @@
-import os
-import sys
 import json
-from pathlib import Path
+import sys
 from datetime import datetime
+from pathlib import Path
 
 current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from mcp.server.fastmcp import FastMCP
-from google import genai
-from app.core.config import settings
+from google import genai  # noqa: E402
+from mcp.server.fastmcp import FastMCP  # noqa: E402
 
+from app.core.config import settings  # noqa: E402
 
 mcp = FastMCP("FormFiller")
 
@@ -116,9 +115,7 @@ Return ONLY the JSON object, nothing else."""
             ensure_ascii=False,
         )
     except Exception as e:
-        return json.dumps(
-            {"error": f"Form filling failed: {str(e)}"}, ensure_ascii=False
-        )
+        return json.dumps({"error": f"Form filling failed: {str(e)}"}, ensure_ascii=False)
 
 
 if __name__ == "__main__":

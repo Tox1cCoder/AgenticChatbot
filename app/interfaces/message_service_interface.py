@@ -3,11 +3,13 @@ Message service interface definition
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from collections.abc import AsyncGenerator
+from typing import Any
 from uuid import UUID
 
 from app.repositories.utils.pagination import Paginator
-from app.schemas.message import MessageCreate, MessageUpdate, MessageRead
+from app.schemas.message import MessageCreate, MessageRead, MessageUpdate
+from app.schemas.workflow import InterruptDecision
 
 
 class IMessageService(ABC):
@@ -18,6 +20,16 @@ class IMessageService(ABC):
         self, message_create_data: MessageCreate, user_id: UUID
     ) -> MessageRead:
         """Create a new message with validation"""
+        pass
+
+    @abstractmethod
+    async def create_message_stream(
+        self,
+        message_create_data: MessageCreate,
+        user_id: UUID,
+        bot_message_id: UUID | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Create a new message and stream the assistant response"""
         pass
 
     @abstractmethod
@@ -32,7 +44,7 @@ class IMessageService(ABC):
         user_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = None,
+        order_by: str | None = None,
         order_direction: str = "asc",
         include_feedback: bool = False,
     ) -> Paginator[MessageRead]:
@@ -45,7 +57,7 @@ class IMessageService(ABC):
         user_id: UUID,
         page: int = 1,
         limit: int = 10,
-        order_by: Optional[str] = None,
+        order_by: str | None = None,
         order_direction: str = "desc",
         include_feedback: bool = False,
     ) -> Paginator[MessageRead]:
@@ -66,7 +78,37 @@ class IMessageService(ABC):
 
     @abstractmethod
     async def resume_workflow(
-        self, conversation_id: UUID, user_id: UUID, user_input: Optional[str] = None
+        self, conversation_id: UUID, user_id: UUID, user_input: str | None = None
     ) -> MessageRead:
         """Resume a paused workflow and return the bot's response message"""
+        pass
+
+    @abstractmethod
+    async def resume_message_creation_stream(
+        self,
+        thread_id: str,
+        conversation_id: UUID,
+        user_id: UUID,
+        decisions: list[InterruptDecision],
+        interrupt_id: str | None = None,
+        device_id: UUID | None = None,
+        bot_message_id: UUID | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Resume an interrupted workflow and stream the assistant response"""
+        pass
+
+    @abstractmethod
+    async def stop_message_generation(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        user_message_id: UUID,
+    ) -> dict:
+        """
+        Request cancellation of an in-flight streaming generation.
+
+        Returns a dict with:
+          - ``status``: ``"cancelled"`` | ``"not_inflight"``
+          - ``message``: optional ``MessageRead`` (the persisted partial/final message)
+        """
         pass

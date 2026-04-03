@@ -2,8 +2,8 @@
 Feedback factory for creating Feedback entities
 """
 
-from typing import Dict, Any
-from uuid import uuid4, UUID
+from typing import Any
+from uuid import UUID, uuid4
 
 from app.schemas.feedback import FeedbackCreate
 from app.utils.timestamp_utils import TimestampUtils
@@ -13,9 +13,7 @@ class FeedbackFactory:
     """Factory for creating Feedback entities"""
 
     @staticmethod
-    def create_from_schema(
-        feedback_data: FeedbackCreate, submitter_id: UUID
-    ) -> Dict[str, Any]:
+    def create_from_schema(feedback_data: FeedbackCreate, submitter_id: UUID) -> dict[str, Any]:
         """Create Feedback data dictionary from FeedbackCreate schema"""
         timestamps = TimestampUtils.get_timestamp_dict()
         return {
@@ -28,7 +26,7 @@ class FeedbackFactory:
         }
 
     @staticmethod
-    def create_from_dict(feedback_data: Dict[str, Any]) -> Dict[str, Any]:
+    def create_from_dict(feedback_data: dict[str, Any]) -> dict[str, Any]:
         """Create Feedback data dictionary from dictionary"""
         timestamps = TimestampUtils.get_timestamp_dict(
             created_at=feedback_data.get("created_at"),

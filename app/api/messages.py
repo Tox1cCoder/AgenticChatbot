@@ -1,17 +1,92 @@
-from typing import List
-from uuid import UUID
+import asyncio
+import contextlib
 import json
-from fastapi import APIRouter, status, Query, Response
+import logging
+from collections.abc import AsyncGenerator, Callable
+from uuid import UUID
+
+from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.message_service_interface import IMessageService
-from app.schemas.message import MessageCreate, MessageRead, InterruptResumeRequest
+from app.schemas.message import (
+    InterruptResumeRequest,
+    MessageCreate,
+    MessageRead,
+    StopGenerationRequest,
+)
+from app.schemas.pagination import MessagePaginationParams
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
-from app.schemas.pagination import MessagePaginationParams
+
+logger = logging.getLogger(__name__)
+
+# Heartbeat interval in seconds (MVP: 1.0s for Streamlit responsiveness)
+HEARTBEAT_INTERVAL_SECONDS = 1.0
 
 router = APIRouter(prefix="/messages", tags=["messages"])
+
+
+def _internal_event_stream_response(
+    producer_factory: Callable[[], AsyncGenerator[dict, None]],
+    request: Request,
+) -> StreamingResponse:
+    async def event_generator():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def producer():
+            try:
+                async for event in producer_factory():
+                    await queue.put(event)
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                await queue.put({"type": "error", "error": str(exc)})
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(producer())
+        try:
+            while True:
+                if await request.is_disconnected():
+                    logger.debug("Client disconnected during SSE stream")
+                    break
+
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_INTERVAL_SECONDS)
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                    continue
+
+                if event is None:
+                    break
+
+                event_type = event.get("type")
+                yield f"data: {json.dumps(event)}\n\n"
+
+                if event_type in ("complete", "error", "interrupt"):
+                    break
+
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            error_event = {"type": "error", "error": str(exc)}
+            yield f"data: {json.dumps(error_event)}\n\n"
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post(
@@ -44,9 +119,7 @@ async def create_message(
             data=result,
         )
 
-    return ApiResponse(
-        success=True, message="Message created successfully", data=result
-    )
+    return ApiResponse(success=True, message="Message created successfully", data=result)
 
 
 @router.post("/stream", status_code=status.HTTP_200_OK)
@@ -55,67 +128,87 @@ async def create_message_stream(
     message_data: MessageCreate,
     message_service: IMessageService,
     user_id: UUID,
+    request: Request,
 ):
     """
     Create a new message and stream the bot response.
+
+    Uses an asyncio.Queue + producer-task pattern so that heartbeat events can
+    be emitted even while the service-layer generator is blocked (e.g. waiting
+    for a long tool call).  This keeps the SSE connection alive and gives
+    Streamlit frequent yield-points for a responsive "Stop generating" UX.
     """
+    return _internal_event_stream_response(
+        lambda: message_service.create_message_stream(message_data, user_id),
+        request,
+    )
 
-    async def event_generator():
-        """Generate Server-Sent Events (SSE) from the message stream"""
-        try:
-            async for event in message_service.create_message_stream(
-                message_data, user_id
-            ):
-                event_type = event.get("type")
 
-                # Format as SSE: data: {json}\n\n
-                event_json = json.dumps(event)
-                yield f"data: {event_json}\n\n"
+@router.post(
+    "/stop",
+    response_model=ApiResponse,
+    status_code=status.HTTP_200_OK,
+)
+@AppAutoInjector.auto_inject()
+async def stop_message_generation(
+    stop_request: StopGenerationRequest,
+    message_service: IMessageService,
+    user_id: UUID,
+) -> ApiResponse:
+    """
+    Request cancellation of an in-flight streaming generation.
 
-                if event_type in ["complete", "error", "interrupt"]:
-                    break
-
-        except Exception as exc:
-            # Send error event
-            error_event = {"type": "error", "error": str(exc)}
-            yield f"data: {json.dumps(error_event)}\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # Disable buffering in nginx
-        },
+    Idempotent: calling stop multiple times is safe.  If the generation has
+    already completed, returns ``status: "not_inflight"`` so the UI can
+    refresh messages normally.
+    """
+    result = await message_service.stop_message_generation(
+        conversation_id=stop_request.conversation_id,
+        user_id=user_id,
+        user_message_id=stop_request.user_message_id,
+    )
+    return ApiResponse(
+        success=True,
+        message=(
+            "Generation stopped"
+            if result.get("status") == "cancelled"
+            else "Generation not in flight"
+        ),
+        data=result,
     )
 
 
 @router.post(
     "/resume-interrupt",
-    response_model=ApiResponse[MessageRead],
     status_code=status.HTTP_200_OK,
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Internal SSE stream for resumed approval flow",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        }
+    },
 )
 @AppAutoInjector.auto_inject()
 async def resume_interrupt(
     resume_request: InterruptResumeRequest,
     message_service: IMessageService,
     user_id: UUID,
-) -> ApiResponse[MessageRead]:
+    request: Request,
+):
     """
-    Resume execution after handling tool execution interrupts.
+    Resume execution after handling tool execution interrupts and stream the result.
     """
-    result = await message_service.resume_message_creation(
-        thread_id=resume_request.thread_id,
-        conversation_id=resume_request.conversation_id,
-        user_id=user_id,
-        interrupt_id=resume_request.interrupt_id,
-        decisions=resume_request.decisions,
-    )
-    return ApiResponse(
-        success=True,
-        message="Message creation resumed successfully",
-        data=result,
+    return _internal_event_stream_response(
+        lambda: message_service.resume_message_creation_stream(
+            thread_id=resume_request.thread_id,
+            conversation_id=resume_request.conversation_id,
+            user_id=user_id,
+            interrupt_id=resume_request.interrupt_id,
+            device_id=resume_request.device_id,
+            decisions=resume_request.decisions,
+        ),
+        request,
     )
 
 
@@ -128,9 +221,7 @@ async def get_message(
 ) -> ApiResponse[MessageRead]:
     """Get message by ID"""
     result = message_service.get_by_id(message_id, user_id)
-    return ApiResponse(
-        success=True, message="Message retrieved successfully", data=result
-    )
+    return ApiResponse(success=True, message="Message retrieved successfully", data=result)
 
 
 @router.get("/", response_model=PaginatedApiResponse[MessageRead])
@@ -139,9 +230,7 @@ async def get_user_messages(
     message_service: IMessageService,
     user_id: UUID,
     pagination: MessagePaginationParams,
-    include: List[str] = Query(
-        default=[], description="Array of includes e.g. ['feedback']"
-    ),
+    include: list[str] = Query(default=[], description="Array of includes e.g. ['feedback']"),  # noqa: B008
 ) -> PaginatedApiResponse[MessageRead]:
     """Get all messages for authenticated user with pagination"""
     include_feedback = "feedback" in include

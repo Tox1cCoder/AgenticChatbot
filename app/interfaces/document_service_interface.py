@@ -1,13 +1,12 @@
 from abc import ABC, abstractmethod
-from typing import Optional
 from uuid import UUID
 
 from app.schemas.document import (
     DocumentCreate,
-    DocumentResponse,
-    DocumentUpdate,
     DocumentListResponse,
+    DocumentResponse,
     DocumentStatus,
+    DocumentUpdate,
 )
 
 
@@ -20,15 +19,22 @@ class IDocumentService(ABC):
         pass
 
     @abstractmethod
-    async def get_document(self, document_id: UUID) -> Optional[DocumentResponse]:
+    async def get_document(self, document_id: UUID) -> DocumentResponse | None:
         """Get document by ID"""
         pass
 
     @abstractmethod
     async def update_document(
         self, document_id: UUID, document_data: DocumentUpdate
-    ) -> Optional[DocumentResponse]:
+    ) -> DocumentResponse | None:
         """Update document"""
+        pass
+
+    @abstractmethod
+    async def set_processing_task_id(
+        self, document_id: UUID, task_id: str
+    ) -> DocumentResponse | None:
+        """Persist the background-processing task ID for a document."""
         pass
 
     @abstractmethod
@@ -46,7 +52,7 @@ class IDocumentService(ABC):
     @abstractmethod
     async def update_status(
         self, document_id: UUID, status: DocumentStatus
-    ) -> Optional[DocumentResponse]:
+    ) -> DocumentResponse | None:
         """Update document status"""
         pass
 
@@ -54,7 +60,7 @@ class IDocumentService(ABC):
     async def validate_and_create_document(
         self,
         filename: str,
-        file_content: bytes,
+        file_size: int,
         content_type: str,
         conversation_id: UUID,
     ) -> DocumentResponse:

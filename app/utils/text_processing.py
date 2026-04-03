@@ -5,14 +5,13 @@ Provides functions for token counting, sentence splitting, smart chunking,
 text truncation, and page range extraction.
 """
 
-import re
 import logging
-from typing import List, Tuple, Optional
+import re
 
 logger = logging.getLogger(__name__)
 
-import tiktoken
-from nltk.tokenize import sent_tokenize
+import tiktoken  # noqa: E402
+from nltk.tokenize import sent_tokenize  # noqa: E402
 
 
 def estimate_tokens(text: str) -> int:
@@ -26,7 +25,7 @@ def estimate_tokens(text: str) -> int:
     return len(encoding.encode(text))
 
 
-def split_into_sentences(text: str) -> List[str]:
+def split_into_sentences(text: str) -> list[str]:
     """
     Split text into sentences.
     """
@@ -64,7 +63,7 @@ def truncate_text(text: str, max_chars: int, add_ellipsis: bool = True) -> str:
     return truncated
 
 
-def extract_page_range(text: str) -> Tuple[Optional[int], Optional[int]]:
+def extract_page_range(text: str) -> tuple[int | None, int | None]:
     """
     Extract page range from text containing [PAGE X] markers.
 
@@ -121,29 +120,6 @@ def clean_text(text: str) -> str:
     return text
 
 
-def validate_persona(persona: str | None, max_length: int = 8000) -> str | None:
-    """
-    Validate persona text.
-
-    Args:
-        persona: The persona text to validate
-        max_length: Maximum allowed length
-
-    Returns:
-        The validated persona or None if empty
-
-    Raises:
-        ValueError: If persona exceeds max_length
-    """
-    if persona is None or not persona.strip():
-        return None
-
-    if len(persona) > max_length:
-        raise ValueError(f"Persona exceeds maximum length of {max_length} characters")
-
-    return persona
-
-
 def sanitize_persona(persona: str | None) -> str | None:
     """
     Sanitize and truncate persona text.
@@ -170,13 +146,10 @@ def fix_markdown_code_blocks(text: str) -> str:
     """
     Fix markdown code blocks that are missing newlines before opening fences.
 
-    Ensures proper rendering by adding newline before ``` if preceded by non-whitespace.
     """
     if not text:
         return text
 
-    # Pattern: non-whitespace character followed by ``` (code fence)
-    # Replace with: the character, newline, then the code fence
     fixed = re.sub(r"([^\n\s])(```)", r"\1\n\2", text)
 
     return fixed

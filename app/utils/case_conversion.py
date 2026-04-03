@@ -3,7 +3,7 @@ Utility functions for converting between camelCase and snake_case.
 """
 
 import re
-from typing import Dict, Any
+from typing import Any
 
 
 def to_camel_case(snake_str: str) -> str:
@@ -23,7 +23,7 @@ def to_snake_case(camel_str: str) -> str:
     return snake_str.lower()
 
 
-def convert_dict_keys_to_snake_case(data: Dict[str, Any]) -> Dict[str, Any]:
+def convert_dict_keys_to_snake_case(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(data, dict):
         return {
             to_snake_case(key): convert_dict_keys_to_snake_case(value)
@@ -35,7 +35,7 @@ def convert_dict_keys_to_snake_case(data: Dict[str, Any]) -> Dict[str, Any]:
         return data
 
 
-def convert_dict_keys_to_camel_case(data: Dict[str, Any]) -> Dict[str, Any]:
+def convert_dict_keys_to_camel_case(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(data, dict):
         return {
             to_camel_case(key): convert_dict_keys_to_camel_case(value)

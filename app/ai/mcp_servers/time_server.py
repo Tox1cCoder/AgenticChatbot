@@ -1,8 +1,9 @@
 import json
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime
+from datetime import timezone as dt_timezone
+from zoneinfo import ZoneInfo
 
 from mcp.server.fastmcp import FastMCP
-from zoneinfo import ZoneInfo
 
 mcp = FastMCP("Time")
 
@@ -54,9 +55,7 @@ def get_current_time(
     }
 
     if resolved_timezone != timezone:
-        payload["note"] = (
-            "Requested timezone was not found. Returned time in UTC instead."
-        )
+        payload["note"] = "Requested timezone was not found. Returned time in UTC instead."
 
     return json.dumps(payload)
 

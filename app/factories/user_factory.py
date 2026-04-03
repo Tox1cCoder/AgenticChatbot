@@ -2,11 +2,11 @@
 User factory for creating User entities
 """
 
-from typing import Dict, Any
+from typing import Any
 from uuid import uuid4
 
-from app.schemas.user import UserCreate
 from app.core.security import hash_password
+from app.schemas.user import UserCreate
 from app.utils.timestamp_utils import TimestampUtils
 
 
@@ -14,7 +14,7 @@ class UserFactory:
     """Factory for creating User entities"""
 
     @staticmethod
-    def create_from_schema(user_data: UserCreate) -> Dict[str, Any]:
+    def create_from_schema(user_data: UserCreate) -> dict[str, Any]:
         """Create User data dictionary from UserCreate schema"""
         timestamps = TimestampUtils.get_timestamp_dict()
         return {
@@ -27,7 +27,7 @@ class UserFactory:
         }
 
     @staticmethod
-    def create_from_dict(user_data: Dict[str, Any]) -> Dict[str, Any]:
+    def create_from_dict(user_data: dict[str, Any]) -> dict[str, Any]:
         """Create User data dictionary from dictionary"""
         timestamps = TimestampUtils.get_timestamp_dict(
             created_at=user_data.get("created_at"),

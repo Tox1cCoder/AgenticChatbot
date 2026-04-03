@@ -1,9 +1,9 @@
 """Repository for managing tool approval audit trail records."""
 
-from typing import List, Optional
 from uuid import UUID
+
+from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
-from sqlalchemy import select, desc
 
 from app.models.tool_approval import ToolApproval
 from app.repositories.command_strategy import DefaultCommandStrategy
@@ -22,7 +22,7 @@ class ToolApprovalCRUDStrategy(
 
     def get_by_conversation_id(
         self, db: Session, conversation_id: UUID, limit: int = 100
-    ) -> List[ToolApproval]:
+    ) -> list[ToolApproval]:
         """
         Retrieve all tool approvals for a specific conversation.
 
@@ -42,7 +42,7 @@ class ToolApprovalCRUDStrategy(
         )
         return list(db.execute(statement).scalars().all())
 
-    def get_by_interrupt_id(self, db: Session, interrupt_id: str) -> List[ToolApproval]:
+    def get_by_interrupt_id(self, db: Session, interrupt_id: str) -> list[ToolApproval]:
         """
         Retrieve all tool approvals for a specific interrupt.
 
@@ -60,9 +60,7 @@ class ToolApprovalCRUDStrategy(
         )
         return list(db.execute(statement).scalars().all())
 
-    def get_by_user_id(
-        self, db: Session, user_id: UUID, limit: int = 100
-    ) -> List[ToolApproval]:
+    def get_by_user_id(self, db: Session, user_id: UUID, limit: int = 100) -> list[ToolApproval]:
         """
         Retrieve all tool approvals made by a specific user.
 
@@ -103,30 +101,32 @@ class ToolApprovalCRUDStrategy(
 class ToolApprovalRepository:
     """Repository for tool approval operations."""
 
-    def __init__(self, db: Session):
+    def __init__(self, session_factory: callable):
         """
-        Initialize repository with database session.
+        Initialize repository with session factory for dependency injection.
 
         Args:
-            db: SQLAlchemy database session
+            session_factory: Callable that returns a context-managed DB session
         """
-        self.db = db
+        self.session_factory = session_factory
         self.strategy = ToolApprovalCRUDStrategy(ToolApproval)
 
     def create(self, approval_data: dict) -> ToolApproval:
         """Create a new tool approval record."""
-        return self.strategy.create(self.db, approval_data)
+        with self.session_factory() as db:
+            return self.strategy.create(db, approval_data)
 
-    def get_by_conversation_id(
-        self, conversation_id: UUID, limit: int = 100
-    ) -> List[ToolApproval]:
+    def get_by_conversation_id(self, conversation_id: UUID, limit: int = 100) -> list[ToolApproval]:
         """Get all tool approvals for a conversation."""
-        return self.strategy.get_by_conversation_id(self.db, conversation_id, limit)
+        with self.session_factory() as db:
+            return self.strategy.get_by_conversation_id(db, conversation_id, limit)
 
-    def get_by_interrupt_id(self, interrupt_id: str) -> List[ToolApproval]:
+    def get_by_interrupt_id(self, interrupt_id: str) -> list[ToolApproval]:
         """Get all tool approvals for an interrupt."""
-        return self.strategy.get_by_interrupt_id(self.db, interrupt_id)
+        with self.session_factory() as db:
+            return self.strategy.get_by_interrupt_id(db, interrupt_id)
 
-    def get_by_user_id(self, user_id: UUID, limit: int = 100) -> List[ToolApproval]:
+    def get_by_user_id(self, user_id: UUID, limit: int = 100) -> list[ToolApproval]:
         """Get all tool approvals made by a user."""
-        return self.strategy.get_by_user_id(self.db, user_id, limit)
+        with self.session_factory() as db:
+            return self.strategy.get_by_user_id(db, user_id, limit)

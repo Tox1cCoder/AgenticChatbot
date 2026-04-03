@@ -2,46 +2,49 @@
 Auto-injection decorators for FastAPI dependency management.
 """
 
-import inspect
 import functools
-from typing import Dict, Any, Type
-from fastapi import Depends
-from dependency_injector.wiring import Provide
+import inspect
+from typing import Any
+
 from dependency_injector import providers
+from fastapi import Depends
 
 from app.interfaces import (
-    IUserService,
-    IConversationService,
-    IMessageService,
-    IFeedbackService,
     IAuthService,
+    IConversationService,
     IDocumentService,
+    IFeedbackService,
+    IMessageService,
+    IUserService,
 )
 from app.interfaces.task_plan_service_interface import ITaskPlanService
-from app.repositories.user import UserRepository
 from app.repositories.conversation import ConversationRepository
-from app.repositories.message import MessageRepository
-from app.repositories.feedback import FeedbackRepository
 from app.repositories.document import DocumentRepository
+from app.repositories.feedback import FeedbackRepository
+from app.repositories.message import MessageRepository
 from app.repositories.task_plan import TaskPlanRepository
-from app.services.document_processing_service import DocumentProcessingService
-from app.services.mcp_service import MCPService
-from app.services.jwt_service import JwtService
+from app.repositories.user import UserRepository
 from app.services.ai_service import AIService
-from app.utils.validation.user_validation import UserValidationUtils
+from app.services.document_processing_service import DocumentProcessingService
+from app.services.jwt_service import JwtService
+from app.services.mcp_service import MCPService
+from app.services.model_config_service import ModelConfigService
+from app.services.provider_service import ProviderService
+from app.services.skills_service import SkillsService
 from app.utils.validation.conversation_validation import (
     ConversationValidationUtils,
 )
-from app.utils.validation.message_validation import MessageValidationUtils
-from app.utils.validation.feedback_validation import FeedbackValidationUtils
 from app.utils.validation.document_validation import DocumentValidationUtils
+from app.utils.validation.feedback_validation import FeedbackValidationUtils
+from app.utils.validation.message_validation import MessageValidationUtils
 from app.utils.validation.task_plan_validation import TaskPlanValidationUtils
+from app.utils.validation.user_validation import UserValidationUtils
 
 
 class AutoInjector:
     """Base class for auto-injection with wiring_map configuration."""
 
-    wiring_map: Dict[Type, Any] = {}
+    wiring_map: dict[type, Any] = {}
 
     @classmethod
     def auto_inject(cls):
@@ -51,7 +54,7 @@ class AutoInjector:
             sig = inspect.signature(func)
             new_params = []
 
-            for name, param in sig.parameters.items():
+            for _name, param in sig.parameters.items():
                 ann = param.annotation
                 if ann in cls.wiring_map and (
                     param.default == inspect.Parameter.empty or param.default is None
@@ -88,7 +91,7 @@ class AutoInjector:
 class ContainerInjector:
     """Helper for automatic container provider creation."""
 
-    wiring_map: Dict[Type, Any] = {}
+    wiring_map: dict[type, Any] = {}
 
     @classmethod
     def inject_container(cls, target_cls):
@@ -116,30 +119,32 @@ class AppAutoInjector(AutoInjector):
         container_ref = container
 
         cls.wiring_map = {
-            IUserService: getattr(container_ref, "user_service"),
-            IConversationService: getattr(container_ref, "conversation_service"),
-            IMessageService: getattr(container_ref, "message_service"),
-            IFeedbackService: getattr(container_ref, "feedback_service"),
-            IAuthService: getattr(container_ref, "auth_service"),
-            IDocumentService: getattr(container_ref, "document_service"),
-            ITaskPlanService: getattr(container_ref, "task_plan_service"),
-            DocumentProcessingService: getattr(
-                container_ref, "document_processing_service"
-            ),
-            MCPService: getattr(container_ref, "mcp_service"),
-            JwtService: getattr(container_ref, "jwt_service"),
-            AIService: getattr(container_ref, "ai_service"),
+            IUserService: container_ref.user_service,
+            IConversationService: container_ref.conversation_service,
+            IMessageService: container_ref.message_service,
+            IFeedbackService: container_ref.feedback_service,
+            IAuthService: container_ref.auth_service,
+            IDocumentService: container_ref.document_service,
+            ITaskPlanService: container_ref.task_plan_service,
+            DocumentProcessingService: container_ref.document_processing_service,
+            MCPService: container_ref.mcp_service,
+            SkillsService: container_ref.skills_service,
+            JwtService: container_ref.jwt_service,
+            AIService: container_ref.ai_service,
+            ProviderService: container_ref.provider_service,
+            ModelConfigService: container_ref.model_config_service,
         }
 
     @classmethod
     def auto_inject(cls):
         """Decorator factory to auto-wire FastAPI route parameters."""
+        from uuid import UUID
+
         from app.core.auth import get_current_user_id, get_refresh_token_user_id
         from app.schemas.pagination import (
-            MessagePaginationParams,
             ConversationPaginationParams,
+            MessagePaginationParams,
         )
-        from uuid import UUID
 
         def decorator(func):
             sig = inspect.signature(func)
@@ -165,9 +170,7 @@ class AppAutoInjector(AutoInjector):
                     if name in ["user_id", "current_user_id", "authenticated_user_id"]:
                         param = param.replace(default=Depends(get_current_user_id))
                     elif name in ["refresh_user_id"]:
-                        param = param.replace(
-                            default=Depends(get_refresh_token_user_id)
-                        )
+                        param = param.replace(default=Depends(get_refresh_token_user_id))
 
                 # Handle pagination parameters
                 elif (
@@ -220,38 +223,28 @@ class AppContainerInjector(ContainerInjector):
 
         cls.wiring_map = {
             # Services
-            IUserService: getattr(container_ref, "user_service"),
-            IConversationService: getattr(container_ref, "conversation_service"),
-            IMessageService: getattr(container_ref, "message_service"),
-            IFeedbackService: getattr(container_ref, "feedback_service"),
-            IAuthService: getattr(container_ref, "auth_service"),
-            IDocumentService: getattr(container_ref, "document_service"),
-            ITaskPlanService: getattr(container_ref, "task_plan_service"),
-            DocumentProcessingService: getattr(
-                container_ref, "document_processing_service"
-            ),
-            JwtService: getattr(container_ref, "jwt_service"),
-            AIService: getattr(container_ref, "ai_service"),
+            IUserService: container_ref.user_service,
+            IConversationService: container_ref.conversation_service,
+            IMessageService: container_ref.message_service,
+            IFeedbackService: container_ref.feedback_service,
+            IAuthService: container_ref.auth_service,
+            IDocumentService: container_ref.document_service,
+            ITaskPlanService: container_ref.task_plan_service,
+            DocumentProcessingService: container_ref.document_processing_service,
+            JwtService: container_ref.jwt_service,
+            AIService: container_ref.ai_service,
             # Repositories
-            UserRepository: getattr(container_ref, "user_repository"),
-            ConversationRepository: getattr(container_ref, "conversation_repository"),
-            MessageRepository: getattr(container_ref, "message_repository"),
-            FeedbackRepository: getattr(container_ref, "feedback_repository"),
-            DocumentRepository: getattr(container_ref, "document_repository"),
-            TaskPlanRepository: getattr(container_ref, "task_plan_repository"),
+            UserRepository: container_ref.user_repository,
+            ConversationRepository: container_ref.conversation_repository,
+            MessageRepository: container_ref.message_repository,
+            FeedbackRepository: container_ref.feedback_repository,
+            DocumentRepository: container_ref.document_repository,
+            TaskPlanRepository: container_ref.task_plan_repository,
             # Validation utilities
-            UserValidationUtils: getattr(container_ref, "user_validation_utils"),
-            ConversationValidationUtils: getattr(
-                container_ref, "conversation_validation_utils"
-            ),
-            MessageValidationUtils: getattr(container_ref, "message_validation_utils"),
-            FeedbackValidationUtils: getattr(
-                container_ref, "feedback_validation_utils"
-            ),
-            DocumentValidationUtils: getattr(
-                container_ref, "document_validation_utils"
-            ),
-            TaskPlanValidationUtils: getattr(
-                container_ref, "task_plan_validation_utils"
-            ),
+            UserValidationUtils: container_ref.user_validation_utils,
+            ConversationValidationUtils: container_ref.conversation_validation_utils,
+            MessageValidationUtils: container_ref.message_validation_utils,
+            FeedbackValidationUtils: container_ref.feedback_validation_utils,
+            DocumentValidationUtils: container_ref.document_validation_utils,
+            TaskPlanValidationUtils: container_ref.task_plan_validation_utils,
         }

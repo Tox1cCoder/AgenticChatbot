@@ -3,15 +3,11 @@ TaskPlan service interface definition.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, List, Dict, Any
+from typing import Any
 from uuid import UUID
 
-from app.schemas.task_plan import (
-    TaskPlanCreate,
-    TaskPlanUpdate,
-    TaskPlanRead,
-    PlanningStatusResponse,
-)
+from app.models.enums import PlanLifecycle
+from app.schemas.task_plan import PlanningStatusResponse, TaskPlanRead, TaskPlanUpdate
 
 
 class ITaskPlanService(ABC):
@@ -23,7 +19,7 @@ class ITaskPlanService(ABC):
         conversation_id: UUID,
         user_message: str,
         user_id: UUID,
-    ) -> List[TaskPlanRead]:
+    ) -> list[TaskPlanRead]:
         """Create task plan from user request using planning agent.
 
         Args:
@@ -37,20 +33,21 @@ class ITaskPlanService(ABC):
         pass
 
     @abstractmethod
-    def sync_plan_from_agent(
+    def sync_todos_from_agent(
         self,
         conversation_id: UUID,
-        plan_payload: Dict[str, Any],
+        todos: list[dict[str, Any]],
         user_id: UUID,
-        replace_existing: bool = True,
-    ) -> List[TaskPlanRead]:
-        """Persist plan data produced by the planning agent.
+        preserve_existing_status: bool = False,
+        lifecycle: PlanLifecycle | None = None,
+    ) -> list[TaskPlanRead]:
+        """Persist todo data produced by the planning agent.
 
         Args:
             conversation_id: The conversation to update
-            plan_payload: Planning agent response metadata containing plan/tasks
+            todos: Planning agent todo payload
             user_id: The user requesting the sync (for ownership validation)
-            replace_existing: Whether to replace current tasks
+            preserve_existing_status: Whether matched existing task statuses should win
 
         Returns:
             List of TaskPlanRead schemas for the stored tasks
@@ -61,10 +58,10 @@ class ITaskPlanService(ABC):
     def create_task_plan_from_list(
         self,
         conversation_id: UUID,
-        task_descriptions: List[str],
+        task_descriptions: list[str],
         user_id: UUID,
-    ) -> List[TaskPlanRead]:
-        """Create task plan from manual list of descriptions.
+    ) -> list[TaskPlanRead]:
+        """Create or append task plan items from a manual list of descriptions.
 
         Args:
             conversation_id: The conversation to create tasks for
@@ -98,7 +95,7 @@ class ITaskPlanService(ABC):
         conversation_id: UUID,
         user_id: UUID,
         include_completed: bool = False,
-    ) -> List[TaskPlanRead]:
+    ) -> list[TaskPlanRead]:
         """Get all tasks for a conversation.
 
         Args:
@@ -112,18 +109,26 @@ class ITaskPlanService(ABC):
         pass
 
     @abstractmethod
-    def get_next_task(
-        self, conversation_id: UUID, user_id: UUID
-    ) -> Optional[TaskPlanRead]:
-        """Get next pending task considering dependencies.
+    def get_active_or_next_task(self, conversation_id: UUID, user_id: UUID) -> TaskPlanRead | None:
+        """Get the active task, otherwise the next pending task.
 
         Args:
-            conversation_id: The conversation to get next task for
+            conversation_id: The conversation to get the active/next task for
             user_id: The user making the request
 
         Returns:
-            TaskPlanRead schema or None if no pending tasks
+            TaskPlanRead schema or None if no active or pending tasks
         """
+        pass
+
+    @abstractmethod
+    def set_plan_lifecycle(
+        self,
+        conversation_id: UUID,
+        user_id: UUID,
+        lifecycle: PlanLifecycle | None,
+    ) -> None:
+        """Persist an internal lifecycle transition for a conversation plan."""
         pass
 
     @abstractmethod
@@ -159,6 +164,19 @@ class ITaskPlanService(ABC):
         pass
 
     @abstractmethod
+    def mark_task_in_progress(self, task_id: UUID, user_id: UUID) -> TaskPlanRead:
+        """Mark task as in progress.
+
+        Args:
+            task_id: The task ID to mark as in progress
+            user_id: The user making the request
+
+        Returns:
+            Updated TaskPlanRead schema
+        """
+        pass
+
+    @abstractmethod
     def delete_task(self, task_id: UUID, user_id: UUID) -> bool:
         """Delete task with ownership validation.
 
@@ -172,9 +190,7 @@ class ITaskPlanService(ABC):
         pass
 
     @abstractmethod
-    def get_planning_status(
-        self, conversation_id: UUID, user_id: UUID
-    ) -> PlanningStatusResponse:
+    def get_planning_status(self, conversation_id: UUID, user_id: UUID) -> PlanningStatusResponse:
         """Get planning mode status and progress.
 
         Args:

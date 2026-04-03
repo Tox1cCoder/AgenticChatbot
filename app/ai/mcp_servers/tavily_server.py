@@ -1,16 +1,18 @@
+import json
 import os
 import sys
-import json
 from pathlib import Path
 
 current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from mcp.server.fastmcp import FastMCP
-from tavily import TavilyClient
-from app.core.config import settings
+import contextlib  # noqa: E402
 
+from mcp.server.fastmcp import FastMCP  # noqa: E402
+from tavily import TavilyClient  # noqa: E402
+
+from app.core.config import settings  # noqa: E402
 
 mcp = FastMCP("Tavily")
 
@@ -42,10 +44,8 @@ def tavily_search(query: str, max_results: int = 5) -> str:
         api_key = os.getenv("TAVILY_API_KEY")
 
         if not api_key:
-            try:
+            with contextlib.suppress(Exception):
                 api_key = settings.tavily_api_key
-            except Exception as e:
-                pass
 
         if not api_key:
             return json.dumps(

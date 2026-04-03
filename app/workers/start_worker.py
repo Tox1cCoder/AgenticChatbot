@@ -1,7 +1,7 @@
 import os
-import sys
-import subprocess
 import platform
+import subprocess
+import sys
 from pathlib import Path
 
 

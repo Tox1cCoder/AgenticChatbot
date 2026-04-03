@@ -1,12 +1,12 @@
 from __future__ import annotations
-from typing import List, Optional
+
 from uuid import UUID
 
-from app.repositories.user import UserRepository
-from app.schemas.user import UserCreate, UserUpdate, UserRead, UserInDB
 from app.factories.user_factory import UserFactory
-from app.utils.validation.user_validation import UserValidationUtils
 from app.interfaces.user_service_interface import IUserService
+from app.repositories.user import UserRepository
+from app.schemas.user import UserCreate, UserInDB, UserRead, UserUpdate
+from app.utils.validation.user_validation import UserValidationUtils
 
 
 class UserService(IUserService):
@@ -33,19 +33,19 @@ class UserService(IUserService):
         user_entity = self.repository.get_by_id(user_id)
         return UserRead.model_validate(user_entity)
 
-    def get_by_email(self, email: str) -> Optional[UserRead]:
+    def get_by_email(self, email: str) -> UserRead | None:
         user_entity = self.repository.get_by_email(email)
         return UserRead.model_validate(user_entity) if user_entity else None
 
-    def get_by_email_with_password(self, email: str) -> Optional[UserInDB]:
+    def get_by_email_with_password(self, email: str) -> UserInDB | None:
         user_entity = self.repository.get_by_email(email)
         return UserInDB.model_validate(user_entity) if user_entity else None
 
-    def get_by_username(self, username: str) -> Optional[UserRead]:
+    def get_by_username(self, username: str) -> UserRead | None:
         user_entity = self.repository.get_by_username(username)
         return UserRead.model_validate(user_entity) if user_entity else None
 
-    def get_all(self, skip: int = 0, limit: int = 100) -> List[UserRead]:
+    def get_all(self, skip: int = 0, limit: int = 100) -> list[UserRead]:
         user_entities = self.repository.get_all(skip=skip, limit=limit)
         return [UserRead.model_validate(user_entity) for user_entity in user_entities]
 

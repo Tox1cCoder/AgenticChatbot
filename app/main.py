@@ -1,38 +1,55 @@
-import sys
 import asyncio
-import uvicorn
 import logging
-from contextlib import asynccontextmanager
+import sys
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timezone
+
+# psycopg3 async requires SelectorEventLoop on Windows; set this before uvicorn creates its loop
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from redis import Redis
-from datetime import datetime, timezone
 
+from app.api import (
+    ai_sdk_router,
+    auth_router,
+    client_devices_router,
+    conversations_router,
+    device_runtime_router,
+    documents_router,
+    feedback_router,
+    mcp_router,
+    messages_router,
+    model_config_router,
+    providers_router,
+    skills_router,
+    task_plans_router,
+    users_router,
+)
 from app.core.config import settings
 from app.core.container import (
     get_container,
     setup_auto_injection,
 )
-from app.api import (
-    users_router,
-    conversations_router,
-    messages_router,
-    feedback_router,
-)
-from app.api.documents import router as documents_router
-from app.api.mcp import router as mcp_router
-from app.api.task_plans import router as task_plans_router
-from app.api.ai_sdk import router as ai_sdk_router
-from app.database.session import get_engine
-from app.api.auth import router as auth_router
+from app.core.events import DocumentEvent, get_event_bus
+from app.database.migrations import upgrade_database
+from app.database.session import SessionLocal, get_engine
+from app.services.client_device_service import periodic_session_cleanup_task
+from app.services.client_runtime_store import close_client_runtime_store
+from app.services.document_event_listener import DocumentEventLogger
 from app.utils.exception_handler import register_exception_handlers
 from app.workers.celery_app import celery_app
-from app.ai.agents.rag_agent import RAGAgent
-
-from app.core.events import get_event_bus, DocumentEvent
-from app.services.document_event_listener import DocumentEventLogger
 
 logger = logging.getLogger(__name__)
+_client_runtime_cleanup_task: asyncio.Task | None = None
+
+
+async def init_database_migrations():
+    """Apply pending Alembic migrations before serving requests."""
+    await asyncio.to_thread(upgrade_database)
 
 
 async def init_checkpoint_tables():
@@ -41,10 +58,12 @@ async def init_checkpoint_tables():
         logger.info("LangGraph checkpoints disabled in settings")
         return
 
-    container = get_container()
-    checkpoint_manager = container.checkpoint_manager()
-
-    await checkpoint_manager.setup()
+    try:
+        container = get_container()
+        checkpoint_manager = container.checkpoint_manager()
+        await checkpoint_manager.setup()
+    except Exception as e:
+        logger.warning(f"Checkpoint table setup failed (non-fatal): {e}")
 
 
 async def init_agents():
@@ -53,20 +72,60 @@ async def init_agents():
         container = get_container()
         ai_service = container.ai_service()
 
-        await ai_service.workflow.initialize()
+        await ai_service.initialize()
 
     except Exception as e:
         logger.error(f"Failed to initialize agents: {e}")
 
 
+async def init_skills():
+    """Pre-scan skills folder at startup."""
+    try:
+        from app.ai.skills_registry import get_skills_registry
+
+        registry = get_skills_registry()
+        skills = registry.get_all_skills()
+        logger.info(f"Loaded {len(skills)} skills ({sum(s.enabled for s in skills)} enabled)")
+    except Exception as e:
+        logger.warning(f"Skills init failed (non-fatal): {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
+    global _client_runtime_cleanup_task
     # Startup
+    await init_database_migrations()
     await init_checkpoint_tables()
     await init_agents()
+    await init_skills()
+    if settings.enable_client_runtime_bridge:
+        _client_runtime_cleanup_task = asyncio.create_task(
+            periodic_session_cleanup_task(
+                SessionLocal,
+                interval_seconds=settings.client_runtime_heartbeat_interval_seconds,
+            )
+        )
     yield
-    # Shutdown (add cleanup code here if needed in the future)
+    # Shutdown
+    if _client_runtime_cleanup_task is not None:
+        _client_runtime_cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _client_runtime_cleanup_task
+        _client_runtime_cleanup_task = None
+    try:
+        from app.ai.mcp_registry import get_global_mcp_manager
+
+        mcp_manager = await get_global_mcp_manager()
+        if mcp_manager:
+            await mcp_manager.cleanup()
+            logger.info("MCP sessions closed cleanly")
+    except Exception as e:
+        logger.debug(f"MCP cleanup during shutdown (non-fatal): {e}")
+    try:
+        await close_client_runtime_store()
+    except Exception as e:
+        logger.debug(f"Client runtime store cleanup during shutdown (non-fatal): {e}")
 
 
 def create_app() -> FastAPI:
@@ -87,6 +146,11 @@ def create_app() -> FastAPI:
             "app.api.mcp",
             "app.api.task_plans",
             "app.api.ai_sdk",
+            "app.api.providers",
+            "app.api.model_config",
+            "app.api.skills",
+            "app.api.client_devices",
+            "app.api.device_runtime",
         ]
     )
 
@@ -102,14 +166,25 @@ def create_app() -> FastAPI:
     app.container = container
 
     # Add CORS middleware
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["x-vercel-ai-ui-message-stream"],
-    )
+    _cors_origins = settings.cors_origins
+    if "*" in _cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_origin_regex=".*",
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["x-vercel-ai-ui-message-stream"],
+        )
+    else:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["x-vercel-ai-ui-message-stream"],
+        )
 
     # Register centralized exception handlers
     register_exception_handlers(app)
@@ -124,6 +199,11 @@ def create_app() -> FastAPI:
     app.include_router(mcp_router)
     app.include_router(task_plans_router)
     app.include_router(ai_sdk_router)
+    app.include_router(providers_router)
+    app.include_router(model_config_router)
+    app.include_router(skills_router)
+    app.include_router(client_devices_router)
+    app.include_router(device_runtime_router)
 
     # Initialize and register event listeners
     event_bus = get_event_bus()
@@ -218,43 +298,35 @@ async def health_check_redis():
 
 @app.get("/health/qdrant")
 async def health_check_qdrant():
-    """Check Qdrant connection health"""
-    rag_agent = None
     try:
-        container = get_container()
-        app_settings = container.config()
+        from qdrant_client import QdrantClient
 
-        rag_agent = RAGAgent(
-            settings=app_settings,
-            collection_name=app_settings.qdrant_collection_name,
+        client = QdrantClient(url=settings.qdrant_url)
+        collections = client.get_collections()
+
+        collection_exists = any(
+            c.name == settings.qdrant_collection_name for c in collections.collections
         )
 
-        await rag_agent.initialize()
-
-        status_info = await rag_agent.get_status()
-
-        return {
-            "status": status_info.get("status", "unknown"),
-            "collection": status_info.get("collection"),
-            "vectors_count": status_info.get("vectors_count", 0),
-            "message": (
-                "Qdrant connection successful"
-                if status_info.get("status") == "healthy"
-                else "Qdrant connection issues"
-            ),
-        }
+        if collection_exists:
+            info = client.get_collection(settings.qdrant_collection_name)
+            return {
+                "status": "healthy",
+                "collection": settings.qdrant_collection_name,
+                "vectors_count": info.vectors_count,
+                "message": "Qdrant connection successful",
+            }
+        else:
+            return {
+                "status": "unhealthy",
+                "message": f"Collection '{settings.qdrant_collection_name}' not found",
+            }
     except Exception as e:
         return {
             "status": "unhealthy",
             "error": str(e),
             "message": "Failed to connect to Qdrant",
         }
-    finally:
-        if rag_agent:
-            try:
-                await rag_agent.cleanup()
-            except:
-                pass
 
 
 @app.get("/health/all")
@@ -282,9 +354,7 @@ async def health_check_all():
             "redis": redis_health,
             "qdrant": qdrant_health,
         },
-        "message": (
-            "All services healthy" if all_healthy else "One or more services unhealthy"
-        ),
+        "message": ("All services healthy" if all_healthy else "One or more services unhealthy"),
     }
 
 

@@ -13,7 +13,7 @@ class PlanExecutionPausedException(Exception):
         self,
         reason: PauseReason,
         user_message: str,
-        original_error: Optional[str] = None,
+        original_error: str | None = None,
     ):
         self.reason = reason
         self.user_message = user_message

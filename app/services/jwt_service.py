@@ -1,12 +1,11 @@
 """JWT Service for token management and authentication utilities"""
 
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+from datetime import datetime, timedelta, timezone
 
 import jwt
 
 from app.core.config import settings
-from app.core.exceptions import TokenExpiredException, AuthenticationException
+from app.core.exceptions import AuthenticationException, TokenExpiredException
 
 
 class JwtService:
@@ -18,19 +17,17 @@ class JwtService:
         self.access_token_expire_minutes = settings.access_token_expire_minutes
         self.refresh_token_expire_days = settings.refresh_token_expire_days
 
-    def _calculate_expiration_time(self, delta: Optional[timedelta] = None, now: Optional[datetime] = None) -> datetime:
+    def _calculate_expiration_time(
+        self, delta: timedelta | None = None, now: datetime | None = None
+    ) -> datetime:
         """Calculate token expiration time"""
         if now is None:
             now = datetime.now(timezone.utc)
         if delta:
             return now + delta
-        return now + timedelta(
-            minutes=self.access_token_expire_minutes
-        )
+        return now + timedelta(minutes=self.access_token_expire_minutes)
 
-    def create_access_token(
-        self, data: dict, expires_delta: Optional[timedelta] = None
-    ) -> str:
+    def create_access_token(self, data: dict, expires_delta: timedelta | None = None) -> str:
         """Create JWT access token"""
         to_encode = data.copy()
         now = datetime.now(timezone.utc)
@@ -57,13 +54,13 @@ class JwtService:
         try:
             payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
             return payload
-        except jwt.ExpiredSignatureError:
-            raise TokenExpiredException()
-        except jwt.InvalidTokenError:
+        except jwt.ExpiredSignatureError as e:
+            raise TokenExpiredException() from e
+        except jwt.InvalidTokenError as e:
             raise AuthenticationException(
                 detail="Invalid authentication credentials",
                 error_code="INVALID_CREDENTIALS",
-            )
+            ) from e
 
     def verify_refresh_token(self, token: str) -> dict:
         """Verify refresh token and ensure correct type"""

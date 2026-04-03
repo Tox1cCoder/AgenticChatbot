@@ -1,22 +1,22 @@
-from typing import Any, List
+from typing import Any
 from uuid import UUID
-from fastapi import APIRouter, status, Query
+
+from fastapi import APIRouter, Query, status
 from pydantic import BaseModel
-from app.services.ai_service import AIService
 
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.conversation_service_interface import IConversationService
+from app.interfaces.message_service_interface import IMessageService
 from app.schemas.conversation import (
     ConversationCreate,
-    ConversationUpdate,
     ConversationRead,
+    ConversationUpdate,
 )
-from app.interfaces.message_service_interface import IMessageService
 from app.schemas.message import MessageRead
+from app.schemas.pagination import ConversationPaginationParams, MessagePaginationParams
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
-from app.schemas.pagination import ConversationPaginationParams, MessagePaginationParams
-from app.core.config import settings
+from app.services.ai_service import AIService
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -27,9 +27,6 @@ class GenerateTitleRequest(BaseModel):
 
 class GenerateTitleResponse(BaseModel):
     title: str
-
-
-
 
 
 @router.post("/generate-title", response_model=ApiResponse[GenerateTitleResponse])
@@ -61,9 +58,7 @@ async def create_conversation(
 ) -> ApiResponse[ConversationRead]:
     """Create a new conversation for authenticated user"""
     result = conversation_service.create_conversation(conversation_data, user_id)
-    return ApiResponse(
-        success=True, message="Conversation created successfully", data=result
-    )
+    return ApiResponse(success=True, message="Conversation created successfully", data=result)
 
 
 @router.get("/{conversation_id}", response_model=ApiResponse[ConversationRead])
@@ -75,9 +70,7 @@ async def get_conversation(
 ) -> ApiResponse[ConversationRead]:
     """Get conversation by ID"""
     result = conversation_service.get_by_id_for_user(conversation_id, user_id)
-    return ApiResponse(
-        success=True, message="Conversation retrieved successfully", data=result
-    )
+    return ApiResponse(success=True, message="Conversation retrieved successfully", data=result)
 
 
 @router.get("/", response_model=PaginatedApiResponse[ConversationRead])
@@ -86,7 +79,7 @@ async def get_conversations(
     conversation_service: IConversationService,
     user_id: UUID,
     pagination: ConversationPaginationParams,
-    include: List[str] = Query(
+    include: list[str] = Query(  # noqa: B008
         default=[], description="Array of includes e.g. ['messages', 'feedback']"
     ),
     latest_messages: int = Query(
@@ -120,9 +113,7 @@ async def get_conversation_messages(
     message_service: IMessageService,
     user_id: UUID,
     pagination: MessagePaginationParams,
-    include: List[str] = Query(
-        default=[], description="Array of includes e.g. ['feedback']"
-    ),
+    include: list[str] = Query(default=[], description="Array of includes e.g. ['feedback']"),  # noqa: B008
 ) -> PaginatedApiResponse[MessageRead]:
     """Get conversation's messages (requires user ownership)"""
     include_feedback = "feedback" in include
@@ -149,12 +140,8 @@ async def update_conversation(
     user_id: UUID,
 ) -> ApiResponse[ConversationRead]:
     """Update conversation (requires user ownership)"""
-    result = conversation_service.update_conversation(
-        conversation_id, user_id, conversation_data
-    )
-    return ApiResponse(
-        success=True, message="Conversation updated successfully", data=result
-    )
+    result = conversation_service.update_conversation(conversation_id, user_id, conversation_data)
+    return ApiResponse(success=True, message="Conversation updated successfully", data=result)
 
 
 @router.delete("/{conversation_id}", response_model=ApiResponse[Any])

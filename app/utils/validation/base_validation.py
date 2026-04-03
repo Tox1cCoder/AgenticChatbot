@@ -2,7 +2,7 @@
 Base validation utility class for consistent patterns
 """
 
-from abc import ABC
+from abc import ABC, abstractmethod
 
 
 class BaseValidationUtils(ABC):
@@ -18,6 +18,6 @@ class BaseValidationUtils(ABC):
         self.session_factory = session_factory
         self._init_repositories()
 
+    @abstractmethod
     def _init_repositories(self):
         """Initialize repositories - to be implemented by subclasses"""
-        pass

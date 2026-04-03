@@ -3,14 +3,13 @@ Conversation service interface definition
 """
 
 from abc import ABC, abstractmethod
-from typing import List
 from uuid import UUID
 
 from app.repositories.utils.pagination import Paginator
 from app.schemas.conversation import (
     ConversationCreate,
-    ConversationUpdate,
     ConversationRead,
+    ConversationUpdate,
 )
 
 
@@ -42,7 +41,7 @@ class IConversationService(ABC):
         limit: int = 10,
         order_by: str = "updated_at",
         order_direction: str = "desc",
-        include: List[str] = None,
+        include: list[str] = None,
         latest_messages: int = 3,
     ) -> Paginator[ConversationRead]:
         """Get all conversations for a user with optional includes"""

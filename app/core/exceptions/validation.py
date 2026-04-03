@@ -3,15 +3,14 @@ Validation-related exception classes
 """
 
 from fastapi import status
+
 from .http import CustomHTTPException
 
 
 class ValidationException(CustomHTTPException):
     """Validation-related exceptions"""
 
-    def __init__(
-        self, detail: str = "Validation failed", error_code: str = "VALIDATION_ERROR"
-    ):
+    def __init__(self, detail: str = "Validation failed", error_code: str = "VALIDATION_ERROR"):
         super().__init__(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=detail,

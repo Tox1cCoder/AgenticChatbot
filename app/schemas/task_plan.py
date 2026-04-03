@@ -5,10 +5,11 @@ TaskPlan Pydantic schemas for API request/response handling.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
 from app.models.enums import TaskStatus
 from app.utils.case_conversion import to_camel_case as to_camel
 
@@ -16,20 +17,13 @@ from app.utils.case_conversion import to_camel_case as to_camel
 class TaskPlanCreate(BaseModel):
     """Schema for creating a new task plan."""
 
-    conversation_id: UUID = Field(
-        ..., description="Conversation ID this task plan belongs to"
-    )
+    conversation_id: UUID = Field(..., description="Conversation ID this task plan belongs to")
     task_order: int = Field(..., ge=0, description="Order/sequence of the task")
-    description: str = Field(
-        ..., min_length=1, description="Clear, actionable task description"
-    )
-    dependencies: List[UUID] = Field(
-        default_factory=list,
-        description="List of task IDs this task depends on",
-    )
-    task_metadata: Dict[str, Any] = Field(
+    description: str = Field(..., min_length=1, description="Clear, actionable task description")
+
+    task_metadata: dict[str, Any] = Field(
         default_factory=dict,
-        description="Additional metadata for the task (e.g., complexity, notes)",
+        description="Additional metadata for the task (e.g., notes)",
     )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
@@ -38,22 +32,14 @@ class TaskPlanCreate(BaseModel):
 class TaskPlanUpdate(BaseModel):
     """Schema for updating an existing task plan."""
 
-    description: Optional[str] = Field(
-        None, min_length=1, description="Updated task description"
-    )
-    status: Optional[TaskStatus] = Field(
+    description: str | None = Field(None, min_length=1, description="Updated task description")
+    status: TaskStatus | None = Field(
         None,
         description="Task status: pending, in_progress, completed, skipped",
     )
-    dependencies: Optional[List[UUID]] = Field(
-        None, description="Updated list of task IDs this task depends on"
-    )
-    task_metadata: Optional[Dict[str, Any]] = Field(
-        None, description="Updated metadata for the task"
-    )
-    completed_at: Optional[datetime] = Field(
-        None, description="Timestamp when the task was completed"
-    )
+
+    task_metadata: dict[str, Any] | None = Field(None, description="Updated metadata for the task")
+    completed_at: datetime | None = Field(None, description="Timestamp when the task was completed")
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -61,49 +47,39 @@ class TaskPlanUpdate(BaseModel):
 class TaskPlanRead(BaseModel):
     """Schema for reading a task plan (API response)."""
 
-    model_config = ConfigDict(
-        from_attributes=True, alias_generator=to_camel, populate_by_name=True
-    )
+    model_config = ConfigDict(from_attributes=True, alias_generator=to_camel, populate_by_name=True)
 
     id: UUID
-    conversation_id: UUID = Field(
-        ..., description="Conversation ID this task belongs to"
-    )
+    conversation_id: UUID = Field(..., description="Conversation ID this task belongs to")
     task_order: int = Field(..., description="Order/sequence of the task")
     description: str = Field(..., description="Task description")
     status: TaskStatus = Field(
         ..., description="Task status: pending, in_progress, completed, skipped"
     )
-    dependencies: Optional[List[UUID]] = Field(
-        default_factory=list, description="List of task IDs this task depends on"
-    )
-    task_metadata: Optional[Dict[str, Any]] = Field(
+
+    task_metadata: dict[str, Any] | None = Field(
         default_factory=dict, description="Additional task metadata"
     )
     created_at: datetime
     updated_at: datetime
-    completed_at: Optional[datetime] = Field(
-        None, description="Timestamp when the task was completed"
-    )
+    completed_at: datetime | None = Field(None, description="Timestamp when the task was completed")
 
 
 class TaskPlanInDB(BaseModel):
     """Internal schema matching database structure."""
 
-    model_config = ConfigDict(
-        from_attributes=True, alias_generator=to_camel, populate_by_name=True
-    )
+    model_config = ConfigDict(from_attributes=True, alias_generator=to_camel, populate_by_name=True)
 
     id: UUID
     conversation_id: UUID
     task_order: int
     description: str
     status: TaskStatus
-    dependencies: Optional[List[UUID]] = Field(default_factory=list)
-    task_metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+    task_metadata: dict[str, Any] | None = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
-    completed_at: Optional[datetime] = None
+    completed_at: datetime | None = None
 
 
 class TaskPlanGenerateRequest(BaseModel):
@@ -119,7 +95,7 @@ class TaskPlanGenerateRequest(BaseModel):
 class TaskPlanManualCreateRequest(BaseModel):
     """Request schema for manually creating task plans from a list of descriptions."""
 
-    task_descriptions: List[str] = Field(
+    task_descriptions: list[str] = Field(
         ...,
         min_length=1,
         description="List of task descriptions to create",
@@ -134,6 +110,10 @@ class PlanningStatusResponse(BaseModel):
     planning_mode_enabled: bool = Field(
         ..., description="Whether planning mode is enabled for the conversation"
     )
+    plan_lifecycle: str | None = Field(
+        None,
+        description="Explicit plan lifecycle state: draft, ready, executing, paused, completed",
+    )
     total_tasks: int = Field(..., ge=0, description="Total number of tasks")
     pending_tasks: int = Field(..., ge=0, description="Number of pending tasks")
     in_progress_tasks: int = Field(..., ge=0, description="Number of in-progress tasks")
@@ -142,8 +122,30 @@ class PlanningStatusResponse(BaseModel):
     progress_percentage: float = Field(
         ..., ge=0, le=100, description="Percentage of tasks completed"
     )
-    next_task: Optional[TaskPlanRead] = Field(
-        None, description="The next task to work on (if any)"
-    )
+    next_task: TaskPlanRead | None = Field(None, description="The next task to work on (if any)")
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class PlanningRuntimeRequest(BaseModel):
+    """Service-owned request for planning runtime operations."""
+
+    user_message: str = Field(..., min_length=1, description="User message to plan from")
+    conversation_id: str | None = Field(
+        default=None,
+        description="Conversation ID for planning context",
+    )
+    user_id: str | None = Field(default=None, description="User ID for planning context")
+    existing_tasks: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Existing task snapshot when modifying a plan",
+    )
+
+
+class PlanningRuntimeResult(BaseModel):
+    """Service-owned result for planning runtime operations."""
+
+    todos: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Canonical todo payload returned by the planning runtime",
+    )

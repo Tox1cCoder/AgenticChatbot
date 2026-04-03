@@ -1,16 +1,19 @@
 """Authentication dependencies and middleware for FastAPI"""
 
-from fastapi import Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from uuid import UUID
-import jwt
 
-from app.core.security import get_user_id_from_token, verify_refresh_token
+import jwt
+from fastapi import Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
 from app.core.exceptions import (
-    TokenExpiredException,
     AuthenticationException,
     AuthorizationException,
+    ResourceNotFoundException,
+    TokenExpiredException,
 )
+from app.core.security import get_user_id_from_token, verify_refresh_token
+from app.models.user import User
 from app.services.jwt_service import JwtService
 
 security = HTTPBearer()
@@ -23,9 +26,16 @@ def get_jwt_service() -> JwtService:
     return container.jwt_service()
 
 
+def get_user_service():
+    """Dependency to get UserService from container"""
+    from app.core.container import container
+
+    return container.user_service()
+
+
 async def get_current_user_id(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    jwt_service: JwtService = Depends(get_jwt_service),
+    credentials: HTTPAuthorizationCredentials = Depends(security),  # noqa: B008
+    jwt_service: JwtService = Depends(get_jwt_service),  # noqa: B008
 ) -> UUID:
     """
     Dependency to get current authenticated user ID from JWT token
@@ -34,18 +44,18 @@ async def get_current_user_id(
     try:
         user_id_str = get_user_id_from_token(token, jwt_service)
         return UUID(user_id_str)
-    except jwt.ExpiredSignatureError:
-        raise TokenExpiredException()
-    except ValueError:
+    except jwt.ExpiredSignatureError as e:
+        raise TokenExpiredException() from e
+    except ValueError as e:
         raise AuthenticationException(
             detail="Invalid user ID format in token",
             error_code="INVALID_USER_ID_FORMAT",
-        )
+        ) from e
 
 
 async def get_refresh_token_user_id(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    jwt_service: JwtService = Depends(get_jwt_service),
+    credentials: HTTPAuthorizationCredentials = Depends(security),  # noqa: B008
+    jwt_service: JwtService = Depends(get_jwt_service),  # noqa: B008
 ) -> UUID:
     """
     Dependency to get user ID from refresh token
@@ -63,13 +73,13 @@ async def get_refresh_token_user_id(
             )
 
         return UUID(user_id_str)
-    except jwt.ExpiredSignatureError:
-        raise TokenExpiredException()
-    except ValueError:
+    except jwt.ExpiredSignatureError as e:
+        raise TokenExpiredException() from e
+    except ValueError as e:
         raise AuthenticationException(
             detail="Invalid user ID format in refresh token",
             error_code="INVALID_USER_ID_FORMAT",
-        )
+        ) from e
 
 
 def require_user_ownership(resource_user_id: UUID, authenticated_user_id: UUID) -> None:
@@ -81,3 +91,54 @@ def require_user_ownership(resource_user_id: UUID, authenticated_user_id: UUID) 
             detail="Access denied: insufficient permissions",
             error_code="INSUFFICIENT_PERMISSIONS",
         )
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),  # noqa: B008
+    jwt_service: JwtService = Depends(get_jwt_service),  # noqa: B008
+) -> User:
+    """
+    Dependency to get current authenticated User object from JWT token.
+
+    Returns:
+        User: The authenticated user object
+
+    Raises:
+        TokenExpiredException: If the token has expired
+        AuthenticationException: If the token is invalid or user not found
+    """
+    user_service = get_user_service()
+    token = credentials.credentials
+    try:
+        user_id_str = get_user_id_from_token(token, jwt_service)
+        user_id = UUID(user_id_str)
+
+        # Get user from service
+        user_read = user_service.get_by_id(user_id)
+
+        # Convert UserRead schema to User model
+        # Note: We return a minimal User object for auth purposes
+        user = User(
+            id=user_read.id,
+            username=user_read.username,
+            email=user_read.email,
+            created_at=user_read.created_at,
+            updated_at=user_read.updated_at,
+            deleted_at=user_read.deleted_at,
+            avatar_url=user_read.avatar_url,
+            password_hash="",  # Don't include password hash in auth response
+        )
+        return user
+
+    except jwt.ExpiredSignatureError as e:
+        raise TokenExpiredException() from e
+    except ValueError as e:
+        raise AuthenticationException(
+            detail="Invalid user ID format in token",
+            error_code="INVALID_USER_ID_FORMAT",
+        ) from e
+    except ResourceNotFoundException as e:
+        raise AuthenticationException(
+            detail="Authenticated user no longer exists",
+            error_code="AUTHENTICATED_USER_NOT_FOUND",
+        ) from e

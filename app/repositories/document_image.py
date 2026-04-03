@@ -1,7 +1,7 @@
 """Repository for DocumentImage operations."""
 
-from typing import List, Optional
 from uuid import UUID
+
 from sqlalchemy import asc
 
 from app.models.document_image import DocumentImage
@@ -9,7 +9,6 @@ from app.schemas.document_image import DocumentImageCreate, DocumentImageUpdate
 
 
 class DocumentImageRepository:
-
     def __init__(self, session_factory: callable):
         self.session_factory = session_factory
 
@@ -28,11 +27,11 @@ class DocumentImageRepository:
             db.refresh(db_image)
             return db_image
 
-    def get_by_id(self, image_id: UUID) -> Optional[DocumentImage]:
+    def get_by_id(self, image_id: UUID) -> DocumentImage | None:
         with self.session_factory() as db:
             return db.query(DocumentImage).filter(DocumentImage.id == image_id).first()
 
-    def get_by_document_id(self, document_id: UUID) -> List[DocumentImage]:
+    def get_by_document_id(self, document_id: UUID) -> list[DocumentImage]:
         with self.session_factory() as db:
             return (
                 db.query(DocumentImage)
@@ -41,19 +40,13 @@ class DocumentImageRepository:
                 .all()
             )
 
-    def get_by_chunk_id(self, chunk_id: UUID) -> List[DocumentImage]:
+    def get_by_chunk_id(self, chunk_id: UUID) -> list[DocumentImage]:
         with self.session_factory() as db:
-            return (
-                db.query(DocumentImage).filter(DocumentImage.chunk_id == chunk_id).all()
-            )
+            return db.query(DocumentImage).filter(DocumentImage.chunk_id == chunk_id).all()
 
-    def update(
-        self, image_id: UUID, update_data: DocumentImageUpdate
-    ) -> Optional[DocumentImage]:
+    def update(self, image_id: UUID, update_data: DocumentImageUpdate) -> DocumentImage | None:
         with self.session_factory() as db:
-            db_image = (
-                db.query(DocumentImage).filter(DocumentImage.id == image_id).first()
-            )
+            db_image = db.query(DocumentImage).filter(DocumentImage.id == image_id).first()
             if not db_image:
                 return None
 
@@ -67,9 +60,7 @@ class DocumentImageRepository:
 
     def delete(self, image_id: UUID) -> bool:
         with self.session_factory() as db:
-            db_image = (
-                db.query(DocumentImage).filter(DocumentImage.id == image_id).first()
-            )
+            db_image = db.query(DocumentImage).filter(DocumentImage.id == image_id).first()
             if not db_image:
                 return False
 
@@ -79,11 +70,7 @@ class DocumentImageRepository:
 
     def delete_by_document_id(self, document_id: UUID) -> int:
         with self.session_factory() as db:
-            images = (
-                db.query(DocumentImage)
-                .filter(DocumentImage.document_id == document_id)
-                .all()
-            )
+            images = db.query(DocumentImage).filter(DocumentImage.document_id == document_id).all()
             count = len(images)
 
             for image in images:
@@ -92,7 +79,7 @@ class DocumentImageRepository:
             db.commit()
             return count
 
-    def get_image_paths_by_document_id(self, document_id: UUID) -> List[str]:
+    def get_image_paths_by_document_id(self, document_id: UUID) -> list[str]:
         with self.session_factory() as db:
             images = (
                 db.query(DocumentImage.image_path)

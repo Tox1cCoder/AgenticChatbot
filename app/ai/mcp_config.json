@@ -28,7 +28,7 @@
       "description": "Current time lookup utility with timezone support"
     },
     "form_filler": {
-      "enabled": true,
+      "enabled": false,
       "transport": "stdio",
       "command": "python",
       "args": [
@@ -60,29 +60,47 @@
         "@timlukahorstmann/mcp-weather"
       ],
       "env": {
-        "ACCUWEATHER_API_KEY": "zpka_a60ac65c742a4a70b34530754b2c3010_ca64d211"
+        "ACCUWEATHER_API_KEY": "${ACCUWEATHER_API_KEY}"
       },
       "enabled": true
+    },
+    "mcp": {
+      "enabled": false,
+      "transport": "streamable_http",
+      "url": "http://192.168.2.182:8100/mcp"
     },
     "desktop-commander": {
-      "transport": "stdio",
-      "command": "node",
-      "args": [
-        "C:\\Users\\Vina32\\AppData\\Roaming\\npm\\node_modules\\@wonderwhy-er\\desktop-commander\\dist\\index.js"
-      ],
-      "env": {
-        "NODE_OPTIONS": "--no-warnings"
-      },
-      "enabled": true
-    },
-    "postgres": {
       "transport": "stdio",
       "command": "npx",
       "args": [
         "-y",
-        "@modelcontextprotocol/server-postgres",
-        "postgresql://postgres:123123123@localhost:5432/chatbot"
+        "@wonderwhy-er/desktop-commander@latest"
       ],
+      "enabled": true
+    },
+    "mcp-server-for-revit": {
+      "transport": "stdio",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "mcp-server-for-revit"
+      ],
+      "enabled": false
+    },
+    "excel": {
+      "transport": "stdio",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "--yes",
+        "@negokaz/excel-mcp-server"
+      ],
+      "env": {
+        "EXCEL_MCP_PAGING_CELLS_LIMIT": "4000"
+      },
       "enabled": true
     }
   }

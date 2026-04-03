@@ -1,9 +1,10 @@
-from typing import List, Optional, Tuple
 from uuid import UUID
-from sqlalchemy import desc
 
-from app.models.document import Document
+from sqlalchemy import desc
+from sqlalchemy.exc import MultipleResultsFound
+
 from app.models.conversation import Conversation
+from app.models.document import Document
 from app.schemas.document import DocumentCreate, DocumentUpdate
 
 
@@ -28,35 +29,49 @@ class DocumentRepository:
             db.refresh(db_document)
             return db_document
 
-    def get_by_id(self, document_id: UUID) -> Optional[Document]:
+    def get_by_id(self, document_id: UUID) -> Document | None:
         """Get document by ID"""
         with self.session_factory() as db:
             return db.query(Document).filter(Document.id == document_id).first()
 
+    def get_by_processing_task_id(self, task_id: str) -> Document | None:
+        """Get document by its Celery processing task ID."""
+        with self.session_factory() as db:
+            query = db.query(Document).filter(Document.processing_task_id == task_id)
+            try:
+                return query.one_or_none()
+            except MultipleResultsFound:
+                return None
+
+    def set_processing_task_id(self, document_id: UUID, task_id: str) -> Document | None:
+        """Persist the Celery processing task ID for a document."""
+        with self.session_factory() as db:
+            db_document = db.query(Document).filter(Document.id == document_id).first()
+            if not db_document:
+                return None
+
+            db_document.processing_task_id = task_id
+            db.commit()
+            db.refresh(db_document)
+            return db_document
+
     def get_by_conversation_id(
         self, conversation_id: UUID, page: int = 1, page_size: int = 20
-    ) -> Tuple[List[Document], int]:
+    ) -> tuple[list[Document], int]:
         """Get paginated documents for a conversation with total count"""
         with self.session_factory() as db:
             skip = (page - 1) * page_size
 
-            query = db.query(Document).filter(
-                Document.conversation_id == conversation_id
-            )
+            query = db.query(Document).filter(Document.conversation_id == conversation_id)
 
             total = query.count()
             documents = (
-                query.order_by(desc(Document.upload_time))
-                .offset(skip)
-                .limit(page_size)
-                .all()
+                query.order_by(desc(Document.upload_time)).offset(skip).limit(page_size).all()
             )
 
             return documents, total
 
-    def update(
-        self, document_id: UUID, update_data: DocumentUpdate
-    ) -> Optional[Document]:
+    def update(self, document_id: UUID, update_data: DocumentUpdate) -> Document | None:
         """Update document with new data"""
         with self.session_factory() as db:
             db_document = db.query(Document).filter(Document.id == document_id).first()
@@ -85,7 +100,7 @@ class DocumentRepository:
 
     def get_by_status(
         self, status: int, page: int = 1, page_size: int = 20
-    ) -> Tuple[List[Document], int]:
+    ) -> tuple[list[Document], int]:
         """Get paginated documents by status with total count"""
         with self.session_factory() as db:
             skip = (page - 1) * page_size
@@ -94,10 +109,7 @@ class DocumentRepository:
 
             total = query.count()
             documents = (
-                query.order_by(desc(Document.upload_time))
-                .offset(skip)
-                .limit(page_size)
-                .all()
+                query.order_by(desc(Document.upload_time)).offset(skip).limit(page_size).all()
             )
 
             return documents, total
@@ -110,20 +122,13 @@ class DocumentRepository:
     def count_by_conversation(self, conversation_id: UUID) -> int:
         """Count documents for a conversation"""
         with self.session_factory() as db:
-            return (
-                db.query(Document)
-                .filter(Document.conversation_id == conversation_id)
-                .count()
-            )
+            return db.query(Document).filter(Document.conversation_id == conversation_id).count()
 
     # Authorization helpers
     def exists(self, document_id: UUID) -> bool:
         """Check if a document exists by ID."""
         with self.session_factory() as db:
-            return (
-                db.query(Document).filter(Document.id == document_id).first()
-                is not None
-            )
+            return db.query(Document).filter(Document.id == document_id).first() is not None
 
     def user_owns_document(self, user_id: UUID, document_id: UUID) -> bool:
         """Check if a user owns the document via its conversation ownership."""

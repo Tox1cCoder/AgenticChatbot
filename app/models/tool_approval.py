@@ -1,10 +1,12 @@
 """Model for tracking human-in-the-loop tool approval decisions."""
 
-import uuid
-from sqlalchemy import Column, String, ForeignKey, DateTime, Enum as SQLEnum, func
-from sqlalchemy.dialects.postgresql import UUID, JSONB
-from sqlalchemy.orm import relationship
 import enum
+import uuid
+
+from sqlalchemy import Column, DateTime, ForeignKey, String, func
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import relationship
 
 from app.models.base import Base
 
@@ -38,9 +40,7 @@ class ToolApproval(Base):
     conversation_id = Column(
         UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False, index=True
     )
-    user_id = Column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
-    )
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
 
     # Interrupt tracking
     interrupt_id = Column(String(255), nullable=False, index=True)
@@ -52,16 +52,32 @@ class ToolApproval(Base):
     modified_args = Column(JSONB, nullable=True)
 
     # Decision information
-    decision = Column(
-        SQLEnum(DecisionType, name="decision_type", create_type=True), nullable=False
+    decision = Column(SQLEnum(DecisionType, name="decision_type", create_type=True), nullable=False)
+    decided_at = Column(DateTime(timezone=True), default=func.now(), nullable=False, index=True)
+
+    # Device context (optional - set when tool originated from a client device)
+    device_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("client_devices.id"),
+        nullable=True,
+        index=True,
     )
-    decided_at = Column(
-        DateTime(timezone=True), default=func.now(), nullable=False, index=True
-    )
+
+    # Tool provenance fields for audit
+    tool_origin = Column(
+        String(32), nullable=True, index=True
+    )  # e.g., "client_native", "client_mcp", "server"
+    server_name = Column(
+        String(255), nullable=True
+    )  # MCP server name when tool_origin is "client_mcp"
+    qualified_tool_id = Column(
+        String(512), nullable=True, index=True
+    )  # Fully qualified tool identifier
 
     # Relationships
     conversation = relationship("Conversation", backref="tool_approvals")
     user = relationship("User", backref="tool_approvals")
+    device = relationship("ClientDevice", backref="tool_approvals")
 
     def __repr__(self) -> str:
         return (

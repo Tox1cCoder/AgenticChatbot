@@ -4,8 +4,8 @@ Document validation utilities
 
 from uuid import UUID
 
+from app.core.exceptions import AuthorizationException, ResourceNotFoundException
 from app.repositories.document import DocumentRepository
-from app.core.exceptions import ResourceNotFoundException, AuthorizationException
 
 
 class DocumentValidationUtils:

@@ -1,7 +1,7 @@
-from typing import List, Optional
 from uuid import UUID
-from sqlalchemy.orm import Session
+
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.models.feedback import Feedback
 from app.repositories.command_strategy import DefaultCommandStrategy
@@ -19,23 +19,21 @@ class FeedbackCRUDStrategy(
         DefaultCommandStrategy.__init__(self, model)
         DefaultQueryStrategy.__init__(self, model)
 
-    def get_by_message_id(self, db: Session, message_id: UUID) -> Optional[Feedback]:
+    def get_by_message_id(self, db: Session, message_id: UUID) -> Feedback | None:
         """Get feedback by message ID"""
         statement = select(Feedback).where(Feedback.message_id == message_id)
         return db.execute(statement).scalar_one_or_none()
 
-    def get_by_user_id(self, db: Session, user_id: UUID) -> List[Feedback]:
+    def get_by_user_id(self, db: Session, user_id: UUID) -> list[Feedback]:
         """Get all feedback by user ID"""
         statement = (
-            select(Feedback)
-            .where(Feedback.user_id == user_id)
-            .order_by(Feedback.created_at.desc())
+            select(Feedback).where(Feedback.user_id == user_id).order_by(Feedback.created_at.desc())
         )
         return list(db.execute(statement).scalars().all())
 
-    def get_rating_for_message(self, db: Session, message_id: UUID) -> Optional[float]:
+    def get_rating_for_message(self, db: Session, message_id: UUID) -> float | None:
         """Get rating for a message"""
-        statement = select((Feedback.rating)).where(Feedback.message_id == message_id)
+        statement = select(Feedback.rating).where(Feedback.message_id == message_id)
         result = db.execute(statement).scalar_one_or_none()
         return result if result is not None else None
 
@@ -48,17 +46,17 @@ class FeedbackRepository:
         self.session_factory = session_factory
         self._crud_strategy = FeedbackCRUDStrategy(Feedback)
 
-    def get_by_message_id(self, message_id: UUID) -> Optional[Feedback]:
+    def get_by_message_id(self, message_id: UUID) -> Feedback | None:
         """Get feedback by message ID (1-1 relationship per ERD)"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_message_id(session, message_id)
 
-    def get_by_user_id(self, user_id: UUID) -> List[Feedback]:
+    def get_by_user_id(self, user_id: UUID) -> list[Feedback]:
         """Get all feedback by user ID (no pagination needed for user's own feedback)"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_user_id(session, user_id)
 
-    def get_rating_for_message(self, message_id: UUID) -> Optional[float]:
+    def get_rating_for_message(self, message_id: UUID) -> float | None:
         """Get rating for a message"""
         with self.session_factory() as session:
             return self._crud_strategy.get_rating_for_message(session, message_id)
@@ -68,18 +66,18 @@ class FeedbackRepository:
         with self.session_factory() as session:
             return self._crud_strategy.create(session, input_schema)
 
-    def get_by_id(self, id: UUID) -> Optional[Feedback]:
+    def get_by_id(self, id: UUID) -> Feedback | None:
         """Get feedback by ID"""
         with self.session_factory() as session:
             return self._crud_strategy.get_by_id(session, id)
 
-    def get_all(self) -> List[Feedback]:
+    def get_all(self) -> list[Feedback]:
         """Get all feedback (removed pagination as not needed for admin operations)"""
         with self.session_factory() as session:
             statement = select(Feedback).order_by(Feedback.created_at.desc())
             return list(session.execute(statement).scalars().all())
 
-    def update(self, id: UUID, input_schema: FeedbackUpdate) -> Optional[Feedback]:
+    def update(self, id: UUID, input_schema: FeedbackUpdate) -> Feedback | None:
         """Update feedback by ID"""
         with self.session_factory() as session:
             db_obj = self._crud_strategy.get_by_id(session, id)

@@ -4,7 +4,6 @@ Document-related Pydantic schemas for API requests and responses.
 
 from datetime import datetime
 from enum import IntEnum
-from typing import Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -35,9 +34,9 @@ class DocumentCreate(DocumentBase):
 class DocumentUpdate(BaseModel):
     """Schema for updating a document"""
 
-    filename: Optional[str] = None
-    file_type: Optional[str] = None
-    status: Optional[int] = None
+    filename: str | None = None
+    file_type: str | None = None
+    status: int | None = None
 
 
 class DocumentResponse(DocumentBase):

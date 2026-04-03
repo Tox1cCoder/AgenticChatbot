@@ -1,11 +1,10 @@
-import json
+import asyncio
 import hashlib
-from typing import List, Optional
-from functools import lru_cache
+import json
 
 from google import genai
 
-from .agent_config import create_gemini_client, AGENT_CONFIG
+from .agent_config import AGENT_CONFIG, create_gemini_client
 
 SUGGESTION_PROMPT = """Based on this conversation exchange, generate follow-up questions the user might want to ask next.
 
@@ -32,17 +31,18 @@ Return ONLY a JSON array of strings, nothing else. Examples:
 class SuggestionGenerator:
     """Generates follow-up question suggestions using Gemini."""
 
-    def __init__(self, model_name: Optional[str] = None):
+    def __init__(self, model_name: str | None = None):
         config = AGENT_CONFIG["suggestion"]
         self.model_name = model_name or config["model"]
-        self.client: Optional[genai.Client] = None
+        self.client: genai.Client | None = None
+        self._suggestion_cache: dict = {}
         self._init_client()
 
     def _init_client(self) -> None:
         """Initialize Gemini client."""
         try:
             self.client = create_gemini_client()
-        except Exception as e:
+        except Exception:
             self.client = None
 
     def _create_cache_key(self, user_query: str, response_content: str) -> str:
@@ -55,11 +55,12 @@ class SuggestionGenerator:
         content = f"{truncated_query}||{truncated_response}"
         return hashlib.md5(content.encode()).hexdigest()
 
-    @lru_cache(maxsize=100)
-    def _get_cached_suggestions(
-        self, cache_key: str, prompt: str
-    ) -> Optional[List[str]]:
+    def _get_cached_suggestions(self, cache_key: str, prompt: str) -> list[str] | None:
         """Internal cached method for LLM calls."""
+        _key = (cache_key, prompt)
+        if _key in self._suggestion_cache:
+            return self._suggestion_cache[_key]
+
         if not self.client:
             return None
 
@@ -69,7 +70,7 @@ class SuggestionGenerator:
                 contents=prompt,
                 config={
                     "temperature": 1,
-                    "max_output_tokens": 256,
+                    "max_output_tokens": 512,
                 },
             )
 
@@ -89,6 +90,9 @@ class SuggestionGenerator:
             if not isinstance(suggestions, list):
                 return None
 
+            if len(self._suggestion_cache) >= 100:
+                self._suggestion_cache.pop(next(iter(self._suggestion_cache)))
+            self._suggestion_cache[_key] = suggestions
             return suggestions
 
         except (json.JSONDecodeError, Exception):
@@ -99,7 +103,7 @@ class SuggestionGenerator:
         user_query: str,
         response_content: str,
         max_suggestions: int = 3,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Generate follow-up question suggestions.
 
@@ -127,7 +131,11 @@ class SuggestionGenerator:
 
             # Create cache key and get cached result
             cache_key = self._create_cache_key(user_query, response_content)
-            suggestions = self._get_cached_suggestions(cache_key, prompt)
+            suggestions = await asyncio.to_thread(
+                self._get_cached_suggestions,
+                cache_key,
+                prompt,
+            )
 
             if suggestions is None:
                 return []
@@ -143,12 +151,12 @@ class SuggestionGenerator:
 
             return valid_suggestions
 
-        except Exception as e:
+        except Exception:
             return []
 
 
 # Global singleton instance
-_suggestion_generator: Optional[SuggestionGenerator] = None
+_suggestion_generator: SuggestionGenerator | None = None
 
 
 def get_suggestion_generator() -> SuggestionGenerator:
@@ -162,7 +170,7 @@ def get_suggestion_generator() -> SuggestionGenerator:
 async def generate_follow_up_suggestions(
     user_query: str,
     response_content: str,
-) -> List[str]:
+) -> list[str]:
     """
     Convenience function to generate follow-up suggestions.
 

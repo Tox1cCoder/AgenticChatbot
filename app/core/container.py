@@ -3,56 +3,61 @@ Dependency Injection Container.
 """
 
 from dependency_injector import containers, providers
-
-from app.core.config import settings
-from app.database.database import Database
-from app.repositories.user import UserRepository
-from app.repositories.conversation import ConversationRepository
-from app.repositories.message import MessageRepository
-from app.repositories.feedback import FeedbackRepository
-from app.repositories.document import DocumentRepository
-from app.repositories.task_plan import TaskPlanRepository
-
-from app.services.auth_service import AuthService
-from app.services.user_service import UserService
-from app.services.conversation_service import ConversationService
-from app.services.message_service import MessageService
-from app.services.feedback_service import FeedbackService
-from app.services.ai_service import AIService
-from app.services.document_service import DocumentService
-from app.services.document_processing_service import DocumentProcessingService
-from app.services.mcp_service import MCPService
-from app.services.jwt_service import JwtService
-from app.services.task_plan_service import TaskPlanService
-
-from app.ai.checkpoint import CheckpointManager
-from app.ai.mcp_integration import MCPManager
-from app.ai.agents.planning_agent import PlanningAgent
-from app.repositories.document_image import DocumentImageRepository
-
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
-from app.workers.celery_app import celery_app
 
-from app.utils.validation.user_validation import UserValidationUtils
+from app.ai.agents.planning_agent import PlanningAgent
+from app.ai.checkpoint import CheckpointManager
+from app.ai.graph import create_workflow
+from app.ai.mcp_integration import MCPManager
+from app.ai.mcp_registry import MCPRegistry
+from app.ai.planning_runtime_adapter import PlanningRuntimeAdapter
+from app.ai.skills_registry import get_skills_registry
+from app.core.config import settings
+from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
+from app.database.database import Database
+from app.interfaces import (
+    IAuthService,
+    IConversationService,
+    IDocumentService,
+    IFeedbackService,
+    IMessageService,
+    IUserService,
+)
+from app.interfaces.planning_runtime_interface import IPlanningRuntimeService
+from app.interfaces.task_plan_service_interface import ITaskPlanService
+from app.repositories.agent_model_config import AgentModelConfigRepository
+from app.repositories.conversation import ConversationRepository
+from app.repositories.document import DocumentRepository
+from app.repositories.document_image import DocumentImageRepository
+from app.repositories.feedback import FeedbackRepository
+from app.repositories.hitl_interrupt import HITLInterruptRepository
+from app.repositories.message import MessageRepository
+from app.repositories.model_provider import ModelProviderRepository
+from app.repositories.task_plan import TaskPlanRepository
+from app.repositories.tool_approval import ToolApprovalRepository
+from app.repositories.user import UserRepository
+from app.services.ai_service import AIService
+from app.services.auth_service import AuthService
+from app.services.conversation_service import ConversationService
+from app.services.document_processing_service import DocumentProcessingService
+from app.services.document_service import DocumentService
+from app.services.feedback_service import FeedbackService
+from app.services.jwt_service import JwtService
+from app.services.mcp_service import MCPService
+from app.services.message_service import MessageService
+from app.services.model_config_service import ModelConfigService
+from app.services.provider_service import ProviderService
+from app.services.skills_service import SkillsService
+from app.services.task_plan_service import TaskPlanService
+from app.services.user_service import UserService
 from app.utils.validation.conversation_validation import ConversationValidationUtils
+from app.utils.validation.document_validation import DocumentValidationUtils
 from app.utils.validation.feedback_validation import FeedbackValidationUtils
 from app.utils.validation.message_validation import MessageValidationUtils
-from app.utils.validation.document_validation import DocumentValidationUtils
 from app.utils.validation.task_plan_validation import TaskPlanValidationUtils
-
-from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
-
-
-from app.interfaces import (
-    IUserService,
-    IConversationService,
-    IMessageService,
-    IFeedbackService,
-    IAuthService,
-    IDocumentService,
-)
-from app.interfaces.task_plan_service_interface import ITaskPlanService
+from app.utils.validation.user_validation import UserValidationUtils
+from app.workers.celery_app import celery_app
 
 
 class Container(containers.DeclarativeContainer):
@@ -69,6 +74,9 @@ class Container(containers.DeclarativeContainer):
             "app.api.mcp",
             "app.api.task_plans",
             "app.api.ai_sdk",
+            "app.api.providers",
+            "app.api.model_config",
+            "app.api.skills",
         ]
     )
 
@@ -91,7 +99,7 @@ class Container(containers.DeclarativeContainer):
     embedding_model = providers.Singleton(
         SentenceTransformer,
         "google/embeddinggemma-300m",
-        device="cpu",
+        device="cuda",
     )
 
     # JWT Service
@@ -106,9 +114,10 @@ class Container(containers.DeclarativeContainer):
         settings=providers.Object(settings),
     )
 
-    # MCP Manager
+    # MCP Manager - uses MCPRegistry to share instance with agents
+    # This returns the sync accessor; async initialization happens via get_manager_async()
     mcp_manager = providers.Singleton(
-        MCPManager,
+        lambda: MCPRegistry.get_manager_sync() or MCPManager(),
     )
 
     # Repositories - use session factory from database
@@ -147,6 +156,26 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    model_provider_repository = providers.Factory(
+        ModelProviderRepository,
+        session_factory=db.provided.session,
+    )
+
+    agent_model_config_repository = providers.Factory(
+        AgentModelConfigRepository,
+        session_factory=db.provided.session,
+    )
+
+    tool_approval_repository = providers.Factory(
+        ToolApprovalRepository,
+        session_factory=db.provided.session,
+    )
+
+    hitl_interrupt_repository = providers.Factory(
+        HITLInterruptRepository,
+        session_factory=db.provided.session,
+    )
+
     # Validation utils
     user_validation_utils = providers.Factory(
         UserValidationUtils,
@@ -173,9 +202,21 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    provider_service = providers.Factory(
+        ProviderService,
+        provider_repository=model_provider_repository,
+    )
+
+    model_config_service = providers.Factory(
+        ModelConfigService,
+        repository=agent_model_config_repository,
+        provider_service=provider_service,
+    )
+
     # Planning agent
     planning_agent = providers.Factory(
         PlanningAgent,
+        runtime_model_resolver=model_config_service,
     )
 
     # Business services
@@ -192,35 +233,44 @@ class Container(containers.DeclarativeContainer):
         conversation_validation_utils=conversation_validation_utils,
     )
 
+    def _get_checkpointer():
+        if not settings.enable_langgraph_checkpoints:
+            return None
+
+        checkpoint_mgr = container.checkpoint_manager()
+        return checkpoint_mgr.get_checkpointer()
+
     # AI service with conditional checkpoint injection
     def _create_ai_service():
         """Factory function to create AIService with conditional checkpointer."""
-        qdrant = container.qdrant_client()
-        embeddings = container.embedding_model()
-
-        # Conditionally get checkpointer based on settings
-        checkpointer = None
-        if settings.enable_langgraph_checkpoints:
-            checkpoint_mgr = container.checkpoint_manager()
-            # Get the checkpointer (now synchronous)
-            checkpointer = checkpoint_mgr.get_checkpointer()
+        checkpointer = Container._get_checkpointer()
+        workflow_runtime = create_workflow(
+            qdrant_client=container.qdrant_client(),
+            embedding_model=container.embedding_model(),
+            checkpointer=checkpointer,
+            document_repository=container.document_repository(),
+            runtime_model_resolver=container.model_config_service(),
+        )
 
         return AIService(
-            qdrant_client=qdrant,
-            embedding_model=embeddings,
+            workflow_runtime=workflow_runtime,
             conversation_repository=container.conversation_repository(),
-            document_repository=container.document_repository(),
             checkpointer=checkpointer,
         )
 
     ai_service = providers.Singleton(_create_ai_service)
+
+    planning_runtime_service: providers.Provider[IPlanningRuntimeService] = providers.Factory(
+        PlanningRuntimeAdapter,
+        planning_agent=planning_agent,
+    )
 
     task_plan_service: providers.Provider[ITaskPlanService] = providers.Factory(
         TaskPlanService,
         task_plan_repository=task_plan_repository,
         conversation_validation_utils=conversation_validation_utils,
         task_plan_validation_utils=task_plan_validation_utils,
-        planning_agent=planning_agent,
+        planning_runtime=planning_runtime_service,
         conversation_repository=conversation_repository,
     )
 
@@ -230,6 +280,8 @@ class Container(containers.DeclarativeContainer):
         conversation_validation_utils=conversation_validation_utils,
         message_validation_utils=message_validation_utils,
         ai_service=ai_service,
+        tool_approval_repository=tool_approval_repository,
+        hitl_interrupt_repository=hitl_interrupt_repository,
         task_plan_service=task_plan_service,
     )
 
@@ -270,6 +322,16 @@ class Container(containers.DeclarativeContainer):
     mcp_service = providers.Factory(
         MCPService,
         mcp_manager=mcp_manager,
+    )
+
+    # Skills
+    skills_registry = providers.Singleton(
+        lambda: get_skills_registry(),
+    )
+
+    skills_service = providers.Factory(
+        SkillsService,
+        registry=skills_registry,
     )
 
 

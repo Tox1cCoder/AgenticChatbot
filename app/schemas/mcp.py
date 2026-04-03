@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from typing import Optional, Dict, Any, List
-from pydantic import BaseModel, Field, ConfigDict
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
 from app.utils.case_conversion import to_camel_case as to_camel
 
 
@@ -13,24 +15,20 @@ class MCPServerConfig(BaseModel):
         ...,
         description="Transport type: 'stdio' for command-based or 'http' for HTTP-based",
     )
-    command: Optional[str] = Field(
+    command: str | None = Field(
         None,
         description="Command to execute for stdio transport (e.g., 'node', 'python')",
     )
-    args: Optional[List[str]] = Field(
-        None, description="Arguments for the command in stdio transport"
-    )
-    env: Optional[Dict[str, str]] = Field(
+    args: list[str] | None = Field(None, description="Arguments for the command in stdio transport")
+    env: dict[str, str] | None = Field(
         None, description="Environment variables for stdio transport"
     )
-    url: Optional[str] = Field(None, description="Base URL for HTTP transport")
-    headers: Optional[Dict[str, str]] = Field(
+    url: str | None = Field(None, description="Base URL for HTTP transport")
+    headers: dict[str, str] | None = Field(
         None, description="Headers for HTTP transport authentication"
     )
     enabled: bool = Field(default=True, description="Whether the server is enabled")
-    description: Optional[str] = Field(
-        None, description="Human-readable description of the server"
-    )
+    description: str | None = Field(None, description="Human-readable description of the server")
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -41,9 +39,9 @@ class MCPServerInfo(BaseModel):
     name: str = Field(..., description="Server name")
     transport: str = Field(..., description="Transport type (stdio/http)")
     enabled: bool = Field(..., description="Whether the server is enabled")
-    description: Optional[str] = Field(None, description="Server description")
+    description: str | None = Field(None, description="Server description")
     tool_count: int = Field(..., description="Number of tools provided by this server")
-    config: Dict[str, Any] = Field(..., description="Full server configuration")
+    config: dict[str, Any] = Field(..., description="Full server configuration")
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -51,9 +49,7 @@ class MCPServerInfo(BaseModel):
 class MCPServerListResponse(BaseModel):
     """Schema for list of MCP servers response."""
 
-    servers: List[MCPServerInfo] = Field(
-        ..., description="List of configured MCP servers"
-    )
+    servers: list[MCPServerInfo] = Field(..., description="List of configured MCP servers")
     total_count: int = Field(..., description="Total number of servers")
     enabled_count: int = Field(..., description="Number of enabled servers")
 
@@ -64,10 +60,8 @@ class MCPToolInfo(BaseModel):
     """Schema for MCP tool information."""
 
     name: str = Field(..., description="Tool name")
-    description: Optional[str] = Field(None, description="Tool description")
-    args_schema: Dict[str, Any] = Field(
-        ..., description="JSON Schema for tool arguments"
-    )
+    description: str | None = Field(None, description="Tool description")
+    args_schema: dict[str, Any] = Field(..., description="JSON Schema for tool arguments")
     server_name: str = Field(..., description="Name of the server providing this tool")
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
@@ -76,7 +70,7 @@ class MCPToolInfo(BaseModel):
 class MCPToolListResponse(BaseModel):
     """Schema for list of MCP tools response."""
 
-    tools: List[MCPToolInfo] = Field(..., description="List of available tools")
+    tools: list[MCPToolInfo] = Field(..., description="List of available tools")
     total_count: int = Field(..., description="Total number of tools")
     servers_count: int = Field(..., description="Number of servers providing tools")
 
@@ -86,7 +80,7 @@ class MCPToolListResponse(BaseModel):
 class MCPToolExecuteRequest(BaseModel):
     """Schema for tool execution request."""
 
-    arguments: Dict[str, Any] = Field(
+    arguments: dict[str, Any] = Field(
         default_factory=dict, description="Arguments to pass to the tool"
     )
 
@@ -97,13 +91,11 @@ class MCPToolExecuteResponse(BaseModel):
     """Schema for tool execution response."""
 
     success: bool = Field(..., description="Whether the tool execution succeeded")
-    result: Optional[Any] = Field(None, description="Tool execution result")
-    error: Optional[str] = Field(None, description="Error message if execution failed")
+    result: Any | None = Field(None, description="Tool execution result")
+    error: str | None = Field(None, description="Error message if execution failed")
     execution_time: float = Field(..., description="Execution time in seconds")
     tool_name: str = Field(..., description="Name of the executed tool")
-    server_name: str = Field(
-        ..., description="Name of the server that executed the tool"
-    )
+    server_name: str = Field(..., description="Name of the server that executed the tool")
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -112,11 +104,11 @@ class MCPServerURLConfig(BaseModel):
     """Schema for adding MCP server from URL."""
 
     url: str = Field(..., description="The URL string (npx command or HTTP URL)")
-    name: Optional[str] = Field(
+    name: str | None = Field(
         None,
         description="Optional custom server name (auto-generated if not provided)",
     )
-    description: Optional[str] = Field(None, description="Optional description")
+    description: str | None = Field(None, description="Optional description")
     enabled: bool = Field(default=True, description="Whether to enable the server")
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)

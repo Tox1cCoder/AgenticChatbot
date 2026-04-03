@@ -1,3 +1,1 @@
-from .planning_agent import PlanningAgent
-
-__all__ = ["PlanningAgent"]
+__all__ = ["PlanningAgent", "CanvasAgent"]

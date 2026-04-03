@@ -1,27 +1,26 @@
-from typing import Any
-from fastapi import APIRouter, status
-from uuid import UUID
 import logging
+from typing import Any
+from uuid import UUID
+
+from fastapi import APIRouter, status
 
 from app.core.dependency_injection import AppAutoInjector
-from app.interfaces.user_service_interface import IUserService
-from app.interfaces.auth_service_interface import IAuthService
 from app.core.security import create_access_token
-from app.services.jwt_service import JwtService
-from app.schemas.user import UserCreate, UserRead
+from app.interfaces.auth_service_interface import IAuthService
+from app.interfaces.user_service_interface import IUserService
 from app.schemas.responses.api_response import ApiResponse
 from app.schemas.responses.token_response import (
-    TokenResponse,
     LoginRequest,
     RefreshTokenResponse,
+    TokenResponse,
 )
+from app.schemas.user import UserCreate, UserRead
+from app.services.jwt_service import JwtService
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
-@router.post(
-    "/signup", response_model=ApiResponse[UserRead], status_code=status.HTTP_201_CREATED
-)
+@router.post("/signup", response_model=ApiResponse[UserRead], status_code=status.HTTP_201_CREATED)
 @AppAutoInjector.auto_inject()
 async def signup(
     user_data: UserCreate,
@@ -29,9 +28,7 @@ async def signup(
 ) -> ApiResponse[UserRead]:
     """Register a new user"""
     created_user = user_service.create_user(user_data)
-    return ApiResponse(
-        success=True, message="User created successfully", data=created_user
-    )
+    return ApiResponse(success=True, message="User created successfully", data=created_user)
 
 
 @router.post("/login", response_model=ApiResponse[TokenResponse])

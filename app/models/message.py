@@ -1,12 +1,11 @@
 import uuid
 
-from sqlalchemy import Column, ForeignKey, Text, Index, DateTime, func
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Text, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
-from app.models.enums import MessageRoleType
-
 from app.models.base import Base
+from app.models.enums import MessageRoleType
 
 
 class Message(Base):
@@ -28,14 +27,12 @@ class Message(Base):
 
     # Relationships
     conversation = relationship("Conversation", back_populates="messages")
-    feedback = relationship(
-        "Feedback", back_populates="message", uselist=False, lazy="joined"
-    )
+    feedback = relationship("Feedback", back_populates="message", uselist=False, lazy="joined")
 
     # Index for efficient querying by conversation and timestamp
-    __table_args__ = (
-        Index("idx_message_conversation_created", "conversation_id", "created_at"),
-    )
+    __table_args__ = (Index("idx_message_conversation_created", "conversation_id", "created_at"),)
 
     def __repr__(self) -> str:
-        return f"<Message(id={self.id}, conversation_id={self.conversation_id}, sender={self.sender})>"
+        return (
+            f"<Message(id={self.id}, conversation_id={self.conversation_id}, sender={self.sender})>"
+        )

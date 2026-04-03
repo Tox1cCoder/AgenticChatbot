@@ -1,5 +1,5 @@
+from typing import Any
 
-from typing import Any, Dict
 from app.core.exceptions.mcp import ServerConfigurationError
 
 
@@ -22,10 +22,7 @@ def generate_server_name_from_url(url: str) -> str:
             if part == "run" and i + 1 < len(parts):
                 package = parts[i + 1]
                 # Extract the actual package name after @org/
-                if "/" in package:
-                    package_name = package.split("/")[-1]
-                else:
-                    package_name = package.lstrip("@")
+                package_name = package.split("/")[-1] if "/" in package else package.lstrip("@")
                 # Clean up any remaining special characters
                 return package_name.replace("@", "-")
         # Fallback if pattern doesn't match
@@ -57,7 +54,7 @@ def generate_server_name_from_url(url: str) -> str:
     return "unknown-server"
 
 
-def parse_mcp_url(url: str) -> Dict[str, Any]:
+def parse_mcp_url(url: str) -> dict[str, Any]:
     """Parse an MCP server URL and generate appropriate configuration.
 
     Args:
@@ -72,9 +69,7 @@ def parse_mcp_url(url: str) -> Dict[str, Any]:
     url = url.strip()
 
     if not url:
-        raise ServerConfigurationError(
-            detail="URL cannot be empty", error_code="INVALID_URL"
-        )
+        raise ServerConfigurationError(detail="URL cannot be empty", error_code="INVALID_URL")
 
     # Handle npx URLs
     if url.startswith("npx "):
@@ -131,7 +126,7 @@ def parse_mcp_url(url: str) -> Dict[str, Any]:
             raise ServerConfigurationError(
                 detail=f"Invalid HTTP URL format: {str(e)}",
                 error_code="INVALID_HTTP_URL",
-            )
+            ) from e
 
     # Unknown URL format
     else:

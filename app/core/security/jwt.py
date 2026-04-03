@@ -2,14 +2,13 @@
 JWT token utilities
 """
 
-from typing import Optional
 from datetime import timedelta
 
 from app.services.jwt_service import JwtService
 
 
 def create_access_token(
-    data: dict, jwt_service: JwtService, expires_delta: Optional[timedelta] = None
+    data: dict, jwt_service: JwtService, expires_delta: timedelta | None = None
 ) -> str:
     """Create JWT access token using JwtService"""
     return jwt_service.create_access_token(data, expires_delta)

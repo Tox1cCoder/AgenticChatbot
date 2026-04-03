@@ -1,4 +1,3 @@
-from typing import Optional
 import logging
 from uuid import UUID
 
@@ -7,19 +6,19 @@ from sentence_transformers import SentenceTransformer
 
 from app.ai.agents.rag_agent import RAGAgent
 from app.core.config import get_settings
+from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.core.exceptions.validation import FileValidationError
 from app.interfaces.document_service_interface import IDocumentService
 from app.repositories.document import DocumentRepository
-from app.services.document_processing_service import DocumentProcessingService
-from app.utils.validation.document_validation import DocumentValidationUtils
-from app.core.events import get_event_bus, DocumentEvent, DocumentEventData
 from app.schemas.document import (
     DocumentCreate,
-    DocumentResponse,
-    DocumentUpdate,
     DocumentListResponse,
+    DocumentResponse,
     DocumentStatus,
+    DocumentUpdate,
 )
+from app.services.document_processing_service import DocumentProcessingService
+from app.utils.validation.document_validation import DocumentValidationUtils
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +47,7 @@ class DocumentService(IDocumentService):
         document = self.repository.create(document_data)
         return DocumentResponse.model_validate(document)
 
-    async def get_document(self, document_id: UUID) -> Optional[DocumentResponse]:
+    async def get_document(self, document_id: UUID) -> DocumentResponse | None:
         """Get document by ID."""
         document = self.repository.get_by_id(document_id)
         if document:
@@ -57,9 +56,18 @@ class DocumentService(IDocumentService):
 
     async def update_document(
         self, document_id: UUID, document_data: DocumentUpdate
-    ) -> Optional[DocumentResponse]:
+    ) -> DocumentResponse | None:
         """Update document."""
         document = self.repository.update(document_id, document_data)
+        if document:
+            return DocumentResponse.model_validate(document)
+        return None
+
+    async def set_processing_task_id(
+        self, document_id: UUID, task_id: str
+    ) -> DocumentResponse | None:
+        """Persist the background-processing task ID for a document."""
+        document = self.repository.set_processing_task_id(document_id, task_id)
         if document:
             return DocumentResponse.model_validate(document)
         return None
@@ -113,9 +121,7 @@ class DocumentService(IDocumentService):
         self, conversation_id: UUID, page: int = 1, page_size: int = 20
     ) -> DocumentListResponse:
         """Get paginated documents for a conversation."""
-        documents, total = self.repository.get_by_conversation_id(
-            conversation_id, page, page_size
-        )
+        documents, total = self.repository.get_by_conversation_id(conversation_id, page, page_size)
 
         document_responses = [DocumentResponse.model_validate(doc) for doc in documents]
 
@@ -131,7 +137,7 @@ class DocumentService(IDocumentService):
 
     async def update_status(
         self, document_id: UUID, status: DocumentStatus
-    ) -> Optional[DocumentResponse]:
+    ) -> DocumentResponse | None:
         """Update document status."""
         update_data = DocumentUpdate(status=status)
         return await self.update_document(document_id, update_data)
@@ -139,7 +145,7 @@ class DocumentService(IDocumentService):
     async def validate_and_create_document(
         self,
         filename: str,
-        file_content: bytes,
+        file_size: int,
         content_type: str,
         conversation_id: UUID,
     ) -> DocumentResponse:
@@ -149,7 +155,7 @@ class DocumentService(IDocumentService):
             raise FileValidationError(detail="No file provided")
 
         # Use processing service for validation
-        await self.processing_service.validate_upload_file(filename, len(file_content))
+        await self.processing_service.validate_upload_file(filename, file_size)
 
         # Create document record
         document_data = DocumentCreate(

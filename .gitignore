@@ -49,6 +49,7 @@ htmlcov/
 # Build
 build/
 dist/
+.desloppify/
 *.egg-info/
 .eggs/
 WARP.md
@@ -63,3 +64,8 @@ mcp_config.json
 output/
 boring_servers/
 scripts/
+.agent
+.pytest_cache/
+.ruff_cache/
+.streamlit/
+.vscode/
