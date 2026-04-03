@@ -69,3 +69,4 @@ scripts/
 .ruff_cache/
 .streamlit/
 .vscode/
+.claude
