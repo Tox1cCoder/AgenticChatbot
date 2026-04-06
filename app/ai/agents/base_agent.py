@@ -11,13 +11,14 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 
 from ...core.config import settings
 from ...core.runtime_modeling import (
     ResolvedRuntimeModelConfig,
     RuntimeFallbackConfig,
 )
+
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
 from ..client_runtime_tools import get_client_runtime_tools
@@ -29,6 +30,7 @@ from ..hand_off_tool import hand_off as _hand_off_tool
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..prompts import DELEGATION_SUFFIX, TOOL_CONTEXT_SUFFIX, TOOL_EXPLORATION_SUFFIX
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from ..tool_execution import _WIDGET_SESSION_BOUND_TOOLS, _bind_widget_session_args
 from ..skills_tool import create_activate_skill_tool, get_available_skill_summaries
 from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
 from ..utils import (
@@ -41,6 +43,67 @@ logger = logging.getLogger(__name__)
 
 _MODEL_REQUEST_SUPPORTED_AGENT_KEYS = {"chat", "rag", "search", "planning"}
 _OPENAI_REASONING_SUMMARY_DISABLED_USERS: set[str] = set()
+
+# Agents that must NOT receive widget tools.
+# Widgets are for in-chat visual aids on chat/rag/search agents only.
+_WIDGET_TARGET_AGENT_KEYS = {"chat", "rag", "search"}
+_WIDGET_EXCLUDED_AGENT_KEYS = {"canvas", "image_generator", "planning"}
+_WIDGET_TOOL_NAMES = {"widget_create", "widget_update", "widget_get_state", "widget_close", "session_list_widgets"}
+
+
+def _get_effective_tool_allowlist(agent_key: str) -> list[str]:
+    """Return the configured allowlist with widget access preserved for target agents."""
+    allowlist_key = f"{agent_key}_agent_allowed_tools"
+    allowlist = list(getattr(settings, allowlist_key, []) or [])
+    if agent_key in _WIDGET_TARGET_AGENT_KEYS and allowlist and "widgets" not in allowlist:
+        allowlist.append("widgets")
+    return allowlist
+
+
+def _wrap_widget_session_tool(tool: BaseTool, conversation_id: str) -> BaseTool:
+    """Return a tool wrapper that forces widget session-scoped args to the active conversation."""
+
+    async def _dispatch_widget_tool(**kwargs: Any) -> Any:
+        bound_args = _bind_widget_session_args(tool.name, kwargs, conversation_id)
+        return await tool.ainvoke(bound_args)
+
+    structured_tool_kwargs: dict[str, Any] = {
+        "coroutine": _dispatch_widget_tool,
+        "name": tool.name,
+        "description": tool.description or f"Conversation-bound wrapper for {tool.name}",
+        "return_direct": bool(getattr(tool, "return_direct", False)),
+        "metadata": {
+            **(getattr(tool, "metadata", {}) or {}),
+            "conversation_bound_widget_tool": True,
+            "bound_conversation_id": str(conversation_id),
+            "source_tool_name": tool.name,
+        },
+    }
+
+    args_schema = getattr(tool, "args_schema", None)
+    if args_schema is not None:
+        structured_tool_kwargs["args_schema"] = args_schema
+        structured_tool_kwargs["infer_schema"] = False
+
+    return StructuredTool.from_function(**structured_tool_kwargs)
+
+
+def _bind_widget_session_tools(
+    tools: list[BaseTool],
+    conversation_id: str | None,
+) -> list[BaseTool]:
+    """Bind widget tools to the active conversation for every execution path."""
+    if not conversation_id:
+        return tools
+
+    bound_tools: list[BaseTool] = []
+    for tool in tools:
+        tool_name = getattr(tool, "name", "")
+        if tool_name in _WIDGET_SESSION_BOUND_TOOLS:
+            bound_tools.append(_wrap_widget_session_tool(tool, str(conversation_id)))
+        else:
+            bound_tools.append(tool)
+    return bound_tools
 
 
 class BaseAgent(ABC):
@@ -143,13 +206,19 @@ class BaseAgent(ABC):
         - Server names (e.g., "tavily") - matches all tools from that server
 
         If allowlist is empty, all tools are allowed.
-        """
-        # Get agent-specific allowlist from settings
-        allowlist_key = f"{self.agent_config_key}_agent_allowed_tools"
-        allowlist = getattr(settings, allowlist_key, []) or []
 
-        # Empty allowlist means all tools allowed
+        Widget tools are always excluded for agents listed in
+        _WIDGET_EXCLUDED_AGENT_KEYS regardless of allowlist.
+        """
+        exclude_widgets = self.agent_config_key in _WIDGET_EXCLUDED_AGENT_KEYS
+
+        # Get agent-specific allowlist from settings
+        allowlist = _get_effective_tool_allowlist(self.agent_config_key)
+
+        # Empty allowlist means all tools allowed (modulo widget exclusion)
         if not allowlist:
+            if exclude_widgets:
+                return [t for t in tools if getattr(t, "name", "") not in _WIDGET_TOOL_NAMES]
             return tools
 
         # Build set of allowed names
@@ -158,6 +227,10 @@ class BaseAgent(ABC):
         filtered_tools = []
         for tool in tools:
             tool_name = getattr(tool, "name", "")
+
+            # Hard widget exclusion for non-target agents
+            if exclude_widgets and tool_name in _WIDGET_TOOL_NAMES:
+                continue
 
             # Check if tool name is directly in allowlist
             if tool_name in allowed_set:
@@ -184,8 +257,7 @@ class BaseAgent(ABC):
 
     def _get_allowlist(self) -> list[str] | None:
         """Get the per-agent tool allowlist from settings."""
-        allowlist_key = f"{self.agent_config_key}_agent_allowed_tools"
-        return getattr(settings, allowlist_key, []) or []
+        return _get_effective_tool_allowlist(self.agent_config_key)
 
     def _get_skills_internal_tools(
         self,
@@ -290,7 +362,7 @@ class BaseAgent(ABC):
                 tools.append(tool)
                 seen_names.add(tool.name)
 
-        return tools
+        return _bind_widget_session_tools(tools, conversation_id)
 
     def _resolve_model_request(self, model_request: dict[str, Any] | None) -> dict[str, Any] | None:
         if self.agent_config_key not in _MODEL_REQUEST_SUPPORTED_AGENT_KEYS:

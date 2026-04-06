@@ -39,7 +39,7 @@ logging.getLogger("langchain_google_genai._function_utils").setLevel(logging.ERR
 class MCPManager:
     """Manages MCP server connections and tool loading"""
 
-    DEFAULT_SERVERS = {"calculator", "tavily", "time"}
+    DEFAULT_SERVERS = {"calculator", "tavily", "time", "widgets"}
 
     def __init__(self, config_path: str | None = None):
         """

@@ -7,7 +7,9 @@ import re
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 
 import markdown as _markdown  # type: ignore
@@ -21,8 +23,12 @@ from app.services.stream_events import infer_tool_state, normalize_tool_phase
 from upload_support import delete_document, get_uploaded_documents, upload_document
 
 API_BASE_URL = os.environ.get("CHATBOT_API_BASE_URL", "http://127.0.0.1:8000")
+WIDGET_WS_BASE_URL = os.environ.get("CHATBOT_WIDGET_WS_BASE_URL", "").rstrip("/")
 REQUEST_TIMEOUT = (5, 30)
 STREAM_REQUEST_TIMEOUT = (10, 900)
+LIVE_WIDGET_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent / "app" / "static" / "live_widget_component.html"
+)
 
 _MAX_PERSONA_LENGTH = 8000
 _MAX_IMAGE_ATTACHMENTS = 4
@@ -1268,6 +1274,7 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "planning_generate_input": str,
     "planning_manual_input": str,
     "api_cache_version": lambda: 0,
+    "live_widget_mounts": dict,
     # localStorage bridge
     "_ls_op": lambda: None,
 }
@@ -2905,6 +2912,1323 @@ def render_canvas_artifact(message_metadata: dict):
         st.code(content, language=language)
 
 
+def _widget_component_json(value: Any) -> str:
+    return (
+        json.dumps(value, ensure_ascii=False)
+        .replace("</", "<\\/")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
+def _legacy_build_live_widget_component_html(
+    widget: dict[str, Any], auth_token: str | None
+) -> str:
+    widget_id = str(widget.get("widget_id") or "")
+    config = {
+        "widget": {
+            "widget_id": widget_id,
+            "widget_type": str(widget.get("widget_type") or "widget"),
+            "title": widget.get("title"),
+            "status": str(widget.get("status") or "active"),
+            "version": widget.get("version", 1),
+            "connection_endpoint": str(
+                widget.get("connection_endpoint") or f"/widgets/{widget_id}/connection"
+            ),
+        },
+        "apiBaseUrl": API_BASE_URL.rstrip("/"),
+        "widgetWsBaseUrl": WIDGET_WS_BASE_URL,
+        "authToken": auth_token or "",
+    }
+
+    template = """
+    <style>
+      :root{color-scheme:light}
+      *{box-sizing:border-box}
+      html,body{margin:0;height:100%;overflow:hidden}
+      body{padding:8px;background:radial-gradient(circle at top left,rgba(14,165,233,.12),transparent 34%),radial-gradient(circle at bottom right,rgba(37,99,235,.1),transparent 28%),linear-gradient(180deg,#f8fbff 0%,#eef4ff 100%);font-family:"Segoe UI","Inter",-apple-system,BlinkMacSystemFont,sans-serif;color:#0f172a}
+      .lw-card{height:100%;display:flex;flex-direction:column;border:1px solid rgba(148,163,184,.24);border-radius:22px;background:linear-gradient(180deg,rgba(255,255,255,.98),rgba(248,250,252,.96));box-shadow:0 24px 56px rgba(15,23,42,.12);overflow:hidden}
+      .lw-head{display:flex;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid #e2e8f0;background:radial-gradient(circle at top right,rgba(14,165,233,.18),transparent 40%),linear-gradient(135deg,rgba(239,246,255,.96),rgba(255,255,255,.98))}
+      .lw-kicker{font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#0284c7;margin-bottom:6px}
+      .lw-title{font-size:20px;font-weight:800;color:#0f172a;line-height:1.15}
+      .lw-sub{margin-top:7px;font-size:12px;color:#64748b}
+      .lw-badge,.lw-pill{display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border-radius:999px;font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase}
+      .lw-badge{white-space:nowrap;align-self:flex-start}
+      .lw-badge[data-state="active"]{background:rgba(16,185,129,.14);color:#047857}
+      .lw-badge[data-state="closed"]{background:rgba(148,163,184,.18);color:#475569}
+      .lw-meta{display:flex;flex-wrap:wrap;gap:10px;padding:14px 20px 0}
+      .lw-pill{background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8}
+      .lw-pill[data-conn="connected"]{background:#ecfdf5;border-color:#a7f3d0;color:#047857}
+      .lw-pill[data-conn="connecting"],.lw-pill[data-conn="reconnecting"]{background:#fff7ed;border-color:#fed7aa;color:#c2410c}
+      .lw-pill[data-conn="error"],.lw-pill[data-conn="disconnected"],.lw-pill[data-conn="auth"]{background:#fef2f2;border-color:#fecaca;color:#b91c1c}
+      .lw-error{margin:14px 20px 0;padding:12px 14px;border-radius:14px;background:#fff1f2;border:1px solid #fecdd3;color:#9f1239;font-size:13px}
+      .lw-body{flex:1;min-height:0;overflow:auto;padding:18px 20px 22px;background:linear-gradient(180deg,rgba(255,255,255,.78),rgba(241,245,249,.86));scrollbar-gutter:stable}
+      .lw-body::-webkit-scrollbar{width:10px}
+      .lw-body::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:999px}
+      .lw-empty{display:flex;align-items:center;justify-content:center;min-height:220px;border:1px dashed #bfdbfe;border-radius:18px;color:#475569;background:linear-gradient(180deg,rgba(255,255,255,.98),rgba(239,246,255,.72));padding:22px;text-align:center}
+      .lw-table-wrap{overflow:auto;border:1px solid #dbeafe;border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.98),rgba(248,250,252,.96))}
+      .lw-table{width:100%;border-collapse:separate;border-spacing:0}
+      .lw-table th,.lw-table td{padding:13px 15px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top;font-size:13px}
+      .lw-table th{position:sticky;top:0;background:rgba(248,250,252,.96);backdrop-filter:blur(10px);color:#0f172a;font-weight:800;z-index:1}
+      .lw-table tbody tr:nth-child(even) td{background:rgba(248,250,252,.66)}
+      .lw-table tr:last-child td{border-bottom:none}
+      .lw-list{display:grid;gap:12px}
+      .lw-item{border:1px solid #dbeafe;border-radius:16px;padding:14px 15px;background:linear-gradient(180deg,rgba(255,255,255,.98),rgba(248,250,252,.92));box-shadow:0 8px 24px rgba(59,130,246,.08)}
+      .lw-item[data-clickable="true"]{cursor:pointer;transition:border-color .15s ease,transform .15s ease,box-shadow .15s ease}
+      .lw-item[data-clickable="true"]:hover{border-color:#60a5fa;transform:translateY(-1px);box-shadow:0 12px 28px rgba(37,99,235,.14)}
+      .lw-item[data-selected="true"]{border-color:#3b82f6;background:linear-gradient(180deg,rgba(239,246,255,.96),#fff)}
+      .lw-item-title{font-size:14px;font-weight:800;color:#0f172a}
+      .lw-item-desc{margin-top:7px;font-size:12px;color:#64748b;line-height:1.55}
+      .lw-form{display:grid;gap:16px}
+      .lw-field{display:grid;gap:8px}
+      .lw-field label{font-size:13px;font-weight:700;color:#0f172a}
+      .lw-field input,.lw-field select,.lw-field textarea{width:100%;border:1px solid #cbd5e1;border-radius:14px;padding:11px 12px;background:#fff;color:#0f172a;font:inherit;box-shadow:inset 0 1px 0 rgba(255,255,255,.7)}
+      .lw-field textarea{min-height:120px;resize:vertical}
+      .lw-field-help,.lw-note{font-size:12px;color:#64748b;line-height:1.5}
+      .lw-check{display:flex;align-items:center;gap:10px}
+      .lw-chart,.lw-panel,.lw-metric{border:1px solid #dbeafe;border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.98),rgba(248,250,252,.95));box-shadow:0 16px 30px rgba(37,99,235,.08)}
+      .lw-chart{padding:16px}
+      .lw-chart-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}
+      .lw-chart-type{display:inline-flex;padding:5px 9px;border-radius:999px;background:#eff6ff;color:#1d4ed8;font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}
+      .lw-chart-title{font-size:14px;font-weight:800;color:#0f172a}
+      .lw-chart-sub{margin-top:6px;font-size:12px;color:#64748b}
+      .lw-chart-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin:0 0 16px}
+      .lw-stat{padding:12px 13px;border-radius:16px;background:linear-gradient(180deg,rgba(239,246,255,.92),rgba(255,255,255,.96));border:1px solid rgba(191,219,254,.9)}
+      .lw-stat-label{font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.04em}
+      .lw-stat-value{margin-top:6px;font-size:20px;font-weight:800;color:#0f172a}
+      .lw-legend{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 14px}
+      .lw-legend-item{display:inline-flex;align-items:center;gap:7px;color:#334155;font-size:12px;font-weight:600}
+      .lw-dot{width:10px;height:10px;border-radius:999px;box-shadow:0 0 0 3px rgba(255,255,255,.7)}
+      .lw-chart-surface{padding:12px;border-radius:16px;background:linear-gradient(180deg,rgba(248,250,252,.98),rgba(239,246,255,.86));border:1px solid rgba(219,234,254,.95)}
+      .lw-html-shell{display:grid;gap:12px}
+      .lw-html-caption{font-size:12px;color:#475569;line-height:1.55}
+      .lw-html-frame{width:100%;border:none;border-radius:18px;background:#fff;box-shadow:0 18px 30px rgba(15,23,42,.08)}
+      .lw-chart-svg{display:block;width:100%;height:auto}
+      .lw-grid-line{stroke:#dbeafe;stroke-dasharray:4 6}
+      .lw-axis-line{stroke:#cbd5e1}
+      .lw-axis-text{fill:#64748b;font-size:11px;font-weight:600}
+      .lw-line-path{fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+      .lw-area-path{opacity:.14}
+      .lw-point{stroke:#fff;stroke-width:2}
+      .lw-donut{display:grid;grid-template-columns:minmax(180px,240px) minmax(0,1fr);gap:20px;align-items:center}
+      .lw-ring{position:relative;aspect-ratio:1;border-radius:999px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.8),0 18px 30px rgba(15,23,42,.08)}
+      .lw-ring-hole{position:absolute;inset:22%;display:flex;flex-direction:column;align-items:center;justify-content:center;border-radius:999px;background:linear-gradient(180deg,#fff,#eff6ff);border:1px solid rgba(219,234,254,.9);text-align:center}
+      .lw-ring-hole strong{font-size:24px;font-weight:800;color:#0f172a}
+      .lw-ring-hole span{margin-top:4px;font-size:12px;color:#64748b}
+      .lw-donut-legend{display:grid;gap:10px}
+      .lw-donut-item{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:10px;padding:10px 12px;border-radius:14px;background:rgba(255,255,255,.78);border:1px solid rgba(226,232,240,.92)}
+      .lw-donut-value{font-size:12px;font-weight:700;color:#0f172a}
+      .lw-donut-share{font-size:11px;color:#64748b}
+      .lw-dash{display:grid;gap:16px}
+      .lw-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+      .lw-metric,.lw-panel{padding:15px}
+      .lw-metric-title{font-size:12px;color:#64748b;margin-bottom:8px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+      .lw-metric-value{font-size:28px;font-weight:800;color:#0f172a}
+      .lw-metric-delta{margin-top:8px;font-size:12px;color:#2563eb}
+      .lw-panel-title{font-size:14px;font-weight:800;color:#0f172a;margin-bottom:12px}
+      .lw-fallback{display:grid;gap:12px}
+      .lw-json{margin:0;padding:14px;border-radius:14px;background:#0f172a;color:#e2e8f0;font-size:12px;line-height:1.55;overflow:auto;white-space:pre-wrap;word-break:break-word}
+      .lw-raw{border:1px dashed #cbd5e1;border-radius:14px;background:rgba(248,250,252,.82);padding:12px}
+      .lw-raw summary{cursor:pointer;font-size:12px;font-weight:700;color:#475569}
+      .lw-muted{color:#94a3b8}
+      .lw-controls{display:grid;gap:12px;margin:0 0 14px;padding:14px;border:1px solid #dbeafe;border-radius:18px;background:linear-gradient(180deg,rgba(255,255,255,.98),rgba(239,246,255,.72));box-shadow:0 14px 28px rgba(37,99,235,.08)}
+      .lw-controls-head,.lw-table-toolbar,.lw-chart-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+      .lw-controls-title{font-size:12px;font-weight:800;color:#1d4ed8;letter-spacing:.08em;text-transform:uppercase}
+      .lw-chip-wrap{display:flex;gap:8px;flex-wrap:wrap}
+      .lw-chip{display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:#dbeafe;color:#1e3a8a;font-size:11px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
+      .lw-control-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+      .lw-control{display:grid;gap:7px}
+      .lw-control label{font-size:12px;font-weight:700;color:#0f172a}
+      .lw-control select,.lw-control input{width:100%;border:1px solid #cbd5e1;border-radius:12px;padding:10px 11px;background:#fff;color:#0f172a;font:inherit}
+      .lw-segment{display:flex;flex-wrap:wrap;gap:8px}
+      .lw-segment button,.lw-legend-item-button,.lw-sort-button{border:1px solid #bfdbfe;background:#eff6ff;color:#1d4ed8;border-radius:999px;padding:8px 11px;font:inherit;font-size:12px;font-weight:700;cursor:pointer;transition:transform .15s ease,box-shadow .15s ease}
+      .lw-segment button[data-active="true"]{background:linear-gradient(135deg,#1d4ed8,#2563eb);color:#fff;border-color:transparent;box-shadow:0 10px 24px rgba(37,99,235,.22)}
+      .lw-segment button:disabled,.lw-legend-item-button:disabled,.lw-sort-button:disabled{opacity:.55;cursor:not-allowed;transform:none;box-shadow:none}
+      .lw-legend-item-button{display:inline-flex;align-items:center;gap:7px;background:#fff;border-color:#dbeafe;color:#1e3a8a}
+      .lw-legend-item-button[data-hidden="true"]{opacity:.55;text-decoration:line-through}
+      .lw-search{display:flex;align-items:center;gap:8px;min-width:min(100%,280px);padding:10px 12px;border-radius:14px;border:1px solid #dbeafe;background:rgba(255,255,255,.92)}
+      .lw-search input{border:none;outline:none;flex:1;min-width:0;background:transparent;padding:0}
+      .lw-meta-note{font-size:12px;color:#64748b;font-weight:600}
+      .lw-sort-button{width:100%;display:inline-flex;align-items:center;justify-content:space-between;gap:10px;padding:0;border:none;background:transparent;color:inherit;border-radius:0}
+      .lw-sort-button[data-active="true"]{color:#1d4ed8}
+      @media (max-width:760px){.lw-head{flex-direction:column;align-items:stretch}.lw-donut{grid-template-columns:1fr}.lw-ring{max-width:240px;justify-self:center}}
+    </style>
+    <div class="lw-card">
+      <div class="lw-head">
+        <div>
+          <div class="lw-kicker">Live Widget</div>
+          <div class="lw-title" id="lw-title"></div>
+          <div class="lw-sub" id="lw-sub"></div>
+        </div>
+        <div class="lw-badge" id="lw-status" data-state="active"></div>
+      </div>
+      <div class="lw-meta">
+        <div class="lw-pill" id="lw-conn" data-conn="connecting"></div>
+        <div class="lw-pill" id="lw-version"></div>
+      </div>
+      <div class="lw-error" id="lw-error" hidden></div>
+      <div class="lw-body" id="lw-body"><div class="lw-empty">Connecting widget…</div></div>
+    </div>
+    <script>
+    (() => {
+      const cfg = __CFG__;
+      const palette = ["#2563eb","#0f766e","#ea580c","#7c3aed","#dc2626","#0891b2"];
+      const el = {
+        title: document.getElementById("lw-title"),
+        sub: document.getElementById("lw-sub"),
+        status: document.getElementById("lw-status"),
+        conn: document.getElementById("lw-conn"),
+        version: document.getElementById("lw-version"),
+        error: document.getElementById("lw-error"),
+        body: document.getElementById("lw-body"),
+      };
+      const state = {
+        data: null,
+        status: String(cfg.widget.status || "active"),
+        version: Number(cfg.widget.version || 0),
+        conn: "connecting",
+      };
+      let ws = null;
+      let reconnectTimer = null;
+      let reconnectCount = 0;
+      let patchTimer = null;
+      let pendingPatch = null;
+      let destroyed = false;
+      function isObj(v){return !!v && typeof v === "object" && !Array.isArray(v);}
+      function esc(v){return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));}
+      function label(v){return (String(v ?? "").replace(/[_-]+/g," ").replace(/\\s+/g," ").trim().replace(/\\b\\w/g, (m) => m.toUpperCase())) || "Widget";}
+      function numeric(v){const n = Number(v); return Number.isFinite(n) ? n : null;}
+      function formatNumber(value){
+        const n = numeric(value);
+        if(n === null) return String(value ?? "-");
+        const abs = Math.abs(n);
+        const digits = abs >= 100 ? 0 : abs >= 10 ? 1 : 2;
+        return new Intl.NumberFormat(undefined, {maximumFractionDigits: digits}).format(n);
+      }
+      function truncateText(value, maxLength = 18){
+        const text = String(value ?? "");
+        return text.length > maxLength ? `${text.slice(0, Math.max(1, maxLength - 1))}…` : text;
+      }
+      function colorWithAlpha(color, alpha){
+        const raw = String(color || "").trim();
+        const hex = raw.startsWith("#") ? raw.slice(1) : raw;
+        if(/^[0-9a-fA-F]{3}$/.test(hex)){
+          const chars = hex.split("");
+          const [r, g, b] = chars.map((item) => parseInt(item + item, 16));
+          return `rgba(${r},${g},${b},${alpha})`;
+        }
+        if(/^[0-9a-fA-F]{6}$/.test(hex)){
+          const r = parseInt(hex.slice(0, 2), 16);
+          const g = parseInt(hex.slice(2, 4), 16);
+          const b = parseInt(hex.slice(4, 6), 16);
+          return `rgba(${r},${g},${b},${alpha})`;
+        }
+        return raw || `rgba(37,99,235,${alpha})`;
+      }
+      function val(v){if(v === null || v === undefined || v === "") return '<span class="lw-muted">-</span>'; if(typeof v === "object") return `<code>${esc(JSON.stringify(v))}</code>`; return esc(typeof v === "number" ? formatNumber(v) : v);}
+      function resize(){document.body.style.margin="0";}
+      function showError(msg){el.error.hidden=!msg;el.error.textContent=msg || "";resize();}
+      function inputValue(target, type){
+        if(type === "checkbox") return Boolean(target.checked);
+        if(type === "number" || type === "range"){
+          const raw = String(target.value ?? "").trim();
+          return raw === "" ? null : Number(raw);
+        }
+        return target.value;
+      }
+      function meta(){
+        const widgetType = label(cfg.widget.widget_type);
+        el.title.textContent = cfg.widget.title || widgetType;
+        el.sub.textContent = `${widgetType} · ${cfg.widget.widget_id || "pending"}`;
+        el.status.textContent = state.status;
+        el.status.dataset.state = state.status;
+        el.version.textContent = `Version ${state.version || 0}`;
+        const connLabel = {connected:"Connected",connecting:"Connecting",reconnecting:"Reconnecting",disconnected:"Disconnected",error:"Connection Error",auth:"Sign In Required"}[state.conn] || "Connecting";
+        el.conn.textContent = connLabel;
+        el.conn.dataset.conn = state.conn;
+      }
+      function renderJson(data){return `<pre class="lw-json">${esc(JSON.stringify(data, null, 2))}</pre>`;}
+      function renderRawDisclosure(data){return `<details class="lw-raw"><summary>Inspect raw data</summary>${renderJson(data)}</details>`;}
+      function normalizeOption(option, index){
+        if(isObj(option)){
+          const value = option.value ?? option.id ?? option.key ?? option.label ?? `${index}`;
+          return {value: String(value), label: String(option.label ?? option.title ?? option.name ?? value)};
+        }
+        return {value: String(option ?? index), label: String(option ?? index)};
+      }
+      function deepClone(value){
+        if(Array.isArray(value)) return value.map((item) => deepClone(item));
+        if(isObj(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, deepClone(item)]));
+        return value;
+      }
+      function deepMerge(base, override){
+        if(!isObj(base) || !isObj(override)) return deepClone(override);
+        const merged = deepClone(base);
+        Object.entries(override).forEach(([key, value]) => {
+          merged[key] = isObj(value) && isObj(merged[key]) ? deepMerge(merged[key], value) : deepClone(value);
+        });
+        return merged;
+      }
+      function normalizeControls(data){
+        if(!isObj(data) || !Array.isArray(data.controls)) return [];
+        return data.controls.filter((item) => isObj(item)).map((control, index) => ({
+          key: String(control.key || control.id || control.name || `control_${index}`),
+          label: String(control.label || control.title || label(control.key || control.id || control.name || `Control ${index + 1}`)),
+          type: String(control.type || "select").toLowerCase(),
+          options: Array.isArray(control.options) ? control.options.map(normalizeOption) : [],
+          min: numeric(control.min),
+          max: numeric(control.max),
+          step: numeric(control.step),
+          help: String(control.help || control.helpText || control.description || ""),
+          value: control.value,
+          defaultValue: control.default,
+        }));
+      }
+      function getControlValues(data, controls){
+        const explicit = isObj(data.control_values) ? data.control_values : isObj(data.args) ? data.args : {};
+        const values = {...explicit};
+        controls.forEach((control) => {
+          if(values[control.key] !== undefined) return;
+          if(control.value !== undefined) values[control.key] = control.value;
+          else if(control.defaultValue !== undefined) values[control.key] = control.defaultValue;
+          else if(control.options[0]) values[control.key] = control.options[0].value;
+          else if(control.type === "checkbox" || control.type === "toggle") values[control.key] = false;
+        });
+        return values;
+      }
+      function applyControlValues(data, controlValues){
+        const next = isObj(data) ? {...data} : {};
+        next.control_values = {...controlValues};
+        next.args = {...controlValues};
+        if(Array.isArray(next.controls)){
+          next.controls = next.controls.map((control, index) => {
+            const key = String(control.key || control.id || control.name || `control_${index}`);
+            return {...control, value: controlValues[key]};
+          });
+        }
+        return next;
+      }
+      function parseControlSelector(raw){
+        const result = {};
+        String(raw || "").replace(/[|,]+/g, "&").split("&").forEach((pair) => {
+          const [key, ...rest] = pair.split("=");
+          const safeKey = String(key || "").trim();
+          if(!safeKey) return;
+          result[safeKey] = rest.join("=").trim();
+        });
+        return result;
+      }
+      function matchesControlValues(expected, actual){
+        return isObj(expected) && Object.entries(expected).every(([key, value]) => String(actual[key]) === String(value));
+      }
+      function resolveInteractiveData(data){
+        if(!isObj(data)) return {payload: data, controls: [], controlValues: {}};
+        const controls = normalizeControls(data);
+        const controlValues = getControlValues(data, controls);
+        let variantState = null;
+        if(isObj(data.views)){
+          const encoded = Object.keys(controlValues).sort().map((key) => `${key}=${String(controlValues[key])}`).join("&");
+          variantState = data.views[encoded] || null;
+          if(!variantState && controls.length === 1) variantState = data.views[String(controlValues[controls[0].key])] || null;
+          if(!variantState){
+            Object.entries(data.views).some(([key, value]) => {
+              if(key === "default" || key === "__default") return false;
+              if(matchesControlValues(parseControlSelector(key), controlValues)){
+                variantState = value;
+                return true;
+              }
+              return false;
+            });
+          }
+          if(!variantState) variantState = data.views.default || data.views.__default || null;
+        }
+        if(!variantState && Array.isArray(data.variants)){
+          data.variants.some((variant) => {
+            if(!isObj(variant)) return false;
+            const expected = variant.match || variant.when || variant.args;
+            if(!matchesControlValues(expected, controlValues)) return false;
+            variantState = variant.state || variant.view || variant.data || variant.payload || null;
+            return Boolean(variantState);
+          });
+        }
+        const base = deepClone(data);
+        delete base.views;
+        delete base.variants;
+        delete base.default_view;
+        return {payload: variantState && isObj(variantState) ? deepMerge(base, variantState) : base, controls, controlValues};
+      }
+      function renderControls(controls, controlValues, readOnly){
+        if(!controls.length) return "";
+        const chips = Object.entries(controlValues || {}).map(([key, value]) => `<span class="lw-chip">${esc(label(key))}: ${esc(typeof value === "number" ? formatNumber(value) : value)}</span>`).join("");
+        const items = controls.map((control) => {
+          const currentValue = controlValues[control.key];
+          const disabled = readOnly ? " disabled" : "";
+          if(control.type === "segmented" || control.type === "radio" || control.type === "pill"){
+            return `<div class="lw-control"><label>${esc(control.label)}</label><div class="lw-segment">${control.options.map((option) => `<button type="button" data-control-option="true" data-control-key="${esc(control.key)}" data-control-value="${esc(option.value)}" data-active="${String(option.value) === String(currentValue)}"${disabled}>${esc(option.label)}</button>`).join("")}</div>${control.help ? `<div class="lw-note">${esc(control.help)}</div>` : ""}</div>`;
+          }
+          if(control.type === "checkbox" || control.type === "toggle"){
+            return `<div class="lw-control"><label>${esc(control.label)}</label><label class="lw-check"><input type="checkbox" data-control-key="${esc(control.key)}" data-control-type="checkbox"${currentValue ? " checked" : ""}${disabled}><span>${esc(control.help || "Enabled")}</span></label></div>`;
+          }
+          if(control.type === "range" || control.type === "slider"){
+            const min = control.min ?? 0;
+            const max = control.max ?? 100;
+            const step = control.step ?? 1;
+            const value = numeric(currentValue) ?? min;
+            return `<div class="lw-control"><label>${esc(control.label)} · ${esc(formatNumber(value))}</label><input type="range" min="${esc(min)}" max="${esc(max)}" step="${esc(step)}" value="${esc(value)}" data-control-key="${esc(control.key)}" data-control-type="range"${disabled}>${control.help ? `<div class="lw-note">${esc(control.help)}</div>` : ""}</div>`;
+          }
+          if(control.options.length){
+            return `<div class="lw-control"><label>${esc(control.label)}</label><select data-control-key="${esc(control.key)}" data-control-type="select"${disabled}>${control.options.map((option) => `<option value="${esc(option.value)}"${String(option.value) === String(currentValue) ? " selected" : ""}>${esc(option.label)}</option>`).join("")}</select>${control.help ? `<div class="lw-note">${esc(control.help)}</div>` : ""}</div>`;
+          }
+          return `<div class="lw-control"><label>${esc(control.label)}</label><input type="${esc(control.type === "number" ? "number" : "text")}" value="${esc(currentValue ?? "")}" data-control-key="${esc(control.key)}" data-control-type="${esc(control.type === "number" ? "number" : "text")}"${disabled}>${control.help ? `<div class="lw-note">${esc(control.help)}</div>` : ""}</div>`;
+        }).join("");
+        return `<div class="lw-controls"><div class="lw-controls-head"><div class="lw-controls-title">Interactive Controls</div>${chips ? `<div class="lw-chip-wrap">${chips}</div>` : ""}</div><div class="lw-control-grid">${items}</div></div>`;
+      }
+      function tableUi(data){
+        return isObj(data.table_ui) ? data.table_ui : {};
+      }
+      function chartUi(data){
+        return isObj(data.chart_ui) ? data.chart_ui : {};
+      }
+      function queuePatch(patch, delay = 150){
+        if(!patch || state.status === "closed") return;
+        const basePatch = isObj(pendingPatch) ? pendingPatch : {};
+        pendingPatch = {...basePatch, ...patch};
+        window.clearTimeout(patchTimer);
+        patchTimer = window.setTimeout(() => {
+          const payload = pendingPatch;
+          pendingPatch = null;
+          sendPatch(payload);
+        }, Math.max(0, delay));
+      }
+      function setTableUi(patch){
+        const base = isObj(state.data) ? state.data : {};
+        const nextTableUi = {...tableUi(base), ...patch};
+        state.data = {...base, table_ui: nextTableUi};
+        renderBody();
+        queuePatch({table_ui: nextTableUi});
+      }
+      function setChartUi(patch, delay = 120){
+        const base = isObj(state.data) ? state.data : {};
+        const nextChartUi = {...chartUi(base), ...patch};
+        state.data = {...base, chart_ui: nextChartUi};
+        renderBody();
+        queuePatch({chart_ui: nextChartUi}, delay);
+      }
+      function setControlValue(key, value, delay = 150){
+        const base = isObj(state.data) ? state.data : {};
+        const controls = normalizeControls(base);
+        if(!controls.length) return;
+        const nextValues = {...getControlValues(base, controls), [key]: value};
+        const next = applyControlValues(base, nextValues);
+        state.data = next;
+        renderBody();
+        const patch = {
+          control_values: next.control_values || {},
+          args: next.args || {},
+        };
+        if(Array.isArray(next.controls)) patch.controls = next.controls;
+        queuePatch(patch, delay);
+      }
+      function toggleChartSeries(seriesLabel){
+        const base = isObj(state.data) ? state.data : {};
+        const currentHidden = Array.isArray(chartUi(base).hidden_series) ? chartUi(base).hidden_series.map((item) => String(item)) : [];
+        const nextHidden = currentHidden.includes(seriesLabel)
+          ? currentHidden.filter((item) => item !== seriesLabel)
+          : [...currentHidden, seriesLabel];
+        setChartUi({hidden_series: nextHidden});
+      }
+      function normColumns(data){
+        let raw = Array.isArray(data.columns) ? data.columns : Array.isArray(data.cols) ? data.cols : [];
+        if(!raw.length && Array.isArray(data.rows) && data.rows[0] && isObj(data.rows[0])) raw = Object.keys(data.rows[0]);
+        if(!raw.length && Array.isArray(data.rows) && Array.isArray(data.rows[0])) raw = Array.from({length: data.rows[0].length}, (_, idx) => `column_${idx + 1}`);
+        if(!raw.length) raw = ["value"];
+        return raw.map((col, i) => typeof col === "string" ? {key: col, label: label(col)} : {key: String(col.key || col.id || col.name || col.label || `column_${i}`), label: String(col.label || col.title || col.name || col.key || `Column ${i + 1}`)});
+      }
+      function normRows(data, columns){
+        const rows = Array.isArray(data.rows) ? data.rows : [];
+        return rows.map((row) => {
+          if(Array.isArray(row)){const mapped={};columns.forEach((col, idx) => mapped[col.key]=row[idx]);return mapped;}
+          if(isObj(row)) return row;
+          return {value: row};
+        });
+      }
+      function renderTable(data, readOnly = false){
+        const columns = normColumns(data);
+        const rows = normRows(data, columns);
+        if(!rows.length) return '<div class="lw-empty">No table rows available yet.</div>';
+        const ui = tableUi(data);
+        const disabled = readOnly ? " disabled" : "";
+        const query = String(ui.query || "").trim().toLowerCase();
+        let filteredRows = rows.filter((row) => !query || columns.some((col) => String(row[col.key] ?? "").toLowerCase().includes(query)));
+        const sortKey = String(ui.sort_by || "");
+        const sortDirection = String(ui.sort_dir || "asc");
+        if(sortKey){
+          filteredRows = [...filteredRows].sort((left, right) => {
+            const leftValue = left[sortKey];
+            const rightValue = right[sortKey];
+            const leftNumeric = numeric(leftValue);
+            const rightNumeric = numeric(rightValue);
+            let comparison = 0;
+            if(leftNumeric !== null && rightNumeric !== null) comparison = leftNumeric - rightNumeric;
+            else comparison = String(leftValue ?? "").localeCompare(String(rightValue ?? ""), undefined, {numeric: true, sensitivity: "base"});
+            return sortDirection === "desc" ? comparison * -1 : comparison;
+          });
+        }
+        const head = columns.map((col) => {
+          const active = sortKey === col.key;
+          const symbol = active ? (sortDirection === "desc" ? "↓" : "↑") : "↕";
+          return `<th><button type="button" class="lw-sort-button" data-sort-key="${esc(col.key)}" data-active="${active}"${disabled}><span>${esc(col.label)}</span><span>${esc(symbol)}</span></button></th>`;
+        }).join("");
+        const body = filteredRows.map((row) => `<tr>${columns.map((col) => `<td>${val(row[col.key])}</td>`).join("")}</tr>`).join("");
+        return `<div class="lw-table-shell"><div class="lw-table-toolbar"><label class="lw-search"><span>Search</span><input type="text" value="${esc(ui.query || "")}" data-table-search="true" placeholder="Filter rows"${disabled}></label><div class="lw-meta-note">${esc(filteredRows.length)} / ${esc(rows.length)} rows</div></div><div class="lw-table-wrap"><table class="lw-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div></div>`;
+      }
+      function renderList(data, readOnly){
+        const items = Array.isArray(data.items) ? data.items : Array.isArray(data.options) ? data.options : [];
+        if(!items.length) return '<div class="lw-empty">No list items available yet.</div>';
+        return `<div class="lw-list">${items.map((item, i) => {
+          const x = isObj(item) ? item : {label: item};
+          const key = String(x.id ?? x.key ?? x.value ?? i);
+          const selected = String(data.selection ?? "") === key;
+          const title = String(x.label ?? x.title ?? x.name ?? x.value ?? `Item ${i + 1}`);
+          const desc = x.description ?? x.subtitle ?? x.summary ?? "";
+          const click = readOnly ? "" : ` data-action="select" data-selection="${esc(key)}"`;
+          return `<div class="lw-item" data-clickable="${!readOnly}" data-selected="${selected}"${click}><div class="lw-item-title">${esc(title)}</div>${desc ? `<div class="lw-item-desc">${esc(desc)}</div>` : ""}</div>`;
+        }).join("")}</div>`;
+      }
+      function normFields(data){
+        if(Array.isArray(data.fields) && data.fields.length) return data.fields.filter((field) => isObj(field));
+        if(isObj(data.values)) return Object.keys(data.values).map((key) => ({ key, label: label(key), type: typeof data.values[key] === "boolean" ? "checkbox" : typeof data.values[key] === "number" ? "number" : "text" }));
+        return [];
+      }
+      function renderForm(data, readOnly){
+        const fields = normFields(data);
+        const values = isObj(data.values) ? data.values : {};
+        if(!fields.length) return '<div class="lw-empty">No form fields available yet.</div>';
+        return `<div class="lw-form">${fields.map((field) => {
+          const key = String(field.key || field.id || field.name || "");
+          if(!key) return "";
+          const title = String(field.label || field.title || label(key));
+          const help = field.help_text || field.helpText || field.description || "";
+          const type = String(field.type || "text").toLowerCase();
+          const value = values[key];
+          const disabled = readOnly ? " disabled" : "";
+          if(type === "checkbox" || type === "boolean"){
+            return `<div class="lw-field"><label>${esc(title)}</label><label class="lw-check"><input type="checkbox" data-field-key="${esc(key)}" data-field-type="checkbox"${value ? " checked" : ""}${disabled}><span>${esc(help || "Toggle")}</span></label>${readOnly ? '<div class="lw-note">Read-only because the widget is closed.</div>' : ""}</div>`;
+          }
+          if(type === "select"){
+            const options = Array.isArray(field.options) ? field.options : [];
+            const optionsHtml = options.map((option) => {
+              const item = isObj(option) ? option : {value: option, label: option};
+              const optionValue = String(item.value ?? item.id ?? item.label ?? "");
+              const optionLabel = String(item.label ?? item.title ?? optionValue);
+              return `<option value="${esc(optionValue)}"${String(value ?? "") === optionValue ? " selected" : ""}>${esc(optionLabel)}</option>`;
+            }).join("");
+            return `<div class="lw-field"><label>${esc(title)}</label><select data-field-key="${esc(key)}" data-field-type="select"${disabled}>${optionsHtml}</select>${help ? `<div class="lw-field-help">${esc(help)}</div>` : ""}${readOnly ? '<div class="lw-note">Read-only because the widget is closed.</div>' : ""}</div>`;
+          }
+          if(type === "textarea"){
+            return `<div class="lw-field"><label>${esc(title)}</label><textarea data-field-key="${esc(key)}" data-field-type="textarea"${disabled}>${esc(value ?? "")}</textarea>${help ? `<div class="lw-field-help">${esc(help)}</div>` : ""}${readOnly ? '<div class="lw-note">Read-only because the widget is closed.</div>' : ""}</div>`;
+          }
+          const inputType = type === "number" ? "number" : "text";
+          return `<div class="lw-field"><label>${esc(title)}</label><input type="${esc(inputType)}" value="${esc(value ?? "")}" data-field-key="${esc(key)}" data-field-type="${esc(inputType)}"${disabled}>${help ? `<div class="lw-field-help">${esc(help)}</div>` : ""}${readOnly ? '<div class="lw-note">Read-only because the widget is closed.</div>' : ""}</div>`;
+        }).join("")}</div>`;
+      }
+      function chartContainer(data){
+        if(Array.isArray(data)) return {points: data};
+        if(!isObj(data)) return {};
+        const nestedCandidates = [data.chart, data.data, data.payload, data.config, data.state, data.spec, data.chart_spec, data.chartSpec];
+        for(const candidate of nestedCandidates){
+          if(Array.isArray(candidate)) return {points: candidate, chart_type: data.chart_type || data.chartType || data.type || data.kind, title: data.title};
+          if(isObj(candidate) && (
+            Array.isArray(candidate.labels) ||
+            Array.isArray(candidate.datasets) ||
+            isObj(candidate.datasets) ||
+            Array.isArray(candidate.series) ||
+            isObj(candidate.series) ||
+            Array.isArray(candidate.points) ||
+            Array.isArray(candidate.items) ||
+            Array.isArray(candidate.entries) ||
+            Array.isArray(candidate.rows) ||
+            Array.isArray(candidate.values) ||
+            isObj(candidate.values) ||
+            Array.isArray(candidate.data) ||
+            isObj(candidate.encoding) ||
+            candidate.mark !== undefined ||
+            Array.isArray(candidate.xAxis) ||
+            isObj(candidate.xAxis)
+          )){
+            return {
+              ...candidate,
+              title: candidate.title || data.title,
+              chart_type:
+                candidate.chart_type
+                || candidate.chartType
+                || (isObj(candidate.mark) ? candidate.mark.type || candidate.mark.kind || candidate.mark.name : candidate.mark)
+                || data.chart_type
+                || data.chartType
+                || data.type
+                || data.kind,
+            };
+          }
+        }
+        if(Array.isArray(data.data)) return {points: data.data, chart_type: data.chart_type || data.chartType || data.type || data.kind, title: data.title};
+        return data;
+      }
+      function pickChartLabelKey(row){
+        const preferred = ["label", "name", "title", "x", "category", "key"];
+        for(const key of preferred){
+          if(row[key] !== undefined && row[key] !== null && row[key] !== "") return key;
+        }
+        for(const [key, value] of Object.entries(row)){
+          if(numeric(value) === null) return key;
+        }
+        return null;
+      }
+      function normalizeDatasetCollection(source){
+        if(Array.isArray(source.datasets)) return source.datasets;
+        if(Array.isArray(source.series)) return source.series;
+        if(isObj(source.datasets)){
+          return Object.entries(source.datasets).map(([name, value]) => {
+            if(isObj(value)) return {...value, label: value.label || value.name || name};
+            return {label: name, data: Array.isArray(value) ? value : [value]};
+          });
+        }
+        if(isObj(source.series)){
+          return Object.entries(source.series).map(([name, value]) => {
+            if(isObj(value)) return {...value, label: value.label || value.name || name};
+            return {label: name, data: Array.isArray(value) ? value : [value]};
+          });
+        }
+        return [];
+      }
+      function classifyChartKind(chartType){
+        const raw = String(chartType || "").toLowerCase();
+        if(raw.includes("donut") || raw.includes("pie") || raw.includes("ring")) return "donut";
+        if(raw.includes("line") || raw.includes("trend") || raw.includes("spark")) return "line";
+        if(raw.includes("area")) return "area";
+        return "bar";
+      }
+      function chartSpecRows(source){
+        if(Array.isArray(source.values)) return source.values;
+        if(isObj(source.data) && Array.isArray(source.data.values)) return source.data.values;
+        return [];
+      }
+      function normalizeChartPayload(data){
+        const source = chartContainer(data);
+        let labels = Array.isArray(source.labels) ? source.labels.map((item) => String(item)) : [];
+        let datasets = normalizeDatasetCollection(source).map((item) => isObj(item) ? item : {data: Array.isArray(item) ? item : [item]});
+        const xAxis = isObj(source.xAxis) ? source.xAxis : Array.isArray(source.xAxis) && isObj(source.xAxis[0]) ? source.xAxis[0] : {};
+        if(!labels.length && Array.isArray(xAxis.data)){
+          labels = xAxis.data.map((item) => String(item));
+        }
+        if(!datasets.length && Array.isArray(source.values)){
+          datasets = [{label: source.title || "Series 1", data: source.values}];
+        }
+        if(!datasets.length && isObj(source.values)){
+          const valuePairs = Object.entries(source.values).filter(([, value]) => numeric(value) !== null);
+          if(valuePairs.length){
+            labels = valuePairs.map(([key]) => label(key));
+            datasets = [{label: source.title || "Series 1", data: valuePairs.map(([, value]) => numeric(value) ?? 0)}];
+          }
+        }
+        if(!datasets.length && isObj(source.encoding)){
+          const rows = chartSpecRows(source).filter((row) => isObj(row));
+          const encoding = source.encoding;
+          const xEncoding = isObj(encoding.x) ? encoding.x : {};
+          const thetaEncoding = isObj(encoding.theta) ? encoding.theta : {};
+          const yEncoding = isObj(encoding.y) ? encoding.y : {};
+          const radiusEncoding = isObj(encoding.radius) ? encoding.radius : {};
+          const colorEncoding = isObj(encoding.color) ? encoding.color : {};
+          const labelField = String(xEncoding.field || thetaEncoding.field || "").trim();
+          const valueField = String(yEncoding.field || radiusEncoding.field || "").trim();
+          const seriesField = String(colorEncoding.field || "").trim();
+          if(rows.length && valueField){
+            if(seriesField){
+              const grouped = {};
+              labels = [];
+              rows.forEach((row, idx) => {
+                const labelValue = String((labelField && row[labelField] !== undefined) ? row[labelField] : `Item ${idx + 1}`);
+                const seriesName = String(row[seriesField] ?? source.title ?? "Series 1");
+                const pointValue = numeric(row[valueField]);
+                if(pointValue === null) return;
+                if(!labels.includes(labelValue)) labels.push(labelValue);
+                if(!grouped[seriesName]) grouped[seriesName] = {};
+                grouped[seriesName][labelValue] = pointValue;
+              });
+              datasets = Object.entries(grouped).map(([seriesName, values]) => ({
+                label: seriesName,
+                data: labels.map((labelValue) => numeric(values[labelValue]) ?? 0),
+              }));
+            } else {
+              labels = rows.map((row, idx) => String((labelField && row[labelField] !== undefined) ? row[labelField] : `Item ${idx + 1}`));
+              datasets = [{
+                label: source.title || label(valueField) || "Series 1",
+                data: rows.map((row) => numeric(row[valueField]) ?? 0),
+              }];
+            }
+          }
+        }
+        if(!datasets.length){
+          const pointLike = Array.isArray(source.points) ? source.points : Array.isArray(source.items) ? source.items : Array.isArray(source.entries) ? source.entries : Array.isArray(source.data) ? source.data : [];
+          const grouped = {};
+          pointLike.forEach((point, idx) => {
+            const item = isObj(point) ? point : {value: point};
+            const seriesName = String(item.series || item.dataset || item.group || source.title || "Series 1");
+            const pointLabel = String(item.label ?? item.name ?? item.x ?? item.category ?? item.key ?? `Item ${idx + 1}`);
+            const pointValue = numeric(item.value ?? item.y ?? item.amount ?? item.count ?? item.metric ?? item.total);
+            if(pointValue === null) return;
+            if(!grouped[seriesName]) grouped[seriesName] = [];
+            grouped[seriesName].push({label: pointLabel, value: pointValue});
+          });
+          const groupedSeries = Object.values(grouped);
+          if(groupedSeries.length){
+            labels = groupedSeries[0].map((entry) => entry.label);
+            datasets = Object.entries(grouped).map(([seriesName, entries]) => ({
+              label: seriesName,
+              data: labels.map((labelValue) => {
+                const match = entries.find((entry) => entry.label === labelValue);
+                return match ? match.value : 0;
+              }),
+            }));
+          }
+        }
+        if(!datasets.length && Array.isArray(source.rows)){
+          const rows = source.rows.filter((row) => row !== null && row !== undefined);
+          if(rows.length && Array.isArray(rows[0])){
+            const rawCols = Array.isArray(source.columns) ? source.columns : Array.isArray(source.cols) ? source.cols : [];
+            const normalizedCols = rawCols.map((col, idx) => typeof col === "string" ? {key: col, label: label(col)} : {key: String(col.key || col.id || col.name || col.label || `column_${idx}`), label: String(col.label || col.title || col.name || col.key || `Column ${idx + 1}`)});
+            const valueColumns = normalizedCols.slice(1);
+            if(valueColumns.length){
+              labels = rows.map((row, idx) => String(row[0] ?? `Item ${idx + 1}`));
+              datasets = valueColumns.map((col, valueIdx) => ({
+                label: col.label,
+                data: rows.map((row) => numeric(row[valueIdx + 1]) ?? 0),
+              }));
+            }
+          } else if(rows.length && isObj(rows[0])){
+            const labelKey = pickChartLabelKey(rows[0]);
+            const explicitSeriesKeys = Array.isArray(source.series_keys) ? source.series_keys : Array.isArray(source.seriesKeys) ? source.seriesKeys : [];
+            let valueKeys = explicitSeriesKeys.filter((key) => typeof key === "string" && key);
+            if(!valueKeys.length){
+              const candidateKeys = Object.keys(rows[0]).filter((key) => key !== labelKey);
+              valueKeys = candidateKeys.filter((key) => rows.some((row) => numeric(row[key]) !== null));
+            }
+            if(valueKeys.length){
+              labels = rows.map((row, idx) => String((labelKey && row[labelKey] !== undefined) ? row[labelKey] : `Item ${idx + 1}`));
+              datasets = valueKeys.map((key) => ({
+                label: label(key),
+                data: rows.map((row) => numeric(row[key]) ?? 0),
+              }));
+            }
+          }
+        }
+        const series = datasets.map((item, i) => {
+          let rawData = Array.isArray(item.data) ? item.data : Array.isArray(item.values) ? item.values : Array.isArray(item.points) ? item.points : [];
+          if(!rawData.length && isObj(item.data)){
+            const pairs = Object.entries(item.data).filter(([, value]) => numeric(value) !== null);
+            if(pairs.length){
+              if(!labels.length) labels = pairs.map(([key]) => label(key));
+              rawData = pairs.map(([, value]) => numeric(value) ?? 0);
+            }
+          }
+          const inferredLabels = [];
+          const values = rawData.map((value, idx) => {
+            if(isObj(value)){
+              inferredLabels.push(String(value.label ?? value.name ?? value.x ?? value.category ?? value.key ?? `Item ${idx + 1}`));
+              return numeric(value.y ?? value.value ?? value.amount ?? value.count ?? value.metric ?? value.total);
+            }
+            inferredLabels.push(labels[idx] ?? `Item ${idx + 1}`);
+            return numeric(value);
+          }).filter((value) => value !== null);
+          if(!labels.length && inferredLabels.length) labels = inferredLabels;
+          return {
+            label: String(item.label || item.name || `Series ${i + 1}`),
+            color: item.color || item.backgroundColor || item.borderColor || palette[i % palette.length],
+            data: values.map((value) => value ?? 0),
+          };
+        }).filter((item) => item.data.length);
+        const maxLen = series.reduce((acc, item) => Math.max(acc, item.data.length), 0);
+        if(!labels.length && maxLen > 0){
+          labels = Array.from({length: maxLen}, (_, idx) => `Item ${idx + 1}`);
+        }
+        if(labels.length && series.length){
+          series.forEach((item) => {
+            if(item.data.length < labels.length){
+              while(item.data.length < labels.length) item.data.push(0);
+            } else if(item.data.length > labels.length){
+              item.data = item.data.slice(0, labels.length);
+            }
+          });
+        }
+        const ui = chartUi(data);
+        const hiddenSeries = Array.isArray(ui.hidden_series) ? ui.hidden_series.map((item) => String(item)) : [];
+        const explicitChartTypeOptions = Array.isArray(source.chart_types)
+          ? source.chart_types
+          : Array.isArray(source.chart_type_options)
+            ? source.chart_type_options
+            : Array.isArray(data.chart_types)
+              ? data.chart_types
+              : Array.isArray(data.chart_type_options)
+                ? data.chart_type_options
+                : [];
+        const chartTypeOptions = explicitChartTypeOptions.length ? explicitChartTypeOptions : ["bar", "line", "area", "donut"];
+        const markType = isObj(source.mark) ? source.mark.type || source.mark.kind || source.mark.name : source.mark;
+        const firstSeriesType = Array.isArray(source.series) && isObj(source.series[0]) ? source.series[0].type || source.series[0].chart_type : "";
+        const chartType = String(ui.chart_type || source.chart_type || source.chartType || markType || firstSeriesType || data.chart_type || data.chartType || "chart");
+        const filteredSeries = series.filter((item) => !hiddenSeries.includes(item.label));
+        return {
+          source,
+          labels,
+          allSeries: series,
+          series: filteredSeries,
+          hiddenSeries,
+          chartTypeOptions: chartTypeOptions.map(normalizeOption),
+          chartType,
+          chartKind: classifyChartKind(chartType),
+        };
+      }
+      function buildChartStats(normalized){
+        const values = normalized.series.flatMap((item) => item.data.filter((value) => numeric(value) !== null));
+        if(!values.length) return "";
+        const total = values.reduce((acc, value) => acc + value, 0);
+        const peak = Math.max(...values);
+        const latest = normalized.series.reduce((acc, item) => acc + (numeric(item.data[item.data.length - 1]) ?? 0), 0);
+        const stats = [
+          {label: "Series", value: normalized.series.length},
+          {label: "Categories", value: normalized.labels.length},
+          {label: "Peak", value: formatNumber(peak)},
+          {label: normalized.series.length > 1 ? "Latest Sum" : "Total", value: formatNumber(normalized.series.length > 1 ? latest : total)},
+        ];
+        return `<div class="lw-chart-stats">${stats.map((item) => `<div class="lw-stat"><div class="lw-stat-label">${esc(item.label)}</div><div class="lw-stat-value">${esc(item.value)}</div></div>`).join("")}</div>`;
+      }
+      function sampledLabelIndexes(length, maxLabels = 8){
+        const step = Math.max(1, Math.ceil(length / maxLabels));
+        return Array.from({length}, (_, idx) => idx).filter((idx) => idx % step === 0 || idx === length - 1);
+      }
+      function renderBarChartSvg(normalized){
+        const width = 920;
+        const height = 340;
+        const margin = {top: 18, right: 24, bottom: 58, left: 56};
+        const innerWidth = width - margin.left - margin.right;
+        const innerHeight = height - margin.top - margin.bottom;
+        const values = normalized.series.flatMap((item) => item.data);
+        const minValue = Math.min(0, ...values);
+        const maxValue = Math.max(0, ...values);
+        const safeMax = minValue === maxValue ? maxValue + 1 : maxValue;
+        const span = safeMax - minValue || 1;
+        const yFor = (value) => margin.top + ((safeMax - value) / span) * innerHeight;
+        const zeroY = yFor(0);
+        const ticks = Array.from({length: 5}, (_, idx) => safeMax - ((safeMax - minValue) * idx / 4));
+        const groupWidth = innerWidth / Math.max(normalized.labels.length, 1);
+        const clusterWidth = Math.min(groupWidth * 0.8, 96);
+        const barWidth = Math.max(8, Math.min(36, clusterWidth / Math.max(normalized.series.length, 1)));
+        const labelIndexes = new Set(sampledLabelIndexes(normalized.labels.length, normalized.labels.length > 12 ? 6 : 10));
+        const grid = ticks.map((tick) => {
+          const y = yFor(tick);
+          return `<g><line class="lw-grid-line" x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}"></line><text class="lw-axis-text" x="${margin.left - 10}" y="${y + 4}" text-anchor="end">${esc(formatNumber(tick))}</text></g>`;
+        }).join("");
+        const axis = `<line class="lw-axis-line" x1="${margin.left}" y1="${zeroY}" x2="${width - margin.right}" y2="${zeroY}"></line>`;
+        const bars = normalized.series.map((seriesItem, seriesIdx) => seriesItem.data.map((value, idx) => {
+          const x = margin.left + idx * groupWidth + Math.max(0, (groupWidth - barWidth * normalized.series.length) / 2) + seriesIdx * barWidth;
+          const yValue = yFor(value);
+          const y = value >= 0 ? yValue : zeroY;
+          const barHeight = Math.max(2, Math.abs(yValue - zeroY));
+          const valueLabel = normalized.labels.length <= 8 && normalized.series.length <= 2 ? `<text class="lw-axis-text" x="${x + barWidth / 2}" y="${value >= 0 ? y - 8 : y + barHeight + 16}" text-anchor="middle">${esc(formatNumber(value))}</text>` : "";
+          return `<g><rect x="${x}" y="${y}" width="${Math.max(4, barWidth - 4)}" height="${barHeight}" rx="10" fill="${esc(seriesItem.color)}"></rect>${valueLabel}</g>`;
+        }).join("")).join("");
+        const xLabels = normalized.labels.map((labelValue, idx) => {
+          if(!labelIndexes.has(idx)) return "";
+          const x = margin.left + idx * groupWidth + groupWidth / 2;
+          return `<text class="lw-axis-text" x="${x}" y="${height - 18}" text-anchor="middle">${esc(truncateText(labelValue, 14))}</text>`;
+        }).join("");
+        return `<svg class="lw-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet">${grid}${axis}${bars}${xLabels}</svg>`;
+      }
+      function renderLineChartSvg(normalized, fillArea){
+        const width = 920;
+        const height = 340;
+        const margin = {top: 18, right: 24, bottom: 58, left: 56};
+        const innerWidth = width - margin.left - margin.right;
+        const innerHeight = height - margin.top - margin.bottom;
+        const values = normalized.series.flatMap((item) => item.data);
+        const minValue = Math.min(0, ...values);
+        const maxValue = Math.max(0, ...values);
+        const safeMax = minValue === maxValue ? maxValue + 1 : maxValue;
+        const span = safeMax - minValue || 1;
+        const yFor = (value) => margin.top + ((safeMax - value) / span) * innerHeight;
+        const xFor = (idx) => normalized.labels.length === 1 ? margin.left + innerWidth / 2 : margin.left + (innerWidth * idx / (normalized.labels.length - 1));
+        const ticks = Array.from({length: 5}, (_, idx) => safeMax - ((safeMax - minValue) * idx / 4));
+        const labelIndexes = new Set(sampledLabelIndexes(normalized.labels.length, normalized.labels.length > 12 ? 6 : 10));
+        const grid = ticks.map((tick) => {
+          const y = yFor(tick);
+          return `<g><line class="lw-grid-line" x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}"></line><text class="lw-axis-text" x="${margin.left - 10}" y="${y + 4}" text-anchor="end">${esc(formatNumber(tick))}</text></g>`;
+        }).join("");
+        const xLabels = normalized.labels.map((labelValue, idx) => {
+          if(!labelIndexes.has(idx)) return "";
+          return `<text class="lw-axis-text" x="${xFor(idx)}" y="${height - 18}" text-anchor="middle">${esc(truncateText(labelValue, 14))}</text>`;
+        }).join("");
+        const seriesMarkup = normalized.series.map((seriesItem) => {
+          const points = seriesItem.data.map((value, idx) => ({x: xFor(idx), y: yFor(value)}));
+          const path = points.map((point, idx) => `${idx === 0 ? "M" : "L"}${point.x},${point.y}`).join(" ");
+          const areaPath = fillArea ? `${path} L ${points[points.length - 1].x},${margin.top + innerHeight} L ${points[0].x},${margin.top + innerHeight} Z` : "";
+          const dots = points.map((point) => `<circle class="lw-point" cx="${point.x}" cy="${point.y}" r="4.5" fill="${esc(seriesItem.color)}"></circle>`).join("");
+          return `<g>${fillArea ? `<path class="lw-area-path" d="${areaPath}" fill="${esc(colorWithAlpha(seriesItem.color, 0.18))}"></path>` : ""}<path class="lw-line-path" d="${path}" stroke="${esc(seriesItem.color)}"></path>${dots}</g>`;
+        }).join("");
+        return `<svg class="lw-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet">${grid}${seriesMarkup}${xLabels}</svg>`;
+      }
+      function renderDonutChart(normalized){
+        const slices = (normalized.series.length === 1 ? normalized.labels.map((labelValue, idx) => ({
+          label: labelValue,
+          value: normalized.series[0].data[idx] ?? 0,
+          color: palette[idx % palette.length],
+        })) : normalized.labels.map((labelValue, idx) => ({
+          label: labelValue,
+          value: normalized.series.reduce((acc, item) => acc + (numeric(item.data[idx]) ?? 0), 0),
+          color: palette[idx % palette.length],
+        }))).filter((item) => numeric(item.value) !== null && item.value > 0);
+        if(!slices.length) return "";
+        const total = slices.reduce((acc, item) => acc + item.value, 0);
+        let cursor = 0;
+        const gradient = slices.map((slice) => {
+          const start = cursor / total * 100;
+          cursor += slice.value;
+          const end = cursor / total * 100;
+          return `${slice.color} ${start}% ${end}%`;
+        }).join(",");
+        const legend = slices.map((slice) => `<div class="lw-donut-item"><span class="lw-dot" style="background:${esc(slice.color)}"></span><div><div class="lw-donut-value">${esc(truncateText(slice.label, 22))}</div><div class="lw-donut-share">${esc(formatNumber((slice.value / total) * 100))}% share</div></div><div class="lw-donut-value">${esc(formatNumber(slice.value))}</div></div>`).join("");
+        return `<div class="lw-donut"><div class="lw-ring" style="background:conic-gradient(${gradient})"><div class="lw-ring-hole"><strong>${esc(formatNumber(total))}</strong><span>Total</span></div></div><div class="lw-donut-legend">${legend}</div></div>`;
+      }
+      function htmlState(data){
+        if(!isObj(data)) return {html: "", caption: "", height: 560};
+        const html = String(data.html || data.document || data.content || data.srcdoc || "");
+        const caption = String(data.caption || data.note || data.description || "");
+        const explicitHeight = numeric(data.height) ?? numeric(data.min_height) ?? numeric(data.minHeight);
+        const height = Math.max(260, Math.min(960, explicitHeight ?? 560));
+        return {html, caption, height};
+      }
+      function renderHtmlWidget(data){
+        const cfg = htmlState(data);
+        if(!cfg.html.trim()){
+          return '<div class="lw-empty">No HTML content available yet.</div>';
+        }
+        return `<div class="lw-html-shell">${cfg.caption ? `<div class="lw-html-caption">${esc(cfg.caption)}</div>` : ""}<iframe class="lw-html-frame" sandbox="allow-scripts allow-forms allow-modals allow-downloads" referrerpolicy="no-referrer" style="height:${cfg.height}px" srcdoc="${esc(cfg.html)}"></iframe></div>`;
+      }
+      function renderChartPreview(source){
+        if(Array.isArray(source.rows)) return renderTable(source);
+        const pointLike = Array.isArray(source.points) ? source.points : Array.isArray(source.items) ? source.items : Array.isArray(source.entries) ? source.entries : Array.isArray(source.data) ? source.data : [];
+        if(pointLike.length){
+          return renderTable({
+            columns: ["Label", "Value"],
+            rows: pointLike.map((point, idx) => {
+              if(isObj(point)) return [point.label ?? point.name ?? point.x ?? point.category ?? point.key ?? `Item ${idx + 1}`, point.value ?? point.y ?? point.amount ?? point.count ?? point.metric ?? point.total ?? JSON.stringify(point)];
+              return [`Item ${idx + 1}`, point];
+            }),
+          });
+        }
+        if(isObj(source.values)){
+          return renderTable({columns: ["Label", "Value"], rows: Object.entries(source.values).map(([key, value]) => [label(key), value])});
+        }
+        const scalarEntries = Object.entries(source).filter(([, value]) => value === null || ["string", "number", "boolean"].includes(typeof value));
+        if(scalarEntries.length){
+          return renderTable({columns: ["Field", "Value"], rows: scalarEntries.map(([key, value]) => [label(key), value])});
+        }
+        return renderRawDisclosure(source);
+      }
+      function renderChartToolbar(normalized, readOnly){
+        const disabled = readOnly ? " disabled" : "";
+        const chartTypeButtons = normalized.chartTypeOptions.map((option) => {
+          const optionKind = classifyChartKind(option.value);
+          return `<button type="button" data-chart-type="${esc(option.value)}" data-active="${optionKind === normalized.chartKind}"${disabled}>${esc(label(option.label || option.value))}</button>`;
+        }).join("");
+        const legendButtons = normalized.allSeries.map((item) => `<button type="button" class="lw-legend-item-button" data-series-toggle="${esc(item.label)}" data-hidden="${normalized.hiddenSeries.includes(item.label)}"${disabled}><span class="lw-dot" style="background:${esc(item.color)}"></span>${esc(item.label)}</button>`).join("");
+        const resetButton = normalized.hiddenSeries.length ? `<button type="button" class="lw-legend-item-button" data-series-reset="true"${disabled}>Show all</button>` : "";
+        if(!chartTypeButtons && !legendButtons && !resetButton) return "";
+        return `<div class="lw-chart-toolbar">${chartTypeButtons ? `<div class="lw-segment">${chartTypeButtons}</div>` : ""}${legendButtons || resetButton ? `<div class="lw-chip-wrap">${legendButtons}${resetButton}</div>` : ""}</div>`;
+      }
+      function renderChart(data, readOnly = false){
+        const normalized = normalizeChartPayload(data);
+        const labels = normalized.labels;
+        const series = normalized.series;
+        const toolbar = renderChartToolbar(normalized, readOnly);
+        if(!series.length && normalized.allSeries.length && labels.length){
+          return `<div class="lw-chart"><div class="lw-chart-top"><div><div class="lw-chart-type">${esc(label(normalized.chartType))}</div><div class="lw-chart-sub">All series are hidden. Re-enable one to continue.</div></div></div>${toolbar}<div class="lw-empty">This chart still has data, but every series is currently hidden.</div></div>`;
+        }
+        if(!series.length || !labels.length){
+          if(isObj(normalized.source) && Object.keys(normalized.source).length){
+            return `<div class="lw-chart"><div class="lw-chart-top"><div><div class="lw-chart-type">${esc(label(normalized.chartType))}</div><div class="lw-chart-sub">Showing a data preview because this chart payload could not be normalized yet.</div></div></div>${toolbar}<div class="lw-fallback">${renderChartPreview(normalized.source)}</div></div>`;
+          }
+          return '<div class="lw-empty">No chart data available yet.</div>';
+        }
+        let surface = renderBarChartSvg(normalized);
+        if(normalized.chartKind === "line" || normalized.chartKind === "area") surface = renderLineChartSvg(normalized, normalized.chartKind === "area");
+        if(normalized.chartKind === "donut"){
+          const donut = renderDonutChart(normalized);
+          surface = donut || renderBarChartSvg(normalized);
+        }
+        return `<div class="lw-chart"><div class="lw-chart-top"><div><div class="lw-chart-type">${esc(label(normalized.chartType))}</div><div class="lw-chart-sub">${esc(series.length > 1 ? `${series.length} series across ${labels.length} categories` : `${labels.length} categories`)}</div></div></div>${toolbar}${buildChartStats(normalized)}<div class="lw-chart-surface">${surface}</div></div>`;
+      }
+      function renderDashboard(data, readOnly = false){
+        const panels = Array.isArray(data.panels) ? data.panels : [];
+        if(!panels.length){
+          const fallbackMetrics = Object.entries(data).filter(([key, value]) => key !== "panels" && (numeric(value) !== null || typeof value === "string"));
+          if(fallbackMetrics.length){
+            return `<div class="lw-dash"><div class="lw-metrics">${fallbackMetrics.slice(0, 6).map(([key, value]) => `<div class="lw-metric"><div class="lw-metric-title">${esc(label(key))}</div><div class="lw-metric-value">${esc(typeof value === "number" ? formatNumber(value) : value)}</div></div>`).join("")}</div></div>`;
+          }
+          return '<div class="lw-empty">No dashboard panels available yet.</div>';
+        }
+        const metrics = [];
+        const details = [];
+        panels.forEach((panel, idx) => {
+          const item = isObj(panel) ? panel : {value: panel};
+          const type = String(item.type || item.widget_type || item.kind || "").toLowerCase();
+          const nested = isObj(item.data) ? item.data : isObj(item.state) ? item.state : item;
+          const plainMetric = item.value !== undefined && !nested.rows && !nested.datasets && !nested.items && !nested.fields;
+          if(type === "metric" || type === "stat" || type === "summary" || plainMetric){
+            metrics.push(`<div class="lw-metric"><div class="lw-metric-title">${esc(item.title || item.label || "Metric")}</div><div class="lw-metric-value">${esc(item.value ?? item.metric ?? item.total ?? "-")}</div>${item.delta || item.change || item.description ? `<div class="lw-metric-delta">${esc(item.delta || item.change || item.description)}</div>` : ""}</div>`);
+            return;
+          }
+          let content = renderJson(nested);
+          if(type === "table") content = renderTable(nested, true);
+          else if(type === "chart") content = renderChart(nested, true);
+          else if(type === "list") content = renderList(nested, true);
+          else if(type === "form") content = renderForm(nested, true);
+          details.push(`<div class="lw-panel"><div class="lw-panel-title">${esc(item.title || item.label || `Panel ${idx + 1}`)}</div>${content}</div>`);
+        });
+        return `<div class="lw-dash">${metrics.length ? `<div class="lw-metrics">${metrics.join("")}</div>` : ""}${details.join("")}</div>`;
+      }
+      function renderBody(){
+        meta();
+        if(!state.data){el.body.innerHTML='<div class="lw-empty">Connecting widget…</div>';resize();return;}
+        const type = String(cfg.widget.widget_type || "").toLowerCase();
+        const readOnly = state.status === "closed";
+        const resolved = resolveInteractiveData(state.data);
+        const payload = resolved.payload;
+        const controlsHtml = renderControls(resolved.controls, resolved.controlValues, readOnly);
+        let bodyHtml = renderJson(payload);
+        if(type === "table") bodyHtml = renderTable(payload, readOnly);
+        else if(type === "chart") bodyHtml = renderChart(payload, readOnly);
+        else if(type === "dashboard") bodyHtml = renderDashboard(payload, readOnly);
+        else if(type === "form") bodyHtml = renderForm(payload, readOnly);
+        else if(type === "list") bodyHtml = renderList(payload, readOnly);
+        else if(type === "html" || type === "iframe" || type === "micro_app") bodyHtml = renderHtmlWidget(payload);
+        el.body.innerHTML = `${controlsHtml}${bodyHtml}`;
+        resize();
+      }
+      function wsBase(){
+        const source = cfg.widgetWsBaseUrl || cfg.apiBaseUrl;
+        const url = new URL(source);
+        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+        url.pathname = "/";
+        url.search = "";
+        url.hash = "";
+        return url.toString();
+      }
+      function wsUrl(pathOrUrl){
+        if(!pathOrUrl) return "";
+        if(pathOrUrl.startsWith("ws://") || pathOrUrl.startsWith("wss://")) return pathOrUrl;
+        if(pathOrUrl.startsWith("http://") || pathOrUrl.startsWith("https://")){const url=new URL(pathOrUrl);url.protocol=url.protocol === "https:" ? "wss:" : "ws:";return url.toString();}
+        return new URL(pathOrUrl, wsBase()).toString();
+      }
+      function sendPatch(patch){
+        if(!patch || state.status === "closed" || !ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({type:"user_state_patch", patch}));
+      }
+      function collectValues(){
+        const values = {};
+        el.body.querySelectorAll("[data-field-key]").forEach((input) => {
+          const key = input.getAttribute("data-field-key");
+          const type = input.getAttribute("data-field-type");
+          if(!key) return;
+          values[key] = inputValue(input, type);
+        });
+        return values;
+      }
+      function scheduleReconnect(){
+        if(destroyed || state.status === "closed" || reconnectTimer) return;
+        state.conn = reconnectCount === 0 ? "reconnecting" : "disconnected";
+        meta();
+        const delay = Math.min(1000 * Math.pow(2, reconnectCount), 15000);
+        reconnectCount += 1;
+        reconnectTimer = window.setTimeout(() => {reconnectTimer = null; connect();}, delay);
+      }
+      function openSocket(url){
+        if(!url){showError("Widget connection response did not include a WebSocket URL.");scheduleReconnect();return;}
+        if(ws){try{ws.close();}catch{}}
+        ws = new WebSocket(url);
+        ws.addEventListener("open", () => {reconnectCount = 0; state.conn = "connected"; meta(); showError("");});
+        ws.addEventListener("message", (event) => {
+          let msg = null;
+          try{msg = JSON.parse(event.data);}catch{return;}
+          if(!isObj(msg)) return;
+          if(msg.type === "ping"){if(ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type:"pong"})); return;}
+          if(msg.type === "error"){showError(msg.message || "Widget connection error."); return;}
+          if(msg.type === "widget_state_sync" || msg.type === "widget_update" || msg.type === "widget_close"){
+            if(isObj(msg.state)) state.data = msg.state;
+            if(msg.version !== undefined) state.version = Number(msg.version || 0);
+            if(msg.status) state.status = String(msg.status);
+            if(msg.type === "widget_close") state.status = "closed";
+            renderBody();
+          }
+        });
+        ws.addEventListener("close", () => {if(destroyed) return; if(state.status === "closed"){state.conn = "disconnected"; meta(); return;} state.conn = "disconnected"; meta(); scheduleReconnect();});
+        ws.addEventListener("error", () => {state.conn = "error"; meta();});
+      }
+      async function connect(){
+        meta();
+        if(!cfg.widget.widget_id){state.conn = "error"; meta(); showError("Widget metadata is missing widget_id."); renderBody(); return;}
+        if(!cfg.authToken){state.conn = "auth"; meta(); showError("Sign in again to connect this widget."); renderBody(); return;}
+        state.conn = "connecting";
+        meta();
+        showError("");
+        renderBody();
+        try{
+          const response = await fetch(new URL(cfg.widget.connection_endpoint, `${cfg.apiBaseUrl}/`).toString(), {method:"POST", headers:{Authorization:`Bearer ${cfg.authToken}`}});
+          const statusCode = response.status;
+          const raw = await response.text();
+          let payload = {};
+          if(raw){try{payload = JSON.parse(raw);}catch{throw new Error(`Unexpected widget connection response: ${raw.slice(0,160)}`);}}
+          if(isObj(payload) && payload.success === false) throw new Error(payload.message || "Widget connection request failed.");
+          if(!response.ok){
+            const err = new Error((isObj(payload) && (payload.error || payload.message)) || `Widget connection request failed (${response.status})`);
+            err.permanent = statusCode >= 400 && statusCode < 500 && statusCode !== 408 && statusCode !== 429;
+            throw err;
+          }
+          const data = isObj(payload.data) ? payload.data : payload;
+          openSocket(wsUrl(String(data.ws_url || "")));
+        }catch(error){
+          state.conn = "error";
+          meta();
+          showError(error instanceof Error ? error.message : "Unable to connect widget.");
+          if(!(error && error.permanent)) scheduleReconnect();
+        }
+      }
+      el.body.addEventListener("click", (event) => {
+        const rawTarget = event.target;
+        if(!(rawTarget instanceof Element)) return;
+        const controlOption = rawTarget.closest("[data-control-option='true']");
+        if(controlOption){
+          const key = controlOption.getAttribute("data-control-key");
+          if(key) setControlValue(key, controlOption.getAttribute("data-control-value") ?? "");
+          return;
+        }
+        const sortButton = rawTarget.closest("[data-sort-key]");
+        if(sortButton && isObj(state.data)){
+          const sortKey = String(sortButton.getAttribute("data-sort-key") || "");
+          if(sortKey){
+            const currentUi = tableUi(state.data);
+            const nextDirection = currentUi.sort_by === sortKey && currentUi.sort_dir !== "desc" ? "desc" : "asc";
+            setTableUi({sort_by: sortKey, sort_dir: nextDirection});
+          }
+          return;
+        }
+        const chartTypeButton = rawTarget.closest("[data-chart-type]");
+        if(chartTypeButton){
+          const nextChartType = chartTypeButton.getAttribute("data-chart-type");
+          if(nextChartType) setChartUi({chart_type: nextChartType});
+          return;
+        }
+        const seriesButton = rawTarget.closest("[data-series-toggle]");
+        if(seriesButton){
+          const seriesLabel = seriesButton.getAttribute("data-series-toggle");
+          if(seriesLabel) toggleChartSeries(seriesLabel);
+          return;
+        }
+        const resetSeriesButton = rawTarget.closest("[data-series-reset='true']");
+        if(resetSeriesButton){
+          setChartUi({hidden_series: []});
+          return;
+        }
+        const target = rawTarget.closest("[data-action='select']");
+        if(target && isObj(state.data)){
+          const selection = target.getAttribute("data-selection");
+          state.data = {...state.data, selection};
+          renderBody();
+          sendPatch({selection});
+        }
+      });
+      el.body.addEventListener("input", (event) => {
+        const target = event.target;
+        if(!(target instanceof HTMLElement)) return;
+        if(target.hasAttribute("data-table-search")){
+          const nextQuery = target.value || "";
+          setTableUi({query: target.value || ""});
+          const nextSearch = el.body.querySelector("[data-table-search='true']");
+          if(nextSearch && typeof nextSearch.focus === "function"){
+            nextSearch.focus();
+            if(typeof nextSearch.setSelectionRange === "function"){
+              const cursor = String(nextQuery).length;
+              nextSearch.setSelectionRange(cursor, cursor);
+            }
+          }
+          return;
+        }
+      });
+      el.body.addEventListener("change", (event) => {
+        const target = event.target;
+        if(!(target instanceof HTMLElement)) return;
+        if(target.hasAttribute("data-control-key")){
+          const key = target.getAttribute("data-control-key");
+          if(key) setControlValue(key, inputValue(target, target.getAttribute("data-control-type")), target.getAttribute("data-control-type") === "range" ? 80 : 150);
+          return;
+        }
+        if(!target.hasAttribute("data-field-key")) return;
+        const values = collectValues();
+        const base = isObj(state.data) ? state.data : {};
+        state.data = {...base, values};
+        window.clearTimeout(patchTimer);
+        patchTimer = window.setTimeout(() => sendPatch({values}), 150);
+      });
+      window.addEventListener("beforeunload", () => {
+        destroyed = true;
+        window.clearTimeout(reconnectTimer);
+        window.clearTimeout(patchTimer);
+        if(ws){try{ws.close();}catch{}}
+      });
+      meta();
+      renderBody();
+      connect();
+    })();
+    </script>
+    """
+    return template.replace("__CFG__", _widget_component_json(config))
+
+
+@lru_cache(maxsize=1)
+def _load_live_widget_component_template() -> str:
+    try:
+        return LIVE_WIDGET_TEMPLATE_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            f"Live widget template not found at {LIVE_WIDGET_TEMPLATE_PATH}"
+        ) from exc
+
+
+def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | None) -> str:
+    return _legacy_build_live_widget_component_html(widget, auth_token)
+
+
+def _live_widget_frame_height(widget: dict[str, Any]) -> int:
+    widget_type = str(widget.get("widget_type") or "").lower()
+    if widget_type == "dashboard":
+        return 800
+    if widget_type == "chart":
+        return 760
+    if widget_type in {"html", "iframe", "micro_app"}:
+        return 820
+    if widget_type == "form":
+        return 660
+    if widget_type == "table":
+        return 680
+    if widget_type == "list":
+        return 600
+    return 640
+
+
+def render_live_widgets(
+    message_metadata: dict,
+    *,
+    message_key: str = "",
+    auto_mount: bool = False,
+):
+    """Render live widgets from assistant message metadata.
+
+    Historical widgets stay lightweight until opened, which prevents
+    conversation-load reruns from mounting every widget iframe at once.
+    """
+    if not message_metadata:
+        return
+
+    widgets = message_metadata.get("live_widgets") or []
+    if not widgets:
+        return
+
+    import streamlit.components.v1 as _stc
+
+    auth_token = str(st.session_state.get("auth_token") or "")
+    mount_state = st.session_state.live_widget_mounts
+    for index, widget in enumerate(widgets):
+        if not isinstance(widget, dict):
+            continue
+
+        widget_id = str(widget.get("widget_id") or "")
+        if not widget_id:
+            continue
+
+        widget_type = str(widget.get("widget_type") or "widget")
+        title = str(widget.get("title") or widget_type or f"Widget {index + 1}")
+        version = widget.get("version", 1)
+        mount_key = f"{message_key}:{widget_id}" if message_key else widget_id
+        if auto_mount and mount_key not in mount_state:
+            mount_state[mount_key] = True
+        is_mounted = bool(mount_state.get(mount_key))
+
+        status = str(widget.get("status") or "active")
+        meta_suffix = f"{widget_type} · v{version} · {widget_id[:16]}…"
+        if status != "active":
+            meta_suffix = f"{meta_suffix} · {status}"
+        st.markdown(
+            f"""
+            <div style="
+                border: 1px solid #dbeafe;
+                border-left: 4px solid #2563eb;
+                border-radius: 14px;
+                background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+                padding: 12px 14px 12px 16px;
+                margin: 8px 0 10px;
+            ">
+              <div style="font-size:11px; font-weight:700; color:#2563eb; text-transform:uppercase; letter-spacing:.06em;">
+                Live Widget
+              </div>
+              <div style="margin-top:4px; font-weight:700; color:#0f172a; font-size:16px;">
+                {html.escape(title)}
+              </div>
+              <div style="margin-top:6px; color:#64748b; font-size:12px;">
+                {html.escape(meta_suffix)}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        controls = st.columns([1, 5])
+        with controls[0]:
+            if not is_mounted:
+                if st.button("Open", key=f"open_live_widget_{mount_key}", width="stretch"):
+                    mount_state[mount_key] = True
+                    st.rerun()
+            else:
+                if st.button("Hide", key=f"hide_live_widget_{mount_key}", width="stretch"):
+                    mount_state[mount_key] = False
+                    st.rerun()
+        with controls[1]:
+            if not is_mounted:
+                st.caption(
+                    "Widget is not connected yet. Open it on demand to avoid loading every widget in the conversation history."
+                )
+
+        if is_mounted:
+            _stc.html(
+                _build_live_widget_component_html(widget, auth_token),
+                height=_live_widget_frame_height(widget),
+                scrolling=False,
+            )
+
+        with st.expander(f"Widget details: {title}", expanded=False):
+            st.code(
+                json.dumps(
+                    {
+                        "widget_id": widget_id,
+                        "widget_type": widget.get("widget_type"),
+                        "status": widget.get("status"),
+                        "version": widget.get("version"),
+                        "connection_endpoint": widget.get(
+                            "connection_endpoint", f"/widgets/{widget_id}/connection"
+                        ),
+                    },
+                    indent=2,
+                ),
+                language="json",
+            )
+
+
 def render_agent_images(message_metadata: dict):
     """Render images from agent responses as thumbnails (Tavily, Image Generator)"""
     if not message_metadata:
@@ -4016,7 +5340,12 @@ def render_suggestion_buttons(suggestions: list[str], msg_id: str):
                 st.rerun()
 
 
-def render_message_bubble(msg: dict[str, Any], is_user: bool):
+def render_message_bubble(
+    msg: dict[str, Any],
+    is_user: bool,
+    *,
+    auto_mount_live_widgets: bool = False,
+):
     content_text = msg.get("content", "")
     timestamp = format_time(msg.get("createdAt", ""))
 
@@ -4072,6 +5401,14 @@ def render_message_bubble(msg: dict[str, Any], is_user: bool):
     # Show canvas artifact for assistant messages (HTML/SVG live preview)
     if not is_user:
         render_canvas_artifact(get_message_metadata(msg))
+
+    # Show live widget cards for assistant messages
+    if not is_user:
+        render_live_widgets(
+            get_message_metadata(msg),
+            message_key=str(msg.get("id", "")),
+            auto_mount=auto_mount_live_widgets,
+        )
 
     # Show citations for assistant messages
     if not is_user:
@@ -5497,7 +6834,13 @@ def render_chat_view():
         # reload recovery and carry no user-visible content.
         if not is_user_message and get_message_metadata(msg).get("paused"):
             continue
-        render_message_bubble(msg, is_user_message)
+        render_message_bubble(
+            msg,
+            is_user_message,
+            auto_mount_live_widgets=(
+                not is_user_message and msg.get("id") == last_assistant_msg_id
+            ),
+        )
 
         # Show suggestion buttons for the last assistant message only
         if not is_user_message and msg.get("id") == last_assistant_msg_id:

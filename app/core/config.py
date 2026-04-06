@@ -1,8 +1,10 @@
 import logging
 import os
 import secrets
+import sys
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 from dotenv import load_dotenv
 from pydantic import Field, field_validator, model_validator
@@ -20,6 +22,61 @@ if _langsmith_tracing and _langsmith_api_key:
     os.environ["LANGCHAIN_TRACING_V2"] = "true"
     os.environ["LANGCHAIN_API_KEY"] = _langsmith_api_key
     os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGSMITH_PROJECT", "sample-chatbot")
+
+
+def _inject_redis_password(url: str, password: str) -> str:
+    """Attach a password to a redis/rediss URL when credentials are missing."""
+    raw_url = (url or "").strip()
+    raw_password = (password or "").strip()
+    if not raw_url or not raw_password:
+        return raw_url
+
+    parsed = urlparse(raw_url)
+    if parsed.scheme.lower() not in {"redis", "rediss"}:
+        return raw_url
+    if parsed.password:
+        return raw_url
+    if not parsed.hostname:
+        return raw_url
+
+    hostname = parsed.hostname
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+
+    hostport = hostname
+    if parsed.port is not None:
+        hostport = f"{hostport}:{parsed.port}"
+
+    username = parsed.username or ""
+    credentials = f"{username}:{raw_password}" if username else f":{raw_password}"
+    return urlunparse(parsed._replace(netloc=f"{credentials}@{hostport}"))
+
+
+def _normalize_redis_loopback_host(url: str) -> str:
+    """Use 127.0.0.1 instead of localhost for Redis on Windows async clients."""
+    raw_url = (url or "").strip()
+    if not raw_url:
+        return raw_url
+
+    parsed = urlparse(raw_url)
+    if parsed.scheme.lower() not in {"redis", "rediss"}:
+        return raw_url
+    if sys.platform != "win32":
+        return raw_url
+    if (parsed.hostname or "").lower() != "localhost":
+        return raw_url
+
+    hostport = "127.0.0.1"
+    if parsed.port is not None:
+        hostport = f"{hostport}:{parsed.port}"
+
+    credentials = ""
+    if parsed.username or parsed.password:
+        username = parsed.username or ""
+        password = parsed.password or ""
+        credentials = f"{username}:{password}@" if username else f":{password}@"
+
+    return urlunparse(parsed._replace(netloc=f"{credentials}{hostport}"))
 
 
 class Settings(BaseSettings):
@@ -261,7 +318,14 @@ class Settings(BaseSettings):
     # Redis Configuration
     redis_url: str = Field(
         default="",
-        description="Redis connection URL for optional timeout tracking (leave blank to disable)",
+        description="Redis connection URL used for widget runtime state, HITL timeout tracking, and other shared-state features. "
+        "Required for live widget flows when the widgets MCP server runs out-of-process. "
+        "Falls back to celery_broker_url if blank.",
+    )
+    redis_password: str = Field(
+        default="",
+        description="Optional Redis password convenience variable for local Docker setups. "
+        "When set, it is automatically injected into redis:// and rediss:// URLs that omit credentials.",
     )
     celery_broker_url: str = Field(
         default="redis://localhost:6379/0",
@@ -709,6 +773,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _cross_field_checks(self) -> "Settings":
+        if self.redis_password:
+            self.redis_url = _inject_redis_password(self.redis_url, self.redis_password)
+            self.celery_broker_url = _inject_redis_password(
+                self.celery_broker_url, self.redis_password
+            )
+            self.celery_result_backend = _inject_redis_password(
+                self.celery_result_backend, self.redis_password
+            )
+        self.redis_url = _normalize_redis_loopback_host(self.redis_url)
+        self.celery_broker_url = _normalize_redis_loopback_host(self.celery_broker_url)
+        self.celery_result_backend = _normalize_redis_loopback_host(
+            self.celery_result_backend
+        )
         if not self.secret_key or self.secret_key == "secret-key":
             if self.environment == "development":
                 self.secret_key = secrets.token_urlsafe(48)

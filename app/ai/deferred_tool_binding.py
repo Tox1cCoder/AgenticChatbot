@@ -18,10 +18,27 @@ from .deferred_tool_state import get_deferred_tool_state
 from .mcp_integration import MCPManager
 from .tool_search_tool import create_tool_search_tool
 
+_WIDGET_PINNED_AGENT_KEYS = {"chat", "rag", "search"}
+_WIDGET_PINNED_SPECS = (
+    "widgets::widget_create",
+    "widgets::widget_update",
+    "widgets::widget_get_state",
+)
+
+
+def _get_pinned_specs(agent_key: str | None) -> list[str]:
+    pinned_specs = list(settings.mcp_tool_search_pinned_tools or [])
+    if agent_key in _WIDGET_PINNED_AGENT_KEYS:
+        for spec in _WIDGET_PINNED_SPECS:
+            if spec not in pinned_specs:
+                pinned_specs.append(spec)
+    return pinned_specs
+
 
 def get_pinned_tools(
     mcp_manager: MCPManager,
     all_tools: list[BaseTool],
+    agent_key: str | None = None,
 ) -> list[BaseTool]:
     """
     Get the pinned MCP tools that should always be bound.
@@ -38,7 +55,7 @@ def get_pinned_tools(
     Returns:
         List of BaseTool objects for pinned tools
     """
-    pinned_specs = settings.mcp_tool_search_pinned_tools or []
+    pinned_specs = _get_pinned_specs(agent_key)
     max_pinned = settings.mcp_tool_search_max_pinned_tools
 
     if not pinned_specs:
@@ -196,7 +213,7 @@ def build_deferred_tool_list(
 
     # 3. Add pinned MCP tools
     if mcp_manager and all_mcp_tools:
-        pinned = get_pinned_tools(mcp_manager, all_mcp_tools)
+        pinned = get_pinned_tools(mcp_manager, all_mcp_tools, agent_key=agent_key)
         for tool in pinned:
             if tool.name not in seen_names:
                 result_tools.append(tool)

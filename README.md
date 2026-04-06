@@ -52,10 +52,54 @@ docker pull qdrant/qdrant
 docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
 ```
 
-#### Redis (optional, for Celery + HITL timeouts)
+#### Redis (recommended for Celery, HITL, client runtime, and live widgets)
+
+Use the included Docker setup instead of a Windows bind mount. It uses only a
+Docker named volume for Redis data, which avoids the `/data` I/O errors that
+are common with host-mounted folders under `Documents`, cloud-synced
+directories, or other unstable Windows paths. The bundled setup also enables a
+Redis password by default so host apps and Docker clients can connect without
+turning off protected mode.
 
 ```bash
-docker run -d -p 6379:6379 redis
+docker compose -f docker-compose.redis.yml up -d redis
+docker compose -f docker-compose.redis.yml ps
+```
+
+Useful checks:
+
+```bash
+docker compose -f docker-compose.redis.yml logs -f redis
+docker exec sample_chatbot_redis redis-cli -a sample-chatbot-dev INFO persistence
+```
+
+If you previously started Redis with a broken bind mount, remove that container
+before switching:
+
+```bash
+docker rm -f chatbot_redis
+docker rm -f sample_chatbot_redis
+```
+
+Environment variables:
+
+If FastAPI and Celery run on your host machine:
+
+```env
+REDIS_PASSWORD=sample-chatbot-dev
+REDIS_URL=redis://:sample-chatbot-dev@127.0.0.1:6379/0
+CELERY_BROKER_URL=redis://:sample-chatbot-dev@127.0.0.1:6379/0
+CELERY_RESULT_BACKEND=redis://:sample-chatbot-dev@127.0.0.1:6379/0
+```
+
+If FastAPI and Celery run in Docker on the same network as Redis, use the
+service hostname instead of `localhost`:
+
+```env
+REDIS_PASSWORD=sample-chatbot-dev
+REDIS_URL=redis://:sample-chatbot-dev@redis:6379/0
+CELERY_BROKER_URL=redis://:sample-chatbot-dev@redis:6379/0
+CELERY_RESULT_BACKEND=redis://:sample-chatbot-dev@redis:6379/0
 ```
 
 ### 3. External Services
@@ -75,10 +119,10 @@ docker pull qdrant/qdrant
 docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
 ```
 
-#### Redis (optional, for Celery + HITL timeouts)
+#### Redis (recommended for Celery, HITL, client runtime, and live widgets)
 
 ```bash
-docker run -d -p 6379:6379 redis
+docker compose -f docker-compose.redis.yml up -d redis
 ```
 
 ### 4. DB migrations

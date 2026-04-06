@@ -28,6 +28,7 @@ from app.api import (
     skills_router,
     task_plans_router,
     users_router,
+    widgets_router,
 )
 from app.core.config import settings
 from app.core.container import (
@@ -90,6 +91,24 @@ async def init_skills():
         logger.warning(f"Skills init failed (non-fatal): {e}")
 
 
+def _log_widget_runtime_status():
+    """Log whether Redis-backed widget storage is available."""
+    redis_url = settings.redis_url or settings.celery_broker_url
+    if not redis_url:
+        logger.warning(
+            "Widget runtime: no Redis URL configured — "
+            "live widget flows require Redis when the widgets MCP server runs out-of-process"
+        )
+        return
+    try:
+        r = Redis.from_url(redis_url, decode_responses=True, socket_connect_timeout=2)
+        r.ping()
+        r.close()
+        logger.info("Widget runtime: Redis-backed storage active (%s)", redis_url.split("@")[-1])
+    except Exception as e:
+        logger.warning("Widget runtime: Redis unavailable (%s) — widget flows will be degraded", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
@@ -99,6 +118,7 @@ async def lifespan(app: FastAPI):
     await init_checkpoint_tables()
     await init_agents()
     await init_skills()
+    _log_widget_runtime_status()
     if settings.enable_client_runtime_bridge:
         _client_runtime_cleanup_task = asyncio.create_task(
             periodic_session_cleanup_task(
@@ -151,6 +171,7 @@ def create_app() -> FastAPI:
             "app.api.skills",
             "app.api.client_devices",
             "app.api.device_runtime",
+            "app.api.widgets",
         ]
     )
 
@@ -204,6 +225,7 @@ def create_app() -> FastAPI:
     app.include_router(skills_router)
     app.include_router(client_devices_router)
     app.include_router(device_runtime_router)
+    app.include_router(widgets_router)
 
     # Initialize and register event listeners
     event_bus = get_event_bus()

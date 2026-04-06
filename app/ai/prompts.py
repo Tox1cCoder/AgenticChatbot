@@ -24,6 +24,15 @@ When using tools:
 - If one tool result suggests another would help, chain them together
 - Synthesize all tool results into coherent, comprehensive responses
 - Don't repeat identical tool calls with the same arguments in a single turn
+- When a concise table, chart, dashboard, chooser, or form would materially improve understanding, create a live widget to demonstrate the concept or summarize the result
+- When explaining an abstract or multi-part concept, prefer a live widget when it can make the explanation clearer at a glance
+- Strong widget use cases include comparisons, pros/cons, taxonomies, step-by-step flows, timelines, decision guides, and metric summaries
+- Use widgets to clarify the current answer, not as decoration, and keep the surrounding text useful even without the widget
+- For chart widgets, prefer a canonical state shape with `chart_type`, `labels`, and `datasets`
+- When you need a mix of metrics, tables, and charts in one explainer, prefer a `dashboard` widget over forcing everything into a single chart
+- When the widget should let the user switch metrics, windows, scenarios, or views, encode that explicitly with top-level `controls`, `control_values`, and either `views` or `variants`
+- When the built-in widget types are too rigid for the desired in-chat experience, you may create `widget_type="html"` with a compact self-contained HTML micro-app in `initial_state.html`
+- Reserve `widget_type="html"` for bounded in-chat micro experiences; do not use it for full websites or multi-page apps that belong in `canvas_agent`
 
 Critical:
 - Do NOT give shallow, one-sentence responses unless the question truly warrants brevity
@@ -204,7 +213,15 @@ TOOLS AND ENVIRONMENT:
 - If results are weak or ambiguous, refine the query and search again rather than guessing
 - Prefer the smallest sufficient tool and avoid duplicate calls with the same inputs
 - For web search, use `tool_search(query="...", server_name="tavily")` to find and load the right tool — do NOT guess Tavily tool names directly
-- For files, processes, shell commands, or desktop interaction, use `tool_search(query="...", server_name="desktop-commander")` — do NOT guess desktop-commander tool names directly"""
+- For files, processes, shell commands, or desktop interaction, use `tool_search(query="...", server_name="desktop-commander")` — do NOT guess desktop-commander tool names directly
+- For live in-chat visual aids or concept explainers (tables, charts, dashboards, process breakdowns, taxonomies, decision guides, structured choosers), use widget tools proactively when they would materially improve comprehension
+- If widget tools are already available in your bound tools, call them directly
+- Otherwise use `tool_search(query="...", server_name="widgets")` to discover widget tools, then create or update the widget and continue your textual answer normally
+- Prefer canonical widget state shapes so the frontend can render them reliably: chart widgets should usually use `chart_type`, `labels`, and `datasets`, and dashboard widgets should use `panels`
+- For interactive widgets, keep the control model explicit: top-level `controls`, current values in `control_values`, and alternate render payloads in `views` or `variants`
+- If the built-in structured widget types cannot express the desired UI cleanly, create `widget_type="html"` and put a compact self-contained HTML/CSS/JS micro-app in `initial_state.html`
+- Keep HTML widgets bounded to the current chat turn context; use `canvas_agent` instead for standalone pages, websites, or larger authored artifacts
+- Do NOT hand off to canvas_agent for in-chat visuals — widgets are handled directly by the current agent"""
 
 TOOL_CONTEXT_SUFFIX = """
 
@@ -257,6 +274,7 @@ Routing rules (strict priority):
 
 Canvas clarification:
 - Route TO canvas_agent: "create a website", "build a landing page", "make a portfolio site", "build a web page for my business"
+- Route TO chat_agent (NOT canvas_agent): in-chat visual aids like "show a comparison table", "render a chart of these results", "make a dashboard in chat", "let me pick from options" — these are handled by the current agent using widget tools
 - Route TO chat_agent: code explanations, algorithm discussions, non-web development tasks
 - Route TO image_generator_agent: pixel images, illustrations, graphics (not code-based)
 
@@ -279,7 +297,11 @@ Summarize the report -> rag_agent (if documents available)
 Documents available + "Summarize this" -> rag_agent
 Documents available + "What happened in the news today?" -> search_agent
 Documents available + "Draw a logo" -> image_generator_agent
-Documents available + "Create a website" -> canvas_agent"""
+Documents available + "Create a website" -> canvas_agent
+Show me a comparison table -> chat_agent
+Render a chart of these results -> chat_agent
+Make a dashboard for this data -> chat_agent
+Let me pick from options in the chat -> chat_agent"""
 
 
 def _build_persona_block(persona: str) -> str:

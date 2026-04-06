@@ -503,6 +503,8 @@ def extract_agent_execution_info(agent_response: dict[str, Any]) -> dict[str, An
                             "tool": tool_name,
                             "args": make_json_safe(tool_call.get("args", {})),
                             "output": (format_tool_result(tool_result) if tool_result else None),
+                            "error": None,
+                            "status": "success",
                         }
                     )
 

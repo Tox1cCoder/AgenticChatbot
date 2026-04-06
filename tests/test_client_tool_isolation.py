@@ -21,6 +21,7 @@ from app.services.client_runtime_store import (
     InMemoryClientRuntimeStore,
     reset_client_runtime_store,
 )
+from app.services.client_device_service import ClientDeviceService
 from app.services.message_service import MessageService
 
 
@@ -229,3 +230,25 @@ async def test_cleanup_stale_sessions_fails_pending_requests_without_waiting_for
     assert cleaned_count == 1
     assert result["success"] is False
     assert result["error_context"]["code"] == "DEVICE_DISCONNECTED"
+
+
+@pytest.mark.asyncio
+async def test_device_cleanup_still_updates_db_when_runtime_store_fails(monkeypatch):
+    class _ExplodingStore:
+        async def cleanup_stale_sessions(self) -> int:
+            raise RuntimeError("MISCONF")
+
+    monkeypatch.setattr(
+        "app.services.client_device_service.get_client_runtime_store",
+        lambda: _ExplodingStore(),
+    )
+
+    service = ClientDeviceService.__new__(ClientDeviceService)
+    service.session = None
+    service.repository = SimpleNamespace(
+        mark_stale_devices_offline=lambda _timeout_seconds: 2
+    )
+
+    cleaned_count = await service.cleanup_stale_sessions()
+
+    assert cleaned_count == 2

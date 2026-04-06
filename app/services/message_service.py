@@ -321,6 +321,7 @@ class MessageService(IMessageService):
         next_nodes: Any | None = None,
         user_id: UUID | None = None,
         message_id: UUID | None = None,
+        tool_artifacts: list[dict[str, Any]] | None = None,
     ) -> MessageRead:
         """
         Persist an assistant message that represents a paused workflow awaiting HITL approval.
@@ -360,6 +361,16 @@ class MessageService(IMessageService):
             metadata["next"] = next_nodes
         if pending_tool_calls is not None:
             metadata["pending_tool_calls"] = pending_tool_calls
+
+        # Preserve live_widgets from widget tools that already succeeded
+        # before the interrupt paused the run.
+        if tool_artifacts:
+            metadata["tool_artifacts"] = tool_artifacts
+            from app.core.response_constants import extract_live_widgets_from_artifacts
+
+            live_widgets = extract_live_widgets_from_artifacts(tool_artifacts)
+            if live_widgets:
+                metadata["live_widgets"] = live_widgets
 
         bot_message = self._create_bot_response_message(
             conversation_id=conversation_id,
@@ -547,6 +558,7 @@ class MessageService(IMessageService):
             # Stream bot response generation
             bot_response = None
             bot_message_persisted = False
+            stream_tool_artifacts: list[dict[str, Any]] = []
 
             try:
                 async for event in self.ai_service.execute_request_stream(workflow_request):
@@ -579,6 +591,26 @@ class MessageService(IMessageService):
 
                     elif event_type == "tool":
                         inflight.touch()
+                        # Accumulate artifacts from completed tool calls so we
+                        # can derive live_widgets on interrupt messages.
+                        if event.get("phase") == "end" and event.get("name"):
+                            from app.ai.tool_execution import build_tool_artifact
+
+                            stream_tool_artifacts.append(
+                                build_tool_artifact(
+                                    tool_call_id=event.get("tool_call_id"),
+                                    tool_name=event.get("name", "unknown"),
+                                    tool_args=event.get("args"),
+                                    output_text=(
+                                        str(event["result"])
+                                        if event.get("result") is not None
+                                        else None
+                                    ),
+                                    error=None
+                                    if event.get("state") != "error"
+                                    else str(event.get("result", "")),
+                                )
+                            )
                         yield dict(event)
 
                     elif event_type == "interrupt":
@@ -615,6 +647,7 @@ class MessageService(IMessageService):
                                 next_nodes=event.get("next"),
                                 user_id=resolved_user_id,
                                 message_id=bot_message_id,
+                                tool_artifacts=stream_tool_artifacts or None,
                             ).model_dump(mode="json"),
                         }
                         # Workflow is paused - don't create a bot message yet
@@ -997,6 +1030,7 @@ class MessageService(IMessageService):
 
         partial_text = ""
         bot_message_persisted = False
+        resume_tool_artifacts: list[dict[str, Any]] = []
 
         try:
             async for event in self.ai_service.resume_interrupted_execution_stream(
@@ -1017,6 +1051,24 @@ class MessageService(IMessageService):
                     yield {"type": "thinking", "content": event.get("content", "")}
 
                 elif event_type == "tool":
+                    if event.get("phase") == "end" and event.get("name"):
+                        from app.ai.tool_execution import build_tool_artifact
+
+                        resume_tool_artifacts.append(
+                            build_tool_artifact(
+                                tool_call_id=event.get("tool_call_id"),
+                                tool_name=event.get("name", "unknown"),
+                                tool_args=event.get("args"),
+                                output_text=(
+                                    str(event["result"])
+                                    if event.get("result") is not None
+                                    else None
+                                ),
+                                error=None
+                                if event.get("state") != "error"
+                                else str(event.get("result", "")),
+                            )
+                        )
                     yield dict(event)
 
                 elif event_type == "continuation_start" or event_type == "node_complete":
@@ -1053,6 +1105,7 @@ class MessageService(IMessageService):
                         next_nodes=event.get("next"),
                         user_id=user_id,
                         message_id=bot_message_id,
+                        tool_artifacts=resume_tool_artifacts or None,
                     )
                     self._set_plan_lifecycle(
                         conversation_id,

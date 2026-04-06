@@ -213,3 +213,22 @@ async def proxy_ai_conversation_messages(
         request,
         upstream_path=f"/ai/conversations/{conversation_id}/messages",
     )
+
+
+# ── Widget connection proxy ───────────────────────────────────────────────
+# Phase 1: proxy the widget connection minting endpoint so the frontend
+# can obtain a signed widget token through client_backend.
+# The returned ws_url points to the canonical server — no local WebSocket
+# relay in this phase.
+
+
+@router.post("/widgets/{widget_id}/connection")
+async def proxy_widget_connection(
+    widget_id: str,
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(
+        request,
+        upstream_path=f"/widgets/{widget_id}/connection",
+    )

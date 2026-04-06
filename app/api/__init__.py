@@ -18,6 +18,7 @@ from app.api.providers import router as providers_router  # noqa: E402
 from app.api.skills import router as skills_router  # noqa: E402
 from app.api.task_plans import router as task_plans_router  # noqa: E402
 from app.api.users import router as users_router  # noqa: E402
+from app.api.widgets import router as widgets_router  # noqa: E402
 
 __all__ = [
     "ai_sdk_router",
@@ -34,4 +35,5 @@ __all__ = [
     "providers_router",
     "skills_router",
     "task_plans_router",
+    "widgets_router",
 ]

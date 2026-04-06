@@ -503,7 +503,6 @@ class RedisClientRuntimeStore(BaseClientRuntimeStore):
             redis_url,
             decode_responses=True,
             socket_connect_timeout=1,
-            socket_timeout=1,
             health_check_interval=30,
         )
 

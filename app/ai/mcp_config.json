@@ -1,5 +1,14 @@
 {
   "mcp_servers": {
+    "widgets": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "app/ai/mcp_servers/widgets_server.py"
+      ],
+      "description": "Live UI widget tools for showing interactive tables, charts, dashboards, and forms inside chat"
+    },
     "calculator": {
       "enabled": true,
       "transport": "stdio",

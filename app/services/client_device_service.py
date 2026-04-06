@@ -9,6 +9,7 @@ This service handles:
 """
 
 import asyncio
+import logging
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -24,6 +25,7 @@ from app.services.client_runtime_store import (
 )
 
 DeviceSession = DeviceSessionRecord
+logger = logging.getLogger(__name__)
 
 
 class ClientDeviceService:
@@ -282,7 +284,14 @@ class ClientDeviceService:
         Returns:
             Number of sessions cleaned up.
         """
-        store_stale_count = await get_client_runtime_store().cleanup_stale_sessions()
+        try:
+            store_stale_count = await get_client_runtime_store().cleanup_stale_sessions()
+        except Exception as exc:
+            logger.warning(
+                "Client runtime store stale-session cleanup failed; continuing with DB cleanup only: %s",
+                exc,
+            )
+            store_stale_count = 0
 
         # Also mark stale devices as offline in database
         db_stale_count = self.repository.mark_stale_devices_offline(
@@ -322,8 +331,8 @@ async def periodic_session_cleanup_task(session_factory: callable, interval_seco
             finally:
                 db_session.close()
             if count > 0:
-                print(f"Cleaned up {count} stale device sessions")
+                logger.info("Cleaned up %d stale device sessions", count)
         except asyncio.CancelledError:
             break
         except Exception as e:
-            print(f"Error in session cleanup task: {e}")
+            logger.warning("Error in session cleanup task: %s", e)

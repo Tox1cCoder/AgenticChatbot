@@ -1,0 +1,53 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: sample_chatbot_redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    command:
+      - redis-server
+      - --bind
+      - 0.0.0.0
+      - --protected-mode
+      - "yes"
+      - --port
+      - "6379"
+      - --dir
+      - /data
+      - --dbfilename
+      - dump.rdb
+      - --appendonly
+      - "yes"
+      - --appendfilename
+      - appendonly.aof
+      - --appendfsync
+      - everysec
+      - --save
+      - "900 1"
+      - --save
+      - "300 10"
+      - --save
+      - "60 10000"
+      - --stop-writes-on-bgsave-error
+      - "yes"
+      - --rdbcompression
+      - "yes"
+      - --rdbchecksum
+      - "yes"
+      - --tcp-keepalive
+      - "60"
+      - --requirepass
+      - ${REDIS_PASSWORD:-sample-chatbot-dev}
+    volumes:
+      - sample_chatbot_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-sample-chatbot-dev}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  sample_chatbot_redis_data:
+    name: sample_chatbot_redis_data

@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 # Tool names that may load additional tools dynamically
 TOOL_LOADING_TOOLS = {"tool_search"}
+_WIDGET_ARTIFACT_TOOLS = {"widget_create", "widget_update"}
+_WIDGET_SESSION_BOUND_TOOLS = {"widget_create", "session_list_widgets"}
 
 
 def extract_images_from_tool_result(result_text: str) -> list[dict[str, str]]:
@@ -77,11 +79,74 @@ def build_tool_artifact(
     }
 
     if output_text is not None:
+        if tool_name in _WIDGET_ARTIFACT_TOOLS:
+            output_text = _compact_widget_artifact_output(output_text)
         artifact["output"] = (
             output_text[:max_output_chars] if len(output_text) > max_output_chars else output_text
         )
 
     return artifact
+
+
+def _compact_widget_artifact_output(output_text: str) -> str:
+    """Store a compact, parseable widget descriptor in artifacts.
+
+    Widget tool results can include a large ``state`` payload. The backend only
+    needs the stable mount metadata to derive ``live_widgets``, so keep a small
+    JSON object here to avoid truncating the artifact into invalid JSON.
+    """
+    try:
+        parsed = json.loads(output_text)
+    except (json.JSONDecodeError, TypeError):
+        return output_text
+
+    if not isinstance(parsed, dict) or not parsed.get("widget_id"):
+        return output_text
+
+    compact = {
+        "widget_id": parsed.get("widget_id"),
+        "session_id": parsed.get("session_id", ""),
+        "widget_type": parsed.get("widget_type", ""),
+        "title": parsed.get("title"),
+        "status": parsed.get("status", "active"),
+        "version": parsed.get("version", 1),
+    }
+    return json.dumps(compact, separators=(",", ":"), ensure_ascii=False)
+
+
+def _bind_widget_session_args(
+    tool_name: str,
+    tool_args: Any,
+    conversation_id: str | None,
+) -> Any:
+    """Bind widget session-scoped tools to the active conversation.
+
+    Widget tools operate inside the current conversation. Models may still emit
+    placeholders like ``current_session`` or stale IDs, so normalize those
+    arguments here before the MCP tool is invoked.
+    """
+    if tool_name not in _WIDGET_SESSION_BOUND_TOOLS:
+        return tool_args
+    if not conversation_id or not isinstance(tool_args, dict):
+        return tool_args
+
+    bound_conversation_id = str(conversation_id)
+    current_session_id = tool_args.get("session_id")
+    if current_session_id == bound_conversation_id:
+        return tool_args
+
+    bound_args = dict(tool_args)
+    bound_args["session_id"] = bound_conversation_id
+
+    if current_session_id not in (None, "", bound_conversation_id):
+        logger.debug(
+            "Binding widget tool '%s' session_id from %r to active conversation %s",
+            tool_name,
+            current_session_id,
+            bound_conversation_id,
+        )
+
+    return bound_args
 
 
 def build_rejected_tool_artifacts(
@@ -425,6 +490,7 @@ async def execute_tool_calls(
         tool_name = tool_call.get("name")
         tool_id = tool_call.get("id")
         tool_args = tool_call.get("args", {})
+        tool_args = _bind_widget_session_args(tool_name or "", tool_args, conversation_id)
 
         if not tool_name:
             error_msg = "Error: Tool name missing"
