@@ -111,6 +111,18 @@
         "EXCEL_MCP_PAGING_CELLS_LIMIT": "4000"
       },
       "enabled": true
+    },
+    "openbrowser": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "openbrowser-ai",
+        "--mcp"
+      ],
+      "env": {
+        "OPENBROWSER_HEADLESS": "true"
+      },
+      "enabled": true
     }
   }
 }

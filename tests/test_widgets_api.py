@@ -5,12 +5,12 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from types import SimpleNamespace
 
 qdrant_client_stub = types.ModuleType("qdrant_client")
 qdrant_client_stub.QdrantClient = object
@@ -190,14 +190,14 @@ def test_widget_connection_restores_missing_widget_from_message_metadata(
                     "widget_type": "chart",
                     "title": "Recovered Chart",
                     "initial_state": (
-                        "{\"chart_type\":\"line\",\"labels\":[\"A\"],"
-                        "\"datasets\":[{\"label\":\"Series\",\"data\":[1]}]}"
+                        '{"chart_type":"line","labels":["A"],'
+                        '"datasets":[{"label":"Series","data":[1]}]}'
                     ),
                 },
                 "output": (
-                    "{\"widget_id\":\"restored-widget-id\",\"session_id\":\"current_session\","
-                    "\"widget_type\":\"chart\",\"title\":\"Recovered Chart\","
-                    "\"status\":\"active\",\"version\":2}"
+                    '{"widget_id":"restored-widget-id","session_id":"current_session",'
+                    '"widget_type":"chart","title":"Recovered Chart",'
+                    '"status":"active","version":2}'
                 ),
             }
         ],
@@ -251,9 +251,7 @@ def test_widget_websocket_sync_and_user_patch(widget_test_client):
         assert initial["version"] == 1
         assert initial["state"]["items"][0]["label"] == "Alpha"
 
-        websocket.send_json(
-            {"type": "user_state_patch", "patch": {"selection": "alpha"}}
-        )
+        websocket.send_json({"type": "user_state_patch", "patch": {"selection": "alpha"}})
         updated = websocket.receive_json()
         assert updated["type"] == "widget_update"
         assert updated["widget_id"] == created.widget_id

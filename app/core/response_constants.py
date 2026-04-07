@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..schemas.workflow import WorkflowResponse
@@ -52,7 +52,7 @@ def _extract_metadata_message(metadata: dict[str, Any] | None) -> str:
 
 
 def extract_response_content(
-    response: Optional["WorkflowResponse"],
+    response: WorkflowResponse | None,
     fallback: str = NO_RESPONSE_GENERATED,
 ) -> str:
     """Extract content from a service-owned workflow response with fallback."""
@@ -149,7 +149,7 @@ def extract_live_widgets_from_artifacts(
 
 
 def build_bot_metadata(
-    response: Optional["WorkflowResponse"],
+    response: WorkflowResponse | None,
     persona: str | None = None,
 ) -> dict[str, Any]:
     """Build standard bot response metadata from a workflow response."""
@@ -176,9 +176,7 @@ def build_bot_metadata(
         metadata["images"] = response.metadata["images"]
 
     # Derive live_widgets from widget tool artifacts
-    live_widgets = extract_live_widgets_from_artifacts(
-        metadata.get("tool_artifacts")
-    )
+    live_widgets = extract_live_widgets_from_artifacts(metadata.get("tool_artifacts"))
     if live_widgets:
         metadata["live_widgets"] = live_widgets
 

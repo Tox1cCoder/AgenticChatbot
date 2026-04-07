@@ -14,9 +14,7 @@ from pydantic import BaseModel
 from app.ai.tool_execution import build_tool_artifact, execute_tool_calls
 from app.core.response_constants import build_bot_metadata, extract_live_widgets_from_artifacts
 from app.services.widget_runtime import (
-    DEFAULT_WIDGET_TTL_SECONDS,
     MAX_WIDGET_STATE_BYTES,
-    WIDGET_TOKEN_TTL_SECONDS,
     InMemoryWidgetStore,
     WidgetConnectionManager,
     WidgetRecord,
@@ -237,9 +235,7 @@ class TestWidgetRecordMetadata:
 # ---------------------------------------------------------------------------
 class TestWidgetTokenService:
     def test_mint_and_verify(self, token_service):
-        token, expires_at = token_service.mint(
-            widget_id="w-1", session_id="s-1", user_id="u-1"
-        )
+        token, expires_at = token_service.mint(widget_id="w-1", session_id="s-1", user_id="u-1")
         claims = token_service.verify(token)
         assert claims["wid"] == "w-1"
         assert claims["sid"] == "s-1"
@@ -255,9 +251,7 @@ class TestWidgetTokenService:
             token_service.verify(token)
 
     def test_wrong_secret_raises(self, token_service):
-        token, _ = token_service.mint(
-            widget_id="w-1", session_id="s-1", user_id="u-1"
-        )
+        token, _ = token_service.mint(widget_id="w-1", session_id="s-1", user_id="u-1")
         other = WidgetTokenService(secret="different-secret-key-long-enough!")
         with pytest.raises(pyjwt.InvalidSignatureError):
             other.verify(token)
@@ -288,14 +282,16 @@ class TestExtractLiveWidgets:
                 "tool_call_id": "tc-1",
                 "tool": "widget_create",
                 "args": {},
-                "output": json.dumps({
-                    "widget_id": "w-abc",
-                    "session_id": "s-1",
-                    "widget_type": "table",
-                    "title": "Result Table",
-                    "status": "active",
-                    "version": 1,
-                }),
+                "output": json.dumps(
+                    {
+                        "widget_id": "w-abc",
+                        "session_id": "s-1",
+                        "widget_type": "table",
+                        "title": "Result Table",
+                        "status": "active",
+                        "version": 1,
+                    }
+                ),
                 "error": None,
                 "status": "success",
             }
@@ -336,7 +332,11 @@ class TestExtractLiveWidgets:
         }
         artifacts = [
             {"tool": "widget_create", "output": json.dumps(base), "status": "success"},
-            {"tool": "widget_update", "output": json.dumps({**base, "version": 2}), "status": "success"},
+            {
+                "tool": "widget_update",
+                "output": json.dumps({**base, "version": 2}),
+                "status": "success",
+            },
         ]
         widgets = extract_live_widgets_from_artifacts(artifacts)
         assert len(widgets) == 1
@@ -355,14 +355,16 @@ class TestExtractLiveWidgets:
         artifacts = [
             {
                 "tool": "widget_create",
-                "output": json.dumps({
-                    "widget_id": "w-legacy",
-                    "session_id": "s-1",
-                    "widget_type": "table",
-                    "title": "Legacy Widget",
-                    "status": "active",
-                    "version": 1,
-                }),
+                "output": json.dumps(
+                    {
+                        "widget_id": "w-legacy",
+                        "session_id": "s-1",
+                        "widget_type": "table",
+                        "title": "Legacy Widget",
+                        "status": "active",
+                        "version": 1,
+                    }
+                ),
             }
         ]
         widgets = extract_live_widgets_from_artifacts(artifacts)
@@ -373,14 +375,16 @@ class TestExtractLiveWidgets:
         artifacts = [
             {
                 "tool_name": "widget_update",
-                "tool_output": json.dumps({
-                    "widget_id": "w-legacy-shape",
-                    "session_id": "s-1",
-                    "widget_type": "chart",
-                    "title": "Legacy Shape",
-                    "status": "active",
-                    "version": 2,
-                }),
+                "tool_output": json.dumps(
+                    {
+                        "widget_id": "w-legacy-shape",
+                        "session_id": "s-1",
+                        "widget_type": "chart",
+                        "title": "Legacy Shape",
+                        "status": "active",
+                        "version": 2,
+                    }
+                ),
             }
         ]
         widgets = extract_live_widgets_from_artifacts(artifacts)
@@ -399,14 +403,16 @@ class TestBuildBotMetadataWidgets:
             tool_artifacts = [
                 {
                     "tool": "widget_create",
-                    "output": json.dumps({
-                        "widget_id": "w-1",
-                        "session_id": "s-1",
-                        "widget_type": "chart",
-                        "title": "Chart",
-                        "status": "active",
-                        "version": 1,
-                    }),
+                    "output": json.dumps(
+                        {
+                            "widget_id": "w-1",
+                            "session_id": "s-1",
+                            "widget_type": "chart",
+                            "title": "Chart",
+                            "status": "active",
+                            "version": 1,
+                        }
+                    ),
                     "status": "success",
                 }
             ]
@@ -419,9 +425,7 @@ class TestBuildBotMetadataWidgets:
     def test_no_live_widgets_without_widget_artifacts(self):
         class FakeResponse:
             metadata = {}
-            tool_artifacts = [
-                {"tool": "add", "output": "5", "status": "success"}
-            ]
+            tool_artifacts = [{"tool": "add", "output": "5", "status": "success"}]
 
         metadata = build_bot_metadata(FakeResponse())
         assert "live_widgets" not in metadata
@@ -436,14 +440,16 @@ class TestBuildBotMetadataWidgets:
             tool_artifacts = [
                 {
                     "tool": "widget_create",
-                    "output": json.dumps({
-                        "widget_id": "w-merged",
-                        "session_id": "s-1",
-                        "widget_type": "table",
-                        "title": "Merged Widget",
-                        "status": "active",
-                        "version": 1,
-                    }),
+                    "output": json.dumps(
+                        {
+                            "widget_id": "w-merged",
+                            "session_id": "s-1",
+                            "widget_type": "table",
+                            "title": "Merged Widget",
+                            "status": "active",
+                            "version": 1,
+                        }
+                    ),
                     "status": "success",
                 }
             ]
@@ -458,15 +464,17 @@ class TestBuildBotMetadataWidgets:
 # ---------------------------------------------------------------------------
 class TestBuildToolArtifactWidgets:
     def test_widget_artifact_output_remains_parseable(self):
-        raw_output = json.dumps({
-            "widget_id": "w-big",
-            "session_id": "s-1",
-            "widget_type": "table",
-            "title": "Large Widget",
-            "status": "active",
-            "version": 1,
-            "state": {"rows": [["x" * 5000]]},
-        })
+        raw_output = json.dumps(
+            {
+                "widget_id": "w-big",
+                "session_id": "s-1",
+                "widget_type": "table",
+                "title": "Large Widget",
+                "status": "active",
+                "version": 1,
+                "state": {"rows": [["x" * 5000]]},
+            }
+        )
         artifact = build_tool_artifact(
             tool_call_id="tc-1",
             tool_name="widget_create",
@@ -517,7 +525,7 @@ class TestWidgetToolExecutionBinding:
                     "args": {
                         "session_id": "current_session",
                         "widget_type": "table",
-                        "initial_state": "{\"rows\":[]}",
+                        "initial_state": '{"rows":[]}',
                     },
                 }
             ],
@@ -556,7 +564,7 @@ class TestWidgetToolExecutionBinding:
                     "args": {
                         "session_id": "manual-session",
                         "widget_type": "table",
-                        "initial_state": "{\"rows\":[]}",
+                        "initial_state": '{"rows":[]}',
                     },
                 }
             ],
@@ -603,7 +611,7 @@ class TestWidgetToolBindingWrappers:
             {
                 "session_id": "current_session",
                 "widget_type": "table",
-                "initial_state": "{\"rows\":[]}",
+                "initial_state": '{"rows":[]}',
             }
         )
 

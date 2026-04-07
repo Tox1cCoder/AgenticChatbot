@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import datetime, timezone
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -276,7 +276,9 @@ def _resolve_widget_session_id(
     ``current_session``.
     """
     stored_conversation_id = _parse_conversation_uuid(stored_session_id)
-    if stored_conversation_id and _user_can_access_widget_session(user_id, str(stored_conversation_id)):
+    if stored_conversation_id and _user_can_access_widget_session(
+        user_id, str(stored_conversation_id)
+    ):
         return str(stored_conversation_id)
 
     recovered_session_id = _recover_widget_session_id_from_messages(user_id, widget_id)

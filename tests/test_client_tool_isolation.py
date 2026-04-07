@@ -16,12 +16,12 @@ from app.core.exceptions.http import CustomHTTPException
 from app.models.hitl_interrupt import HITLInterruptStatus
 from app.schemas.runtime_protocol import ToolDispatchRequest
 from app.services import client_runtime_store as runtime_store_module
+from app.services.client_device_service import ClientDeviceService
 from app.services.client_runtime_store import (
     DeviceSessionRecord,
     InMemoryClientRuntimeStore,
     reset_client_runtime_store,
 )
-from app.services.client_device_service import ClientDeviceService
 from app.services.message_service import MessageService
 
 
@@ -245,9 +245,7 @@ async def test_device_cleanup_still_updates_db_when_runtime_store_fails(monkeypa
 
     service = ClientDeviceService.__new__(ClientDeviceService)
     service.session = None
-    service.repository = SimpleNamespace(
-        mark_stale_devices_offline=lambda _timeout_seconds: 2
-    )
+    service.repository = SimpleNamespace(mark_stale_devices_offline=lambda _timeout_seconds: 2)
 
     cleaned_count = await service.cleanup_stale_sessions()
 

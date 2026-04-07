@@ -1,15 +1,33 @@
 {
   "skills": {
+    "accessibility-audit": {
+      "enabled": true
+    },
     "AutoCAD TNF Layout": {
       "enabled": false
     },
+    "e2e-testing": {
+      "enabled": true
+    },
     "example-skill": {
       "enabled": false
+    },
+    "file-download": {
+      "enabled": true
+    },
+    "form-filling": {
+      "enabled": true
+    },
+    "page-analysis": {
+      "enabled": true
     },
     "playwright-cli": {
       "enabled": false
     },
     "take100-timesheet": {
+      "enabled": true
+    },
+    "web-scraping": {
       "enabled": true
     }
   }

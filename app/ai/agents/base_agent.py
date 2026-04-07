@@ -18,7 +18,6 @@ from ...core.runtime_modeling import (
     ResolvedRuntimeModelConfig,
     RuntimeFallbackConfig,
 )
-
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
 from ..client_runtime_tools import get_client_runtime_tools
@@ -30,9 +29,9 @@ from ..hand_off_tool import hand_off as _hand_off_tool
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..prompts import DELEGATION_SUFFIX, TOOL_CONTEXT_SUFFIX, TOOL_EXPLORATION_SUFFIX
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from ..tool_execution import _WIDGET_SESSION_BOUND_TOOLS, _bind_widget_session_args
 from ..skills_tool import create_activate_skill_tool, get_available_skill_summaries
 from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
+from ..tool_execution import _WIDGET_SESSION_BOUND_TOOLS, _bind_widget_session_args
 from ..utils import (
     coerce_response_text,
     extract_openai_reasoning_summary,
@@ -48,7 +47,13 @@ _OPENAI_REASONING_SUMMARY_DISABLED_USERS: set[str] = set()
 # Widgets are for in-chat visual aids on chat/rag/search agents only.
 _WIDGET_TARGET_AGENT_KEYS = {"chat", "rag", "search"}
 _WIDGET_EXCLUDED_AGENT_KEYS = {"canvas", "image_generator", "planning"}
-_WIDGET_TOOL_NAMES = {"widget_create", "widget_update", "widget_get_state", "widget_close", "session_list_widgets"}
+_WIDGET_TOOL_NAMES = {
+    "widget_create",
+    "widget_update",
+    "widget_get_state",
+    "widget_close",
+    "session_list_widgets",
+}
 
 
 def _get_effective_tool_allowlist(agent_key: str) -> list[str]:

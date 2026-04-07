@@ -88,9 +88,7 @@ class WidgetRecord:
 def _validate_state_size(state: dict[str, Any]) -> None:
     serialized = json.dumps(state, separators=(",", ":"))
     if len(serialized.encode()) > MAX_WIDGET_STATE_BYTES:
-        raise ValueError(
-            f"Widget state exceeds maximum size of {MAX_WIDGET_STATE_BYTES} bytes"
-        )
+        raise ValueError(f"Widget state exceeds maximum size of {MAX_WIDGET_STATE_BYTES} bytes")
 
 
 # ---------------------------------------------------------------------------

@@ -783,9 +783,7 @@ class Settings(BaseSettings):
             )
         self.redis_url = _normalize_redis_loopback_host(self.redis_url)
         self.celery_broker_url = _normalize_redis_loopback_host(self.celery_broker_url)
-        self.celery_result_backend = _normalize_redis_loopback_host(
-            self.celery_result_backend
-        )
+        self.celery_result_backend = _normalize_redis_loopback_host(self.celery_result_backend)
         if not self.secret_key or self.secret_key == "secret-key":
             if self.environment == "development":
                 self.secret_key = secrets.token_urlsafe(48)

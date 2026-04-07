@@ -7,9 +7,7 @@ import re
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
 from html.parser import HTMLParser
-from pathlib import Path
 from typing import Any
 
 import markdown as _markdown  # type: ignore
@@ -26,9 +24,6 @@ API_BASE_URL = os.environ.get("CHATBOT_API_BASE_URL", "http://127.0.0.1:8000")
 WIDGET_WS_BASE_URL = os.environ.get("CHATBOT_WIDGET_WS_BASE_URL", "").rstrip("/")
 REQUEST_TIMEOUT = (5, 30)
 STREAM_REQUEST_TIMEOUT = (10, 900)
-LIVE_WIDGET_TEMPLATE_PATH = (
-    Path(__file__).resolve().parent / "app" / "static" / "live_widget_component.html"
-)
 
 _MAX_PERSONA_LENGTH = 8000
 _MAX_IMAGE_ATTACHMENTS = 4
@@ -1847,10 +1842,44 @@ def _cached_get_request(endpoint: str, auth_token: str, cache_version: int) -> d
     }
 
 
+def _extract_api_error_message(status_code: int | None, payload: Any) -> str:
+    if isinstance(payload, dict):
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+
+        detail = payload.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail.strip()
+
+        error = payload.get("error")
+        if isinstance(error, dict) and error:
+            first_key = next(iter(error))
+            first_value = error[first_key]
+            if isinstance(first_value, list) and first_value:
+                return f"{first_key}: {first_value[0]}"
+            if isinstance(first_value, str) and first_value.strip():
+                return f"{first_key}: {first_value.strip()}"
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+
+    if status_code:
+        return f"HTTP error {status_code}"
+    return "Request failed"
+
+
+def _last_api_error_message(default: str = "Request failed") -> str:
+    message = st.session_state.get("_last_api_error_message")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    return default
+
+
 def make_api_request(method: str, endpoint: str, data: dict | None = None) -> dict:
     method = method.strip().upper()
     auth_token = st.session_state.get("auth_token")
     response_data: dict[str, Any]
+    st.session_state["_last_api_error_message"] = None
 
     try:
         if method == "GET" and data is None:
@@ -1862,7 +1891,9 @@ def make_api_request(method: str, endpoint: str, data: dict | None = None) -> di
             status_code = int(cached.get("status_code") or 0)
             response_data = cached.get("payload") or {}
             if status_code >= 400:
-                st.toast(f"HTTP error {status_code}", icon=":material/cancel:")
+                error_message = _extract_api_error_message(status_code, response_data)
+                st.session_state["_last_api_error_message"] = error_message
+                st.toast(error_message, icon=":material/cancel:")
                 return {}
         else:
             url = f"{API_BASE_URL}{endpoint}"
@@ -1880,7 +1911,16 @@ def make_api_request(method: str, endpoint: str, data: dict | None = None) -> di
             parsed = response.json()
             response_data = parsed if isinstance(parsed, dict) else {}
     except requests.exceptions.HTTPError as http_error:
-        st.toast(f"HTTP error {http_error.response.status_code}", icon=":material/cancel:")
+        status_code = http_error.response.status_code if http_error.response is not None else None
+        payload: Any = {}
+        if http_error.response is not None:
+            try:
+                payload = http_error.response.json()
+            except ValueError:
+                payload = {}
+        error_message = _extract_api_error_message(status_code, payload)
+        st.session_state["_last_api_error_message"] = error_message
+        st.toast(error_message, icon=":material/cancel:")
         return {}
     except requests.exceptions.ConnectionError:
         st.toast("Cannot connect to API", icon=":material/cancel:")
@@ -1895,6 +1935,7 @@ def make_api_request(method: str, endpoint: str, data: dict | None = None) -> di
     if not response_data.get("success"):
         error_code = response_data.get("code", "unknown_error")
         error_message = response_data.get("message", "An unknown error occurred.")
+        st.session_state["_last_api_error_message"] = error_message
 
         if error_code == "unauthenticated":
             st.session_state.auth_token = None
@@ -2921,9 +2962,7 @@ def _widget_component_json(value: Any) -> str:
     )
 
 
-def _legacy_build_live_widget_component_html(
-    widget: dict[str, Any], auth_token: str | None
-) -> str:
+def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | None) -> str:
     widget_id = str(widget.get("widget_id") or "")
     config = {
         "widget": {
@@ -3796,21 +3835,6 @@ def _legacy_build_live_widget_component_html(
         const legend = slices.map((slice) => `<div class="lw-donut-item"><span class="lw-dot" style="background:${esc(slice.color)}"></span><div><div class="lw-donut-value">${esc(truncateText(slice.label, 22))}</div><div class="lw-donut-share">${esc(formatNumber((slice.value / total) * 100))}% share</div></div><div class="lw-donut-value">${esc(formatNumber(slice.value))}</div></div>`).join("");
         return `<div class="lw-donut"><div class="lw-ring" style="background:conic-gradient(${gradient})"><div class="lw-ring-hole"><strong>${esc(formatNumber(total))}</strong><span>Total</span></div></div><div class="lw-donut-legend">${legend}</div></div>`;
       }
-      function htmlState(data){
-        if(!isObj(data)) return {html: "", caption: "", height: 560};
-        const html = String(data.html || data.document || data.content || data.srcdoc || "");
-        const caption = String(data.caption || data.note || data.description || "");
-        const explicitHeight = numeric(data.height) ?? numeric(data.min_height) ?? numeric(data.minHeight);
-        const height = Math.max(260, Math.min(960, explicitHeight ?? 560));
-        return {html, caption, height};
-      }
-      function renderHtmlWidget(data){
-        const cfg = htmlState(data);
-        if(!cfg.html.trim()){
-          return '<div class="lw-empty">No HTML content available yet.</div>';
-        }
-        return `<div class="lw-html-shell">${cfg.caption ? `<div class="lw-html-caption">${esc(cfg.caption)}</div>` : ""}<iframe class="lw-html-frame" sandbox="allow-scripts allow-forms allow-modals allow-downloads" referrerpolicy="no-referrer" style="height:${cfg.height}px" srcdoc="${esc(cfg.html)}"></iframe></div>`;
-      }
       function renderChartPreview(source){
         if(Array.isArray(source.rows)) return renderTable(source);
         const pointLike = Array.isArray(source.points) ? source.points : Array.isArray(source.items) ? source.items : Array.isArray(source.entries) ? source.entries : Array.isArray(source.data) ? source.data : [];
@@ -3831,6 +3855,21 @@ def _legacy_build_live_widget_component_html(
           return renderTable({columns: ["Field", "Value"], rows: scalarEntries.map(([key, value]) => [label(key), value])});
         }
         return renderRawDisclosure(source);
+      }
+      function htmlState(data){
+        if(!isObj(data)) return {html: "", caption: "", height: 560};
+        const html = String(data.html || data.document || data.content || data.srcdoc || "");
+        const caption = String(data.caption || data.note || data.description || "");
+        const explicitHeight = numeric(data.height) ?? numeric(data.min_height) ?? numeric(data.minHeight);
+        const height = Math.max(260, Math.min(960, explicitHeight ?? 560));
+        return {html, caption, height};
+      }
+      function renderHtmlWidget(data){
+        const cfg = htmlState(data);
+        if(!cfg.html.trim()){
+          return '<div class="lw-empty">No HTML content available yet.</div>';
+        }
+        return `<div class="lw-html-shell">${cfg.caption ? `<div class="lw-html-caption">${esc(cfg.caption)}</div>` : ""}<iframe class="lw-html-frame" sandbox="allow-scripts allow-forms allow-modals allow-downloads" referrerpolicy="no-referrer" style="height:${cfg.height}px" srcdoc="${esc(cfg.html)}"></iframe></div>`;
       }
       function renderChartToolbar(normalized, readOnly){
         const disabled = readOnly ? " disabled" : "";
@@ -3972,7 +4011,6 @@ def _legacy_build_live_widget_component_html(
         ws.addEventListener("error", () => {state.conn = "error"; meta();});
       }
       async function connect(){
-        meta();
         if(!cfg.widget.widget_id){state.conn = "error"; meta(); showError("Widget metadata is missing widget_id."); renderBody(); return;}
         if(!cfg.authToken){state.conn = "auth"; meta(); showError("Sign in again to connect this widget."); renderBody(); return;}
         state.conn = "connecting";
@@ -4049,7 +4087,7 @@ def _legacy_build_live_widget_component_html(
         if(!(target instanceof HTMLElement)) return;
         if(target.hasAttribute("data-table-search")){
           const nextQuery = target.value || "";
-          setTableUi({query: target.value || ""});
+          setTableUi({query: nextQuery});
           const nextSearch = el.body.querySelector("[data-table-search='true']");
           if(nextSearch && typeof nextSearch.focus === "function"){
             nextSearch.focus();
@@ -4058,7 +4096,6 @@ def _legacy_build_live_widget_component_html(
               nextSearch.setSelectionRange(cursor, cursor);
             }
           }
-          return;
         }
       });
       el.body.addEventListener("change", (event) => {
@@ -4089,20 +4126,6 @@ def _legacy_build_live_widget_component_html(
     </script>
     """
     return template.replace("__CFG__", _widget_component_json(config))
-
-
-@lru_cache(maxsize=1)
-def _load_live_widget_component_template() -> str:
-    try:
-        return LIVE_WIDGET_TEMPLATE_PATH.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(
-            f"Live widget template not found at {LIVE_WIDGET_TEMPLATE_PATH}"
-        ) from exc
-
-
-def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | None) -> str:
-    return _legacy_build_live_widget_component_html(widget, auth_token)
 
 
 def _live_widget_frame_height(widget: dict[str, Any]) -> int:
@@ -5633,6 +5656,11 @@ def render_tools_tab():
     # Server Management Section
     with st.expander("**MCP Servers Management**", expanded=False):
         servers = servers_data.get("servers", [])
+        existing_server_names = {
+            str(server.get("name") or "").strip()
+            for server in servers
+            if str(server.get("name") or "").strip()
+        }
 
         # Add Server Section
         st.markdown("#### Add New Server")
@@ -5695,7 +5723,12 @@ def render_tools_tab():
                             failed_servers = []
 
                             for server_config in servers_to_add:
-                                server_name = server_config.get("name", "unknown")
+                                server_name = str(server_config.get("name") or "unknown").strip()
+                                if server_name in existing_server_names:
+                                    message = f"Server '{server_name}' already exists"
+                                    failed_servers.append(f"{server_name}: {message}")
+                                    st.error(message, icon=":material/cancel:")
+                                    continue
 
                                 with st.spinner(f"Adding server '{server_name}'..."):
                                     # Make API request
@@ -5710,11 +5743,7 @@ def render_tools_tab():
                                             icon=":material/check_circle:",
                                         )
                                     else:
-                                        error_msg = (
-                                            response.get("message", "Unknown error")
-                                            if response
-                                            else "No response from API"
-                                        )
+                                        error_msg = _last_api_error_message("Failed to add server")
                                         failed_servers.append(f"{server_name}: {error_msg}")
                                         st.error(
                                             f"Failed to add '{server_name}': {error_msg}",
@@ -5780,12 +5809,15 @@ def render_tools_tab():
             enabled_input = st.checkbox("Enable server", value=True)
 
             if st.form_submit_button("Add Server", width="stretch"):
-                if not server_name_input:
+                server_name_value = server_name_input.strip()
+                if not server_name_value:
                     st.error("Server name is required")
+                elif server_name_value in existing_server_names:
+                    st.error(f"Server '{server_name_value}' already exists")
                 else:
                     try:
                         config = {
-                            "name": server_name_input,
+                            "name": server_name_value,
                             "transport": transport_input,
                             "enabled": enabled_input,
                         }
@@ -5794,50 +5826,55 @@ def render_tools_tab():
                             config["description"] = description_input
 
                         if transport_input == "stdio":
-                            if not command_input or not args_input:
+                            parsed_args = [arg.strip() for arg in args_input.split(",") if arg.strip()]
+                            if not command_input.strip() or not parsed_args:
                                 st.error("Command and arguments are required for stdio transport")
                             else:
-                                config["command"] = command_input
-                                config["args"] = [arg.strip() for arg in args_input.split(",")]
+                                config["command"] = command_input.strip()
+                                config["args"] = parsed_args
 
                                 if env_input.strip():
                                     try:
                                         config["env"] = json.loads(env_input)
                                     except json.JSONDecodeError:
                                         st.error("Invalid JSON in environment variables")
+                                        config = {}
 
-                                        with st.spinner("Adding server..."):
-                                            result = add_mcp_server(config)
-                                            if result:
-                                                st.success(
-                                                    f"Server '{server_name_input}' added!",
-                                                    icon=":material/check_circle:",
-                                                )
-                                                st.rerun()
-                                            else:
-                                                st.error("Failed to add server")
+                                if config:
+                                    with st.spinner("Adding server..."):
+                                        result = add_mcp_server(config)
+                                        if result:
+                                            st.success(
+                                                f"Server '{server_name_value}' added!",
+                                                icon=":material/check_circle:",
+                                            )
+                                            st.rerun()
+                                        else:
+                                            st.error(_last_api_error_message("Failed to add server"))
                         else:
-                            if not url_input:
+                            if not url_input.strip():
                                 st.error("URL is required for HTTP transport")
                             else:
-                                config["url"] = url_input
+                                config["url"] = url_input.strip()
 
                                 if headers_input.strip():
                                     try:
                                         config["headers"] = json.loads(headers_input)
                                     except json.JSONDecodeError:
                                         st.error("Invalid JSON in headers")
+                                        config = {}
 
-                                        with st.spinner("Adding server..."):
-                                            result = add_mcp_server(config)
-                                            if result:
-                                                st.success(
-                                                    f"Server '{server_name_input}' added!",
-                                                    icon=":material/check_circle:",
-                                                )
-                                                st.rerun()
-                                            else:
-                                                st.error("Failed to add server")
+                                if config:
+                                    with st.spinner("Adding server..."):
+                                        result = add_mcp_server(config)
+                                        if result:
+                                            st.success(
+                                                f"Server '{server_name_value}' added!",
+                                                icon=":material/check_circle:",
+                                            )
+                                            st.rerun()
+                                        else:
+                                            st.error(_last_api_error_message("Failed to add server"))
                     except Exception as e:
                         st.error(f"Error: {e}")
 
@@ -5864,6 +5901,8 @@ def render_tools_tab():
             if st.button("Add Server from URL", width="stretch"):
                 if not url_input.strip():
                     st.error("URL is required")
+                elif server_name_url.strip() and server_name_url.strip() in existing_server_names:
+                    st.error(f"Server '{server_name_url.strip()}' already exists")
                 else:
                     try:
                         url_config = {
@@ -5890,7 +5929,7 @@ def render_tools_tab():
                                 time.sleep(0.5)
                                 st.rerun()
                             else:
-                                st.error("Failed to add server from URL")
+                                st.error(_last_api_error_message("Failed to add server from URL"))
                     except Exception as e:
                         st.error(f"Error: {e}")
 

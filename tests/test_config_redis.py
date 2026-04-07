@@ -28,7 +28,11 @@ def test_existing_redis_url_password_is_not_overwritten():
         redis_url="redis://:already-set@localhost:6379/0",
     )
 
-    expected = "redis://:already-set@127.0.0.1:6379/0" if sys.platform == "win32" else "redis://:already-set@localhost:6379/0"
+    expected = (
+        "redis://:already-set@127.0.0.1:6379/0"
+        if sys.platform == "win32"
+        else "redis://:already-set@localhost:6379/0"
+    )
     assert settings.redis_url == expected
 
 
