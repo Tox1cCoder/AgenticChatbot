@@ -100,6 +100,9 @@ async def test_client_runtime_tools_are_scoped_per_user_and_device():
         assert [tool.name for tool in tools_a] == ["client__shell_execute"]
         assert [tool.name for tool in tools_b] == ["client__filesystem_read_text"]
         assert wrong_user_tools == []
+        assert tools_a[0].metadata["session_id"] == "session-a"
+        assert tools_a[0].metadata["catalog_version"] == 1
+        assert tools_a[0].metadata["tool_instance_id"]
     finally:
         _CLIENT_TOOL_CACHE.clear()
         reset_client_runtime_store()
@@ -125,13 +128,21 @@ def test_deferred_binding_only_includes_loaded_client_tools(monkeypatch):
         "_get_client_runtime_tools",
         lambda **kwargs: [loaded_client_tool, unloaded_client_tool],
     )
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.get_active_client_runtime_session",
+        lambda **kwargs: SimpleNamespace(session_id="session-a"),
+    )
 
     class _DeferredStateStub:
-        def get_loaded_client_tools(self, conversation_id: str, agent_key: str):
-            return [
+        def get_loaded_client_tools(self, conversation_id: str, agent_key: str, device_id=None, session_id=None):
+            assert session_id == "session-a"
+            all_tools = [
                 SimpleNamespace(tool_name="client__filesystem_read_text", device_id="device-a"),
                 SimpleNamespace(tool_name="client__shell_execute", device_id="device-b"),
             ]
+            if device_id:
+                return [t for t in all_tools if t.device_id == str(device_id)]
+            return all_tools
 
     monkeypatch.setattr(
         "app.ai.deferred_tool_state.get_deferred_tool_state",
@@ -195,6 +206,69 @@ def test_interrupt_resume_rejects_device_mismatch():
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.error_code == "INTERRUPT_DEVICE_MISMATCH"
+
+
+@pytest.mark.asyncio
+async def test_refresh_tool_map_after_search_uses_active_session_scope(monkeypatch):
+    from app.ai.tool_execution import _refresh_tool_map_after_search
+
+    state_calls = []
+    device_id = str(uuid4())
+
+    class _DeferredStateStub:
+        def get_loaded_client_tools(self, conversation_id, agent_key, device_id=None, session_id=None):
+            state_calls.append(
+                {
+                    "conversation_id": conversation_id,
+                    "agent_key": agent_key,
+                    "device_id": device_id,
+                    "session_id": session_id,
+                }
+            )
+            return [SimpleNamespace(tool_name="client__filesystem_read_text")]
+
+    async def _get_global_mcp_manager():
+        return None
+
+    monkeypatch.setattr(
+        "app.ai.mcp_registry.get_global_mcp_manager",
+        _get_global_mcp_manager,
+    )
+    monkeypatch.setattr(
+        "app.ai.deferred_tool_binding.get_deferred_tools_for_binding",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "app.ai.deferred_tool_state.get_deferred_tool_state",
+        lambda: _DeferredStateStub(),
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_execution.get_active_client_runtime_session",
+        lambda **kwargs: SimpleNamespace(session_id="session-a"),
+    )
+    monkeypatch.setattr(
+        "app.ai.client_runtime_tools.get_client_runtime_tools",
+        lambda **kwargs: [SimpleNamespace(name="client__filesystem_read_text")],
+    )
+
+    tool_map = {}
+    await _refresh_tool_map_after_search(
+        tool_map=tool_map,
+        agent=SimpleNamespace(agent_config_key="chat"),
+        conversation_id="conversation-1",
+        user_id="user-1",
+        device_id=device_id,
+    )
+
+    assert state_calls == [
+        {
+                "conversation_id": "conversation-1",
+                "agent_key": "chat",
+                "device_id": device_id,
+                "session_id": "session-a",
+            }
+        ]
+    assert "client__filesystem_read_text" in tool_map
 
 
 @pytest.mark.asyncio

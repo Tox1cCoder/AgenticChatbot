@@ -135,7 +135,11 @@ def test_tool_records_from_loaded_tools_do_not_mutate_foreign_schemas(tmp_path):
             }
         },
     }
-    tool = SimpleNamespace(name="demo:inspect", description="Inspect", args_schema=raw_schema)
+    tool = SimpleNamespace(
+        name="default_api:inspect",
+        description="Inspect",
+        args_schema=raw_schema,
+    )
 
     records = manager._tool_records_from_loaded_tools("demo-server", [tool])
 

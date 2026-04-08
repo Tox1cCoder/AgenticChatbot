@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -26,6 +27,25 @@ TOOL_ORIGIN_INTERNAL = "internal"  # Built-in server tools (tool_search, write_t
 # Prefix used for client tool exposed names to prevent collision with server tools
 CLIENT_TOOL_PREFIX = "client__"
 
+
+def make_tool_instance_id(
+    device_id: str,
+    session_id: str,
+    qualified_tool_id: str,
+    catalog_version: int,
+) -> str:
+    """
+    Build an opaque, stable identifier for a specific tool capability binding.
+
+    Built from a truncated SHA-256 of
+    "{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}".
+    Note: catalog_version is session-scoped and resets to 0 when a new
+    session starts, so the same tool name from a reconnected sidecar gets
+    a new tool_instance_id even if the catalog entry is identical.
+    """
+    composite = f"{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}"
+    return hashlib.sha256(composite.encode()).hexdigest()[:16]
+
 _CLIENT_TOOL_CACHE = TTLCache(
     maxsize=512,
     ttl=max(1, settings.client_runtime_catalog_cache_ttl_seconds),
@@ -43,6 +63,7 @@ class ClientRuntimeToolSpec:
     qualified_tool_id: str
     input_schema: dict[str, Any]
     exposed_name: str
+    tool_instance_id: str = ""
 
     @property
     def tool_origin(self) -> str:
@@ -134,6 +155,7 @@ def _parse_tool_specs(catalog: dict[str, Any]) -> list[ClientRuntimeToolSpec]:
                 qualified_tool_id=qualified_tool_id,
                 input_schema=_normalize_input_schema(raw_entry.get("input_schema")),
                 exposed_name=exposed_name,
+                tool_instance_id=str(raw_entry.get("tool_instance_id") or ""),
             )
         )
 
@@ -177,6 +199,7 @@ def _build_tool(
     bound_user_id: str,
     bound_device_id: str,
     bound_session_id: str,
+    bound_catalog_version: int,
 ) -> BaseTool:
     async def _dispatch_client_tool(**kwargs: Any) -> str:
         ctx = get_tool_context()
@@ -204,6 +227,8 @@ def _build_tool(
             arguments=kwargs,
             timeout_seconds=settings.client_runtime_ws_timeout_seconds,
             bound_session_id=bound_session_id,
+            bound_catalog_version=bound_catalog_version,
+            tool_instance_id=tool_instance_id,
         )
 
         if not response.get("success", False):
@@ -214,6 +239,14 @@ def _build_tool(
     description = (
         f"[Client device tool] {spec.description} "
         f"(origin={spec.tool_origin}, qualified_id={spec.qualified_tool_id})"
+    )
+
+    # Use pre-computed tool_instance_id from catalog, or compute it here
+    tool_instance_id = spec.tool_instance_id or make_tool_instance_id(
+        device_id=bound_device_id,
+        session_id=bound_session_id,
+        qualified_tool_id=spec.qualified_tool_id,
+        catalog_version=bound_catalog_version,
     )
 
     return StructuredTool.from_function(
@@ -230,6 +263,9 @@ def _build_tool(
             "device_id": bound_device_id,
             "user_id": bound_user_id,
             "session_id": bound_session_id,
+            "catalog_version": bound_catalog_version,
+            # Opaque capability identifier for dispatch/audit validation
+            "tool_instance_id": tool_instance_id,
             # Tool origin classification for clean separation
             "tool_origin": spec.tool_origin,  # TOOL_ORIGIN_CLIENT_MCP or TOOL_ORIGIN_CLIENT_NATIVE
             # Original tool identification for dispatch
@@ -238,6 +274,27 @@ def _build_tool(
             "source_tool_name": spec.name,  # Original tool name before prefixing
         },
     )
+
+
+def get_active_client_runtime_session(
+    *,
+    user_id: str | None,
+    device_id: str | None,
+):
+    """Return the validated active runtime session for a specific user/device."""
+    if not settings.enable_client_runtime_bridge or not user_id or not device_id:
+        return None
+
+    try:
+        device_uuid = UUID(str(device_id))
+    except Exception:
+        logger.warning("Invalid device_id passed to client runtime session lookup: %s", device_id)
+        return None
+
+    session = ClientDeviceService.lookup_active_session(device_uuid)
+    if session is None or str(session.user_id) != str(user_id):
+        return None
+    return session
 
 
 def get_client_runtime_tools(
@@ -252,17 +309,8 @@ def get_client_runtime_tools(
     so the graph can rebuild bindings cheaply while still invalidating when the client
     runtime reconnects or resyncs its catalog.
     """
-    if not settings.enable_client_runtime_bridge or not user_id or not device_id:
-        return []
-
-    try:
-        device_uuid = UUID(str(device_id))
-    except Exception:
-        logger.warning("Invalid device_id passed to client runtime tool lookup: %s", device_id)
-        return []
-
-    session = ClientDeviceService.lookup_active_session(device_uuid)
-    if session is None or str(session.user_id) != str(user_id):
+    session = get_active_client_runtime_session(user_id=user_id, device_id=device_id)
+    if session is None:
         return []
 
     if not session.tool_catalog:
@@ -280,6 +328,7 @@ def get_client_runtime_tools(
             bound_user_id=str(session.user_id),
             bound_device_id=str(session.device_id),
             bound_session_id=session.session_id,
+            bound_catalog_version=session.tool_catalog_version,
         )
         for spec in tool_specs
     ]

@@ -800,9 +800,21 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             if device_id:
                 provenance_entry["device_id"] = device_id
             if isinstance(tool_metadata, dict):
-                for field_name in ("tool_origin", "server_name", "qualified_tool_id"):
-                    if tool_metadata.get(field_name):
-                        provenance_entry[field_name] = tool_metadata[field_name]
+                for field_name in (
+                    "tool_origin",
+                    "server_name",
+                    "qualified_tool_id",
+                    "tool_instance_id",
+                    "session_id",
+                    "catalog_version",
+                ):
+                    if field_name not in tool_metadata:
+                        continue
+                    if tool_metadata[field_name] is None:
+                        continue
+                    if tool_metadata[field_name] == "":
+                        continue
+                    provenance_entry[field_name] = tool_metadata[field_name]
 
             if provenance_entry:
                 provenance_key = str(tool_call_id or tool_name or len(provenance))

@@ -61,6 +61,8 @@ class ClientDeviceService:
         arguments: dict[str, Any],
         timeout_seconds: int,
         bound_session_id: str | None = None,
+        bound_catalog_version: int | None = None,
+        tool_instance_id: str | None = None,
     ) -> dict[str, Any]:
         """Dispatch a tool call to the correct sidecar session."""
         session = cls.lookup_active_session(UUID(str(device_id)))
@@ -72,12 +74,47 @@ class ClientDeviceService:
                 "Client device session changed after tool binding. Retry from the active device."
             )
 
+        if (
+            bound_catalog_version is not None
+            and session.tool_catalog_version != bound_catalog_version
+        ):
+            raise RuntimeError(
+                "Client device tool catalog changed after tool binding. Retry from the active device."
+            )
+
+        # Server-side catalog validation (defense-in-depth; sidecar also validates)
+        if session.tool_catalog:
+            tools = session.tool_catalog.get("tools", [])
+            catalog_by_qid = {
+                str(entry.get("qualified_id")): entry
+                for entry in tools
+                if entry.get("qualified_id")
+            }
+            catalog_entry = catalog_by_qid.get(qualified_tool_id)
+            if catalog_entry is None:
+                raise RuntimeError(
+                    f"Tool {qualified_tool_id!r} is not in the active session catalog. "
+                    "The catalog may have changed; re-sync and retry."
+                )
+            current_instance_id = str(catalog_entry.get("tool_instance_id") or "")
+            if tool_instance_id and current_instance_id and tool_instance_id != current_instance_id:
+                raise RuntimeError(
+                    "Client device capability changed after tool binding. Retry from the active device."
+                )
+
         request = ToolDispatchRequest(
             request_id=str(uuid4()),
             tool_name=tool_name,
             qualified_tool_id=qualified_tool_id,
             arguments=arguments,
             timeout_seconds=timeout_seconds,
+            tool_instance_id=tool_instance_id,
+            expected_session_id=session.session_id,
+            expected_catalog_version=(
+                bound_catalog_version
+                if bound_catalog_version is not None
+                else session.tool_catalog_version
+            ),
         )
         return await get_client_runtime_store().dispatch_request(session, request, timeout_seconds)
 

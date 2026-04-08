@@ -201,7 +201,7 @@ class MCPManager:
             session = await session_context.__aenter__()
 
             loaded_tools = list(await load_mcp_tools(session))
-            cleaned_tools = [clone_mcp_tool(tool) for tool in loaded_tools]
+            cleaned_tools = [clone_mcp_tool(tool, server_name=server_name) for tool in loaded_tools]
 
             # Store context and session for proper cleanup
             self._session_contexts[server_name] = {

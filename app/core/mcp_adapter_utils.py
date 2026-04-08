@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from copy import copy
 from typing import Any
 
@@ -67,12 +68,49 @@ def build_mcp_server_entry(
     return None
 
 
-def clean_mcp_tool_name(tool_name: str) -> str:
-    """Strip the optional server prefix that some MCP adapters include in tool names."""
+_REDUNDANT_MCP_TOOL_PREFIXES = frozenset({"default_api"})
 
-    if ":" in tool_name:
-        return tool_name.split(":", 1)[-1]
-    return tool_name
+
+def _normalize_name_prefix(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
+def clean_mcp_tool_name(
+    tool_name: str,
+    *,
+    server_name: str | None = None,
+    redundant_prefixes: Iterable[str] | None = None,
+) -> str:
+    """
+    Remove known adapter-added MCP tool prefixes without stripping arbitrary names.
+
+    Some adapters surface tools as ``default_api:tool_name`` or ``server_alias:tool_name``
+    even though the prefix is redundant in this application because server ownership is
+    tracked separately. Arbitrary ``prefix:tool`` values are preserved to avoid corrupting
+    semantic tool names that legitimately contain a colon.
+    """
+
+    raw_name = str(tool_name or "")
+    if ":" not in raw_name:
+        return raw_name
+
+    prefix, remainder = raw_name.split(":", 1)
+    normalized_prefix = _normalize_name_prefix(prefix)
+    if not remainder:
+        return raw_name
+
+    allowed_prefixes = {
+        _normalize_name_prefix(value)
+        for value in (redundant_prefixes or _REDUNDANT_MCP_TOOL_PREFIXES)
+        if str(value or "").strip()
+    }
+    if server_name:
+        allowed_prefixes.add(_normalize_name_prefix(server_name))
+
+    if normalized_prefix in allowed_prefixes:
+        return remainder
+
+    return raw_name
 
 
 def _filter_mcp_schema_recursively(schema: Any) -> Any:
@@ -189,10 +227,13 @@ def sanitize_mcp_schema(schema: Any) -> dict[str, Any]:
     return default_mcp_input_schema()
 
 
-def clone_mcp_tool(tool: Any) -> Any:
+def clone_mcp_tool(tool: Any, *, server_name: str | None = None) -> Any:
     """Clone one MCP tool with a normalized name and sanitized args schema."""
 
     cloned_tool = tool.model_copy(deep=False) if hasattr(tool, "model_copy") else copy(tool)
-    cloned_tool.name = clean_mcp_tool_name(str(getattr(tool, "name", "") or "unknown"))
+    cloned_tool.name = clean_mcp_tool_name(
+        str(getattr(tool, "name", "") or "unknown"),
+        server_name=server_name,
+    )
     cloned_tool.args_schema = sanitize_mcp_schema(getattr(tool, "args_schema", None))
     return cloned_tool

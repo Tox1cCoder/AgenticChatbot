@@ -247,6 +247,9 @@ async def _execute_tool_search(
                     tool_name=tool_name,
                     server_name=srv_name,
                     device_id=internal.get("device_id", device_id or ""),
+                    session_id=internal.get("session_id", ""),
+                    catalog_version=int(internal.get("catalog_version") or 0),
+                    tool_instance_id=internal.get("tool_instance_id", ""),
                 )
             )
             autoloaded_tool_names.add(tool_name)
@@ -282,6 +285,7 @@ async def _execute_tool_search(
                 agent_key=agent_key,
                 references=autoload_client_refs,
                 device_id=device_id,
+                session_id=client_catalog.session_id if client_catalog is not None else None,
                 user_id=user_id,
             )
             loaded_count += len(loaded_client_refs)

@@ -20,7 +20,10 @@ from ...core.runtime_modeling import (
 )
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..agent_config import AGENT_CONFIG, create_gemini_client, create_langchain_model
-from ..client_runtime_tools import get_client_runtime_tools
+from ..client_runtime_tools import (
+    get_active_client_runtime_session,
+    get_client_runtime_tools,
+)
 from ..deferred_tool_binding import (
     build_deferred_tool_list,
     should_use_deferred_loading,
@@ -322,7 +325,13 @@ class BaseAgent(ABC):
             internal_tools = merged_internal
 
         use_deferred = should_use_deferred_loading(self.agent_config_key)
-        remote_tools = self._get_client_runtime_tools(user_id=user_id, device_id=device_id)
+        # When bridge is enabled and device_id is absent, bind zero client tools.
+        # This prevents a missing device_id (by accident rather than by design)
+        # from falling through to include all loaded client tools.
+        if settings.enable_client_runtime_bridge and not device_id:
+            remote_tools = []
+        else:
+            remote_tools = self._get_client_runtime_tools(user_id=user_id, device_id=device_id)
 
         if use_deferred:
             # Build deferred tool list
@@ -337,13 +346,20 @@ class BaseAgent(ABC):
             if conversation_id and remote_tools:
                 from ..deferred_tool_state import get_deferred_tool_state
 
+                active_session = get_active_client_runtime_session(
+                    user_id=user_id,
+                    device_id=device_id,
+                )
                 loaded_client_names = {
                     loaded.tool_name
                     for loaded in get_deferred_tool_state().get_loaded_client_tools(
                         conversation_id,
                         self.agent_config_key,
+                        device_id=str(device_id) if device_id else None,
+                        session_id=(
+                            active_session.session_id if active_session is not None else None
+                        ),
                     )
-                    if not device_id or str(loaded.device_id) == str(device_id)
                 }
                 remote_tools = [tool for tool in remote_tools if tool.name in loaded_client_names]
             else:

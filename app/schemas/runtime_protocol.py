@@ -28,6 +28,10 @@ class ToolDispatchRequest(BaseModel):
     qualified_tool_id: str
     arguments: dict[str, Any]
     timeout_seconds: int = 30
+    # Execution-scope validation fields — sidecar must reject if they mismatch
+    tool_instance_id: str | None = None
+    expected_session_id: str | None = None
+    expected_catalog_version: int | None = None
 
 
 class ToolDispatchResult(BaseModel):

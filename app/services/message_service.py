@@ -77,6 +77,168 @@ class MessageService(IMessageService):
             return None
         return redis.from_url(redis_url)
 
+    @staticmethod
+    def _normalize_tool_provenance_map(
+        interrupt_metadata: dict[str, Any] | None,
+    ) -> dict[str, dict[str, Any]]:
+        if not isinstance(interrupt_metadata, dict):
+            return {}
+
+        raw_provenance = interrupt_metadata.get("tool_provenance")
+        if not isinstance(raw_provenance, dict):
+            return {}
+
+        return {
+            str(key): value
+            for key, value in raw_provenance.items()
+            if isinstance(value, dict)
+        }
+
+    @staticmethod
+    def _is_client_runtime_provenance_entry(provenance: dict[str, Any]) -> bool:
+        if not isinstance(provenance, dict):
+            return False
+
+        tool_origin = str(provenance.get("tool_origin") or "").strip().lower()
+        return (
+            tool_origin.startswith("client_")
+            or provenance.get("session_id") not in (None, "")
+            or provenance.get("catalog_version") is not None
+            or provenance.get("tool_instance_id") not in (None, "")
+            or provenance.get("qualified_tool_id") not in (None, "")
+        )
+
+    @classmethod
+    def _derive_interrupt_execution_scope(
+        cls,
+        interrupt_metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        client_entries = [
+            provenance
+            for provenance in cls._normalize_tool_provenance_map(interrupt_metadata).values()
+            if cls._is_client_runtime_provenance_entry(provenance)
+        ]
+        if not client_entries:
+            return {
+                "session_id": None,
+                "catalog_version": None,
+                "tool_instance_id": None,
+            }
+
+        session_ids = {
+            str(provenance["session_id"])
+            for provenance in client_entries
+            if provenance.get("session_id") not in (None, "")
+        }
+        catalog_versions = {
+            int(provenance["catalog_version"])
+            for provenance in client_entries
+            if provenance.get("catalog_version") is not None
+        }
+        tool_instance_ids = {
+            str(provenance["tool_instance_id"])
+            for provenance in client_entries
+            if provenance.get("tool_instance_id") not in (None, "")
+        }
+
+        return {
+            "session_id": next(iter(session_ids)) if len(session_ids) == 1 else None,
+            "catalog_version": (
+                next(iter(catalog_versions)) if len(catalog_versions) == 1 else None
+            ),
+            "tool_instance_id": (
+                next(iter(tool_instance_ids)) if len(tool_instance_ids) == 1 else None
+            ),
+        }
+
+    @classmethod
+    def _record_execution_scope_provenance(cls, record: Any) -> dict[str, Any]:
+        provenance: dict[str, Any] = {}
+        if getattr(record, "device_id", None) is not None:
+            provenance["device_id"] = str(record.device_id)
+        if getattr(record, "session_id", None) not in (None, ""):
+            provenance["session_id"] = str(record.session_id)
+        if getattr(record, "catalog_version", None) is not None:
+            provenance["catalog_version"] = int(record.catalog_version)
+        if getattr(record, "tool_instance_id", None) not in (None, ""):
+            provenance["tool_instance_id"] = str(record.tool_instance_id)
+        return provenance
+
+    @classmethod
+    def _get_runtime_validation_provenance(
+        cls,
+        record: Any,
+        decisions: list[InterruptDecision] | None = None,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        provenance_map = cls._normalize_tool_provenance_map(
+            getattr(record, "interrupt_metadata_json", None)
+        )
+
+        if decisions is not None:
+            actionable_decisions = [
+                decision
+                for decision in decisions
+                if decision.type in (
+                    InterruptDecisionType.APPROVE,
+                    InterruptDecisionType.EDIT,
+                )
+            ]
+            if not actionable_decisions:
+                return []
+
+            matched_entries: list[tuple[str, dict[str, Any]]] = []
+            for decision in actionable_decisions:
+                lookup_keys = []
+                if decision.task_id:
+                    lookup_keys.append(str(decision.task_id))
+                if decision.action:
+                    action_key = str(decision.action)
+                    if action_key not in lookup_keys:
+                        lookup_keys.append(action_key)
+
+                for key in lookup_keys:
+                    provenance = provenance_map.get(key)
+                    if cls._is_client_runtime_provenance_entry(provenance or {}):
+                        matched_entries.append((key, provenance))
+                        break
+
+            if matched_entries:
+                return matched_entries
+
+            if not provenance_map:
+                fallback = cls._record_execution_scope_provenance(record)
+                if cls._is_client_runtime_provenance_entry(fallback):
+                    return [("interrupt", fallback)]
+            return []
+
+        client_entries = [
+            (key, provenance)
+            for key, provenance in provenance_map.items()
+            if cls._is_client_runtime_provenance_entry(provenance)
+        ]
+        if client_entries:
+            return client_entries
+
+        fallback = cls._record_execution_scope_provenance(record)
+        if cls._is_client_runtime_provenance_entry(fallback):
+            return [("interrupt", fallback)]
+        return []
+
+    def _expire_interrupt_for_scope_change(
+        self,
+        *,
+        interrupt_id: str | None,
+        resolution_source: str,
+    ) -> None:
+        if not interrupt_id or not self.hitl_interrupt_repository:
+            return
+
+        with contextlib.suppress(Exception):
+            self.hitl_interrupt_repository.mark_expired(
+                interrupt_id,
+                resolution_source=resolution_source,
+            )
+
     def _get_conversation_context(
         self, conversation_id: UUID, user_id: UUID | None = None
     ) -> tuple[UUID | None, str | None]:
@@ -389,6 +551,7 @@ class MessageService(IMessageService):
                         minutes=settings.hitl_approval_timeout_minutes
                     )
                     action_requests = interrupt_dict.get("action_requests") or []
+                    execution_scope = self._derive_interrupt_execution_scope(interrupt_metadata)
                     self.hitl_interrupt_repository.create(
                         interrupt_id=interrupt_id,
                         conversation_id=conversation_id,
@@ -399,6 +562,9 @@ class MessageService(IMessageService):
                         assistant_message_id=bot_message.id,
                         device_id=interrupt_device_id,
                         interrupt_metadata_json=interrupt_metadata,
+                        session_id=execution_scope.get("session_id"),
+                        catalog_version=execution_scope.get("catalog_version"),
+                        tool_instance_id=execution_scope.get("tool_instance_id"),
                     )
                 except Exception as exc:
                     logging.warning(
@@ -793,11 +959,13 @@ class MessageService(IMessageService):
         user_id: UUID,
         interrupt_id: str | None,
         device_id: UUID | None,
+        decisions: list[InterruptDecision] | None = None,
     ) -> Any:
         from fastapi import status as http_status
 
         from app.core.exceptions import CustomHTTPException
         from app.models.hitl_interrupt import HITLInterruptStatus
+        from app.services.client_device_service import ClientDeviceService
 
         self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
 
@@ -856,6 +1024,139 @@ class MessageService(IMessageService):
                     detail="This interrupt has already been resolved.",
                     error_code="INTERRUPT_ALREADY_RESOLVED",
                 )
+
+            runtime_provenance = self._get_runtime_validation_provenance(
+                record,
+                decisions=decisions,
+            )
+            if runtime_provenance:
+                active_session = None
+                if record.device_id is not None:
+                    active_session = ClientDeviceService.lookup_active_session(record.device_id)
+
+                if active_session is None or active_session.user_id != record.user_id:
+                    self._expire_interrupt_for_scope_change(
+                        interrupt_id=interrupt_id,
+                        resolution_source="runtime_unavailable",
+                    )
+                    raise CustomHTTPException(
+                        status_code=http_status.HTTP_409_CONFLICT,
+                        detail=(
+                            "The client device session for this approval is no longer available. "
+                            "Please send a new message from the active device."
+                        ),
+                        error_code="INTERRUPT_RUNTIME_UNAVAILABLE",
+                    )
+
+                catalog_tools = (
+                    active_session.tool_catalog.get("tools", [])
+                    if isinstance(active_session.tool_catalog, dict)
+                    else []
+                )
+                catalog_by_qid = {
+                    str(entry.get("qualified_id")): entry
+                    for entry in catalog_tools
+                    if entry.get("qualified_id")
+                }
+                catalog_instance_ids = {
+                    str(entry.get("tool_instance_id"))
+                    for entry in catalog_tools
+                    if entry.get("tool_instance_id")
+                }
+
+                for provenance_key, provenance in runtime_provenance:
+                    expected_session_id = provenance.get("session_id")
+                    if (
+                        expected_session_id not in (None, "")
+                        and active_session.session_id != str(expected_session_id)
+                    ):
+                        self._expire_interrupt_for_scope_change(
+                            interrupt_id=interrupt_id,
+                            resolution_source="session_changed",
+                        )
+                        raise CustomHTTPException(
+                            status_code=http_status.HTTP_409_CONFLICT,
+                            detail=(
+                                "The client device session changed after this approval was created. "
+                                "Please send a new message from the active device."
+                            ),
+                            error_code="INTERRUPT_SESSION_MISMATCH",
+                        )
+
+                    expected_catalog_version = provenance.get("catalog_version")
+                    if (
+                        expected_catalog_version is not None
+                        and active_session.tool_catalog_version != int(expected_catalog_version)
+                    ):
+                        self._expire_interrupt_for_scope_change(
+                            interrupt_id=interrupt_id,
+                            resolution_source="catalog_changed",
+                        )
+                        raise CustomHTTPException(
+                            status_code=http_status.HTTP_409_CONFLICT,
+                            detail=(
+                                "The client device tool catalog changed after this approval was created. "
+                                "Please search for the tool again and retry."
+                            ),
+                            error_code="INTERRUPT_CATALOG_MISMATCH",
+                        )
+
+                    expected_qualified_id = str(provenance.get("qualified_tool_id") or "").strip()
+                    expected_tool_instance_id = str(
+                        provenance.get("tool_instance_id") or ""
+                    ).strip()
+                    if expected_qualified_id:
+                        catalog_entry = catalog_by_qid.get(expected_qualified_id)
+                        if catalog_entry is None:
+                            self._expire_interrupt_for_scope_change(
+                                interrupt_id=interrupt_id,
+                                resolution_source="tool_unavailable",
+                            )
+                            raise CustomHTTPException(
+                                status_code=http_status.HTTP_409_CONFLICT,
+                                detail=(
+                                    "A client-local tool in this approval is no longer available on the "
+                                    "active device. Please search again and retry."
+                                ),
+                                error_code="INTERRUPT_TOOL_UNAVAILABLE",
+                            )
+
+                        current_tool_instance_id = str(
+                            catalog_entry.get("tool_instance_id") or ""
+                        ).strip()
+                        if (
+                            expected_tool_instance_id
+                            and current_tool_instance_id
+                            and expected_tool_instance_id != current_tool_instance_id
+                        ):
+                            self._expire_interrupt_for_scope_change(
+                                interrupt_id=interrupt_id,
+                                resolution_source="tool_instance_changed",
+                            )
+                            raise CustomHTTPException(
+                                status_code=http_status.HTTP_409_CONFLICT,
+                                detail=(
+                                    "A client-local tool capability changed after this approval was created. "
+                                    "Please search for the tool again and retry."
+                                ),
+                                error_code="INTERRUPT_TOOL_INSTANCE_MISMATCH",
+                            )
+                    elif (
+                        expected_tool_instance_id
+                        and expected_tool_instance_id not in catalog_instance_ids
+                    ):
+                        self._expire_interrupt_for_scope_change(
+                            interrupt_id=interrupt_id,
+                            resolution_source="tool_instance_changed",
+                        )
+                        raise CustomHTTPException(
+                            status_code=http_status.HTTP_409_CONFLICT,
+                            detail=(
+                                "A client-local tool capability changed after this approval was created. "
+                                "Please search for the tool again and retry."
+                            ),
+                            error_code="INTERRUPT_TOOL_INSTANCE_MISMATCH",
+                        )
 
             won_race = self.hitl_interrupt_repository.try_transition_to_resolving(
                 interrupt_id=interrupt_id,
@@ -922,15 +1223,9 @@ class MessageService(IMessageService):
                             action = req.get("action")
                             if action and action not in stored_original_args:
                                 stored_original_args[action] = req.get("args") or {}
-                metadata_json = getattr(fetched_interrupt_record, "interrupt_metadata_json", None)
-                if isinstance(metadata_json, dict):
-                    raw_provenance = metadata_json.get("tool_provenance")
-                    if isinstance(raw_provenance, dict):
-                        stored_provenance = {
-                            str(key): value
-                            for key, value in raw_provenance.items()
-                            if isinstance(value, dict)
-                        }
+                stored_provenance = self._normalize_tool_provenance_map(
+                    getattr(fetched_interrupt_record, "interrupt_metadata_json", None)
+                )
             except Exception:
                 pass
 
@@ -971,6 +1266,9 @@ class MessageService(IMessageService):
                     "tool_origin": provenance.get("tool_origin"),
                     "server_name": provenance.get("server_name"),
                     "qualified_tool_id": provenance.get("qualified_tool_id"),
+                    "session_id": provenance.get("session_id"),
+                    "catalog_version": provenance.get("catalog_version"),
+                    "tool_instance_id": provenance.get("tool_instance_id"),
                 }
                 self.tool_approval_repository.create(approval_data)
             except Exception as audit_exc:
@@ -1015,6 +1313,7 @@ class MessageService(IMessageService):
             user_id=user_id,
             interrupt_id=interrupt_id,
             device_id=device_id,
+            decisions=decisions,
         )
 
         user_id, persona = self._get_conversation_context(conversation_id, user_id)

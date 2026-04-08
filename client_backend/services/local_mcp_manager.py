@@ -383,7 +383,10 @@ class LocalMCPManager:
     ) -> list[MCPTool]:
         records: list[MCPTool] = []
         for tool in loaded_tools:
-            tool_name = clean_mcp_tool_name(str(getattr(tool, "name", "") or "unknown"))
+            tool_name = clean_mcp_tool_name(
+                str(getattr(tool, "name", "") or "unknown"),
+                server_name=server_name,
+            )
             records.append(
                 MCPTool(
                     name=tool_name,
@@ -511,7 +514,13 @@ class LocalMCPManager:
                     self._tool_records_from_loaded_tools(server_name, loaded_tools)
                 )
             for tool in loaded_tools:
-                if clean_mcp_tool_name(str(getattr(tool, "name", "") or "")) != tool_name:
+                if (
+                    clean_mcp_tool_name(
+                        str(getattr(tool, "name", "") or ""),
+                        server_name=server_name,
+                    )
+                    != tool_name
+                ):
                     continue
                 return await asyncio.wait_for(tool.ainvoke(arguments), timeout=timeout)
 

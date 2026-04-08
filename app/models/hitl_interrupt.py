@@ -2,7 +2,7 @@
 
 import enum
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, func
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, func
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
@@ -90,6 +90,11 @@ class HITLInterrupt(Base):
 
     # Additional metadata for the interrupt (device context, tool provenance, etc.)
     interrupt_metadata_json = Column(JSONB, nullable=False, default=dict)
+
+    # Execution-scope for client-local tool interrupts; used to detect stale resume
+    session_id = Column(String(255), nullable=True, index=True)
+    catalog_version = Column(Integer, nullable=True)
+    tool_instance_id = Column(String(64), nullable=True)
 
     # Relationships
     conversation = relationship("Conversation", backref="hitl_interrupts")

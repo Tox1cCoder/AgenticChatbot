@@ -3,7 +3,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, func
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, func
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
@@ -73,6 +73,11 @@ class ToolApproval(Base):
     qualified_tool_id = Column(
         String(512), nullable=True, index=True
     )  # Fully qualified tool identifier
+
+    # Execution-scope for client-local tool approvals; used for resume validation
+    session_id = Column(String(255), nullable=True, index=True)
+    catalog_version = Column(Integer, nullable=True)
+    tool_instance_id = Column(String(64), nullable=True, index=True)
 
     # Relationships
     conversation = relationship("Conversation", backref="tool_approvals")

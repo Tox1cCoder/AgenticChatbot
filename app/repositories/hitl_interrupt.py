@@ -32,6 +32,9 @@ class HITLInterruptRepository:
         assistant_message_id: UUID | None = None,
         device_id: UUID | None = None,
         interrupt_metadata_json: dict | None = None,
+        session_id: str | None = None,
+        catalog_version: int | None = None,
+        tool_instance_id: str | None = None,
     ) -> HITLInterrupt:
         """Persist a new interrupt session in PENDING state."""
         record = HITLInterrupt(
@@ -45,6 +48,9 @@ class HITLInterruptRepository:
             action_requests_json=action_requests_json,
             device_id=device_id,
             interrupt_metadata_json=interrupt_metadata_json or {},
+            session_id=session_id,
+            catalog_version=catalog_version,
+            tool_instance_id=tool_instance_id,
         )
         with self.session_factory() as db:
             db.add(record)
@@ -112,7 +118,11 @@ class HITLInterruptRepository:
             )
             db.commit()
 
-    def mark_expired(self, interrupt_id: str) -> None:
+    def mark_expired(
+        self,
+        interrupt_id: str,
+        resolution_source: str = "timeout",
+    ) -> None:
         """Mark an interrupt as expired."""
         now = datetime.now(timezone.utc)
         with self.session_factory() as db:
@@ -124,11 +134,52 @@ class HITLInterruptRepository:
                 )
                 .values(
                     status=HITLInterruptStatus.EXPIRED,
-                    resolution_source="timeout",
+                    resolution_source=resolution_source,
                     updated_at=now,
                 )
             )
             db.commit()
+
+    def expire_stale_client_tool_interrupts(
+        self,
+        device_id: UUID,
+        current_session_id: str,
+    ) -> int:
+        """
+        Expire all PENDING client-tool interrupts for a device whose session_id
+        does not match the current active session.
+
+        Called when a sidecar reconnects with a new session to prevent stale
+        interrupts from being resumed against the wrong session.
+
+        Returns the number of records expired.
+        """
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as db:
+            result = db.execute(
+                update(HITLInterrupt)
+                .where(
+                    HITLInterrupt.device_id == device_id,
+                    HITLInterrupt.status == HITLInterruptStatus.PENDING,
+                    HITLInterrupt.session_id != current_session_id,
+                    HITLInterrupt.session_id.is_not(None),
+                )
+                .values(
+                    status=HITLInterruptStatus.EXPIRED,
+                    resolution_source="session_changed",
+                    updated_at=now,
+                )
+            )
+            db.commit()
+            expired_count = result.rowcount if hasattr(result, "rowcount") else 0
+            if expired_count:
+                logger.info(
+                    "Expired %d stale client-tool interrupt(s) for device=%s new_session=%s",
+                    expired_count,
+                    device_id,
+                    current_session_id,
+                )
+            return expired_count
 
     def update_assistant_message_id(self, interrupt_id: str, assistant_message_id: UUID) -> None:
         """Attach the persisted assistant message ID to the interrupt record."""

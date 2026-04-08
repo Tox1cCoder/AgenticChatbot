@@ -49,6 +49,93 @@ async def test_execute_tool_search_passes_query_through_unchanged(monkeypatch):
     assert fake_catalog.query == "edit file on my computer"
 
 
+@pytest.mark.asyncio
+async def test_execute_tool_search_preserves_client_execution_scope_for_autoload(monkeypatch):
+    class FakeServerCatalog:
+        def search(self, query=None, top_k=5, server_name=None, allowlist=None):
+            return []
+
+        def is_ambiguous(self, tool_name):
+            return False
+
+    class FakeClientCatalog:
+        tool_count = 1
+        session_id = "session-7"
+        catalog_version = 7
+
+        def search(self, query=None, top_k=5, server_name=None, allowlist=None):
+            return [
+                ClientToolDescriptor(
+                    tool_name="client__shell_execute",
+                    server_name="native",
+                    description="Run a shell command locally.",
+                    arg_names=["command"],
+                    required_arg_names=["command"],
+                    qualified_tool_id="native::shell_execute",
+                    origin="client_native",
+                    device_id="device-123",
+                    session_id="session-7",
+                    catalog_version=7,
+                    tool_instance_id="instance-7",
+                )
+            ]
+
+    class DeferredStateStub:
+        def __init__(self):
+            self.client_calls = []
+
+        def autoload(self, **kwargs):
+            return []
+
+        def autoload_client_tools(self, **kwargs):
+            self.client_calls.append(kwargs)
+            return kwargs["references"]
+
+    deferred_state = DeferredStateStub()
+
+    async def fake_get_global_mcp_manager():
+        return object()
+
+    async def fake_get_tool_catalog(_manager):
+        return FakeServerCatalog()
+
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_global_mcp_manager",
+        fake_get_global_mcp_manager,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_catalog",
+        fake_get_tool_catalog,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_client_tool_catalog",
+        lambda device_id, user_id: FakeClientCatalog(),
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_deferred_tool_state",
+        lambda: deferred_state,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_context",
+        lambda: ToolContext(
+            conversation_id="conversation-1",
+            user_id="user-1",
+            agent_key="chat",
+            device_id="device-123",
+        ),
+    )
+
+    result = await _execute_tool_search(query="run shell command")
+
+    assert result["loaded_count"] == 1
+    assert deferred_state.client_calls
+    autoload_call = deferred_state.client_calls[0]
+    assert autoload_call["device_id"] == "device-123"
+    assert autoload_call["session_id"] == "session-7"
+    assert autoload_call["references"][0].tool_instance_id == "instance-7"
+    assert autoload_call["references"][0].catalog_version == 7
+
+
 def test_merge_search_results_prefers_client_variant_for_same_qualified_tool():
     server_results = [
         ToolDescriptor(

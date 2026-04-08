@@ -45,6 +45,9 @@ class ClientToolDescriptor:
     qualified_tool_id: str  # e.g., "native::shell_execute" or "pylance::get_docs"
     origin: str  # TOOL_ORIGIN_CLIENT_MCP or TOOL_ORIGIN_CLIENT_NATIVE
     device_id: str  # The device this tool belongs to
+    session_id: str = ""
+    catalog_version: int = 0
+    tool_instance_id: str = ""
     args_schema: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -89,6 +92,9 @@ class ClientToolDescriptor:
             "arg_hints": self.arg_hints,
             "origin": self.origin,
             "device_id": self.device_id,
+            "session_id": self.session_id,
+            "catalog_version": self.catalog_version,
+            "tool_instance_id": self.tool_instance_id,
             "is_client_tool": True,
         }
 
@@ -104,6 +110,9 @@ class ClientToolReference:
     tool_name: str
     server_name: str
     device_id: str
+    session_id: str = ""
+    catalog_version: int = 0
+    tool_instance_id: str = ""
 
     def is_client_tool(self) -> bool:
         """Always True for ClientToolReference."""
@@ -150,6 +159,7 @@ class ClientToolCatalog:
         self._token_index: dict[str, set[int]] = {}
         self._doc_freq: Counter = Counter()
         self._total_docs: int = 0
+        self._session_id: str = ""
         self._catalog_version: int = -1
         self._last_refresh: float = 0
 
@@ -195,7 +205,11 @@ class ClientToolCatalog:
         if session.tool_catalog_version == self._catalog_version:
             return False
 
-        self._rebuild_from_catalog(session.tool_catalog, session.tool_catalog_version)
+        self._rebuild_from_catalog(
+            session.tool_catalog,
+            session.tool_catalog_version,
+            session.session_id,
+        )
         return True
 
     def _clear(self) -> None:
@@ -206,13 +220,15 @@ class ClientToolCatalog:
         self._token_index.clear()
         self._doc_freq.clear()
         self._total_docs = 0
+        self._session_id = ""
         self._catalog_version = -1
 
-    def _rebuild_from_catalog(self, catalog: dict[str, Any], version: int) -> None:
+    def _rebuild_from_catalog(self, catalog: dict[str, Any], version: int, session_id: str) -> None:
         """Rebuild the catalog from a device's tool catalog."""
         start_time = time.time()
 
         self._clear()
+        self._session_id = session_id
         self._catalog_version = version
         self._last_refresh = time.time()
 
@@ -257,6 +273,9 @@ class ClientToolCatalog:
                 qualified_tool_id=qualified_id,
                 origin=tool_origin,
                 device_id=self._device_id,
+                session_id=self._session_id,
+                catalog_version=self._catalog_version,
+                tool_instance_id=str(raw_entry.get("tool_instance_id") or ""),
                 args_schema=input_schema,
             )
 
@@ -418,6 +437,10 @@ class ClientToolCatalog:
     @property
     def catalog_version(self) -> int:
         return self._catalog_version
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
 
 
 # Module-level cache for client catalogs

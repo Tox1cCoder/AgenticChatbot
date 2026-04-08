@@ -11,6 +11,7 @@ Maintains the authenticated outbound runtime connection to the canonical server:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import platform
 from contextlib import suppress
@@ -27,6 +28,20 @@ from app.schemas.runtime_protocol import (
 )
 from client_backend import __version__
 from client_backend.core.config import client_settings
+
+
+def _make_tool_instance_id(
+    device_id: str,
+    session_id: str,
+    qualified_tool_id: str,
+    catalog_version: int,
+) -> str:
+    """
+    Compute the opaque tool capability identifier that the server will echo
+    back in ToolDispatchRequest for sidecar-side validation.
+    """
+    composite = f"{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}"
+    return hashlib.sha256(composite.encode()).hexdigest()[:16]
 from client_backend.core.logging import get_logger
 from client_backend.core.security import generate_device_identifier
 from client_backend.schemas.runtime import (
@@ -69,6 +84,9 @@ class RuntimeBridgeService:
         self._websocket = None
         self._device_id: str | None = None
         self._session_id: str | None = None
+        self._tool_catalog_version: int = 0  # Mirrors server-side catalog version counter
+        # Last synced catalog keyed by qualified_id for validation
+        self._current_tool_catalog: dict[str, dict] = {}
         self._state = RuntimeState(
             status=RuntimeStatus.DISCONNECTED,
             device_info=self.get_device_info(),
@@ -189,6 +207,13 @@ class RuntimeBridgeService:
             device_id=self._device_id,
             catalog=tool_catalog,
         )
+        self._tool_catalog_version += 1  # Mirror server-side increment
+        # Cache catalog by qualified_id for fast validation in _validate_tool_request
+        self._current_tool_catalog = {
+            entry["qualified_id"]: entry
+            for entry in tool_catalog.get("tools", [])
+            if entry.get("qualified_id")
+        }
         skill_sync = await self._server_client.update_device_skill_catalog(
             device_id=self._device_id,
             catalog=skill_catalog,
@@ -245,6 +270,8 @@ class RuntimeBridgeService:
                 registration = await self._register_device()
                 self._device_id = registration.device_id
                 self._session_id = registration.session_id
+                self._tool_catalog_version = 0  # Reset on new session
+                self._current_tool_catalog = {}
 
                 self._set_state(
                     status=RuntimeStatus.CONNECTING,
@@ -425,10 +452,68 @@ class RuntimeBridgeService:
             message.type,
         )
 
+    def _validate_tool_request(self, request: ToolDispatchRequest) -> str | None:
+        """
+        Validate an incoming tool request against current advertised capability record.
+
+        Returns an error string if invalid, None if acceptable.
+        """
+        # Validate session_id if provided
+        if request.expected_session_id and request.expected_session_id != self._session_id:
+            return (
+                f"Session mismatch: server expects session_id={request.expected_session_id!r} "
+                f"but current session is {self._session_id!r}. "
+                "The sidecar has reconnected; retry from the active session."
+            )
+
+        # Validate catalog version if provided
+        if (
+            request.expected_catalog_version is not None
+            and request.expected_catalog_version != self._tool_catalog_version
+        ):
+            return (
+                f"Catalog version mismatch: server expects version={request.expected_catalog_version} "
+                f"but current version is {self._tool_catalog_version}. "
+                "The tool catalog has changed; re-sync and retry."
+            )
+
+        qualified_id = request.qualified_tool_id
+        catalog_entry = self._current_tool_catalog.get(qualified_id)
+
+        if catalog_entry is None:
+            return (
+                f"Unknown tool: qualified_tool_id={qualified_id!r} is not in the current tool catalog. "
+                "The tool may have been removed; re-sync and retry."
+            )
+
+        # Validate tool_instance_id if both sides provided it
+        if request.tool_instance_id and catalog_entry.get("tool_instance_id"):
+            if request.tool_instance_id != catalog_entry["tool_instance_id"]:
+                return (
+                    f"tool_instance_id mismatch for {qualified_id!r}: "
+                    f"server sent {request.tool_instance_id!r} "
+                    f"but catalog has {catalog_entry['tool_instance_id']!r}. "
+                    "The catalog has been updated; re-sync and retry."
+                )
+
+        # Validate tool_name matches catalog record
+        catalog_name = catalog_entry.get("name")
+        if catalog_name and catalog_name != request.tool_name:
+            return (
+                f"Tool name mismatch: request.tool_name={request.tool_name!r} "
+                f"does not match catalog name={catalog_name!r} for {qualified_id!r}."
+            )
+
+        return None
+
     async def _handle_tool_request(self, request: ToolDispatchRequest) -> None:
         started_at = datetime.now(timezone.utc)
 
         try:
+            validation_error = self._validate_tool_request(request)
+            if validation_error:
+                raise ValueError(f"Tool request rejected: {validation_error}")
+
             result = await self._execute_tool_request(request)
             duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
             payload = ToolDispatchResult(
@@ -572,6 +657,18 @@ class RuntimeBridgeService:
         mcp_catalog = get_mcp_manager().get_tool_catalog()
         tools = list(native_tools)
         tools.extend(mcp_catalog.get("tools", []))
+
+        # Embed tool_instance_id in each entry using the NEXT catalog_version
+        # (server increments catalog_version on receive, so use version+1)
+        device_id = self._device_id or ""
+        session_id = self._session_id or ""
+        next_catalog_version = self._tool_catalog_version + 1
+        for entry in tools:
+            qid = entry.get("qualified_id", "")
+            if qid:
+                entry["tool_instance_id"] = _make_tool_instance_id(
+                    device_id, session_id, qid, next_catalog_version,
+                )
 
         return {
             "tools": tools,

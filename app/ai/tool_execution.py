@@ -10,6 +10,7 @@ from anyio import BrokenResourceError, ClosedResourceError
 from ..core.config import settings
 from .client_runtime_tools import (
     CLIENT_TOOL_PREFIX,
+    get_active_client_runtime_session,
     get_client_tool_device_id,
     is_client_tool,
 )
@@ -399,7 +400,16 @@ async def _refresh_tool_map_after_search(
 
         # Also refresh client tools (they may have been loaded via tool_search)
         state = get_deferred_tool_state()
-        loaded_client_tools = state.get_loaded_client_tools(conversation_id, agent_key)
+        active_session = get_active_client_runtime_session(
+            user_id=user_id,
+            device_id=device_id,
+        )
+        loaded_client_tools = state.get_loaded_client_tools(
+            conversation_id,
+            agent_key,
+            device_id=device_id,
+            session_id=active_session.session_id if active_session is not None else None,
+        )
 
         if loaded_client_tools and device_id:
             # Get fresh client tools and add any that match loaded references

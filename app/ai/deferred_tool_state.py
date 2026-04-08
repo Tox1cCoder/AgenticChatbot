@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from ..core.config import settings
 from .mcp_registry import get_mcp_tools_generation
@@ -80,7 +81,8 @@ class LoadedClientTool:
         device_id: The device this tool belongs to
         loaded_at: Timestamp when the tool was loaded
         last_used: Timestamp when the tool was last accessed (for LRU)
-        catalog_version: The client catalog version when loaded
+        catalog_version: The client catalog version when loaded (session-scoped)
+        tool_instance_id: Opaque capability identifier for dispatch validation
     """
 
     tool_name: str
@@ -89,6 +91,7 @@ class LoadedClientTool:
     loaded_at: float = field(default_factory=time.time)
     last_used: float = field(default_factory=time.time)
     catalog_version: int = 0
+    tool_instance_id: str = ""
 
     def touch(self) -> None:
         """Update the last_used timestamp."""
@@ -106,26 +109,98 @@ class LoadedClientTool:
         return True
 
 
+
+@dataclass
+class ClientToolScope:
+    """
+    Set of client tools loaded for a specific execution scope.
+
+    Keyed by (conversation_id, agent_key, device_id, session_id) so that
+    two sidecars connected to the same conversation get independent pools
+    and independent LRU budgets.
+    """
+
+    loaded: dict[str, LoadedClientTool] = field(default_factory=dict)
+    created_at: float = field(default_factory=time.time)
+
+    def add(
+        self,
+        tool_name: str,
+        server_name: str,
+        device_id: str,
+        catalog_version: int,
+        max_tools: int,
+        tool_instance_id: str = "",
+    ) -> LoadedClientTool | None:
+        """Add or replace a client tool, evicting LRU when at capacity."""
+        if tool_name in self.loaded:
+            existing = self.loaded[tool_name]
+            existing.server_name = server_name
+            existing.device_id = device_id
+            existing.catalog_version = catalog_version
+            existing.tool_instance_id = tool_instance_id
+            existing.touch()
+            return existing
+
+        while len(self.loaded) >= max_tools:
+            evicted = self._evict_lru()
+            if evicted:
+                logger.debug("Evicted LRU client tool '%s'", evicted)
+            else:
+                return None
+
+        loaded_tool = LoadedClientTool(
+            tool_name=tool_name,
+            server_name=server_name,
+            device_id=device_id,
+            catalog_version=catalog_version,
+            tool_instance_id=tool_instance_id,
+        )
+        self.loaded[tool_name] = loaded_tool
+        return loaded_tool
+
+    def get(self, tool_name: str) -> LoadedClientTool | None:
+        tool = self.loaded.get(tool_name)
+        if tool:
+            tool.touch()
+        return tool
+
+    def cleanup_expired(self, ttl_minutes: int) -> int:
+        to_remove = [
+            name for name, tool in self.loaded.items() if tool.is_expired(ttl_minutes)
+        ]
+        for name in to_remove:
+            del self.loaded[name]
+        return len(to_remove)
+
+    def _evict_lru(self) -> str | None:
+        if not self.loaded:
+            return None
+        lru_name = min(self.loaded.keys(), key=lambda k: self.loaded[k].last_used)
+        self.loaded.pop(lru_name)
+        return lru_name
+
+    def list_tools(self) -> list[LoadedClientTool]:
+        return list(self.loaded.values())
+
+    def __len__(self) -> int:
+        return len(self.loaded)
+
+    def __contains__(self, tool_name: str) -> bool:
+        return tool_name in self.loaded
+
+
 @dataclass
 class ConversationToolSet:
     """
-    Set of tools loaded for a specific (conversation_id, agent_key) pair.
+    Set of server MCP tools loaded for a specific (conversation_id, agent_key) pair.
 
-    Manages:
-    - The set of currently loaded server MCP tools
-    - The set of currently loaded client device tools
-    - LRU ordering for eviction
-    - Capacity limits
+    Note: Client device tools are tracked separately in ClientToolScope
+    instances keyed by execution scope (conversation_id, agent_key,
+    device_id, session_id).
     """
 
-    # Loaded server tools keyed by tool_name
-    # Only one server per tool_name at a time (replacement semantics)
     loaded: dict[str, LoadedTool] = field(default_factory=dict)
-
-    # Loaded client tools keyed by tool_name
-    loaded_client: dict[str, LoadedClientTool] = field(default_factory=dict)
-
-    # When this set was created
     created_at: float = field(default_factory=time.time)
 
     def add(
@@ -135,218 +210,52 @@ class ConversationToolSet:
         generation: int,
         max_tools: int,
     ) -> LoadedTool | None:
-        """
-        Add or replace a tool in the loaded set.
-
-        If the tool_name already exists, it's replaced with the new server.
-        If capacity is exceeded, the least recently used tool is evicted.
-
-        Args:
-            tool_name: Name of the tool to load
-            server_name: Server providing the tool
-            generation: Current MCP tools generation
-            max_tools: Maximum number of tools allowed
-
-        Returns:
-            The LoadedTool if added successfully, None if eviction failed
-        """
-        # If tool already exists, replace it (update server binding)
         if tool_name in self.loaded:
             existing = self.loaded[tool_name]
             if existing.server_name != server_name:
                 logger.debug(
                     "Replacing tool '%s' binding: %s -> %s",
-                    tool_name,
-                    existing.server_name,
-                    server_name,
+                    tool_name, existing.server_name, server_name,
                 )
             existing.server_name = server_name
             existing.generation = generation
             existing.touch()
             return existing
 
-        # Check capacity and evict if needed
         while len(self.loaded) >= max_tools:
             evicted = self._evict_lru()
             if evicted:
                 logger.debug(
                     "Evicted LRU tool '%s' from %s to make room",
-                    evicted.tool_name,
-                    evicted.server_name,
+                    evicted.tool_name, evicted.server_name,
                 )
             else:
-                # Couldn't evict (shouldn't happen)
                 logger.warning("Could not evict tool to make room for '%s'", tool_name)
                 return None
 
-        # Add new tool
         loaded_tool = LoadedTool(
-            tool_name=tool_name,
-            server_name=server_name,
-            generation=generation,
+            tool_name=tool_name, server_name=server_name, generation=generation,
         )
         self.loaded[tool_name] = loaded_tool
         return loaded_tool
 
-    def add_client_tool(
-        self,
-        tool_name: str,
-        server_name: str,
-        device_id: str,
-        catalog_version: int,
-        max_tools: int,
-    ) -> LoadedClientTool | None:
-        """
-        Add or replace a client tool in the loaded set.
-
-        Args:
-            tool_name: Name of the tool to load (with client__ prefix)
-            server_name: Local MCP server name (or "native")
-            device_id: Device the tool belongs to
-            catalog_version: Client catalog version when loaded
-            max_tools: Maximum number of tools allowed
-
-        Returns:
-            The LoadedClientTool if added successfully, None if eviction failed
-        """
-        # If tool already exists, update it
-        if tool_name in self.loaded_client:
-            existing = self.loaded_client[tool_name]
-            existing.server_name = server_name
-            existing.device_id = device_id
-            existing.catalog_version = catalog_version
-            existing.touch()
-            return existing
-
-        # Check capacity and evict if needed (evict from both pools)
-        total_count = len(self.loaded) + len(self.loaded_client)
-        while total_count >= max_tools:
-            evicted = self._evict_lru_any()
-            if evicted:
-                logger.debug(
-                    "Evicted LRU tool '%s' to make room",
-                    evicted,
-                )
-                total_count -= 1
-            else:
-                logger.warning("Could not evict tool to make room for '%s'", tool_name)
-                return None
-
-        # Add new client tool
-        loaded_tool = LoadedClientTool(
-            tool_name=tool_name,
-            server_name=server_name,
-            device_id=device_id,
-            catalog_version=catalog_version,
-        )
-        self.loaded_client[tool_name] = loaded_tool
-        return loaded_tool
-
-    def get(self, tool_name: str) -> LoadedTool | LoadedClientTool | None:
-        """
-        Get a loaded tool by name, updating its LRU timestamp.
-
-        Checks both server and client tool pools.
-
-        Args:
-            tool_name: Name of the tool to get
-
-        Returns:
-            LoadedTool or LoadedClientTool if found, None otherwise
-        """
-        # Check server tools first
+    def get(self, tool_name: str) -> LoadedTool | None:
         tool = self.loaded.get(tool_name)
         if tool:
             tool.touch()
             return tool
-
-        # Check client tools
-        client_tool = self.loaded_client.get(tool_name)
-        if client_tool:
-            client_tool.touch()
-            return client_tool
-
         return None
 
-    def get_client_tool(self, tool_name: str) -> LoadedClientTool | None:
-        """
-        Get a loaded client tool by name, updating its LRU timestamp.
-
-        Args:
-            tool_name: Name of the tool to get
-
-        Returns:
-            LoadedClientTool if found, None otherwise
-        """
-        tool = self.loaded_client.get(tool_name)
-        if tool:
-            tool.touch()
-        return tool
-
-    def remove(self, tool_name: str) -> LoadedTool | LoadedClientTool | None:
-        """
-        Remove a tool from the loaded set.
-
-        Checks both server and client tool pools.
-
-        Args:
-            tool_name: Name of the tool to remove
-
-        Returns:
-            The removed tool, or None if not found
-        """
-        if tool_name in self.loaded:
-            return self.loaded.pop(tool_name)
-        if tool_name in self.loaded_client:
-            return self.loaded_client.pop(tool_name)
-        return None
+    def remove(self, tool_name: str) -> LoadedTool | None:
+        return self.loaded.pop(tool_name, None)
 
     def _evict_lru(self) -> LoadedTool | None:
-        """Evict and return the least recently used server tool."""
         if not self.loaded:
             return None
-
-        # Find LRU tool
         lru_name = min(self.loaded.keys(), key=lambda k: self.loaded[k].last_used)
         return self.loaded.pop(lru_name)
 
-    def _evict_lru_any(self) -> str | None:
-        """Evict the least recently used tool from either pool. Returns tool name."""
-        candidates: list[tuple[str, float, str]] = []  # (name, last_used, pool)
-
-        for name, tool in self.loaded.items():
-            candidates.append((name, tool.last_used, "server"))
-        for name, tool in self.loaded_client.items():
-            candidates.append((name, tool.last_used, "client"))
-
-        if not candidates:
-            return None
-
-        # Find LRU across both pools
-        lru = min(candidates, key=lambda x: x[1])
-        name, _, pool = lru
-
-        if pool == "server":
-            self.loaded.pop(name)
-        else:
-            self.loaded_client.pop(name)
-
-        return name
-
     def cleanup_expired(self, ttl_minutes: int, current_generation: int) -> int:
-        """
-        Remove expired and stale tools.
-
-        Args:
-            ttl_minutes: TTL in minutes (0 = no TTL)
-            current_generation: Current MCP tools generation
-
-        Returns:
-            Number of tools removed
-        """
-        removed = 0
-
-        # Clean up server tools
         to_remove = []
         for name, tool in self.loaded.items():
             if tool.is_expired(ttl_minutes):
@@ -355,42 +264,21 @@ class ConversationToolSet:
             elif tool.is_stale(current_generation):
                 to_remove.append(name)
                 logger.debug("Tool '%s' stale (generation mismatch)", name)
-
         for name in to_remove:
             del self.loaded[name]
-        removed += len(to_remove)
-
-        # Clean up client tools (only TTL-based, no generation for client tools)
-        to_remove_client = []
-        for name, tool in self.loaded_client.items():
-            if tool.is_expired(ttl_minutes):
-                to_remove_client.append(name)
-                logger.debug("Client tool '%s' expired (TTL)", name)
-
-        for name in to_remove_client:
-            del self.loaded_client[name]
-        removed += len(to_remove_client)
-
-        return removed
+        return len(to_remove)
 
     def list_tools(self) -> list[ToolReference]:
-        """Return list of all loaded server tool references."""
         return [tool.to_reference() for tool in self.loaded.values()]
 
-    def list_client_tools(self) -> list[LoadedClientTool]:
-        """Return list of all loaded client tools."""
-        return list(self.loaded_client.values())
-
     def list_all_tool_names(self) -> list[str]:
-        """Return list of all loaded tool names (server + client)."""
-        return list(self.loaded.keys()) + list(self.loaded_client.keys())
+        return list(self.loaded.keys())
 
     def __len__(self) -> int:
-        return len(self.loaded) + len(self.loaded_client)
+        return len(self.loaded)
 
     def __contains__(self, tool_name: str) -> bool:
-        return tool_name in self.loaded or tool_name in self.loaded_client
-
+        return tool_name in self.loaded
 
 class DeferredToolState:
     """
@@ -400,8 +288,10 @@ class DeferredToolState:
     """
 
     def __init__(self):
-        # Map from (conversation_id, agent_key) -> ConversationToolSet
+        # Map from (conversation_id, agent_key) -> ConversationToolSet (server tools only)
         self._conversation_tools: dict[tuple[str, str], ConversationToolSet] = {}
+        # Map from (conversation_id, agent_key, device_id, session_id) -> ClientToolScope
+        self._client_tool_scopes: dict[tuple[str, str, str, str], ClientToolScope] = {}
         self._lock = Lock()
 
     def _get_key(
@@ -411,6 +301,34 @@ class DeferredToolState:
     ) -> tuple[str, str]:
         """Generate a lookup key from conversation_id and agent_key."""
         return (conversation_id or "", agent_key or "default")
+
+    def _get_client_key(
+        self,
+        conversation_id: str | None,
+        agent_key: str | None,
+        device_id: str | None,
+        session_id: str | None,
+    ) -> tuple[str, str, str, str]:
+        """Generate a lookup key for client tool scopes."""
+        return (
+            conversation_id or "",
+            agent_key or "default",
+            device_id or "",
+            session_id or "",
+        )
+
+    @staticmethod
+    def _resolve_active_session_id(device_id: str | None) -> str | None:
+        if not device_id:
+            return None
+
+        from app.services.client_device_service import ClientDeviceService
+
+        try:
+            session = ClientDeviceService.lookup_active_session(UUID(str(device_id)))
+        except Exception:
+            return None
+        return session.session_id if session is not None else None
 
     def autoload(
         self,
@@ -469,33 +387,46 @@ class DeferredToolState:
         agent_key: str | None,
         references: list,  # List of ClientToolReference
         device_id: str | None,
+        session_id: str | None = None,
         user_id: str | None = None,
         max_tools: int | None = None,
     ) -> list:
         """
         Load client device tools for a conversation, respecting capacity limits.
 
-        This is called by tool_search to load client tools from search results.
-
-        Args:
-            conversation_id: The conversation to load tools for
-            agent_key: The agent key (e.g., "chat", "rag")
-            references: List of ClientToolReference to load
-            device_id: The device these tools belong to
-            max_tools: Override for max tools (uses config default if None)
-
-        Returns:
-            List of ClientToolReference that were actually loaded
+        Client tools are stored in a separate scope keyed by
+        (conversation_id, agent_key, device_id, session_id) so that
+        two sidecars in the same conversation get independent pools.
         """
         from .client_tool_catalog import ClientToolReference, get_client_tool_catalog
 
         if max_tools is None:
             max_tools = settings.mcp_tool_search_max_loaded_tools_per_conversation
 
-        key = self._get_key(conversation_id, agent_key)
+        if not device_id:
+            return []
+
+        effective_session_id = session_id
+        if not effective_session_id:
+            effective_session_id = next(
+                (
+                    str(getattr(ref, "session_id"))
+                    for ref in references
+                    if getattr(ref, "session_id", None)
+                ),
+                None,
+            )
+        if not effective_session_id:
+            effective_session_id = self._resolve_active_session_id(device_id)
+
+        client_key = self._get_client_key(
+            conversation_id,
+            agent_key,
+            device_id,
+            effective_session_id,
+        )
         loaded: list[ClientToolReference] = []
 
-        # Get current catalog version for the device
         catalog_version = 0
         if device_id:
             try:
@@ -504,26 +435,27 @@ class DeferredToolState:
             except Exception:
                 pass
 
-        generation = get_mcp_tools_generation()
-
         with self._lock:
-            if key not in self._conversation_tools:
-                self._conversation_tools[key] = ConversationToolSet()
+            if client_key not in self._client_tool_scopes:
+                self._client_tool_scopes[client_key] = ClientToolScope()
 
-            tool_set = self._conversation_tools[key]
-
-            # Clean up expired tools first
+            scope = self._client_tool_scopes[client_key]
             ttl = settings.mcp_tool_search_loaded_tools_ttl_minutes
-            tool_set.cleanup_expired(ttl, generation)
+            scope.cleanup_expired(ttl)
 
-            # Load each client tool reference
             for ref in references:
-                result = tool_set.add_client_tool(
+                ref_catalog_version = getattr(ref, "catalog_version", None)
+                result = scope.add(
                     tool_name=ref.tool_name,
                     server_name=ref.server_name,
                     device_id=ref.device_id or device_id or "",
-                    catalog_version=catalog_version,
+                    catalog_version=(
+                        int(ref_catalog_version)
+                        if ref_catalog_version is not None
+                        else catalog_version
+                    ),
                     max_tools=max_tools,
+                    tool_instance_id=getattr(ref, "tool_instance_id", ""),
                 )
                 if result:
                     loaded.append(ref)
@@ -566,59 +498,73 @@ class DeferredToolState:
         self,
         conversation_id: str | None,
         agent_key: str | None,
+        device_id: str | None = None,
+        session_id: str | None = None,
     ) -> list[LoadedClientTool]:
         """
-        Get all loaded client tools for a conversation.
+        Get all loaded client tools for a conversation and execution scope.
 
-        Args:
-            conversation_id: The conversation to get tools for
-            agent_key: The agent key
-
-        Returns:
-            List of LoadedClientTool for loaded client tools
+        When device_id and session_id are provided, returns tools from
+        that specific execution scope only.
         """
-        key = self._get_key(conversation_id, agent_key)
-        generation = get_mcp_tools_generation()
         ttl = settings.mcp_tool_search_loaded_tools_ttl_minutes
 
         with self._lock:
-            tool_set = self._conversation_tools.get(key)
-            if not tool_set:
-                return []
+            if device_id and not session_id:
+                session_id = self._resolve_active_session_id(device_id)
+            if device_id and session_id:
+                client_key = self._get_client_key(
+                    conversation_id, agent_key, device_id, session_id,
+                )
+                scope = self._client_tool_scopes.get(client_key)
+                if not scope:
+                    return []
+                scope.cleanup_expired(ttl)
+                return scope.list_tools()
 
-            # Clean up expired tools
-            tool_set.cleanup_expired(ttl, generation)
-
-            return tool_set.list_client_tools()
+            conv_id = conversation_id or ""
+            agent = agent_key or "default"
+            result: list[LoadedClientTool] = []
+            for key, scope in list(self._client_tool_scopes.items()):
+                if key[0] == conv_id and key[1] == agent:
+                    if device_id and key[2] != str(device_id):
+                        continue
+                    scope.cleanup_expired(ttl)
+                    result.extend(scope.list_tools())
+            return result
 
     def get_all_loaded_tool_names(
         self,
         conversation_id: str | None,
         agent_key: str | None,
+        device_id: str | None = None,
+        session_id: str | None = None,
     ) -> list[str]:
-        """
-        Get names of all loaded tools (server + client) for a conversation.
-
-        Args:
-            conversation_id: The conversation to get tools for
-            agent_key: The agent key
-
-        Returns:
-            List of tool names (strings)
-        """
+        """Get names of all loaded tools (server + client) for a conversation."""
         key = self._get_key(conversation_id, agent_key)
         generation = get_mcp_tools_generation()
         ttl = settings.mcp_tool_search_loaded_tools_ttl_minutes
 
         with self._lock:
+            names: list[str] = []
             tool_set = self._conversation_tools.get(key)
-            if not tool_set:
-                return []
+            if tool_set:
+                tool_set.cleanup_expired(ttl, generation)
+                names.extend(tool_set.list_all_tool_names())
 
-            # Clean up expired tools
-            tool_set.cleanup_expired(ttl, generation)
-
-            return tool_set.list_all_tool_names()
+            conv_id = conversation_id or ""
+            agent = agent_key or "default"
+            if device_id and not session_id:
+                session_id = self._resolve_active_session_id(device_id)
+            for ckey, scope in list(self._client_tool_scopes.items()):
+                if ckey[0] == conv_id and ckey[1] == agent:
+                    if device_id and ckey[2] != str(device_id):
+                        continue
+                    if session_id and ckey[3] != str(session_id):
+                        continue
+                    scope.cleanup_expired(ttl)
+                    names.extend(name for name in scope.loaded.keys())
+            return names
 
     def is_loaded(
         self,
@@ -705,67 +651,58 @@ class DeferredToolState:
         conversation_id: str | None,
         agent_key: str | None = None,
     ) -> int:
-        """
-        Clear loaded tools for a conversation.
-
-        Args:
-            conversation_id: The conversation to clear
-            agent_key: Optional agent key (clears all agents if None)
-
-        Returns:
-            Number of tool sets cleared
-        """
+        """Clear loaded tools for a conversation (both server and client scopes)."""
         cleared = 0
-
         with self._lock:
             if agent_key:
-                # Clear specific agent
                 key = self._get_key(conversation_id, agent_key)
                 if key in self._conversation_tools:
                     del self._conversation_tools[key]
                     cleared = 1
+                client_keys = [
+                    k for k in self._client_tool_scopes
+                    if k[0] == (conversation_id or "") and k[1] == (agent_key or "default")
+                ]
+                for k in client_keys:
+                    del self._client_tool_scopes[k]
+                    cleared += 1
             else:
-                # Clear all agents for conversation
                 conv_id = conversation_id or ""
                 keys_to_remove = [k for k in self._conversation_tools if k[0] == conv_id]
                 for key in keys_to_remove:
                     del self._conversation_tools[key]
                 cleared = len(keys_to_remove)
+                client_keys = [k for k in self._client_tool_scopes if k[0] == conv_id]
+                for k in client_keys:
+                    del self._client_tool_scopes[k]
+                    cleared += 1
 
         if cleared:
             logger.debug(
                 "Cleared %d tool set(s) for conversation=%s agent=%s",
-                cleared,
-                conversation_id,
-                agent_key,
+                cleared, conversation_id, agent_key,
             )
-
         return cleared
 
     def clear_all(self) -> int:
-        """
-        Clear all loaded tools (for testing/reset).
-
-        Returns:
-            Number of conversations cleared
-        """
+        """Clear all loaded tools (for testing/reset)."""
         with self._lock:
-            count = len(self._conversation_tools)
+            count = len(self._conversation_tools) + len(self._client_tool_scopes)
             self._conversation_tools.clear()
+            self._client_tool_scopes.clear()
         return count
 
     def get_stats(self) -> dict:
-        """
-        Get statistics about the deferred tool state.
-
-        Returns:
-            Dict with stats about loaded tools
-        """
+        """Get statistics about the deferred tool state."""
         with self._lock:
-            total_tools = sum(len(ts) for ts in self._conversation_tools.values())
+            server_tools = sum(len(ts) for ts in self._conversation_tools.values())
+            client_tools = sum(len(s) for s in self._client_tool_scopes.values())
             return {
                 "conversation_count": len(self._conversation_tools),
-                "total_loaded_tools": total_tools,
+                "client_scope_count": len(self._client_tool_scopes),
+                "total_server_tools": server_tools,
+                "total_client_tools": client_tools,
+                "total_loaded_tools": server_tools + client_tools,
             }
 
 

@@ -165,6 +165,197 @@ Repo scope: Same repository, new local-runtime folder
   - Preserved the existing outbound WebSocket model and NAT-safe transport assumptions from the plan's Mermaid diagrams
   - **Verified**: live runtime integration now passes cleanly through connect, server visibility, disconnect, and post-disconnect cleanup
 
+### Architecture Addendum: Multi-Sidecar Hardening (2026-04-07)
+
+This addendum clarifies the production shape for simultaneous multi-sidecar use.
+
+#### Key conclusions
+
+- `device_id` must remain transport-owned metadata carried by the client backend and server, not a model-facing tool argument.
+- The model must never be asked to invent or select a raw device UUID.
+- A single model run should bind to exactly one execution scope:
+  - `(user_id, device_id, session_id, catalog_version)`
+- Client tool visibility must remain scoped to the active execution scope only.
+- HITL, deferred loading, and runtime dispatch must all validate against the same execution scope.
+
+#### Current strengths already in place
+
+- Request-scoped `device_id` is already propagated through message -> workflow -> tool context.
+- Client tools are bound only for the active request device and validate their bound `device_id` and `session_id` at execution time.
+- Client-side tools require HITL approval by default.
+- Interrupt resume already validates `device_id`.
+- Tool catalogs and runtime dispatch queues are already keyed to active runtime sessions.
+
+#### Production gaps still remaining
+
+- `DeferredToolState` currently keys loaded tools by `(conversation_id, agent_key)` only.
+  - This is acceptable for server MCP tools.
+  - This is fragile for client tools when the same conversation is used from multiple sidecars because loaded client tools can share one pool and one LRU budget across devices.
+- Loaded client tools are keyed by exposed tool name.
+  - If two sidecars load the same exposed client tool name in the same conversation, one record can replace the other.
+- The sidecar runtime currently executes a request from `qualified_tool_id` alone once it has been routed to the device.
+  - This is functional today because the server routes by `device_id`.
+  - It is not the strongest production proof that the request still belongs to the current sidecar session and current advertised capability set.
+- The `device_id is None` fallback in `base_agent._get_tools_for_binding()` passes all loaded client tools when no device is in context.
+  - This is the legacy path for server-only requests.
+  - When the bridge is enabled, a missing `device_id` should produce zero client tools, not all tools.
+  - The current permissive fallback is a latent cross-device leak path if `device_id` is absent by accident rather than by design.
+- `dispatch_tool_call()` on the server does not verify that `qualified_tool_id` exists in the session current tool catalog before dispatching.
+  - Sidecar-side rejection covers this, but server-side validation is defense-in-depth.
+- `hitl_interrupts` and `tool_approvals` do not store `session_id` or `catalog_version`.
+  - Device ID mismatch is detected on resume, but a session change within the same device is not.
+
+#### Required architecture decisions
+
+- Do not persist a hard one-conversation -> one-device binding as the primary model.
+  - Conversations remain user-owned.
+  - Device selection is execution-scoped per request and per interrupt.
+- Introduce an opaque client capability identifier for each advertised client tool.
+  - Recommended name: `tool_instance_id`
+  - Build it as a truncated SHA-256 of `{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}`.
+    - SHA-256 is compact, O(1) to compare, and safe to log without leaking internal structure.
+    - Alternatively, use the structured composite `{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}` if debuggability is preferred over compactness.
+    - Either format is acceptable; pick one and apply it consistently across catalog, protocol, and audit.
+  - `catalog_version` is **session-scoped**, not device-scoped. It resets to 0 when a new session starts. A reconnect with a new session produces a new `tool_instance_id` even if the catalog is identical. Document this at the definition site.
+  - The model still sees only the exposed tool name.
+  - The server and sidecar use the opaque identifier for dispatch and validation.
+- Treat `qualified_tool_id` as descriptive provenance, not as the sole authority for execution.
+- Tighten the `device_id is None` fallback: when `enable_client_runtime_bridge` is true and `device_id` is absent, bind zero client tools. Do not fall through to include all loaded client tools.
+- Any future multi-device orchestration must be server-owned.
+  - If a user wants to target a different device, the server or client backend selects the execution scope first.
+  - Only then are that scope's client tools bound to the model.
+  - Do not expose raw device UUIDs in prompts or tool schemas.
+
+#### HITL compatibility requirements
+
+- HITL remains compatible with multi-sidecar support if approvals are bound to execution scope.
+- Persist the following on interrupt and approval records for client-local tools:
+  - `device_id`
+  - `session_id`
+  - `tool_origin`
+  - `server_name`
+  - `qualified_tool_id`
+  - `tool_instance_id`
+  - `catalog_version`
+- Schema changes needed: add `session_id VARCHAR(255)` and `catalog_version INT` columns to both `hitl_interrupts` and `tool_approvals` in a new Alembic migration.
+- Resume rules:
+  - same conversation + same interrupt + same execution scope: allow normal resume
+  - same conversation + different device/session/catalog: reject or require explicit rebind with fresh approval
+- If the device disconnects or reconnects with a new session before resume, pending client-tool approvals should be considered stale unless revalidated.
+
+#### Deferred loading compatibility requirements
+
+- Deferred loading remains compatible only if client-loaded state becomes execution-scope aware.
+- Server tool deferred state can continue using `(conversation_id, agent_key)`.
+- Client tool deferred state should be keyed by:
+  - `(conversation_id, agent_key, device_id, session_id)`
+  - or an equivalent execution-scope key
+- Client tool LRU and capacity limits should apply per execution scope, not across every device participating in the same conversation.
+- `tool_search` should continue searching only the active device's client catalog for the current request.
+- Internal autoload metadata should carry `tool_instance_id` and execution-scope information, not just exposed tool name and server name.
+- Migration note: splitting the deferred-state key is a clean break. Existing `LoadedClientTool` entries under the old `(conversation_id, agent_key)` key are silently dropped on the first access after the change. No backward migration is needed; loaded tools are re-acquired on the next `tool_search` call.
+
+#### Recommended runtime-dispatch contract
+
+- Tool catalogs synced from sidecar -> server should include:
+  - exposed tool name
+  - `qualified_tool_id`
+  - `tool_instance_id`
+  - `catalog_version`
+  - schema fingerprint
+  - origin metadata
+- Server -> sidecar `tool_request` should include:
+  - `request_id`
+  - exposed tool name
+  - `qualified_tool_id`
+  - `tool_instance_id`
+  - expected `session_id`
+  - expected `catalog_version`
+  - arguments
+- Sidecar must reject execution if:
+  - `tool_instance_id` is unknown
+  - `session_id` does not match current runtime session
+  - catalog version is stale
+  - exposed tool name does not match the advertised record
+  - `qualified_tool_id` does not match the advertised record
+- Server must also validate before dispatch (defense-in-depth):
+  - `qualified_tool_id` exists in the active session's tool catalog
+  - session is alive and `user_id` matches
+  - `bound_session_id` matches if provided
+
+#### Explicit guidance for the LLM / device selection
+
+- In the current architecture, the LLM should not hallucinate `device_id` because `device_id` is not a model-visible tool argument.
+- That must remain true.
+- If multi-device selection UX is needed later, use one of these patterns:
+  - client/backend preselects the active device before the request reaches the model
+  - a server-owned broker tool resolves the target device and then rebinds tools for a second model step
+- Avoid any design where the model directly emits `device_id` into a client-local tool call.
+
+#### Next implementation tasks
+
+- [x] Split deferred client-tool state by execution scope instead of conversation-only state (2026-04-08)
+  - Key: `(conversation_id, agent_key, device_id, session_id)`
+  - Per-scope LRU budget; no sharing across devices in the same conversation
+  - Clean break: existing client entries under the old key are silently dropped; tools re-load on next `tool_search`
+  - Introduced `ClientToolScope` dataclass with its own LRU pool separate from `ConversationToolSet`
+  - `DeferredToolState` now maintains two dicts: `_conversation_tools` (server) and `_client_tool_scopes` (client, execution-scope keyed)
+  - Updated `autoload_client_tools`, `get_loaded_client_tools`, `get_all_loaded_tool_names`, `clear_conversation`, `clear_all`, `get_stats`
+  - Updated consumers in `base_agent.py` and `tool_execution.py` to pass `device_id` to scoped queries
+  - **Design decision**: `session_id` is resolved lazily from the active device session when not explicitly provided, avoiding the need to thread it through all callers immediately
+  - **Verified**: All 17 existing tests pass (6 isolation, 4 adapter utils, 7 local MCP manager)
+- [x] Add `tool_instance_id` to the client tool catalog, runtime protocol, interrupt metadata, and audit records (2026-04-08)
+  - **Design decision**: Used truncated SHA-256 (16 hex chars) of `{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}` for compactness
+  - **Design decision**: `catalog_version` is session-scoped; documented in `make_tool_instance_id()` docstring; sidecar tracks locally mirroring server counter
+  - Added `make_tool_instance_id()` to `app/ai/client_runtime_tools.py` (canonical server-side) and `_make_tool_instance_id()` to `client_backend/services/runtime_bridge.py` (sidecar-side)
+  - Added `tool_instance_id` field to `ClientRuntimeToolSpec`, `LoadedClientTool`, `ClientToolReference`
+  - Sidecar embeds `tool_instance_id` in each catalog entry using next_catalog_version before sync
+  - `ToolDispatchRequest` extended with `tool_instance_id`, `expected_session_id`, `expected_catalog_version`
+  - `dispatch_tool_call()` passes `tool_instance_id` and current session fields in the request
+  - Interrupt provenance now includes `tool_instance_id` and `session_id` from tool metadata
+  - **Verified**: All 17 tests pass
+- [x] Make the sidecar validate every tool request against its current advertised capability record before execution (2026-04-08)
+  - Reject if `tool_instance_id` is unknown, `session_id` mismatches, catalog version is stale, or name/ID mismatches
+  - Added `_validate_tool_request(request)` to `runtime_bridge.py` — returns error string or None
+  - Sidecar tracks `_tool_catalog_version: int` (mirrors server-side increment) and `_current_tool_catalog: dict` (keyed by qualified_id)
+  - Both reset on new session assignment; catalog version increments on each `refresh_catalogs()` call
+  - `_handle_tool_request` calls validation first; raises `ValueError` if stale
+  - **Design decision**: `tool_instance_id` formula uses `next_catalog_version = version + 1` at build time so the embedded ID matches what the server will assign after sync
+  - **Verified**: `py_compile` passes
+- [x] Add server-side catalog validation in `dispatch_tool_call()` before queuing the request (2026-04-08)
+  - Verify `qualified_tool_id` exists in `session.tool_catalog`
+  - Added defense-in-depth check in `client_device_service.py`: builds `catalog_qids` set from session catalog, raises `RuntimeError` if tool not present
+  - `ToolDispatchRequest` now includes `tool_instance_id`, `expected_session_id`, `expected_catalog_version`
+  - **Verified**: `py_compile` passes
+- [x] Tighten `device_id is None` fallback in `base_agent._get_tools_for_binding()` (2026-04-08):
+  - When `enable_client_runtime_bridge` is true and `device_id` is absent, bind zero client tools
+  - Added explicit guard: `if settings.enable_client_runtime_bridge and not device_id: remote_tools = []`
+  - `get_loaded_client_tools` call now passes `device_id=str(device_id) if device_id else None`
+  - **Verified**: `py_compile` passes, all 17 tests pass
+- [x] Add `session_id` and `catalog_version` columns to `hitl_interrupts` and `tool_approvals` (new Alembic migration) (2026-04-08)
+  - Capture at interrupt creation time; validate on resume
+  - New migration: `n5o6p7q8r9s0_add_session_id_catalog_version_to_hitl.py` (down_revision: `m4n5o6p7q8r9`)
+  - Adds `session_id VARCHAR(255)`, `catalog_version INTEGER`, `tool_instance_id VARCHAR(64)` to both tables
+  - Model columns added to `hitl_interrupt.py` and `tool_approval.py`
+  - `HITLInterruptRepository.create()` extended with `session_id`, `catalog_version`, `tool_instance_id` params
+  - `message_service.py` now extracts and passes these fields from interrupt provenance
+  - **Verified**: `py_compile` passes on all modified files
+- [x] Invalidate or re-approve pending client-tool interrupts when the sidecar session changes (2026-04-08)
+  - Added `expire_stale_client_tool_interrupts(device_id, current_session_id) -> int` to `HITLInterruptRepository`
+  - Uses bulk UPDATE: sets status=EXPIRED, resolution_source="session_changed" for PENDING interrupts with mismatched session_id
+  - Called from `device_runtime.py` after `start_session()` in a try/except so connection is never blocked
+  - **Verified**: `py_compile` passes on all modified files
+- [x] Add regression tests for multi-sidecar scenarios (2026-04-08)
+  - New file: `tests/test_multi_sidecar_hardening.py` — 19 tests across 7 test classes
+  - **TestOverlappingToolNames** (2 tests): two sidecars publish same tool name in same conversation; verifies independent scopes and distinct `tool_instance_id`s; broad lookup returns both devices
+  - **TestReconnectInvalidatesInstanceId** (6 tests): `tool_instance_id` changes on new session; changes on catalog version bump; sidecar `_validate_tool_request` rejects stale session, stale catalog version, unknown tool, mismatched `tool_instance_id`; accepts valid request
+  - **TestHITLResumeSessionValidation** (1 test): interrupt resume rejects when device changes (409 INTERRUPT_DEVICE_MISMATCH)
+  - **TestDeferredAutoloadIsolation** (2 tests): two devices get independent LRU pools; overflowing device A evicts from A not B
+  - **TestNoDeviceBindsZeroTools** (2 tests): `_get_tools_for_binding` with `device_id=None` skips client tools entirely; `autoload_client_tools` returns [] without device
+  - **TestClientToolScope** (3 tests): add/retrieve, LRU eviction within scope, update existing tool
+  - **TestToolInstanceIdConsistency** (2 tests): server and sidecar produce identical IDs; different inputs produce different IDs
+  - **Verified**: All 25 tests pass (6 existing + 19 new) in 3.1s
+
 ## 1. Objective
 
 Build a new per-device client backend for the Codex Desktop App while keeping the current FastAPI server as the canonical backend for:
