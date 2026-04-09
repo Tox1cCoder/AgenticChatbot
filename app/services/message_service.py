@@ -12,9 +12,11 @@ try:
 except ImportError:  # pragma: no cover - exercised in environments without redis installed
     redis = None
 
+from fastapi import status as http_status
+
 from app.ai.suggestion_generator import generate_follow_up_suggestions
 from app.core.config import settings
-from app.core.exceptions import PauseReason
+from app.core.exceptions import CustomHTTPException, PauseReason
 from app.core.response_constants import (
     ERROR_RESPONSE_AFTER_RESUME,
     NO_RESPONSE_GENERATED,
@@ -26,6 +28,7 @@ from app.core.response_constants import (
 from app.factories.message_factory import MessageFactory
 from app.interfaces.message_service_interface import IMessageService
 from app.models.enums import MessageRole, PlanLifecycle
+from app.models.hitl_interrupt import HITLInterruptStatus
 from app.models.tool_approval import DecisionType
 from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.repositories.message import MessageRepository
@@ -41,6 +44,7 @@ from app.schemas.workflow import (
     WorkflowResponse,
 )
 from app.services.ai_service import AIService
+from app.services.client_device_service import ClientDeviceService
 from app.services.generation_registry import get_generation_registry
 from app.utils.text_processing import fix_markdown_code_blocks, sanitize_persona
 from app.utils.validation.conversation_validation import ConversationValidationUtils
@@ -88,11 +92,7 @@ class MessageService(IMessageService):
         if not isinstance(raw_provenance, dict):
             return {}
 
-        return {
-            str(key): value
-            for key, value in raw_provenance.items()
-            if isinstance(value, dict)
-        }
+        return {str(key): value for key, value in raw_provenance.items() if isinstance(value, dict)}
 
     @staticmethod
     def _is_client_runtime_provenance_entry(provenance: dict[str, Any]) -> bool:
@@ -178,7 +178,8 @@ class MessageService(IMessageService):
             actionable_decisions = [
                 decision
                 for decision in decisions
-                if decision.type in (
+                if decision.type
+                in (
                     InterruptDecisionType.APPROVE,
                     InterruptDecisionType.EDIT,
                 )
@@ -961,12 +962,6 @@ class MessageService(IMessageService):
         device_id: UUID | None,
         decisions: list[InterruptDecision] | None = None,
     ) -> Any:
-        from fastapi import status as http_status
-
-        from app.core.exceptions import CustomHTTPException
-        from app.models.hitl_interrupt import HITLInterruptStatus
-        from app.services.client_device_service import ClientDeviceService
-
         self.conversation_validation_utils.validate_conversation_access(user_id, conversation_id)
 
         fetched_interrupt_record = None
@@ -1066,9 +1061,8 @@ class MessageService(IMessageService):
 
                 for provenance_key, provenance in runtime_provenance:
                     expected_session_id = provenance.get("session_id")
-                    if (
-                        expected_session_id not in (None, "")
-                        and active_session.session_id != str(expected_session_id)
+                    if expected_session_id not in (None, "") and active_session.session_id != str(
+                        expected_session_id
                     ):
                         self._expire_interrupt_for_scope_change(
                             interrupt_id=interrupt_id,
