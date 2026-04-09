@@ -2,850 +2,9 @@
   "info": {
     "_postman_id": "62a30d98-c3e9-4172-aca0-b945bad5351b",
     "name": "Chatbot API",
-    "description": "Complete API testing workflow for the Chatbot application",
-    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "_exporter_id": "47733298",
-    "_collection_link": "https://duythai-nguyen0208-2591537.postman.co/workspace/Duy-Th%C3%A1i-Nguy%E1%BB%85n's-Workspace~d5c33d8c-fbc4-4e95-8e82-32d06aaa6835/collection/47733298-62a30d98-c3e9-4172-aca0-b945bad5351b?action=share&source=collection_link&creator=47733298"
+    "description": "HTTP collection for the canonical Sample Chatbot server backend. Covers auth, conversations, messages, AI SDK routes, documents, planning, providers, model config, MCP, skills, client devices, and widget connection token minting. WebSocket-only flows are documented in README but excluded here.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
-  "item": [
-    {
-      "name": "Authentication",
-      "item": [
-        {
-          "name": "Sign Up",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "if (pm.response.code === 201) {",
-                  "    const response = pm.response.json();",
-                  "    pm.environment.set('user_id', response.id);",
-                  "}",
-                  ""
-                ],
-                "type": "text/javascript",
-                "packages": {}
-              }
-            },
-            {
-              "listen": "prerequest",
-              "script": {
-                "packages": {},
-                "type": "text/javascript"
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"username\": \"test_user\",\n  \"email\": \"test@example.com\",\n  \"password\": \"testpassword123\"\n}"
-            },
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/auth/signup",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["auth", "signup"]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Login",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "if (pm.response.code === 200) {",
-                  "    const response = pm.response.json();",
-                  "    pm.environment.set('ACCESS_TOKEN', response.data.accessToken);",
-                  "    pm.environment.set('REFRESH_TOKEN', response.data.refreshToken);",
-                  "    pm.collectionVariables.set('userId', response.data.userId);",
-                  "}"
-                ],
-                "type": "text/javascript",
-                "packages": {}
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"test@example.com\",\n  \"password\": \"testpassword123\"\n}"
-            },
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/auth/login",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["auth", "login"]
-            }
-          },
-          "response": []
-        }
-      ]
-    },
-    {
-      "name": "Document Management",
-      "item": [
-        {
-          "name": "Upload Document",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "if (pm.response.code === 201) {",
-                  "  const res = pm.response.json();",
-                  "  if (res.data && res.data.document && res.data.processing) {",
-                  "    pm.collectionVariables.set('document_id', res.data.document.id);",
-                  "    pm.collectionVariables.set('task_id', res.data.processing.task_id);",
-                  "  }",
-                  "}"
-                ],
-                "type": "text/javascript",
-                "packages": {}
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }
-            ],
-            "body": {
-              "mode": "formdata",
-              "formdata": [
-                { "key": "file", "type": "file", "src": [] },
-                {
-                  "key": "conversation_id",
-                  "type": "text",
-                  "value": "{{conversation_id}}"
-                }
-              ]
-            },
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/documents/upload",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["documents", "upload"]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Task Status",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "const res = pm.response.json();",
-                  "pm.test('Has task status', function(){ pm.expect(res.data.status).to.be.a('string'); });"
-                ],
-                "type": "text/javascript",
-                "packages": {}
-              }
-            }
-          ],
-          "request": {
-            "method": "GET",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }
-            ],
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/documents/task/{{task_id}}",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["documents", "task", "{{task_id}}"]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Document by ID",
-          "request": {
-            "method": "GET",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }
-            ],
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/documents/{{document_id}}",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["documents", "{{document_id}}"]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Conversation Documents",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "const res = pm.response.json();",
-                  "pm.test('Pagination structure', function(){",
-                  "  pm.expect(res.data.total).to.be.a('number');",
-                  "  pm.expect(res.data.page).to.be.a('number');",
-                  "  pm.expect(res.data.page_size).to.be.a('number');",
-                  "});"
-                ],
-                "type": "text/javascript",
-                "packages": {}
-              }
-            }
-          ],
-          "request": {
-            "method": "GET",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }
-            ],
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/documents/conversation/{{conversation_id}}?page=1&page_size=10",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["documents", "conversation", "{{conversation_id}}"],
-              "query": [
-                { "key": "page", "value": "1" },
-                { "key": "page_size", "value": "10" }
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Update Document",
-          "request": {
-            "method": "PUT",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"filename\": \"new-name.pdf\"\n}"
-            },
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/documents/{{document_id}}",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["documents", "{{document_id}}"]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Delete Document",
-          "request": {
-            "method": "DELETE",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }
-            ],
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/documents/{{document_id}}",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["documents", "{{document_id}}"]
-            }
-          },
-          "response": []
-        }
-      ]
-    },
-    {
-      "name": "User Management",
-      "item": [
-        {
-          "name": "Get Current User",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [""],
-                "type": "text/javascript",
-                "packages": {}
-              }
-            },
-            {
-              "listen": "prerequest",
-              "script": {
-                "packages": {},
-                "type": "text/javascript"
-              }
-            }
-          ],
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/users/{{userId}}",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["users", "{{userId}}"]
-            }
-          },
-          "response": []
-        }
-      ]
-    },
-    {
-      "name": "Conversation Management",
-      "item": [
-        {
-          "name": "Create Conversation",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "if (pm.response.code === 201) {",
-                  "    const response = pm.response.json();",
-                  "    pm.collectionVariables.set('conversation_id', response.data.id);",
-                  "}"
-                ],
-                "type": "text/javascript",
-                "packages": {}
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"title\": \"Test Conversation\"\n}"
-            },
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/conversations/",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["conversations", ""]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get All Conversations",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "const jsonData = pm.response.json();",
-                  "pm.test('Response includes pagination metadata', function () {",
-                  "    pm.expect(jsonData.data).to.be.an('object');",
-                  "    pm.expect(jsonData.data.meta).to.be.an('object');",
-                  "    pm.expect(jsonData.data.meta.currentPage).to.eql(3);",
-                  "    pm.expect(jsonData.data.meta.perPage).to.eql(5);",
-                  "});",
-                  "pm.test('Items array is returned', function () {",
-                  "    pm.expect(jsonData.data.items).to.be.an('array');",
-                  "});",
-                  "pm.test('Messages are included when requested', function () {",
-                  "    const items = jsonData.data.items || [];",
-                  "    if (items.length) {",
-                  "        pm.expect(items[0]).to.have.property('messages');",
-                  "    }",
-                  "});"
-                ],
-                "type": "text/javascript",
-                "packages": {},
-                "requests": {}
-              }
-            }
-          ],
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/conversations/?page=3&limit=5&orderBy=updated_at&orderDirection=desc&include=messages&latestMessages=3",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["conversations", ""],
-              "query": [
-                {
-                  "key": "page",
-                  "value": "3"
-                },
-                {
-                  "key": "limit",
-                  "value": "5"
-                },
-                {
-                  "key": "orderBy",
-                  "value": "updated_at"
-                },
-                {
-                  "key": "orderDirection",
-                  "value": "desc"
-                },
-                {
-                  "key": "include",
-                  "value": "messages"
-                },
-                {
-                  "key": "latestMessages",
-                  "value": "3"
-                }
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Conversation by ID",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["conversations", "{{conversation_id}}"]
-            }
-          },
-          "response": []
-        }
-      ]
-    },
-    {
-      "name": "Message Management",
-      "item": [
-        {
-          "name": "Send Message",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "if (pm.response.code === 201) {",
-                  "    const response = pm.response.json();",
-                  "    pm.collectionVariables.set('message_id', response.data.id);",
-                  "}"
-                ],
-                "type": "text/javascript",
-                "packages": {}
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"conversation_id\": \"{{conversation_id}}\",\n  \"content\": \"Hello, this is a test message!\"\n}"
-            },
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/messages/",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["messages", ""]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Send Message (Streaming)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "pm.test('Response is SSE stream', function () {",
-                  "    pm.expect(pm.response.headers.get('Content-Type')).to.include('text/event-stream');",
-                  "});",
-                  "",
-                  "// Parse SSE events from response",
-                  "const responseText = pm.response.text();",
-                  "const events = [];",
-                  "const lines = responseText.split('\\n\\n');",
-                  "",
-                  "for (const line of lines) {",
-                  "    if (line.startsWith('data: ')) {",
-                  "        try {",
-                  "            const jsonStr = line.substring(6);",
-                  "            const event = JSON.parse(jsonStr);",
-                  "            events.push(event);",
-                  "        } catch (e) {",
-                  "            // Skip invalid JSON",
-                  "        }",
-                  "    }",
-                  "}",
-                  "",
-                  "console.log('Parsed events:', events);",
-                  "",
-                  "// Store the last complete message if available",
-                  "const completeEvent = events.find(e => e.type === 'complete');",
-                  "if (completeEvent && completeEvent.message) {",
-                  "    pm.collectionVariables.set('message_id', completeEvent.message.id);",
-                  "}",
-                  "",
-                  "pm.test('Stream contains events', function () {",
-                  "    pm.expect(events.length).to.be.above(0);",
-                  "});"
-                ],
-                "type": "text/javascript",
-                "packages": {}
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"conversation_id\": \"{{conversation_id}}\",\n  \"content\": \"What can you tell me about the uploaded documents?\",\n  \"role\": \"user\"\n}"
-            },
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/messages/stream",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["messages", "stream"]
-            },
-            "description": "Sends a message and receives a streaming SSE response. The response includes:\n- agent_selected: Which agent is handling the request\n- token: Real-time text chunks as they're generated\n- thinking: AI reasoning (if supported)\n- tool: Tool execution events (start/end)\n- complete: Final message with metadata\n- error: Any errors that occur\n\nSee STREAMING_RESPONSE_EXAMPLES.md for detailed event examples."
-          },
-          "response": []
-        },
-        {
-          "name": "Get Conversation Messages",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "const jsonData = pm.response.json();",
-                  "pm.test('Response is paginated', function () {",
-                  "    pm.expect(jsonData.data).to.be.an('object');",
-                  "    pm.expect(jsonData.data.meta).to.be.an('object');",
-                  "    pm.expect(jsonData.data.meta.currentPage).to.eql(1);",
-                  "    pm.expect(jsonData.data.meta.perPage).to.eql(2);",
-                  "});",
-                  "pm.test('Items array is returned', function () {",
-                  "    pm.expect(jsonData.data.items).to.be.an('array');",
-                  "});"
-                ],
-                "type": "text/javascript"
-              }
-            }
-          ],
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}/messages?page=1&limit=2&orderBy=created_at&orderDirection=asc",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["conversations", "{{conversation_id}}", "messages"],
-              "query": [
-                {
-                  "key": "page",
-                  "value": "1"
-                },
-                {
-                  "key": "limit",
-                  "value": "2"
-                },
-                {
-                  "key": "orderBy",
-                  "value": "created_at"
-                },
-                {
-                  "key": "orderDirection",
-                  "value": "asc"
-                }
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get All Messages (Paginated)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "const jsonData = pm.response.json();",
-                  "pm.test('Response is paginated', function () {",
-                  "    pm.expect(jsonData.data).to.be.an('object');",
-                  "    pm.expect(jsonData.data.meta).to.be.an('object');",
-                  "    pm.expect(jsonData.data.meta.currentPage).to.eql(1);",
-                  "    pm.expect(jsonData.data.meta.perPage).to.eql(5);",
-                  "});",
-                  "pm.test('Items array is returned', function () {",
-                  "    pm.expect(jsonData.data.items).to.be.an('array');",
-                  "});"
-                ],
-                "type": "text/javascript",
-                "packages": {},
-                "requests": {}
-              }
-            }
-          ],
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/messages/?page=1&limit=5&orderBy=created_at&orderDirection=asc",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["messages", ""],
-              "query": [
-                {
-                  "key": "page",
-                  "value": "1"
-                },
-                {
-                  "key": "limit",
-                  "value": "5"
-                },
-                {
-                  "key": "orderBy",
-                  "value": "created_at"
-                },
-                {
-                  "key": "orderDirection",
-                  "value": "asc"
-                }
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Message by ID",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["messages", "{{message_id}}"]
-            }
-          },
-          "response": []
-        }
-      ]
-    },
-    {
-      "name": "Feedback Management",
-      "item": [
-        {
-          "name": "Submit Feedback",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "if (pm.response.code === 201) {",
-                  "    const response = pm.response.json();",
-                  "    if (response.data && response.data.id) {",
-                  "        pm.collectionVariables.set('feedback_id', response.data.id);",
-                  "    }",
-                  "}"
-                ],
-                "type": "text/javascript",
-                "packages": {},
-                "requests": {}
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"messageId\": \"{{message_id}}\",\n  \"rating\": 5,\n  \"comment\": \"Great response!\"\n}"
-            },
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["messages", "{{message_id}}", "feedbacks"]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Update Feedback",
-          "request": {
-            "method": "PUT",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"messageId\": \"{{message_id}}\",\n  \"rating\": 5,\n  \"comment\": \"Great response!\"\n}"
-            },
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks/{{feedback_id}}",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": [
-                "messages",
-                "{{message_id}}",
-                "feedbacks",
-                "{{feedback_id}}"
-              ]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Message Feedbacks",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["messages", "{{message_id}}", "feedbacks"]
-            }
-          },
-          "response": []
-        },
-        {
-          "name": "Get Feedback Stats",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks/stats",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["messages", "{{message_id}}", "feedbacks", "stats"]
-            }
-          },
-          "response": []
-        }
-      ]
-    },
-    {
-      "name": "Cleanup",
-      "item": [
-        {
-          "name": "Delete Conversation",
-          "request": {
-            "method": "DELETE",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{ACCESS_TOKEN}}"
-              }
-            ],
-            "url": {
-              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}",
-              "host": ["{{HOST}}"],
-              "port": "{{PORT}}",
-              "path": ["conversations", "{{conversation_id}}"]
-            }
-          },
-          "response": []
-        }
-      ]
-    }
-  ],
   "variable": [
     {
       "key": "HOST",
@@ -896,6 +55,2029 @@
       "key": "task_id",
       "value": "",
       "type": "string"
+    },
+    {
+      "key": "provider_type",
+      "value": "gemini",
+      "type": "string"
+    },
+    {
+      "key": "server_name",
+      "value": "time-server",
+      "type": "string"
+    },
+    {
+      "key": "tool_name",
+      "value": "calculator",
+      "type": "string"
+    },
+    {
+      "key": "skill_name",
+      "value": "using-superpowers",
+      "type": "string"
+    },
+    {
+      "key": "device_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "widget_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "thread_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "interrupt_id",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Root",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/health"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Health - Celery",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/health/celery"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Health - Redis",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/health/redis"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Health - Qdrant",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/health/qdrant"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Health - All",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/health/all"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Sign Up",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/auth/signup"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"demo_user\",\n  \"email\": \"demo@example.com\",\n  \"password\": \"Passw0rd!234\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let data = {};",
+                  "try { data = pm.response.json().data || {}; } catch (e) {}",
+                  "if (data.accessToken) pm.collectionVariables.set(\"ACCESS_TOKEN\", data.accessToken);",
+                  "if (data.refreshToken) pm.collectionVariables.set(\"REFRESH_TOKEN\", data.refreshToken);",
+                  "if (data.userId) pm.collectionVariables.set(\"userId\", data.userId);",
+                  "if (data.deviceId) pm.collectionVariables.set(\"device_id\", data.deviceId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/auth/login"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"demo@example.com\",\n  \"password\": \"Passw0rd!234\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let data = {};",
+                  "try { data = pm.response.json().data || {}; } catch (e) {}",
+                  "if (data.accessToken) pm.collectionVariables.set(\"ACCESS_TOKEN\", data.accessToken);",
+                  "if (data.refreshToken) pm.collectionVariables.set(\"REFRESH_TOKEN\", data.refreshToken);",
+                  "if (data.userId) pm.collectionVariables.set(\"userId\", data.userId);",
+                  "if (data.deviceId) pm.collectionVariables.set(\"device_id\", data.deviceId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Refresh",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{REFRESH_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/auth/refresh"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/auth/logout"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "item": [
+        {
+          "name": "Get User",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/users/{{userId}}"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Conversations",
+      "item": [
+        {
+          "name": "Generate Title",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/generate-title"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Need a title for a platform architecture review thread.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create Conversation",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Platform walkthrough\",\n  \"personaPrompt\": \"You are a precise engineering assistant.\",\n  \"planningModeEnabled\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let payload = {};",
+                  "try { payload = pm.response.json(); } catch (e) {}",
+                  "const value = payload?.data?.id;",
+                  "if (value) pm.collectionVariables.set(\"conversation_id\", String(value));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Conversations",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/?page=1&limit=10&orderBy=updatedAt&orderDirection=desc&include=messages&latestMessages=3"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Conversation",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Conversation Messages",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}/messages?page=1&limit=20&orderBy=createdAt&orderDirection=asc"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Conversation",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Platform walkthrough (updated)\",\n  \"planningModeEnabled\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Conversation",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Messages",
+      "item": [
+        {
+          "name": "Create Message",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversationId\": \"{{conversation_id}}\",\n  \"content\": \"Summarize the current architecture and main runtime flows.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let payload = {};",
+                  "try { payload = pm.response.json(); } catch (e) {}",
+                  "const value = payload?.data?.id;",
+                  "if (value) pm.collectionVariables.set(\"message_id\", String(value));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Message (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/stream"
+            },
+            "description": "Internal server SSE stream. Postman can send the request, but event rendering is limited.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversationId\": \"{{conversation_id}}\",\n  \"content\": \"Give me a streaming answer with key architectural changes.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Stop Message Generation",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/stop"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"conversationId\": \"{{conversation_id}}\",\n  \"userMessageId\": \"{{message_id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Resume Interrupt (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/resume-interrupt"
+            },
+            "description": "Internal server SSE stream for resuming a HITL interrupt.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"threadId\": \"{{thread_id}}\",\n  \"interruptId\": \"{{interrupt_id}}\",\n  \"conversationId\": \"{{conversation_id}}\",\n  \"decisions\": [\n    {\n      \"type\": \"approve\",\n      \"action\": \"shell_command\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Message",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Messages",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/?page=1&limit=20&orderBy=createdAt&orderDirection=desc"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "AI SDK",
+      "item": [
+        {
+          "name": "Create AI Conversation",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/ai/conversations"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"AI SDK thread\",\n  \"personaPrompt\": \"Answer with concise technical summaries.\",\n  \"planningModeEnabled\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let payload = {};",
+                  "try { payload = pm.response.json(); } catch (e) {}",
+                  "const value = payload?.data?.id;",
+                  "if (value) pm.collectionVariables.set(\"conversation_id\", String(value));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List AI Conversations",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/ai/conversations?page=1&limit=10"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get AI Conversation",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/ai/conversations/{{conversation_id}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update AI Conversation",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/ai/conversations/{{conversation_id}}"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"planningModeEnabled\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete AI Conversation",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/ai/conversations/{{conversation_id}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get AI Conversation Messages",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/ai/conversations/{{conversation_id}}/messages"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Chat (AI SDK SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/api/chat/{{conversation_id}}"
+            },
+            "description": "Vercel AI SDK UI message stream endpoint.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"messages\": [\n    {\n      \"id\": \"msg-1\",\n      \"role\": \"user\",\n      \"content\": \"Summarize the platform architecture in plain English.\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Resume Interrupt (AI SDK SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/ai/resume-interrupt"
+            },
+            "description": "Vercel AI SDK UI message stream resume endpoint.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"threadId\": \"{{thread_id}}\",\n  \"interruptId\": \"{{interrupt_id}}\",\n  \"conversationId\": \"{{conversation_id}}\",\n  \"decisions\": [\n    {\n      \"type\": \"approve\",\n      \"action\": \"shell_command\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Documents",
+      "item": [
+        {
+          "name": "Upload Document",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/documents/upload"
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "conversation_id",
+                  "type": "text",
+                  "value": "{{conversation_id}}"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let payload = {};",
+                  "try { payload = pm.response.json(); } catch (e) {}",
+                  "const docId = payload?.data?.document?.id;",
+                  "const taskId = payload?.data?.processing?.task_id;",
+                  "if (docId) pm.collectionVariables.set(\"document_id\", String(docId));",
+                  "if (taskId) pm.collectionVariables.set(\"task_id\", String(taskId));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Document Task Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/documents/task/{{task_id}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Document",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/documents/{{document_id}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Conversation Documents",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/documents/conversation/{{conversation_id}}?page=1&page_size=20"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Document",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/documents/{{document_id}}"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filename\": \"renamed-document.pdf\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Document",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/documents/{{document_id}}"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Feedback",
+      "item": [
+        {
+          "name": "Create Feedback",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"messageId\": \"{{message_id}}\",\n  \"rating\": 5,\n  \"comment\": \"Helpful and accurate.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let payload = {};",
+                  "try { payload = pm.response.json(); } catch (e) {}",
+                  "const value = payload?.data?.id;",
+                  "if (value) pm.collectionVariables.set(\"feedback_id\", String(value));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Feedback Stats",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks/stats"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get User Feedback",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks/user"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Message Feedbacks",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Feedback",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/messages/{{message_id}}/feedbacks/{{feedback_id}}"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rating\": 4,\n  \"comment\": \"Still useful, but needs more detail.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Task Plans",
+      "item": [
+        {
+          "name": "Generate Task Plan",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}/task-plans"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userMessage\": \"Break down the current architecture into implementation tasks.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let payload = {};",
+                  "try { payload = pm.response.json(); } catch (e) {}",
+                  "const value = Array.isArray(payload?.data) && payload.data.length ? payload.data[0].id : null;",
+                  "if (value) pm.collectionVariables.set(\"task_id\", String(value));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Manual Task Plan",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}/task-plans/manual"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"taskDescriptions\": [\n    \"Document the server architecture\",\n    \"Document the client runtime bridge\",\n    \"Update the API examples\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let payload = {};",
+                  "try { payload = pm.response.json(); } catch (e) {}",
+                  "const value = Array.isArray(payload?.data) && payload.data.length ? payload.data[0].id : null;",
+                  "if (value) pm.collectionVariables.set(\"task_id\", String(value));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Conversation Task Plans",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}/task-plans?include_completed=true"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Planning Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/conversations/{{conversation_id}}/planning-status"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Task Plan",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/task-plans/{{task_id}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Task Plan",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/task-plans/{{task_id}}"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"in_progress\",\n  \"taskMetadata\": {\n    \"owner\": \"docs\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Complete Task Plan",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/task-plans/{{task_id}}/complete"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Task Plan",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/task-plans/{{task_id}}"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Providers",
+      "item": [
+        {
+          "name": "Add Or Update Provider",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/providers"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"providerType\": \"{{provider_type}}\",\n  \"apiKey\": \"replace-with-real-key\",\n  \"isDefault\": true,\n  \"providerMetadata\": {}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Providers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/providers"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Provider",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/providers/{{provider_type}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Validate Provider",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/providers/{{provider_type}}/validate"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Provider Models",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/providers/{{provider_type}}/models"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Provider",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/providers/{{provider_type}}"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Model Config",
+      "item": [
+        {
+          "name": "Get Model Config",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/model-config"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Model Config Options",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/model-config/options"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Patch Model Config",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/model-config"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"chat\": {\n    \"provider\": \"openai\",\n    \"model\": \"gpt-4o-mini\",\n    \"temperature\": 0.7,\n    \"allowCustomModel\": false\n  },\n  \"planning\": {\n    \"provider\": \"gemini\",\n    \"model\": \"gemini-3-flash-preview\",\n    \"temperature\": 0.2\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Reset Model Config",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/model-config/reset"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "MCP",
+      "item": [
+        {
+          "name": "List MCP Servers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/mcp/servers"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get MCP Server",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/mcp/servers/{{server_name}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Add MCP Server",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/mcp/servers"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{server_name}}\",\n  \"transport\": \"stdio\",\n  \"command\": \"npx\",\n  \"args\": [\n    \"@modelcontextprotocol/server-time\"\n  ],\n  \"enabled\": true,\n  \"description\": \"Example stdio MCP server\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Add MCP Server From URL",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/mcp/servers/from-url"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"npx @modelcontextprotocol/server-time\",\n  \"name\": \"{{server_name}}\",\n  \"enabled\": true,\n  \"description\": \"Example MCP server from URL/command\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Toggle MCP Server",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/mcp/servers/{{server_name}}/toggle?enabled=true"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Remove MCP Server",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/mcp/servers/{{server_name}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List MCP Tools",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/mcp/tools?server_name={{server_name}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get MCP Tool",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/mcp/tools/{{tool_name}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Execute MCP Tool",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/mcp/tools/{{tool_name}}/execute"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"arguments\": {}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Skills",
+      "item": [
+        {
+          "name": "List Skills",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/skills"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Skill",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/skills/{{skill_name}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Toggle Skill",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/skills/{{skill_name}}/toggle?enabled=false"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Reload Skills",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/skills/reload"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Client Devices",
+      "item": [
+        {
+          "name": "Register Device",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/client-devices/register"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceIdentifier\": \"local-dev-machine-01\",\n  \"displayName\": \"Local Dev Machine\",\n  \"platform\": \"windows\",\n  \"appVersion\": \"1.0.0\",\n  \"runtimeVersion\": \"1.0.0\",\n  \"capabilities\": {\n    \"shell\": true,\n    \"filesystem\": true\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let payload = {};",
+                  "try { payload = pm.response.json(); } catch (e) {}",
+                  "const value = payload?.device_id || payload?.data?.device_id || payload?.data?.deviceId;",
+                  "if (value) pm.collectionVariables.set(\"device_id\", String(value));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Send Heartbeat",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/client-devices/heartbeat"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{device_id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List My Devices",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/client-devices/me"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Tool Catalog",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/client-devices/{{device_id}}/tool-catalog"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"catalog\": {\n    \"tools\": []\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Skill Catalog",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/client-devices/{{device_id}}/skill-catalog"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"catalog\": {\n    \"skills\": []\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Device",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/client-devices/{{device_id}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Connected Devices",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/device-runtime/connected-devices"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Widgets",
+      "item": [
+        {
+          "name": "Mint Widget Connection Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ACCESS_TOKEN}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{HOST}}:{{PORT}}/widgets/{{widget_id}}/connection"
+            },
+            "description": "HTTP handshake for live widgets. The actual widget state stream uses WebSocket and is not represented in this collection."
+          },
+          "response": []
+        }
+      ]
     }
   ]
 }
