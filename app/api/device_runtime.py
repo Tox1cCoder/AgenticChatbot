@@ -323,8 +323,9 @@ async def device_runtime_connect(
         # Invalidate any pending client-tool interrupts that belong to a
         # different session for this device (stale after reconnect).
         try:
-            from app.repositories.hitl_interrupt import HITLInterruptRepository
             from app.database.session import get_session_factory
+            from app.repositories.hitl_interrupt import HITLInterruptRepository
+
             hitl_repo = HITLInterruptRepository(get_session_factory())
             expired = hitl_repo.expire_stale_client_tool_interrupts(
                 device_id=device_uuid,
@@ -333,7 +334,9 @@ async def device_runtime_connect(
             if expired:
                 logger.info(
                     "Expired %d stale interrupt(s) on device reconnect device=%s session=%s",
-                    expired, device_id, session_id,
+                    expired,
+                    device_id,
+                    session_id,
                 )
         except Exception as _exc:
             logger.warning("Interrupt invalidation failed on connect: %s", _exc)

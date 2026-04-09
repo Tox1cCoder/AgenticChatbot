@@ -22,14 +22,13 @@ from app.ai.client_runtime_tools import make_tool_instance_id
 from app.ai.deferred_tool_state import (
     ClientToolScope,
     DeferredToolState,
-    LoadedClientTool,
 )
 from app.ai.schemas import AgentType
 from app.core.config import settings
 from app.core.exceptions.http import CustomHTTPException
 from app.models.hitl_interrupt import HITLInterruptStatus
-from app.schemas.workflow import InterruptDecision, InterruptDecisionType
 from app.schemas.runtime_protocol import ToolDispatchRequest
+from app.schemas.workflow import InterruptDecision, InterruptDecisionType
 from app.services.message_service import MessageService
 
 
@@ -41,6 +40,7 @@ def _make_instance_id(device_id: str, session_id: str, qid: str, version: int) -
 # ---------------------------------------------------------------------------
 # 1. Same conversation, two sidecars, overlapping tool names
 # ---------------------------------------------------------------------------
+
 
 class TestOverlappingToolNames:
     """Two sidecars publish the same tool name in the same conversation.
@@ -59,17 +59,13 @@ class TestOverlappingToolNames:
             tool_name="client__shell_execute",
             server_name="native",
             device_id=device_a,
-            tool_instance_id=_make_instance_id(
-                device_a, session_a, "native::shell_execute", 1
-            ),
+            tool_instance_id=_make_instance_id(device_a, session_a, "native::shell_execute", 1),
         )
         ref_b = SimpleNamespace(
             tool_name="client__shell_execute",
             server_name="native",
             device_id=device_b,
-            tool_instance_id=_make_instance_id(
-                device_b, session_b, "native::shell_execute", 1
-            ),
+            tool_instance_id=_make_instance_id(device_b, session_b, "native::shell_execute", 1),
         )
 
         state.autoload_client_tools(
@@ -130,8 +126,8 @@ class TestOverlappingToolNames:
 # 2. Reconnect with new session invalidates stale tool_instance_id
 # ---------------------------------------------------------------------------
 
-class TestReconnectInvalidatesInstanceId:
 
+class TestReconnectInvalidatesInstanceId:
     def test_tool_instance_id_changes_on_new_session(self):
         """Same device+tool but new session produces a different tool_instance_id."""
         device = "device-reconnect"
@@ -261,9 +257,7 @@ class TestReconnectInvalidatesInstanceId:
         """_validate_tool_request returns None for a fully valid request."""
         from client_backend.services.runtime_bridge import RuntimeBridgeService
 
-        instance_id = _make_instance_id(
-            "dev-1", "sess-1", "native::shell_execute", 1
-        )
+        instance_id = _make_instance_id("dev-1", "sess-1", "native::shell_execute", 1)
         bridge = RuntimeBridgeService.__new__(RuntimeBridgeService)
         bridge._session_id = "sess-1"
         bridge._tool_catalog_version = 1
@@ -293,8 +287,8 @@ class TestReconnectInvalidatesInstanceId:
 # 3. HITL resume rejection when device changes
 # ---------------------------------------------------------------------------
 
-class TestHITLResumeSessionValidation:
 
+class TestHITLResumeSessionValidation:
     def test_interrupt_resume_rejects_when_device_changed(self):
         """If the interrupt was created for device-A but resume comes from
         device-B, it must be rejected with INTERRUPT_DEVICE_MISMATCH."""
@@ -496,7 +490,6 @@ class TestHITLResumeSessionValidation:
 
 
 class TestInterruptScopePersistence:
-
     def test_derive_interrupt_execution_scope_ignores_non_client_provenance_entries(self):
         scope = MessageService._derive_interrupt_execution_scope(
             {
@@ -528,8 +521,8 @@ class TestInterruptScopePersistence:
 # 4. Deferred autoload isolation across two devices in one conversation
 # ---------------------------------------------------------------------------
 
-class TestDeferredAutoloadIsolation:
 
+class TestDeferredAutoloadIsolation:
     def test_two_devices_independent_lru_pools(self):
         """Each device gets its own LRU pool; filling one does not evict
         from the other."""
@@ -704,8 +697,8 @@ class TestDeferredAutoloadIsolation:
 # 5. device_id is None binds zero client tools when bridge is enabled
 # ---------------------------------------------------------------------------
 
-class TestNoDeviceBindsZeroTools:
 
+class TestNoDeviceBindsZeroTools:
     def test_get_tools_for_binding_no_device_id(self, monkeypatch):
         """When device_id is None and bridge is enabled, zero client tools
         are bound."""
@@ -749,9 +742,7 @@ class TestNoDeviceBindsZeroTools:
         )
 
         assert len(call_log) == 0
-        assert not any(
-            getattr(t, "name", "").startswith("client__") for t in tools
-        )
+        assert not any(getattr(t, "name", "").startswith("client__") for t in tools)
 
     def test_deferred_state_autoload_returns_empty_without_device(self):
         """autoload_client_tools returns [] when device_id is None."""
@@ -775,13 +766,17 @@ class TestNoDeviceBindsZeroTools:
 # 6. ClientToolScope unit tests
 # ---------------------------------------------------------------------------
 
-class TestClientToolScope:
 
+class TestClientToolScope:
     def test_add_and_retrieve(self):
         scope = ClientToolScope()
         scope.add(
-            "client__t1", "native", "dev-1", 1,
-            max_tools=5, tool_instance_id="abc",
+            "client__t1",
+            "native",
+            "dev-1",
+            1,
+            max_tools=5,
+            tool_instance_id="abc",
         )
         tool = scope.get("client__t1")
         assert tool is not None
@@ -798,12 +793,20 @@ class TestClientToolScope:
     def test_update_existing_tool(self):
         scope = ClientToolScope()
         scope.add(
-            "client__t", "native", "dev-1", 1,
-            max_tools=5, tool_instance_id="v1",
+            "client__t",
+            "native",
+            "dev-1",
+            1,
+            max_tools=5,
+            tool_instance_id="v1",
         )
         scope.add(
-            "client__t", "native", "dev-1", 2,
-            max_tools=5, tool_instance_id="v2",
+            "client__t",
+            "native",
+            "dev-1",
+            2,
+            max_tools=5,
+            tool_instance_id="v2",
         )
         assert len(scope) == 1
         assert scope.get("client__t").tool_instance_id == "v2"
@@ -814,8 +817,8 @@ class TestClientToolScope:
 # 7. make_tool_instance_id consistency between server and sidecar
 # ---------------------------------------------------------------------------
 
-class TestToolInstanceIdConsistency:
 
+class TestToolInstanceIdConsistency:
     def test_server_and_sidecar_produce_same_id(self):
         """The formula in client_runtime_tools.make_tool_instance_id must
         match the sidecar _make_tool_instance_id."""

@@ -1059,7 +1059,7 @@ class MessageService(IMessageService):
                     if entry.get("tool_instance_id")
                 }
 
-                for provenance_key, provenance in runtime_provenance:
+                for _provenance_key, provenance in runtime_provenance:
                     expected_session_id = provenance.get("session_id")
                     if expected_session_id not in (None, "") and active_session.session_id != str(
                         expected_session_id

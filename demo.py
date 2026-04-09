@@ -5826,7 +5826,9 @@ def render_tools_tab():
                             config["description"] = description_input
 
                         if transport_input == "stdio":
-                            parsed_args = [arg.strip() for arg in args_input.split(",") if arg.strip()]
+                            parsed_args = [
+                                arg.strip() for arg in args_input.split(",") if arg.strip()
+                            ]
                             if not command_input.strip() or not parsed_args:
                                 st.error("Command and arguments are required for stdio transport")
                             else:
@@ -5850,7 +5852,9 @@ def render_tools_tab():
                                             )
                                             st.rerun()
                                         else:
-                                            st.error(_last_api_error_message("Failed to add server"))
+                                            st.error(
+                                                _last_api_error_message("Failed to add server")
+                                            )
                         else:
                             if not url_input.strip():
                                 st.error("URL is required for HTTP transport")
@@ -5874,7 +5878,9 @@ def render_tools_tab():
                                             )
                                             st.rerun()
                                         else:
-                                            st.error(_last_api_error_message("Failed to add server"))
+                                            st.error(
+                                                _last_api_error_message("Failed to add server")
+                                            )
                     except Exception as e:
                         st.error(f"Error: {e}")
 

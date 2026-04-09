@@ -42,6 +42,8 @@ def _make_tool_instance_id(
     """
     composite = f"{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}"
     return hashlib.sha256(composite.encode()).hexdigest()[:16]
+
+
 from client_backend.core.logging import get_logger
 from client_backend.core.security import generate_device_identifier
 from client_backend.schemas.runtime import (
@@ -667,7 +669,10 @@ class RuntimeBridgeService:
             qid = entry.get("qualified_id", "")
             if qid:
                 entry["tool_instance_id"] = _make_tool_instance_id(
-                    device_id, session_id, qid, next_catalog_version,
+                    device_id,
+                    session_id,
+                    qid,
+                    next_catalog_version,
                 )
 
         return {

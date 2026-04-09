@@ -134,7 +134,9 @@ def test_deferred_binding_only_includes_loaded_client_tools(monkeypatch):
     )
 
     class _DeferredStateStub:
-        def get_loaded_client_tools(self, conversation_id: str, agent_key: str, device_id=None, session_id=None):
+        def get_loaded_client_tools(
+            self, conversation_id: str, agent_key: str, device_id=None, session_id=None
+        ):
             assert session_id == "session-a"
             all_tools = [
                 SimpleNamespace(tool_name="client__filesystem_read_text", device_id="device-a"),
@@ -216,7 +218,9 @@ async def test_refresh_tool_map_after_search_uses_active_session_scope(monkeypat
     device_id = str(uuid4())
 
     class _DeferredStateStub:
-        def get_loaded_client_tools(self, conversation_id, agent_key, device_id=None, session_id=None):
+        def get_loaded_client_tools(
+            self, conversation_id, agent_key, device_id=None, session_id=None
+        ):
             state_calls.append(
                 {
                     "conversation_id": conversation_id,
@@ -262,12 +266,12 @@ async def test_refresh_tool_map_after_search_uses_active_session_scope(monkeypat
 
     assert state_calls == [
         {
-                "conversation_id": "conversation-1",
-                "agent_key": "chat",
-                "device_id": device_id,
-                "session_id": "session-a",
-            }
-        ]
+            "conversation_id": "conversation-1",
+            "agent_key": "chat",
+            "device_id": device_id,
+            "session_id": "session-a",
+        }
+    ]
     assert "client__filesystem_read_text" in tool_map
 
 

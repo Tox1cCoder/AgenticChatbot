@@ -46,6 +46,7 @@ def make_tool_instance_id(
     composite = f"{device_id}:{session_id}:{qualified_tool_id}:{catalog_version}"
     return hashlib.sha256(composite.encode()).hexdigest()[:16]
 
+
 _CLIENT_TOOL_CACHE = TTLCache(
     maxsize=512,
     ttl=max(1, settings.client_runtime_catalog_cache_ttl_seconds),

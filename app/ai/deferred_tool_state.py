@@ -109,7 +109,6 @@ class LoadedClientTool:
         return True
 
 
-
 @dataclass
 class ClientToolScope:
     """
@@ -166,9 +165,7 @@ class ClientToolScope:
         return tool
 
     def cleanup_expired(self, ttl_minutes: int) -> int:
-        to_remove = [
-            name for name, tool in self.loaded.items() if tool.is_expired(ttl_minutes)
-        ]
+        to_remove = [name for name, tool in self.loaded.items() if tool.is_expired(ttl_minutes)]
         for name in to_remove:
             del self.loaded[name]
         return len(to_remove)
@@ -215,7 +212,9 @@ class ConversationToolSet:
             if existing.server_name != server_name:
                 logger.debug(
                     "Replacing tool '%s' binding: %s -> %s",
-                    tool_name, existing.server_name, server_name,
+                    tool_name,
+                    existing.server_name,
+                    server_name,
                 )
             existing.server_name = server_name
             existing.generation = generation
@@ -227,14 +226,17 @@ class ConversationToolSet:
             if evicted:
                 logger.debug(
                     "Evicted LRU tool '%s' from %s to make room",
-                    evicted.tool_name, evicted.server_name,
+                    evicted.tool_name,
+                    evicted.server_name,
                 )
             else:
                 logger.warning("Could not evict tool to make room for '%s'", tool_name)
                 return None
 
         loaded_tool = LoadedTool(
-            tool_name=tool_name, server_name=server_name, generation=generation,
+            tool_name=tool_name,
+            server_name=server_name,
+            generation=generation,
         )
         self.loaded[tool_name] = loaded_tool
         return loaded_tool
@@ -279,6 +281,7 @@ class ConversationToolSet:
 
     def __contains__(self, tool_name: str) -> bool:
         return tool_name in self.loaded
+
 
 class DeferredToolState:
     """
@@ -409,11 +412,7 @@ class DeferredToolState:
         effective_session_id = session_id
         if not effective_session_id:
             effective_session_id = next(
-                (
-                    str(getattr(ref, "session_id"))
-                    for ref in references
-                    if getattr(ref, "session_id", None)
-                ),
+                (str(ref.session_id) for ref in references if getattr(ref, "session_id", None)),
                 None,
             )
         if not effective_session_id:
@@ -514,7 +513,10 @@ class DeferredToolState:
                 session_id = self._resolve_active_session_id(device_id)
             if device_id and session_id:
                 client_key = self._get_client_key(
-                    conversation_id, agent_key, device_id, session_id,
+                    conversation_id,
+                    agent_key,
+                    device_id,
+                    session_id,
                 )
                 scope = self._client_tool_scopes.get(client_key)
                 if not scope:
@@ -563,7 +565,7 @@ class DeferredToolState:
                     if session_id and ckey[3] != str(session_id):
                         continue
                     scope.cleanup_expired(ttl)
-                    names.extend(name for name in scope.loaded.keys())
+                    names.extend(name for name in scope.loaded)
             return names
 
     def is_loaded(
@@ -660,7 +662,8 @@ class DeferredToolState:
                     del self._conversation_tools[key]
                     cleared = 1
                 client_keys = [
-                    k for k in self._client_tool_scopes
+                    k
+                    for k in self._client_tool_scopes
                     if k[0] == (conversation_id or "") and k[1] == (agent_key or "default")
                 ]
                 for k in client_keys:
@@ -680,7 +683,9 @@ class DeferredToolState:
         if cleared:
             logger.debug(
                 "Cleared %d tool set(s) for conversation=%s agent=%s",
-                cleared, conversation_id, agent_key,
+                cleared,
+                conversation_id,
+                agent_key,
             )
         return cleared
 
