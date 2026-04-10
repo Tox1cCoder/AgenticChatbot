@@ -9,6 +9,108 @@ from app.ai.tool_search_tool import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Phase 0 Regression: inventory mode
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_search_without_query_returns_inventory_metadata(monkeypatch):
+    """tool_search() with no query must return server-level inventory summaries,
+    not the first top_k tools from a stable slice."""
+
+    class FakeServerCatalog:
+        def search(self, query=None, top_k=5, server_name=None, allowlist=None):
+            # Should NOT be called in inventory mode
+            raise AssertionError("search() must not be called in inventory mode")
+
+        def is_ambiguous(self, tool_name):
+            return False
+
+        def get_server_inventory(self, allowlist=None):
+            return [
+                {"server_name": "tavily", "tool_count": 2},
+                {"server_name": "time", "tool_count": 1},
+            ]
+
+    async def fake_get_global_mcp_manager():
+        return object()
+
+    async def fake_get_tool_catalog(_manager):
+        return FakeServerCatalog()
+
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_global_mcp_manager",
+        fake_get_global_mcp_manager,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_catalog",
+        fake_get_tool_catalog,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_context",
+        lambda: ToolContext(),
+    )
+
+    result = await _execute_tool_search(query=None)
+
+    # Must return inventory metadata, not a tools list
+    assert "inventory" in result
+    assert result["mode"] == "inventory"
+    servers = {s["server_name"] for s in result["inventory"]}
+    assert "tavily" in servers
+    assert "time" in servers
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 Regression: same-name server tools do not collapse
+# ---------------------------------------------------------------------------
+
+
+def test_merge_search_results_keeps_same_name_tools_from_different_servers():
+    """Two server tools with the same name but different servers must both
+    appear in the merged results. Phase 3 assigns deterministic aliases
+    (call_name) so the dedup logic can distinguish them."""
+    # Simulate catalog collision detection: set call_name as the catalog would
+    tool_a = ToolDescriptor(
+        tool_name="search",
+        server_name="tavily",
+        description="Web search via Tavily.",
+        arg_names=["query"],
+        required_arg_names=["query"],
+        schema_fingerprint="fp-a",
+        call_name="tavily__search",
+    )
+    tool_b = ToolDescriptor(
+        tool_name="search",
+        server_name="brave",
+        description="Web search via Brave.",
+        arg_names=["query"],
+        required_arg_names=["query"],
+        schema_fingerprint="fp-b",
+        call_name="brave__search",
+    )
+
+    public_results, internal_results = _merge_search_results(
+        server_results=[tool_a, tool_b],
+        client_results=[],
+        query="web search",
+        top_k=5,
+    )
+
+    # Both must remain independently representable
+    assert len(public_results) == 2
+    assert len(internal_results) == 2
+    # Different servers must be distinguishable in internal results
+    internal_servers = {r["server_name"] for r in internal_results}
+    assert "tavily" in internal_servers
+    assert "brave" in internal_servers
+    # Public results expose call_name aliases so the model knows what to invoke
+    public_names = {r["tool_name"] for r in public_results}
+    assert "tavily__search" in public_names
+    assert "brave__search" in public_names
+
+
 @pytest.mark.asyncio
 async def test_execute_tool_search_passes_query_through_unchanged(monkeypatch):
     class FakeCatalog:

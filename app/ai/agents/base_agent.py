@@ -200,10 +200,26 @@ class BaseAgent(ABC):
             self.tools = []
 
     def _deduplicate_tools(self, tools: list[BaseTool]) -> list[BaseTool]:
-        unique_tools: dict[str, BaseTool] = {}
+        """Deduplicate tools by provenance-aware key.
+
+        For MCP tools, use (name, server_name) so same-name tools from
+        different servers are kept distinct. For non-MCP tools, use name alone.
+        The first occurrence wins when two tools share a provenance key.
+        """
+        seen: dict[tuple[str, str], BaseTool] = {}
         for tool in tools:
-            unique_tools.setdefault(tool.name, tool)
-        return list(unique_tools.values())
+            name = getattr(tool, "name", "")
+            # Try to get server identity for MCP tools; non-MCP tools use ""
+            server_name = ""
+            if self.mcp_manager:
+                try:
+                    server_name = self.mcp_manager.get_server_for_tool(tool) or ""
+                except Exception:
+                    pass
+            key = (name, server_name)
+            if key not in seen:
+                seen[key] = tool
+        return list(seen.values())
 
     def _filter_tools_by_allowlist(self, tools: list[BaseTool]) -> list[BaseTool]:
         """

@@ -42,15 +42,22 @@ def _search_results_refer_to_same_capability(
     """
     Return True when two search results represent the same underlying tool.
 
-    Exact public-name duplicates are always treated as the same result. In
-    addition, a client-side tool and a server-side tool may refer to the same
-    underlying MCP capability even though the client version is exposed with a
-    `client__...` prefix. In that case we detect duplicates via the shared
-    qualified tool id (for example `desktop_commander::edit_block`).
+    Uses `call_name` (the invokable alias) for deduplication when available,
+    falling back to `tool_name`. Ambiguous same-name tools from different
+    servers get distinct call_names (e.g. tavily__search vs brave__search),
+    so they are NOT collapsed.
+
+    A client-side tool and a server-side tool may refer to the same underlying
+    MCP capability even though the client version has a `client__...` prefix.
+    In that case we detect duplicates via the shared qualified tool id.
     """
-    if public_a.get("tool_name") == public_b.get("tool_name"):
+    # Use call_name for dedup — aliases differ for ambiguous same-name tools
+    call_name_a = internal_a.get("call_name") or public_a.get("tool_name")
+    call_name_b = internal_b.get("call_name") or public_b.get("tool_name")
+    if call_name_a == call_name_b:
         return True
 
+    # Cross-origin dedup: server tool vs client tool with same underlying capability
     if bool(internal_a.get("is_client_tool")) == bool(internal_b.get("is_client_tool")):
         return False
 
@@ -148,9 +155,20 @@ async def _execute_tool_search(
     """
     start_time = time.time()
 
-    # Apply config defaults and limits
-    default_top_k = settings.mcp_tool_search_default_top_k
-    max_top_k = settings.mcp_tool_search_max_top_k
+    # Determine search mode based on query and server_name
+    # - query present -> discovery mode
+    # - query absent and no server_name -> global inventory mode (server summaries)
+    # - query absent and server_name present -> per-server inventory mode
+    is_inventory_mode = not query or not str(query).strip()
+    is_per_server_inventory = is_inventory_mode and bool(server_name)
+
+    # Apply mode-appropriate top_k defaults and limits
+    if is_inventory_mode:
+        default_top_k = settings.mcp_tool_search_inventory_default_top_k
+        max_top_k = settings.mcp_tool_search_inventory_max_top_k
+    else:
+        default_top_k = settings.mcp_tool_search_default_top_k
+        max_top_k = settings.mcp_tool_search_max_top_k
     autoload_top_k = settings.mcp_tool_search_autoload_top_k
 
     effective_top_k = top_k if top_k is not None else default_top_k
@@ -162,10 +180,16 @@ async def _execute_tool_search(
     device_id = ctx.device_id
     user_id = ctx.user_id
 
-    # Log query if enabled
+    # Log query if enabled (gated on mcp_tool_search_log_queries)
     if settings.mcp_tool_search_log_queries:
+        mode_label = (
+            "inventory" if is_inventory_mode and not is_per_server_inventory
+            else "per_server_inventory" if is_per_server_inventory
+            else "discovery"
+        )
         logger.info(
-            "tool_search: query=%r top_k=%d server=%s conversation=%s agent=%s device=%s",
+            "tool_search: mode=%s query=%r top_k=%d server=%s conversation=%s agent=%s device=%s",
+            mode_label,
             query,
             effective_top_k,
             server_name,
@@ -182,13 +206,41 @@ async def _execute_tool_search(
         mcp_manager = await get_global_mcp_manager()
         catalog = await get_tool_catalog(mcp_manager)
 
-        # Search server tools
-        server_results = catalog.search(
-            query=query,
-            top_k=effective_top_k * 2,  # Request extra for merging
-            server_name=server_name,
-            allowlist=allowlist,
-        )
+        # Global inventory mode: return server summaries without searching tools
+        if is_inventory_mode and not is_per_server_inventory:
+            inventory = catalog.get_server_inventory(allowlist=allowlist)
+            latency_ms = (time.time() - start_time) * 1000
+            if settings.mcp_tool_search_log_queries:
+                logger.info(
+                    "tool_search inventory mode: latency=%.1fms servers=%d",
+                    latency_ms,
+                    len(inventory),
+                )
+            return {
+                "query": None,
+                "mode": "inventory",
+                "inventory": inventory,
+                "results": [],
+                "loaded_count": 0,
+                "more_available": False,
+            }
+
+        # Search server tools (discovery or per-server inventory mode)
+        # Use search_scored() when available so we have real scores for autoload gating
+        if query and hasattr(catalog, "search_scored"):
+            server_results = catalog.search_scored(
+                query=query,
+                top_k=effective_top_k * 2,
+                server_name=server_name,
+                allowlist=allowlist,
+            )
+        else:
+            server_results = catalog.search(
+                query=query,
+                top_k=effective_top_k * 2,
+                server_name=server_name,
+                allowlist=allowlist,
+            )
     except Exception as e:
         logger.error("Failed to get server tool catalog: %s", e)
         unavailable_servers.append("all_server")
@@ -230,15 +282,27 @@ async def _execute_tool_search(
         public_results = public_results[:effective_top_k]
         internal_results = internal_results[:effective_top_k]
 
-    # Determine which tools to autoload (using internal results with server_name)
+    # Determine which tools to autoload (gated on autoload relevance threshold)
+    autoload_min_score = settings.mcp_tool_search_autoload_min_relevance_score
     autoload_server_refs: list[ToolReference] = []
     autoload_client_refs: list[ClientToolReference] = []
-    autoloaded_tool_names: set[str] = set()
 
     for internal in internal_results[:autoload_top_k]:
         is_client = internal.get("is_client_tool", False)
         tool_name = internal.get("tool_name", "")
         srv_name = internal.get("server_name", "")
+        tool_score = float(internal.get("_score", 0.0))
+
+        # Gate autoloading on the stricter autoload threshold
+        if tool_score < autoload_min_score:
+            if settings.mcp_tool_search_log_queries:
+                logger.debug(
+                    "tool_search: skipping autoload for '%s' (score=%.2f < threshold=%.2f)",
+                    tool_name,
+                    tool_score,
+                    autoload_min_score,
+                )
+            continue
 
         if is_client:
             # Client tool
@@ -252,19 +316,23 @@ async def _execute_tool_search(
                     tool_instance_id=internal.get("tool_instance_id", ""),
                 )
             )
-            autoloaded_tool_names.add(tool_name)
         else:
-            # Server tool - skip autoloading ambiguous tools unless server_name specified
-            if catalog and catalog.is_ambiguous(tool_name) and not server_name:
+            # Server tool - skip autoloading ambiguous tools without an alias
+            # (they can still be autoloaded once they have a call_name alias)
+            call_name = internal.get("call_name") or tool_name
+            if catalog and catalog.is_ambiguous(tool_name) and call_name == tool_name and not server_name:
                 logger.debug(
-                    "Skipping autoload for ambiguous tool '%s' (multiple servers)",
+                    "Skipping autoload for ambiguous tool '%s' (multiple servers, no alias)",
                     tool_name,
                 )
                 continue
-            autoload_server_refs.append(ToolReference(tool_name=tool_name, server_name=srv_name))
-            autoloaded_tool_names.add(tool_name)
+            autoload_server_refs.append(
+                ToolReference(tool_name=tool_name, server_name=srv_name, call_name=call_name)
+            )
 
     # Autoload tools into deferred state
+    # is_loaded is derived from ACTUAL successful loads, not preselected candidates
+    actually_loaded_names: set[str] = set()
     loaded_count = 0
     if conversation_id and (autoload_server_refs or autoload_client_refs):
         state = get_deferred_tool_state()
@@ -277,6 +345,9 @@ async def _execute_tool_search(
                 references=autoload_server_refs,
             )
             loaded_count += len(loaded_refs)
+            for ref in loaded_refs:
+                # Track by call_name (the invokable alias, or tool_name if unambiguous)
+                actually_loaded_names.add(getattr(ref, "call_name", None) or ref.tool_name)
 
         # Autoload client tools
         if autoload_client_refs:
@@ -289,10 +360,15 @@ async def _execute_tool_search(
                 user_id=user_id,
             )
             loaded_count += len(loaded_client_refs)
+            for ref in loaded_client_refs:
+                actually_loaded_names.add(ref.tool_name)
 
-    # Mark which tools in the public results are loaded
+    # Mark which tools in the public results are loaded (truthful: from actual loads)
+    # Public tool_name is the call_name (alias for ambiguous tools, raw name otherwise)
     for result in public_results:
-        if result["tool_name"] in autoloaded_tool_names:
+        if result["tool_name"] in actually_loaded_names:
+            result["is_loaded"] = True
+        elif result.get("call_name") in actually_loaded_names:
             result["is_loaded"] = True
 
     latency_ms = (time.time() - start_time) * 1000
@@ -313,8 +389,10 @@ async def _execute_tool_search(
 
     # Return clean results for model consumption
     # NO internal metadata like server_name, origin, generation, etc.
+    mode = "per_server_inventory" if is_per_server_inventory else "discovery"
     return {
         "query": query,
+        "mode": mode,
         "results": public_results,
         "loaded_count": loaded_count,
         "more_available": truncated,
@@ -330,38 +408,49 @@ def _merge_search_results(
     """
     Merge search results from server and client catalogs.
 
-    Results are interleaved by relevance score (implicit from ordering),
-    duplicate capabilities are collapsed, and then the final list is
-    truncated to top_k.
+    Accepts either plain descriptor lists (from search()) or scored tuples
+    (descriptor, score) from search_scored(). Results are interleaved by
+    relevance score, duplicate capabilities are collapsed, and the final list
+    is truncated to top_k.
 
     Args:
-        server_results: Results from McpToolCatalog.search()
-        client_results: Results from ClientToolCatalog.search()
+        server_results: Results from McpToolCatalog.search() or search_scored()
+        client_results: Results from ClientToolCatalog.search() or search_scored()
         query: The original search query
         top_k: Maximum results to return
 
     Returns:
         Tuple of (public_results, internal_results):
         - public_results: Clean results for model consumption (no internal metadata)
-        - internal_results: Full results with server_name etc. for autoloading
+        - internal_results: Full results with server_name, score, etc. for autoloading
     """
     # Convert to internal result dicts with scoring
     merged: list[tuple[float, int, dict, dict]] = []  # (score, source, public, internal)
 
     # Process server results (already sorted by relevance)
-    for idx, desc in enumerate(server_results):
+    for idx, item in enumerate(server_results):
+        # Support both (descriptor, score) tuples and plain descriptors
+        if isinstance(item, tuple):
+            desc, real_score = item
+        else:
+            desc = item
+            real_score = float(1000 - idx)
         public_dict = desc.to_search_result()
         internal_dict = desc._to_internal_result()
-        # Use position as implicit score (lower position = higher score)
-        score = 1000 - idx
-        merged.append((score, 0, public_dict, internal_dict))  # 0 = server (prefer on tie)
+        internal_dict["_score"] = real_score
+        merged.append((real_score, 0, public_dict, internal_dict))  # 0 = server (prefer on tie)
 
     # Process client results
-    for idx, desc in enumerate(client_results):
+    for idx, item in enumerate(client_results):
+        if isinstance(item, tuple):
+            desc, real_score = item
+        else:
+            desc = item
+            real_score = float(1000 - idx)
         public_dict = desc.to_search_result()
         internal_dict = desc._to_internal_result()
-        score = 1000 - idx
-        merged.append((score, 1, public_dict, internal_dict))  # 1 = client
+        internal_dict["_score"] = real_score
+        merged.append((real_score, 1, public_dict, internal_dict))  # 1 = client
 
     # Sort by score descending, then by source (server first on tie)
     merged.sort(key=lambda x: (-x[0], x[1]))

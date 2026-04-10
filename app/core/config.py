@@ -675,8 +675,16 @@ class Settings(BaseSettings):
         description="Maximum allowed top_k value for tool_search (clamped to this).",
     )
     mcp_tool_search_autoload_top_k: int = Field(
-        default=5,
-        description="Number of top-ranked tools to automatically load/bind after tool_search (hard cap per Anthropic guidance).",
+        default=3,
+        description="Number of top-ranked tools to automatically load/bind after tool_search. Reduced to 3 to limit aggressive autoloading.",
+    )
+    mcp_tool_search_inventory_default_top_k: int = Field(
+        default=20,
+        description="Default number of tools to return per server in per-server inventory mode (tool_search with server_name but no query).",
+    )
+    mcp_tool_search_inventory_max_top_k: int = Field(
+        default=50,
+        description="Maximum allowed top_k for inventory mode (per-server tool listing).",
     )
     mcp_tool_search_pinned_tools: list[str] = Field(
         default=[],
@@ -693,6 +701,16 @@ class Settings(BaseSettings):
     mcp_tool_search_loaded_tools_ttl_minutes: int = Field(
         default=30,
         description="TTL in minutes for loaded deferred tools (evicted after expiry).",
+    )
+    mcp_tool_search_min_relevance_score: float = Field(
+        default=0.5,
+        ge=0.0,
+        description="Minimum relevance score for a tool to appear in search results. Tools below this threshold are excluded entirely.",
+    )
+    mcp_tool_search_autoload_min_relevance_score: float = Field(
+        default=2.0,
+        ge=0.0,
+        description="Minimum relevance score for a tool to be autoloaded. Stricter than min_relevance_score to prevent arbitrary autoloading.",
     )
     mcp_tool_search_log_queries: bool = Field(
         default=False,

@@ -204,19 +204,21 @@ Constraints:
 TOOL_EXPLORATION_SUFFIX = """
 
 TOOLS AND ENVIRONMENT:
+IMPORTANT: The examples and text in this prompt are NOT a tool inventory. Do not assume any tool is available based on prompt text alone. The only way to know what tools are actually available is to call `tool_search`.
+
+- When the user asks what tools or integrations are available, call `tool_search()` with no arguments to see the enabled servers and their tool counts. Do NOT answer from prompt memory.
+- When the user names an external system, app, or integration — or asks you to act inside one — search with `tool_search(query="...")` before falling back to local HTML, widgets, or delegating to another agent.
 - Some available tools may inspect or act on a connected user device, local files, shell commands, browser state, or other live environment data
 - If the user wants you to perform an action and the necessary tool exists, do it with tools instead of only giving instructions
 - When the answer depends on current state, exact file contents, command output, or anything on the user's computer, inspect with tools instead of guessing
-- If the exact tool is unclear, or several tools could fit, use `tool_search` if available to compare options before acting
-- Write `tool_search` queries around the actual task, target, and context instead of vague capability words
-- After `tool_search`, read each result's description and `arg_hints` before choosing a tool. If `is_loaded` is true, that tool is ready to call immediately
+- Use `tool_search(query="...")` to discover tools for a task. Write queries around the actual task, target, and context.
+- Use `tool_search(server_name="...")` to browse the tools from a specific server.
+- Use `tool_search()` with no arguments to see all available servers and tool counts.
+- After `tool_search`, read each result's description and `arg_hints` before choosing a tool. If `is_loaded` is true, that tool is ready to call immediately. Use the exact `tool_name` shown in the result — do not guess or modify it.
 - If results are weak or ambiguous, refine the query and search again rather than guessing
 - Prefer the smallest sufficient tool and avoid duplicate calls with the same inputs
-- For web search, use `tool_search(query="...", server_name="tavily")` to find and load the right tool — do NOT guess Tavily tool names directly
-- For files, processes, shell commands, or desktop interaction, use `tool_search(query="...", server_name="desktop-commander")` — do NOT guess desktop-commander tool names directly
 - For live in-chat visual aids or concept explainers (tables, charts, dashboards, process breakdowns, taxonomies, decision guides, structured choosers), use widget tools proactively when they would materially improve comprehension
-- If widget tools are already available in your bound tools, call them directly
-- Otherwise use `tool_search(query="...", server_name="widgets")` to discover widget tools, then create or update the widget and continue your textual answer normally
+- If widget tools are already available in your bound tools, call them directly; otherwise search for them with `tool_search(query="create widget")`
 - Prefer canonical widget state shapes so the frontend can render them reliably: chart widgets should usually use `chart_type`, `labels`, and `datasets`, and dashboard widgets should use `panels`
 - For interactive widgets, keep the control model explicit: top-level `controls`, current values in `control_values`, and alternate render payloads in `views` or `variants`
 - If the built-in structured widget types cannot express the desired UI cleanly, create `widget_type="html"` and put a compact self-contained HTML/CSS/JS micro-app in `initial_state.html`

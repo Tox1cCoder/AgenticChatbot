@@ -206,13 +206,16 @@ class ConversationToolSet:
         server_name: str,
         generation: int,
         max_tools: int,
+        call_name: str | None = None,
     ) -> LoadedTool | None:
-        if tool_name in self.loaded:
-            existing = self.loaded[tool_name]
+        # Use call_name as the stable storage key; fall back to tool_name
+        storage_key = call_name if call_name is not None else tool_name
+        if storage_key in self.loaded:
+            existing = self.loaded[storage_key]
             if existing.server_name != server_name:
                 logger.debug(
                     "Replacing tool '%s' binding: %s -> %s",
-                    tool_name,
+                    storage_key,
                     existing.server_name,
                     server_name,
                 )
@@ -230,7 +233,7 @@ class ConversationToolSet:
                     evicted.server_name,
                 )
             else:
-                logger.warning("Could not evict tool to make room for '%s'", tool_name)
+                logger.warning("Could not evict tool to make room for '%s'", storage_key)
                 return None
 
         loaded_tool = LoadedTool(
@@ -238,18 +241,18 @@ class ConversationToolSet:
             server_name=server_name,
             generation=generation,
         )
-        self.loaded[tool_name] = loaded_tool
+        self.loaded[storage_key] = loaded_tool
         return loaded_tool
 
-    def get(self, tool_name: str) -> LoadedTool | None:
-        tool = self.loaded.get(tool_name)
+    def get(self, call_name: str) -> LoadedTool | None:
+        tool = self.loaded.get(call_name)
         if tool:
             tool.touch()
             return tool
         return None
 
-    def remove(self, tool_name: str) -> LoadedTool | None:
-        return self.loaded.pop(tool_name, None)
+    def remove(self, call_name: str) -> LoadedTool | None:
+        return self.loaded.pop(call_name, None)
 
     def _evict_lru(self) -> LoadedTool | None:
         if not self.loaded:
@@ -371,13 +374,15 @@ class DeferredToolState:
             ttl = settings.mcp_tool_search_loaded_tools_ttl_minutes
             tool_set.cleanup_expired(ttl, generation)
 
-            # Load each reference
+            # Load each reference, keyed by call_name for stable identity
             for ref in references:
+                call_name = getattr(ref, "call_name", None)
                 result = tool_set.add(
                     tool_name=ref.tool_name,
                     server_name=ref.server_name,
                     generation=generation,
                     max_tools=max_tools,
+                    call_name=call_name,
                 )
                 if result:
                     loaded.append(ref)

@@ -23,7 +23,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .mcp_registry import get_mcp_tools_generation
-from .text_normalization import tokenize_text
+from .text_normalization import sanitize_identifier, tokenize_text
+from .tool_search_scoring import build_query_tokens, rank_and_filter, score_tool
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,9 @@ class ToolDescriptor:
     schema_fingerprint: str
     args_schema: dict[str, Any] = field(default_factory=dict)
     origin: str = field(default=TOOL_ORIGIN_SERVER_MCP)  # Always server_mcp for this catalog
+    # Deterministic invokable alias for ambiguous same-name tools.
+    # None for non-ambiguous tools (call_name == tool_name in that case).
+    call_name: str | None = field(default=None)
 
     @property
     def arg_hints(self) -> str:
@@ -66,28 +70,47 @@ class ToolDescriptor:
                 hints.append(arg)
         return f"({', '.join(hints)})"
 
+    def get_call_name(self) -> str:
+        """Return the invokable name for this tool.
+
+        For non-ambiguous tools this is equal to tool_name.
+        For ambiguous same-name tools this is the deterministic alias
+        '{sanitized_server}__{tool_name}'.
+        """
+        return self.call_name if self.call_name is not None else self.tool_name
+
     def to_search_result(self) -> dict[str, Any]:
         """
         Convert to a search result dict for tool_search output.
 
-        IMPORTANT: Only expose information the model needs to USE the tool.
-        Do NOT expose internal details like server_name, origin, etc.
-        that could lead to the model guessing tool names.
+        Exposes call_name so the model always knows the exact invokable name.
+        For non-ambiguous tools call_name equals tool_name.
+        For ambiguous same-name tools call_name is the deterministic alias.
+        Exposes source_server only when the tool is ambiguous (call_name differs
+        from tool_name), so the model can disambiguate.
         """
-        return {
-            "tool_name": self.tool_name,
+        effective_call_name = self.get_call_name()
+        result: dict[str, Any] = {
+            "tool_name": effective_call_name,
             "description": self.description[:200] if self.description else "",
             "arg_hints": self.arg_hints,
             "is_loaded": False,  # Will be updated by tool_search
         }
+        # Expose source_server only for ambiguous tools so the model can reason
+        # about which server provides what capability
+        if self.call_name is not None:
+            result["source_server"] = self.server_name
+        return result
 
     def _to_internal_result(self) -> dict[str, Any]:
         """
         Internal result with full metadata for autoloading logic.
         NOT exposed to the model.
         """
+        effective_call_name = self.get_call_name()
         return {
             "tool_name": self.tool_name,
+            "call_name": effective_call_name,
             "server_name": self.server_name,
             "qualified_tool_id": f"{self.server_name}::{self.tool_name}",
             "description": self.description[:200] if self.description else "",
@@ -107,6 +130,13 @@ class ToolReference:
 
     tool_name: str
     server_name: str
+    # The invokable name used as the deferred-state storage key.
+    # Equals tool_name for non-ambiguous tools; alias for ambiguous ones.
+    call_name: str | None = None
+
+    def get_call_name(self) -> str:
+        """Return the stable call key for deferred state storage."""
+        return self.call_name if self.call_name is not None else self.tool_name
 
 
 def compute_schema_fingerprint(args_schema: dict[str, Any], description: str) -> str:
@@ -169,6 +199,8 @@ class McpToolCatalog:
         self._tools_by_name: dict[str, list[ToolDescriptor]] = {}
         self._tools_by_server: dict[str, list[ToolDescriptor]] = {}
         self._colliding_names: set[str] = set()
+        # Case-insensitive server name lookup: {lower_name: canonical_name}
+        self._server_name_lower_map: dict[str, str] = {}
 
         # Inverted index for search: token -> set of tool indices
         self._token_index: dict[str, set[int]] = {}
@@ -207,6 +239,7 @@ class McpToolCatalog:
         self._tools_by_name.clear()
         self._tools_by_server.clear()
         self._colliding_names.clear()
+        self._server_name_lower_map.clear()
         self._token_index.clear()
         self._doc_freq.clear()
 
@@ -268,12 +301,26 @@ class McpToolCatalog:
             # Build search index
             self._index_tool(idx, descriptor)
 
+        # Build case-insensitive server name lookup
+        for sname in self._tools_by_server:
+            self._server_name_lower_map[sname.lower()] = sname
+
         # Detect collisions (tool names exposed by multiple servers)
         for tool_name, descriptors in self._tools_by_name.items():
             if len(descriptors) > 1:
                 servers = {d.server_name for d in descriptors}
                 if len(servers) > 1:
                     self._colliding_names.add(tool_name)
+                    # Assign deterministic aliases to all descriptors with this name
+                    for descriptor in descriptors:
+                        sanitized = sanitize_identifier(descriptor.server_name)
+                        descriptor.call_name = f"{sanitized}__{descriptor.tool_name}"
+                        logger.debug(
+                            "Ambiguous tool '%s' from server '%s' aliased to '%s'",
+                            tool_name,
+                            descriptor.server_name,
+                            descriptor.call_name,
+                        )
 
         self._total_docs = len(self._tools)
 
@@ -331,6 +378,36 @@ class McpToolCatalog:
         descriptors = self._tools_by_name.get(tool_name, [])
         return list({d.server_name for d in descriptors})
 
+    def resolve_server_name(self, server_name: str) -> str | None:
+        """Resolve a server name case-insensitively to its canonical form.
+
+        Returns the canonical server name if found, or None if no server
+        with that name (case-insensitive) exists in the catalog.
+        """
+        return self._server_name_lower_map.get(server_name.lower())
+
+    def get_server_inventory(self, allowlist: list[str] | None = None) -> list[dict]:
+        """Return server-level inventory summaries (name + tool count).
+
+        Used by inventory mode (tool_search with no query and no server_name).
+        Returns a token-cheap summary: server_name and tool_count per server.
+        """
+        summaries = []
+        for sname, descriptors in self._tools_by_server.items():
+            if allowlist:
+                allowlist_set = set(allowlist)
+                visible = [
+                    d for d in descriptors
+                    if d.tool_name in allowlist_set or d.server_name in allowlist_set
+                ]
+                if not visible:
+                    continue
+                tool_count = len(visible)
+            else:
+                tool_count = len(descriptors)
+            summaries.append({"server_name": sname, "tool_count": tool_count})
+        return summaries
+
     def search(
         self,
         query: str | None = None,
@@ -350,8 +427,25 @@ class McpToolCatalog:
         Returns:
             List of ToolDescriptor objects, ranked by relevance
         """
+        # Canonicalize server_name case-insensitively
+        canonical_server = None
+        if server_name:
+            canonical_server = self.resolve_server_name(server_name)
+            if canonical_server is None:
+                logger.debug(
+                    "tool_search: server_name=%r not found in catalog (case-insensitive lookup failed)",
+                    server_name,
+                )
+                return []
+            if canonical_server != server_name:
+                logger.debug(
+                    "tool_search: server_name=%r canonicalized to %r",
+                    server_name,
+                    canonical_server,
+                )
+
         # Start with all tools or server-filtered tools
-        candidates = self._tools_by_server.get(server_name, []) if server_name else self._tools
+        candidates = self._tools_by_server.get(canonical_server, []) if canonical_server else self._tools
 
         # Apply allowlist filtering
         if allowlist:
@@ -375,61 +469,70 @@ class McpToolCatalog:
         # Return top_k results
         return [t for t, _ in scored[:top_k]]
 
+    def search_scored(
+        self,
+        query: str,
+        top_k: int = 5,
+        server_name: str | None = None,
+        allowlist: list[str] | None = None,
+    ) -> list[tuple["ToolDescriptor", float]]:
+        """Like search(), but returns (ToolDescriptor, score) pairs.
+
+        Used by tool_search_tool to gate autoloading on the actual score.
+        """
+        # Canonicalize server_name case-insensitively
+        canonical_server = None
+        if server_name:
+            canonical_server = self.resolve_server_name(server_name)
+            if canonical_server is None:
+                return []
+
+        candidates = self._tools_by_server.get(canonical_server, []) if canonical_server else self._tools
+
+        if allowlist:
+            allowlist_set = set(allowlist)
+            candidates = [
+                t
+                for t in candidates
+                if t.tool_name in allowlist_set or t.server_name in allowlist_set
+            ]
+
+        if not candidates or not query or not query.strip():
+            return []
+
+        scored = self._rank_candidates(query, candidates)
+        return scored[:top_k]
+
     def _rank_candidates(
         self,
         query: str,
         candidates: list[ToolDescriptor],
     ) -> list[tuple[ToolDescriptor, float]]:
         """
-        Rank candidates by relevance to query.
+        Rank candidates by relevance to query using shared scoring logic.
 
-        Scoring factors:
-        - Exact name match (highest boost)
-        - Name prefix match
-        - Token overlap with description and args
+        Uses tool_search_scoring.score_tool for consistent behavior across
+        server and client catalogs. Filters out below-threshold results.
         """
-        query_lower = query.lower().strip()
-        query_tokens = set(tokenize(query))
+        from ..core.config import settings as _settings
+
+        query_lower, query_tokens = build_query_tokens(query)
+        min_score = _settings.mcp_tool_search_min_relevance_score
 
         scored: list[tuple[ToolDescriptor, float]] = []
-
         for tool in candidates:
-            score = 0.0
-            tool_name_lower = tool.tool_name.lower()
-
-            # Exact name match (highest priority)
-            if tool_name_lower == query_lower:
-                score += 100.0
-            # Name prefix match
-            elif tool_name_lower.startswith(query_lower):
-                score += 50.0
-            # Query is substring of name
-            elif query_lower in tool_name_lower:
-                score += 30.0
-
-            # Token overlap scoring (simple TF approach)
-            tool_tokens = set(
-                tokenize(f"{tool.tool_name} {tool.description} {' '.join(tool.arg_names)}")
+            s = score_tool(
+                tool_name=tool.tool_name,
+                description=tool.description,
+                arg_names=tool.arg_names,
+                query_lower=query_lower,
+                query_tokens=query_tokens,
+                doc_freq=self._doc_freq,
+                total_docs=self._total_docs,
             )
+            scored.append((tool, s))
 
-            overlap = query_tokens & tool_tokens
-            if overlap:
-                # Weight by inverse document frequency
-                for token in overlap:
-                    df = self._doc_freq.get(token, 1)
-                    idf = 1.0 / (1.0 + df / max(self._total_docs, 1))
-                    score += idf * 10.0
-
-            # Small boost for tools with descriptions
-            if tool.description:
-                score += 0.1
-
-            scored.append((tool, score))
-
-        # Sort by score descending, then by name for stability
-        scored.sort(key=lambda x: (-x[1], x[0].tool_name))
-
-        return scored
+        return rank_and_filter(scored, min_relevance_score=min_score)
 
     def filter_by_allowlist(
         self,

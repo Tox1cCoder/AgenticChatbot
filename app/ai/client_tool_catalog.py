@@ -25,6 +25,7 @@ from .client_runtime_tools import (
     TOOL_ORIGIN_CLIENT_NATIVE,
 )
 from .text_normalization import sanitize_identifier, tokenize_text
+from .tool_search_scoring import build_query_tokens, rank_and_filter, score_tool
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,8 @@ class ClientToolCatalog:
         self._tools: list[ClientToolDescriptor] = []
         self._tools_by_name: dict[str, ClientToolDescriptor] = {}
         self._tools_by_server: dict[str, list[ClientToolDescriptor]] = {}
+        # Case-insensitive server name lookup: {lower_name: canonical_name}
+        self._server_name_lower_map: dict[str, str] = {}
         self._token_index: dict[str, set[int]] = {}
         self._doc_freq: Counter = Counter()
         self._total_docs: int = 0
@@ -217,6 +220,7 @@ class ClientToolCatalog:
         self._tools.clear()
         self._tools_by_name.clear()
         self._tools_by_server.clear()
+        self._server_name_lower_map.clear()
         self._token_index.clear()
         self._doc_freq.clear()
         self._total_docs = 0
@@ -295,6 +299,10 @@ class ClientToolCatalog:
 
         self._total_docs = len(self._tools)
 
+        # Build case-insensitive server name lookup
+        for sname in self._tools_by_server:
+            self._server_name_lower_map[sname.lower()] = sname
+
         elapsed = time.time() - start_time
         logger.info(
             "Rebuilt client tool catalog for device %s: %d tools in %.2fms",
@@ -323,6 +331,10 @@ class ClientToolCatalog:
             self._token_index[token].add(idx)
             self._doc_freq[token] += 1
 
+    def resolve_server_name(self, server_name: str) -> str | None:
+        """Resolve a server name case-insensitively to its canonical form."""
+        return self._server_name_lower_map.get(server_name.lower())
+
     def search(
         self,
         query: str | None = None,
@@ -342,8 +354,19 @@ class ClientToolCatalog:
         Returns:
             List of ClientToolDescriptor objects, ranked by relevance
         """
+        # Canonicalize server_name case-insensitively
+        canonical_server = None
+        if server_name:
+            canonical_server = self.resolve_server_name(server_name)
+            if canonical_server is None:
+                logger.debug(
+                    "client tool search: server_name=%r not found (case-insensitive lookup failed)",
+                    server_name,
+                )
+                return []
+
         # Start with all tools or server-filtered tools
-        candidates = self._tools_by_server.get(server_name, []) if server_name else self._tools
+        candidates = self._tools_by_server.get(canonical_server, []) if canonical_server else self._tools
 
         # Apply allowlist filtering
         if allowlist:
@@ -370,43 +393,26 @@ class ClientToolCatalog:
         query: str,
         candidates: list[ClientToolDescriptor],
     ) -> list[tuple[ClientToolDescriptor, float]]:
-        """Rank candidates by relevance to query."""
-        query_lower = query.lower().strip()
-        query_tokens = set(_tokenize(query))
+        """Rank candidates by relevance to query using shared scoring logic."""
+        from app.core.config import settings as _settings
+
+        query_lower, query_tokens = build_query_tokens(query)
+        min_score = _settings.mcp_tool_search_min_relevance_score
 
         scored: list[tuple[ClientToolDescriptor, float]] = []
-
         for tool in candidates:
-            score = 0.0
-            tool_name_lower = tool.tool_name.lower()
-
-            # Exact name match
-            if tool_name_lower == query_lower:
-                score += 100.0
-            elif tool_name_lower.startswith(query_lower):
-                score += 50.0
-            elif query_lower in tool_name_lower:
-                score += 30.0
-
-            # Token overlap scoring
-            tool_tokens = set(
-                _tokenize(f"{tool.tool_name} {tool.description} {' '.join(tool.arg_names)}")
+            s = score_tool(
+                tool_name=tool.tool_name,
+                description=tool.description,
+                arg_names=tool.arg_names,
+                query_lower=query_lower,
+                query_tokens=query_tokens,
+                doc_freq=self._doc_freq,
+                total_docs=self._total_docs,
             )
+            scored.append((tool, s))
 
-            overlap = query_tokens & tool_tokens
-            if overlap:
-                for token in overlap:
-                    df = self._doc_freq.get(token, 1)
-                    idf = 1.0 / (1.0 + df / max(self._total_docs, 1))
-                    score += idf * 10.0
-
-            if tool.description:
-                score += 0.1
-
-            scored.append((tool, score))
-
-        scored.sort(key=lambda x: (-x[1], x[0].tool_name))
-        return scored
+        return rank_and_filter(scored, min_relevance_score=min_score)
 
     def get_tool(
         self,
