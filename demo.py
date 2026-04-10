@@ -17,6 +17,11 @@ from dateutil import parser
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from app.ai.skills_snapshot import (
+    get_repo_skill_detail_for_demo,
+    list_repo_skills_for_demo,
+    reload_repo_skills_for_demo,
+)
 from app.services.stream_events import infer_tool_state, normalize_tool_phase
 from upload_support import delete_document, get_uploaded_documents, upload_document
 
@@ -2520,27 +2525,18 @@ def add_mcp_server_from_url(url_config: dict[str, Any]) -> bool:
 
 
 def get_skills_list() -> dict[str, Any] | None:
-    """Fetch all skills with enabled state."""
-    response = make_api_request("GET", "/skills")
-    return response.get("data") if response else None
+    """Fetch the locally installed server repo skills for the demo."""
+    return list_repo_skills_for_demo()
 
 
 def get_skill_detail(name: str) -> dict[str, Any] | None:
-    """Fetch full detail (incl. Markdown content) for one skill."""
-    response = make_api_request("GET", f"/skills/{name}")
-    return response.get("data") if response else None
-
-
-def toggle_skill(name: str, enabled: bool) -> dict[str, Any] | None:
-    """Enable or disable a skill."""
-    response = make_api_request("PATCH", f"/skills/{name}/toggle?enabled={str(enabled).lower()}")
-    return response.get("data") if response else None
+    """Fetch full detail for one installed server repo skill."""
+    return get_repo_skill_detail_for_demo(name)
 
 
 def reload_skills() -> dict[str, Any] | None:
-    """Trigger a hot-reload of skills from disk."""
-    response = make_api_request("POST", "/skills/reload")
-    return response.get("data") if response else None
+    """Rescan repo skills for this local demo process."""
+    return reload_repo_skills_for_demo()
 
 
 def render_login_page():
@@ -5712,7 +5708,7 @@ def render_tools_tab():
                         # Invalid format
                         else:
                             st.error(
-                                "Invalid format. Please use one of these formats:",
+                                "Invalid format.",
                                 icon=":material/error:",
                             )
                             servers_to_add = []
@@ -6116,11 +6112,15 @@ def render_tools_tab():
 
 
 def render_skills_tab():
-    """Render the Skills management interface."""
-    st.markdown("# :material/psychology: Skills Management")
+    """Render the installed repo skills interface."""
+    st.markdown("# :material/psychology: Installed Repo Skills")
     st.markdown(
-        "Manage agent skills — Markdown instruction sets that extend every agent's "
-        "system prompt. Skills are stored in the `skills/` folder as `SKILL.md` files."
+        "Inspect the server-owned skills checked into this repository. This tab reads the "
+        "local `skills/` directory directly and does not call a public server `/skills` API."
+    )
+    st.caption(
+        "Runtime skill selection uses installed repo skills plus device-scoped client skills. "
+        "Server repo skills are installed from disk, not managed over HTTP."
     )
 
     col_refresh, col_reload = st.columns(2)
@@ -6139,7 +6139,7 @@ def render_skills_tab():
             key="skills_reload",
             use_container_width=True,
         ):
-            with st.spinner("Rescanning skills folder..."):
+            with st.spinner("Rescanning repo skills folder..."):
                 result = reload_skills()
                 if result:
                     msg = result.get("message", "Skills reloaded")
@@ -6200,24 +6200,7 @@ def render_skills_tab():
             st.markdown(f"**Description:** {description}")
             st.caption(f"Folder: `{folder_path}`")
 
-            # Toggle button
-            col_toggle, col_view = st.columns(2)
-
-            with col_toggle:
-                toggle_label = "Disable" if enabled else "Enable"
-                toggle_icon = ":material/toggle_off:" if enabled else ":material/toggle_on:"
-                if st.button(
-                    toggle_label,
-                    key=f"skill_toggle_{skill_name}",
-                    icon=toggle_icon,
-                    use_container_width=True,
-                ):
-                    with st.spinner(f"{'Disabling' if enabled else 'Enabling'} skill..."):
-                        result = toggle_skill(skill_name, not enabled)
-                        if result:
-                            st.rerun()
-                        else:
-                            st.error(f"Failed to toggle skill '{skill_name}'")
+            col_view, col_spacer = st.columns([1, 1])
 
             with col_view:
                 if st.button(
@@ -6269,7 +6252,7 @@ agent's system prompt when the skill is enabled.
 ```
 
 3. Click **Reload from Disk** above to pick it up.
-4. Toggle it on or off as needed.
+4. Restart or redeploy the server if you need the running backend process to pick up the new skill.
 """
         )
 

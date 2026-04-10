@@ -369,7 +369,7 @@ def test_live_proxy_and_local_management_endpoints(live_client_backend):
         assert "totalCount" in mcp_payload["data"]
 
 
-def test_live_server_admin_routes_require_auth_and_scope_user_access(live_client_backend):
+def test_live_server_routes_do_not_expose_server_skills_api(live_client_backend):
     with TestClient(app) as client:
         session = _signup_and_login(
             client,
@@ -381,7 +381,7 @@ def test_live_server_admin_routes_require_auth_and_scope_user_access(live_client
     access_headers = _auth_headers(session["access_token"])
 
     unauthenticated_skills = requests.get(f"{LIVE_SERVER_URL}/skills", timeout=120)
-    assert unauthenticated_skills.status_code in {401, 403}, unauthenticated_skills.text
+    assert unauthenticated_skills.status_code == 404, unauthenticated_skills.text
 
     unauthenticated_mcp = requests.get(f"{LIVE_SERVER_URL}/mcp/servers", timeout=120)
     assert unauthenticated_mcp.status_code in {401, 403}, unauthenticated_mcp.text
@@ -402,10 +402,12 @@ def test_live_server_admin_routes_require_auth_and_scope_user_access(live_client
     )
     assert other_user_response.status_code == 403, other_user_response.text
 
-    skills_payload = _assert_api_success(
-        requests.get(f"{LIVE_SERVER_URL}/skills", headers=access_headers, timeout=120)
+    authenticated_skills = requests.get(
+        f"{LIVE_SERVER_URL}/skills",
+        headers=access_headers,
+        timeout=120,
     )
-    assert "skills" in skills_payload["data"]
+    assert authenticated_skills.status_code == 404, authenticated_skills.text
 
     mcp_payload = _assert_api_success(
         requests.get(f"{LIVE_SERVER_URL}/mcp/servers", headers=access_headers, timeout=120)

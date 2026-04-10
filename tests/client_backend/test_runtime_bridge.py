@@ -100,6 +100,17 @@ async def test_handle_tool_request_sends_shared_typed_tool_result(monkeypatch):
     bridge = RuntimeBridgeService(server_client=_ServerClientStub())
     sent_payloads: list[dict] = []
 
+    # Populate the catalog so _validate_tool_request passes.
+    # The request uses tool_name="demo" / qualified_tool_id="native::shell_execute",
+    # so the catalog entry must match both.  No tool_instance_id or session fields
+    # are set on the request, so no additional validation is triggered.
+    bridge._current_tool_catalog = {
+        "native::shell_execute": {
+            "qualified_id": "native::shell_execute",
+            "name": "demo",
+        }
+    }
+
     async def _fake_execute_tool_request(request: ToolDispatchRequest) -> dict[str, bool]:
         assert isinstance(request, ToolDispatchRequest)
         return {"ok": True}

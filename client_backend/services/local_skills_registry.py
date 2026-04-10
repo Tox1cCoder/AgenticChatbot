@@ -9,6 +9,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from shared.skills.front_matter import extract_yaml_value, parse_skill_front_matter, split_front_matter
+
 from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
 from client_backend.core.paths import get_profile_subdir
@@ -176,6 +178,14 @@ class LocalSkillsRegistry:
         """
         Load a skill from a SKILL.md file.
 
+        Parses YAML front matter identically to the server skills registry so that
+        server and client produce the same name, description, and body content for
+        the same SKILL.md file.  Front matter is stripped from the activation body
+        so the model never sees raw YAML delimiters.
+
+        Falls back to directory-name / first-line heuristics only when no valid
+        front matter is present, preserving compatibility with plain markdown skills.
+
         Args:
             skill_file: Path to the SKILL.md file.
 
@@ -183,48 +193,47 @@ class LocalSkillsRegistry:
             SkillMetadata if loaded successfully, None otherwise.
         """
         try:
-            # Read skill content
-            content = await asyncio.to_thread(skill_file.read_text, encoding="utf-8")
+            raw = await asyncio.to_thread(skill_file.read_text, encoding="utf-8")
 
-            # Parse skill name from parent directory
-            skill_name = skill_file.parent.name
+            parsed = parse_skill_front_matter(raw)
 
-            # Extract description from first line or first paragraph
-            lines = content.strip().split("\n")
-            description = ""
+            if parsed is not None:
+                if not parsed.name:
+                    logger.warning("Missing 'name' in front-matter of %s — skipping", skill_file)
+                    return None
 
-            # Look for a description in the first few lines
-            for line in lines[:10]:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    description = line
-                    break
+                name = parsed.name
+                description = parsed.description
+                category = parsed.category
+                tags = list(parsed.tags)
+                content = parsed.body
+                used_plain_markdown_fallback = False
+            else:
+                # No front matter — use directory name and first-line heuristic.
+                name = skill_file.parent.name
+                content = raw
+                used_plain_markdown_fallback = True
 
-            if not description:
-                description = f"Skill: {skill_name}"
+                lines = raw.strip().split("\n")
+                description = ""
+                for line in lines[:10]:
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith("#"):
+                        description = stripped
+                        break
 
-            # Parse metadata from front matter if present
-            category = None
-            tags = []
+                category = None
+                tags = []
 
-            if content.startswith("---"):
-                # Simple front matter parsing
-                front_matter_end = content.find("---", 3)
-                if front_matter_end > 0:
-                    front_matter = content[3:front_matter_end].strip()
-                    for line in front_matter.split("\n"):
-                        if "category:" in line.lower():
-                            category = line.split(":", 1)[1].strip()
-                        elif "tags:" in line.lower():
-                            tags_str = line.split(":", 1)[1].strip()
-                            tags = [t.strip() for t in tags_str.split(",")]
+            if used_plain_markdown_fallback and not description:
+                description = f"Skill: {name}"
 
             return SkillMetadata(
-                name=skill_name,
+                name=name,
                 path=skill_file,
                 description=description,
                 content=content,
-                enabled=True,  # Default enabled, can be overridden by user settings
+                enabled=True,  # Default enabled, overridden by persisted state
                 category=category,
                 tags=tags,
             )
@@ -232,6 +241,32 @@ class LocalSkillsRegistry:
         except Exception as e:
             logger.error(f"Error loading skill from {skill_file}: {e}")
             return None
+
+    @staticmethod
+    def _split_front_matter(raw: str) -> tuple[str, str] | None:
+        """
+        Split a SKILL.md file into YAML block and body.
+
+        Returns (yaml_block, body) if valid front matter delimiters are found,
+        or None if the file does not start with a valid ``---`` block.
+        Mirrors the server-side ``SkillsRegistry._split_front_matter`` exactly.
+        """
+        return split_front_matter(raw)
+
+    @staticmethod
+    def _extract_yaml_value(yaml_block: str, key: str) -> str | None:
+        """
+        Extract a simple scalar or folded multi-line value from a YAML block.
+
+        Handles:
+          name: simple-value
+          description: >
+            multi-line
+            folded text
+
+        Mirrors the server-side ``SkillsRegistry._extract_yaml_value`` exactly.
+        """
+        return extract_yaml_value(yaml_block, key)
 
     async def reload_skill(self, skill_name: str) -> bool:
         """

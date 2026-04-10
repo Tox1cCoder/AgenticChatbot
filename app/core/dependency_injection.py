@@ -30,7 +30,6 @@ from app.services.jwt_service import JwtService
 from app.services.mcp_service import MCPService
 from app.services.model_config_service import ModelConfigService
 from app.services.provider_service import ProviderService
-from app.services.skills_service import SkillsService
 from app.utils.validation.conversation_validation import (
     ConversationValidationUtils,
 )
@@ -128,7 +127,6 @@ class AppAutoInjector(AutoInjector):
             ITaskPlanService: container_ref.task_plan_service,
             DocumentProcessingService: container_ref.document_processing_service,
             MCPService: container_ref.mcp_service,
-            SkillsService: container_ref.skills_service,
             JwtService: container_ref.jwt_service,
             AIService: container_ref.ai_service,
             ProviderService: container_ref.provider_service,

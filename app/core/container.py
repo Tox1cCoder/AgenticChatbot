@@ -12,7 +12,6 @@ from app.ai.graph import create_workflow
 from app.ai.mcp_integration import MCPManager
 from app.ai.mcp_registry import MCPRegistry
 from app.ai.planning_runtime_adapter import PlanningRuntimeAdapter
-from app.ai.skills_registry import get_skills_registry
 from app.core.config import settings
 from app.core.dependency_injection import AppAutoInjector, AppContainerInjector
 from app.database.database import Database
@@ -48,7 +47,6 @@ from app.services.mcp_service import MCPService
 from app.services.message_service import MessageService
 from app.services.model_config_service import ModelConfigService
 from app.services.provider_service import ProviderService
-from app.services.skills_service import SkillsService
 from app.services.task_plan_service import TaskPlanService
 from app.services.user_service import UserService
 from app.utils.validation.conversation_validation import ConversationValidationUtils
@@ -76,7 +74,6 @@ class Container(containers.DeclarativeContainer):
             "app.api.ai_sdk",
             "app.api.providers",
             "app.api.model_config",
-            "app.api.skills",
         ]
     )
 
@@ -323,17 +320,6 @@ class Container(containers.DeclarativeContainer):
         MCPService,
         mcp_manager=mcp_manager,
     )
-
-    # Skills
-    skills_registry = providers.Singleton(
-        lambda: get_skills_registry(),
-    )
-
-    skills_service = providers.Factory(
-        SkillsService,
-        registry=skills_registry,
-    )
-
 
 # Initialize auto-injection wiring map before container instantiation
 def setup_auto_injection(container_ref: Container | type[Container] | None = None):

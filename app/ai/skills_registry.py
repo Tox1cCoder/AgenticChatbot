@@ -1,13 +1,10 @@
 """
-Skills Registry Module - Single Source of Truth for skill discovery and state.
+Server-owned skills registry for checked-in repo skills.
 
-This module provides the core SkillsRegistry that:
-- Scans the skills/ folder for SKILL.md files
-- Parses YAML front-matter and Markdown body
-- Persists enabled/disabled state in skills_config.json
-- Provides a generation counter for cache invalidation (mirrors MCPRegistry)
-
-Skills are additive Markdown instruction sets appended to agent system prompts.
+This registry loads the server's `./skills` directory, parses Anthropic-style
+`SKILL.md` files, persists enabled/disabled state, and provides a generation
+counter for cache invalidation. It is an internal production skill source and
+is not exposed over a public server HTTP API.
 """
 
 import contextlib
@@ -15,21 +12,25 @@ import json
 import logging
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from shared.skills.front_matter import extract_yaml_value, parse_skill_front_matter, split_front_matter
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class SkillMeta:
-    """Metadata for a discovered skill."""
+    """Metadata for a server-owned repo skill."""
 
     name: str
     description: str
     content: str  # full Markdown body (after front-matter)
     enabled: bool
     folder_path: str  # absolute path to the skill folder
+    category: str | None = None
+    tags: list[str] = field(default_factory=list)
 
 
 class SkillsRegistry:
@@ -166,100 +167,32 @@ class SkillsRegistry:
             logger.warning("Failed to read %s: %s", skill_file, exc)
             return None
 
-        split_content = self._split_front_matter(raw)
-        if split_content is None:
+        parsed = parse_skill_front_matter(raw)
+        if parsed is None:
             logger.warning("No valid YAML front-matter in %s — skipping", skill_file)
             return None
 
-        yaml_block, body = split_content
-
-        # Minimal YAML parser — extracts name and description
-        name = self._extract_yaml_value(yaml_block, "name")
-        description = self._extract_yaml_value(yaml_block, "description")
-
-        if not name:
+        if not parsed.name:
             logger.warning("Missing 'name' in front-matter of %s — skipping", skill_file)
             return None
 
-        if not description:
-            description = ""
-
         return SkillMeta(
-            name=name,
-            description=description,
-            content=body,
+            name=parsed.name,
+            description=parsed.description,
+            content=parsed.body,
             enabled=True,  # will be overridden by config
             folder_path=str(folder.resolve()),
+            category=parsed.category,
+            tags=list(parsed.tags),
         )
 
     @staticmethod
     def _split_front_matter(raw: str) -> tuple[str, str] | None:
-        stripped = raw.lstrip()
-        if not stripped.startswith("---"):
-            return None
-
-        lines = stripped.splitlines()
-        if not lines or lines[0].strip() != "---":
-            return None
-
-        end_index = None
-        for i, line in enumerate(lines[1:], start=1):
-            if line.strip() == "---":
-                end_index = i
-                break
-
-        if end_index is None:
-            return None
-
-        yaml_block = "\n".join(lines[1:end_index])
-        body = "\n".join(lines[end_index + 1 :]).strip()
-        return yaml_block, body
+        return split_front_matter(raw)
 
     @staticmethod
     def _extract_yaml_value(yaml_block: str, key: str) -> str | None:
-        """
-        Extract a simple scalar or multi-line '>' value from a YAML block.
-
-        Handles:
-          name: simple-value
-          description: >
-            multi-line
-            folded text
-        """
-        lines = yaml_block.split("\n")
-        for i, line in enumerate(lines):
-            if line[:1].isspace():
-                continue
-
-            separator_index = line.find(":")
-            if separator_index < 0:
-                continue
-
-            line_key = line[:separator_index].strip()
-            if line_key != key:
-                continue
-
-            value = line[separator_index + 1 :].strip()
-
-            # Simple scalar value (not a folded/literal block indicator)
-            if value and value not in (">", "|", ">-", "|-"):
-                # Strip surrounding quotes if present
-                if (value.startswith('"') and value.endswith('"')) or (
-                    value.startswith("'") and value.endswith("'")
-                ):
-                    value = value[1:-1]
-                return value
-
-            # Folded / literal block — collect indented continuation lines
-            collected: list[str] = []
-            for cont_line in lines[i + 1 :]:
-                if cont_line and not cont_line[0].isspace():
-                    break  # next top-level key
-                collected.append(cont_line.strip())
-
-            return " ".join(part for part in collected if part)
-
-        return None
+        return extract_yaml_value(yaml_block, key)
 
     # ------------------------------------------------------------------
     # Config persistence
@@ -324,7 +257,7 @@ _registry: SkillsRegistry | None = None
 
 
 def get_skills_registry() -> SkillsRegistry:
-    """Get or create the global SkillsRegistry singleton."""
+    """Get or create the server-owned skills registry singleton."""
     global _registry
     if _registry is None:
         _registry = SkillsRegistry(
@@ -332,6 +265,11 @@ def get_skills_registry() -> SkillsRegistry:
             config_path=str(Path(__file__).parent / "skills_config.json"),
         )
     return _registry
+
+
+def get_server_skills_registry() -> SkillsRegistry:
+    """Explicit alias for the server-owned repo skills registry."""
+    return get_skills_registry()
 
 
 def get_skills_generation() -> int:

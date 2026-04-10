@@ -106,11 +106,12 @@ Repo scope: Same repository, new local-runtime folder
 - [x] **Implement local skills registry in client_backend** (2026-03-23)
   - Created `client_backend/services/local_skills_registry.py` for skill management
   - Scans configured skill roots for SKILL.md files with async loading
-  - Parses skill metadata (description, category, tags from front matter)
+  - Attempts to parse skill metadata (description, category, tags from front matter)
   - Enable/disable per skill, bulk operations support
   - Search by name/description/tags, filter by category
   - Generates skill catalogs with optional content inclusion (for enabled skills only)
-  - **Verified**: Skill scanning, catalog generation, enable/disable working
+  - **Review update (2026-04-10)**: skill scanning, catalog generation, and enable/disable flow work for markdown-only fixtures, but the client parser is not yet Anthropic-compatible for YAML-front-matter skills. It currently derives `name` from the folder name and can degrade `description` to `---`, so server/client catalogs can diverge for real `SKILL.md` files.
+  - **Fixed (2026-04-10)**: parser rewritten with YAML front-matter parity (see Phase 5 entry above)
 - **Exit criteria met**: All local tool providers complete
 
 ### Phase 4: Server Tool Dispatch Integration
@@ -316,7 +317,7 @@ This addendum clarifies the production shape for simultaneous multi-sidecar use.
   - **Verified**: All 17 tests pass
 - [x] Make the sidecar validate every tool request against its current advertised capability record before execution (2026-04-08)
   - Reject if `tool_instance_id` is unknown, `session_id` mismatches, catalog version is stale, or name/ID mismatches
-  - Added `_validate_tool_request(request)` to `runtime_bridge.py` � returns error string or None
+  - Added `_validate_tool_request(request)` to `runtime_bridge.py` — returns error string or None
   - Sidecar tracks `_tool_catalog_version: int` (mirrors server-side increment) and `_current_tool_catalog: dict` (keyed by qualified_id)
   - Both reset on new session assignment; catalog version increments on each `refresh_catalogs()` call
   - `_handle_tool_request` calls validation first; raises `ValueError` if stale
@@ -346,7 +347,7 @@ This addendum clarifies the production shape for simultaneous multi-sidecar use.
   - Called from `device_runtime.py` after `start_session()` in a try/except so connection is never blocked
   - **Verified**: `py_compile` passes on all modified files
 - [x] Add regression tests for multi-sidecar scenarios (2026-04-08)
-  - New file: `tests/test_multi_sidecar_hardening.py` � 19 tests across 7 test classes
+  - New file: `tests/test_multi_sidecar_hardening.py` — 19 tests across 7 test classes
   - **TestOverlappingToolNames** (2 tests): two sidecars publish same tool name in same conversation; verifies independent scopes and distinct `tool_instance_id`s; broad lookup returns both devices
   - **TestReconnectInvalidatesInstanceId** (6 tests): `tool_instance_id` changes on new session; changes on catalog version bump; sidecar `_validate_tool_request` rejects stale session, stale catalog version, unknown tool, mismatched `tool_instance_id`; accepts valid request
   - **TestHITLResumeSessionValidation** (1 test): interrupt resume rejects when device changes (409 INTERRUPT_DEVICE_MISMATCH)
@@ -355,6 +356,62 @@ This addendum clarifies the production shape for simultaneous multi-sidecar use.
   - **TestClientToolScope** (3 tests): add/retrieve, LRU eviction within scope, update existing tool
   - **TestToolInstanceIdConsistency** (2 tests): server and sidecar produce identical IDs; different inputs produce different IDs
   - **Verified**: All 25 tests pass (6 existing + 19 new) in 3.1s
+
+### Phase 5: Skills and Prompt Integration (2026-04-10)
+- [x] **Fix client skills parser for YAML front-matter parity** (2026-04-10)
+  - Rewrote `_load_skill()` in `client_backend/services/local_skills_registry.py`
+  - Added static `_split_front_matter()` and `_extract_yaml_value()` methods mirroring the server's `SkillsRegistry` implementation exactly
+  - When YAML front matter is present: name comes from the `name` field (not the directory name), description comes from `description`, and `content` is the stripped body (no raw `---` delimiters)
+  - Falls back to directory-name / first-line heuristics for plain markdown skills without front matter
+  - **Design decision**: Shared contract between client and server parsers; no separate library dependency — static methods duplicated intentionally to keep `client_backend/` independent of `app/`
+  - **Verified**: 46 tests pass including 15 new parity tests in `tests/test_skills_parity.py`
+- [x] **Interim stopgap: make server-global skills a debug/admin fallback** (2026-04-10, superseded by the approved refactor below)
+  - Added `enable_server_global_skills_fallback: bool = Field(default=False)` to `app/core/config.py`
+  - Updated `get_available_skill_summaries()` in `app/ai/skills_tool.py`: when `enable_client_runtime_bridge=True` AND a device session is active AND `enable_server_global_skills_fallback=False`, server-global skills are excluded from prompt summaries and `activate_skill` resolution
+  - Server-global skills are always included when no device is connected (server-only mode) so the legacy path still works
+  - **Design decision**: Fallback is controlled by a config flag rather than hard-removing server-global skills, preserving backwards compatibility for local-dev setups with no client backend
+- [x] **Interim stopgap: gate server skills admin API behind a config flag; remove folder_path from public responses** (2026-04-10, superseded by the approved refactor below)
+  - Added `enable_server_skills_admin_api: bool = Field(default=True)` to `app/core/config.py`
+  - Updated `app/api/skills.py` to return HTTP 404 with descriptive message when the flag is False
+  - Removed `folder_path` from `SkillInfo` schema in `app/schemas/skills.py` (server filesystem paths must not be exposed to API clients); added `extra="ignore"` so existing service dict keys are silently dropped by Pydantic
+  - Added module docstring to `skills.py` clarifying it is a debug/operator surface, not a production client API
+- [x] **Repair stale runtime bridge test** (2026-04-10)
+  - Fixed `test_handle_tool_request_sends_shared_typed_tool_result` in `tests/client_backend/test_runtime_bridge.py`
+  - Root cause: `_validate_tool_request()` (added in multi-sidecar hardening) checks `_current_tool_catalog` before executing, but the test never populated the catalog
+  - Fix: added `bridge._current_tool_catalog = {"native::shell_execute": {"qualified_id": "native::shell_execute", "name": "demo"}}` before the call
+  - **Verified**: All 46 targeted tests pass, including the previously failing test
+- **Interim outcome**: the immediate leakage issues were reduced, but this is not the final approved architecture; see the staff review update and approved refactor below.
+
+### Staff Review Update and Approved Skills Refactor (2026-04-10)
+
+Staff review of the uncommitted Phase 5 work found that the stopgap fallback/admin approach is not the accepted production design.
+
+Review findings:
+
+- The server/client branching in `get_available_skill_summaries()` is still driven by ad hoc fallback logic rather than an explicit source-selection model.
+- The public server `/skills/*` HTTP surface is still part of the runtime app and remains incompatible with the desired production posture.
+- Server/client parser behavior is still duplicated in two files; the current parity patch reduced drift but did not remove the structural source of drift.
+
+Approved direction from review:
+
+- Remove the public server `/skills/*` management API entirely; keep server-owned skills internal to the server process and test harness.
+- Promote the repo `skills/` folder to a first-class production skill source owned by the server, analogous to server-owned MCP configuration.
+- Keep device-synced client skills as a separate first-class source scoped to the active `(user_id, device_id, session_id)` execution context.
+- Replace fallback flags and branchy runtime behavior with an explicit skill-source resolver that decides which summaries and activation targets are bound for a request.
+- Replace duplicated parser implementations with one shared parser contract/module used by both server and client codepaths.
+- Preserve startup validation of the repo `skills/` folder so the server proves it can load checked-in skills without exposing an HTTP admin surface.
+
+Test updates captured in this review turn:
+
+- Added executable coverage that the server can load the real repo `skills/` folder and that the checked-in skills parse identically on server and client.
+- Added an architecture test asserting the public server `/skills` routes are removed from the app.
+
+Implementation update (2026-04-10):
+
+- Added a shared front-matter parser module used by both `app/` and `client_backend/`.
+- Refactored the server runtime to use an explicit internal skill resolver that combines server-owned repo skills with device-scoped client skills.
+- Removed the server `/skills/*` HTTP router, related service/schema wiring, and the fallback/admin config flags.
+- Verified with `python -m pytest tests/client_backend/test_skills_registry.py tests/client_backend/test_skills_api.py tests/client_backend/test_runtime_bridge.py tests/test_skills_parity.py tests/test_skills_tool.py tests/test_skills_architecture.py -q` → **32 passed**
 
 ## 1. Objective
 
@@ -689,6 +746,23 @@ Production-ready recommendation:
 
 This replaces the insecure `localStorage` style used by the Streamlit demo.
 
+### 8.4 Client Runtime Concurrency Model
+
+The canonical server must support many users and many devices simultaneously.
+
+Important implementation constraint confirmed in the current codebase:
+
+- a single `client_backend` process currently behaves like one active upstream user profile at a time
+- auth state, skills state, and related local registries are still process-global/singleton-based
+- this is acceptable only if one local sidecar process corresponds to one signed-in local profile
+
+Production decision required before rollout:
+
+- either explicitly enforce and document `one client_backend process = one active upstream user profile`
+- or refactor auth, runtime bridge, MCP manager, and skills registry state to be scoped per local session/profile instead of mutable process globals
+
+Do not describe the local client runtime as multi-tenant until one of those two paths is implemented and verified.
+
 ## 9. MCP Strategy
 
 ### 9.1 Local Ownership
@@ -744,16 +818,55 @@ The client backend owns:
 
 The server still needs skill data because the model runs server-side.
 
-Recommended approach:
+Approved production approach:
 
-- sync skill summaries to the server for prompt construction
-- sync enabled skill full content to a device-session cache
-- refactor the current `activate_skill` logic to read from device-session skill cache first
-- keep server-global skills as an optional fallback path for legacy/server-local skills
+- introduce explicit internal skill sources, at minimum:
+  - server-owned repo skills loaded from `./skills`
+  - client-owned device-session skills synced from the active sidecar
+- add a skill resolver that accepts the active execution scope and returns:
+  - model-visible skill summaries for prompt construction
+  - activation targets for `activate_skill`
+  - source metadata proving whether a skill is server-owned or client-owned
+- keep server repo skills available to normal production runtime as a first-class source, not as a hidden fallback path
+- keep client skills device-scoped and additive; they must remain isolated to the active `(user_id, device_id, session_id)` scope
+- bind `activate_skill` to the resolved source record so activation does not re-derive server/client behavior later with ad hoc branching
+- remove the public server `/skills/*` admin/debug API entirely; server-owned skills should be managed through code, startup validation, and tests, not over HTTP
 
-### 10.3 Important Rule
+### 10.3 Important Rules
 
-Do not keep using the current global filesystem-backed `SkillsRegistry` as the only source of truth once per-device skills are enabled, or skills will leak across users/devices.
+- Do not keep using the current global filesystem-backed `SkillsRegistry` as the only source of truth once per-device skills are enabled, or skills will leak across users/devices.
+- Do not model server-vs-client behavior as fallback flags; choose sources explicitly through the resolver for each request.
+- Do not expose server-local skills management or raw skill bodies through a public server HTTP API in production.
+
+### 10.4 Verified Review Update (2026-04-10)
+
+Confirmed against the current codebase:
+
+- The repo `skills/` folder already contains valid front-matter skills (`playwright-cli`, `take100-timesheet`), and the current server registry can load them at startup.
+- Prompt construction and `activate_skill` availability are already device-session aware on the server side for client-owned skill catalogs.
+- The client backend syncs sanitized skill summaries to `/client-devices/{device_id}/skill-catalog`, and the server stores them in the active runtime session cache.
+- Multi-sidecar hardening for client-local tools is largely in place already: execution scope, `session_id`, `catalog_version`, `tool_instance_id`, and interrupt resume validation are implemented for client-local runtime bindings.
+
+Staff review findings — status as of 2026-04-10:
+
+- The current fallback-based branching in `get_available_skill_summaries()` is a stopgap, not an acceptable long-term architecture.
+- The public `/skills/*` server API is still wired into the production app and must be removed, not merely gated.
+- Parser behavior is still implemented twice; the current parity patch reduced drift but did not eliminate the duplication.
+- The local client runtime is not yet multi-tenant at the process level. Auth state and local registries are singleton-based; a single `client_backend` process supports one active upstream user profile. This remains a known architectural constraint.
+
+Approved implementation changes from the review:
+
+- Introduce a dedicated skill resolver layer, parallel to the server MCP binding path, so runtime code asks one internal component which skills to bind and how to activate them.
+- Keep the repo `skills/` folder as the authoritative production source for server-owned skills and validate it at startup.
+- Keep client-side skills as a separate device-session source and merge them with server-owned skills only through explicit resolver logic.
+- Remove `enable_server_global_skills_fallback`, `enable_server_skills_admin_api`, and the server `/skills/*` router entirely once the refactor lands.
+- Replace duplicated parsing logic with one shared parser contract/module used by both the server and `client_backend`.
+- Replace live server `/skills` integration checks with internal startup/resolver tests plus parity tests against the real checked-in repo skills.
+
+Verification updates recorded in this review turn:
+
+- `tests/test_skills_parity.py` now covers loading the real repo `skills/` directory and server/client parity for the checked-in skills.
+- `tests/test_skills_architecture.py` now carries an explicit `xfail` documenting the approved removal of the public `/skills` route.
 
 ## 11. Local Tooling Strategy
 
@@ -1072,14 +1185,18 @@ Exit criteria:
 
 ### Phase 5: Skills and Prompt Integration
 
-- make server prompt building device-session aware
-- refactor skill lookup to prefer synced device skills over global server files
-- retain legacy fallback for server-global skills if needed
+- promote repo `skills/` to a first-class server-owned production skill source
+- introduce explicit skill sources/resolver parallel to the MCP binding path
+- keep client-owned skills device-session scoped and merge them only through the resolver
+- unify server/client `SKILL.md` parsing through one shared parser contract/module
+- remove the public server `/skills/*` HTTP surface and any fallback/admin flags
+- keep startup validation proving the server can load checked-in repo skills without an HTTP admin path
 
 Exit criteria:
 
-- per-device skills influence only that device's requests
-- no cross-user or cross-device skill leakage
+- server-owned repo skills and client-owned device skills are both first-class runtime inputs with explicit source metadata
+- no cross-user or cross-device leakage for client-owned skills
+- no public server `/skills/*` management API remains
 
 ### Phase 6: Documents and Parse Artifacts
 
@@ -1098,12 +1215,12 @@ Exit criteria:
 - add targeted integration tests where feasible
 - add a manual end-to-end checklist
 - ship behind feature flags
-- keep server-only fallback path alive during rollout
+- keep explicit server-only mode working when the client-runtime bridge is disabled
 
 Exit criteria:
 
 - desktop flow works against the new client backend
-- legacy server flows still work with bridge disabled
+- server-only mode still works with bridge disabled
 
 ## 18. Verification Matrix
 
@@ -1116,19 +1233,24 @@ Because the repo has effectively no automated test coverage today, verification 
 | UI/client/server streaming | long-running SSE, heartbeat continuity, cancellation, reconnect |
 | Local shell/filesystem tools | path sandboxing, timeout, stdout cap, redacted audit args |
 | Local MCP | JSON config parsing, env expansion, relative path handling, tool reload |
-| Skills | local path scanning, enable/disable per profile, prompt isolation |
+| Skills | repo `skills/` folder loads on server startup, YAML front-matter parity holds across server/client parsers, activation payloads are body-only, enable/disable per profile works on the client, and prompt isolation is preserved |
+| Server skill source | no public `/skills/*` HTTP API remains, server-owned repo skills are resolved through the internal source/resolver path, and runtime does not depend on HTTP admin surfaces for skills |
 | HITL | approval, edit, reject, resume, timeout, device-aware audit rows |
 | Documents | upload relay, task polling, status transitions, ownership checks |
 | MinerU parse result | markdown/json artifact persistence, image linkage, cleanup |
 | RAG | retrieval still works, citations intact, images intact, delete cleanup intact |
 | Multi-user | distinct MCP/skill catalogs on same device do not leak |
+| Local runtime tenancy | either explicit one-user-per-process enforcement works or per-session auth/MCP/skills/runtime isolation is verified for concurrent local users |
 | Multi-device | same user can access same conversation from another device without conversation ownership breakage |
 | Failure handling | device disconnect mid-tool, server restart, stale session, expired heartbeat |
 
 Recommended test split:
 
 - server integration tests for device registration, tool dispatch, audit persistence, artifact APIs
-- client unit/integration tests for config parsing, path normalization, MCP loading, skills scanning
+- client unit/integration tests for config parsing, path normalization, MCP loading, and skills scanning
+- add skill-parity tests that use the real checked-in `skills/` fixtures and assert server/client catalogs plus activation payloads stay aligned
+- add internal server tests for repo-skills loading/startup and for route removal once `/skills/*` is deleted
+- update focused runtime-bridge tests so strict request validation paths are exercised with current protocol expectations
 - manual end-to-end smoke checklist for the full three-sided flow
 
 ## 19. Risks and Mitigations
@@ -1138,10 +1260,14 @@ Recommended test split:
 | Existing migrations and ORM are inconsistent | Align ORM first before feature work |
 | Conversations accidentally become device-bound | Do not use `conversation_device_bindings` as canonical ownership |
 | Raw local secrets leak to server | Sync sanitized catalogs only; keep raw config/env local |
-| Global skills leak across users/devices | Replace global-only skill source with device-session-aware cache |
+| Skills resolution drifts into ad hoc branching | Introduce explicit server/client skill sources plus one resolver parallel to MCP binding |
+| Skill parser drift between server and client | Share one front-matter parsing contract/module and keep parity tests on real repo fixtures |
+| Public `/skills` API leaks local server details | Remove the route entirely; keep server-owned skills internal to the process/test harness |
+| Sidecar singletons cause local multi-user leakage | Enforce one-user-per-process or scope auth/runtime/MCP/skills services per local session/profile |
 | Local paths create security/audit issues | Canonicalize, sandbox, redact or normalize before persistence |
 | Device disconnect breaks workflow mid-tool | Correlation IDs, timeout policy, explicit recoverable error path |
 | Tool schema drift across reconnects | Version catalogs and use `qualified_tool_id` |
+| Post-hardening tests drift from runtime behavior | Keep focused protocol tests green as validation semantics tighten |
 | No test harness | Add focused integration tests plus manual rollout checklist |
 
 ## 20. Acceptance Criteria
@@ -1152,23 +1278,30 @@ Recommended test split:
 - Local filesystem/script/MCP/skills execute only on the client backend.
 - The server can bind and dispatch client-local tools without rewriting the main workflow architecture.
 - MCP config is per-user and local to the device.
-- Skills are per-device and do not leak across users/devices.
+- Server-owned repo skills from `skills/` are first-class production runtime inputs and load successfully at startup.
+- Client-owned skills remain device-scoped and do not leak across users/devices.
+- Server and client skills are resolved through one explicit internal source/resolver model; runtime behavior does not depend on fallback/admin flags.
+- No public server `/skills/*` management API remains.
+- Anthropic-style `SKILL.md` files parse identically on server and client, and `activate_skill` returns a consistent body-only payload regardless of source.
+- The local runtime concurrency model is explicit and enforced: either one active upstream user per `client_backend` process or verified per-session scoped auth/MCP/skills/runtime state.
 - Document upload works through the client backend while processing remains server-side.
 - MinerU parse results are represented in server-side artifact persistence.
 - HITL and tool approval audit records include device-aware provenance.
 - The three-sided stream is stable for long-running tool calls and resumptions.
-- Legacy server behavior remains available when the client-runtime bridge is disabled.
+- Focused skills/runtime protocol tests are green, including real repo-skills parity, startup load checks, and strict runtime-bridge request validation coverage.
+- Server-only operation remains valid when the client-runtime bridge is disabled, without relying on deprecated skills fallback paths.
 
 ## 21. Recommended Order of Execution
 
 1. Align schema/models with existing migrations.
 2. Create `client_backend/` skeleton and upstream auth/session proxy.
-3. Add server-side device registration and runtime WebSocket.
-4. Implement local native tools, local MCP, and local skills on the client.
-5. Add server-side remote tool catalog and dispatch path.
-6. Make skill activation device-session aware.
-7. Persist parse artifacts and expose artifact APIs if desktop needs them.
-8. Run the verification matrix and roll out behind flags.
+3. Decide and enforce the local runtime concurrency model (`one user per sidecar process` vs `true per-session multi-tenant sidecar`).
+4. Add server-side device registration and runtime WebSocket.
+5. Implement local native tools, local MCP, and local skills on the client.
+6. Add server-side remote tool catalog and dispatch path.
+7. Refactor skills to an explicit source/resolver model: promote repo `skills/` to a first-class server source, keep client skills device-scoped, remove `/skills/*` HTTP routes, and unify the server/client parser contract.
+8. Persist parse artifacts and expose artifact APIs if desktop needs them.
+9. Run the verification matrix and roll out behind flags.
 
 ## 22. Explicit Non-Goals
 

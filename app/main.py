@@ -25,7 +25,6 @@ from app.api import (
     messages_router,
     model_config_router,
     providers_router,
-    skills_router,
     task_plans_router,
     users_router,
     widgets_router,
@@ -168,7 +167,6 @@ def create_app() -> FastAPI:
             "app.api.ai_sdk",
             "app.api.providers",
             "app.api.model_config",
-            "app.api.skills",
             "app.api.client_devices",
             "app.api.device_runtime",
             "app.api.widgets",
@@ -222,7 +220,6 @@ def create_app() -> FastAPI:
     app.include_router(ai_sdk_router)
     app.include_router(providers_router)
     app.include_router(model_config_router)
-    app.include_router(skills_router)
     app.include_router(client_devices_router)
     app.include_router(device_runtime_router)
     app.include_router(widgets_router)
