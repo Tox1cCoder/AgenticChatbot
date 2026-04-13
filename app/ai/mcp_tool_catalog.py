@@ -201,6 +201,7 @@ class McpToolCatalog:
         self._colliding_names: set[str] = set()
         # Case-insensitive server name lookup: {lower_name: canonical_name}
         self._server_name_lower_map: dict[str, str] = {}
+        self._server_descriptions: dict[str, str] = {}
 
         # Inverted index for search: token -> set of tool indices
         self._token_index: dict[str, set[int]] = {}
@@ -240,6 +241,7 @@ class McpToolCatalog:
         self._tools_by_server.clear()
         self._colliding_names.clear()
         self._server_name_lower_map.clear()
+        self._server_descriptions.clear()
         self._token_index.clear()
         self._doc_freq.clear()
 
@@ -304,6 +306,14 @@ class McpToolCatalog:
         # Build case-insensitive server name lookup
         for sname in self._tools_by_server:
             self._server_name_lower_map[sname.lower()] = sname
+
+        # Cache configured server descriptions so inventory mode can expose
+        # short capability summaries without forcing the model to guess from
+        # opaque server identifiers alone.
+        for sname, info in self._mcp_manager.get_servers_status().items():
+            description = str((info or {}).get("description") or "").strip()
+            if description:
+                self._server_descriptions[sname] = description
 
         # Detect collisions (tool names exposed by multiple servers)
         for tool_name, descriptors in self._tools_by_name.items():
@@ -384,13 +394,79 @@ class McpToolCatalog:
         Returns the canonical server name if found, or None if no server
         with that name (case-insensitive) exists in the catalog.
         """
-        return self._server_name_lower_map.get(server_name.lower())
+        canonical = self._server_name_lower_map.get(server_name.lower())
+        if canonical is not None:
+            return canonical
+
+        from ..core.config import settings as _settings
+
+        query_lower, query_tokens = build_query_tokens(server_name)
+        if not query_tokens:
+            return None
+
+        profiles: list[tuple[str, str, list[str]]] = []
+        doc_freq: Counter = Counter()
+
+        for candidate_name, descriptors in self._tools_by_server.items():
+            candidate_tokens = set(tokenize(candidate_name))
+            has_name_signal = (
+                candidate_name.lower() == query_lower
+                or candidate_name.lower().startswith(query_lower)
+                or query_lower.startswith(candidate_name.lower())
+                or bool(query_tokens & candidate_tokens)
+            )
+            if not has_name_signal:
+                continue
+
+            description = self._server_descriptions.get(candidate_name, "").strip()
+            example_tools = [descriptor.tool_name for descriptor in descriptors[:3]]
+            profiles.append((candidate_name, description, example_tools))
+
+            searchable = " ".join([candidate_name, description, " ".join(example_tools)])
+            for token in set(tokenize(searchable)):
+                doc_freq[token] += 1
+
+        if not profiles:
+            return None
+
+        total_profiles = len(profiles)
+        scored: list[tuple[str, float]] = []
+        for candidate_name, description, example_tools in profiles:
+            score = score_tool(
+                tool_name=candidate_name,
+                description=description,
+                arg_names=example_tools,
+                query_lower=query_lower,
+                query_tokens=query_tokens,
+                doc_freq=doc_freq,
+                total_docs=total_profiles,
+            )
+            scored.append((candidate_name, score))
+
+        scored.sort(key=lambda item: (-item[1], item[0]))
+        top_name, top_score = scored[0]
+        second_score = scored[1][1] if len(scored) > 1 else 0.0
+
+        if top_score < _settings.mcp_tool_search_autoload_min_relevance_score:
+            return None
+        if second_score and (top_score - second_score) < _settings.mcp_tool_search_min_relevance_score:
+            return None
+
+        logger.debug(
+            "tool_search: server_name=%r fuzzy-resolved to %r (score=%.2f, second=%.2f)",
+            server_name,
+            top_name,
+            top_score,
+            second_score,
+        )
+        return top_name
 
     def get_server_inventory(self, allowlist: list[str] | None = None) -> list[dict]:
         """Return server-level inventory summaries (name + tool count).
 
         Used by inventory mode (tool_search with no query and no server_name).
-        Returns a token-cheap summary: server_name and tool_count per server.
+        Returns a token-cheap summary: server_name, short description, and
+        tool_count per server.
         """
         summaries = []
         for sname, descriptors in self._tools_by_server.items():
@@ -405,7 +481,17 @@ class McpToolCatalog:
                 tool_count = len(visible)
             else:
                 tool_count = len(descriptors)
-            summaries.append({"server_name": sname, "tool_count": tool_count})
+            description = self._server_descriptions.get(sname, "").strip()
+            if not description and descriptors:
+                example_tools = ", ".join(descriptor.tool_name for descriptor in descriptors[:3])
+                description = f"Tools: {example_tools}"
+            summaries.append(
+                {
+                    "server_name": sname,
+                    "description": description,
+                    "tool_count": tool_count,
+                }
+            )
         return summaries
 
     def search(

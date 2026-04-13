@@ -24,10 +24,18 @@ _WIDGET_PINNED_SPECS = (
     "widgets::widget_update",
     "widgets::widget_get_state",
 )
+_SEARCH_AGENT_PINNED_SPECS = (
+    "time::get_current_time",
+    "tavily::tavily_search",
+)
 
 
 def _get_pinned_specs(agent_key: str | None) -> list[str]:
     pinned_specs = list(settings.mcp_tool_search_pinned_tools or [])
+    if agent_key == "search":
+        for spec in _SEARCH_AGENT_PINNED_SPECS:
+            if spec not in pinned_specs:
+                pinned_specs.append(spec)
     if agent_key in _WIDGET_PINNED_AGENT_KEYS:
         for spec in _WIDGET_PINNED_SPECS:
             if spec not in pinned_specs:

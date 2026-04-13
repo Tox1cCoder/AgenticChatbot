@@ -333,7 +333,72 @@ class ClientToolCatalog:
 
     def resolve_server_name(self, server_name: str) -> str | None:
         """Resolve a server name case-insensitively to its canonical form."""
-        return self._server_name_lower_map.get(server_name.lower())
+        canonical = self._server_name_lower_map.get(server_name.lower())
+        if canonical is not None:
+            return canonical
+
+        from app.core.config import settings as _settings
+
+        query_lower, query_tokens = build_query_tokens(server_name)
+        if not query_tokens:
+            return None
+
+        profiles: list[tuple[str, str, list[str]]] = []
+        doc_freq: Counter = Counter()
+
+        for candidate_name, descriptors in self._tools_by_server.items():
+            candidate_tokens = set(_tokenize(candidate_name))
+            has_name_signal = (
+                candidate_name.lower() == query_lower
+                or candidate_name.lower().startswith(query_lower)
+                or query_lower.startswith(candidate_name.lower())
+                or bool(query_tokens & candidate_tokens)
+            )
+            if not has_name_signal:
+                continue
+
+            description = ""
+            example_tools = [descriptor.tool_name for descriptor in descriptors[:3]]
+            profiles.append((candidate_name, description, example_tools))
+
+            searchable = " ".join([candidate_name, " ".join(example_tools)])
+            for token in set(_tokenize(searchable)):
+                doc_freq[token] += 1
+
+        if not profiles:
+            return None
+
+        total_profiles = len(profiles)
+        scored: list[tuple[str, float]] = []
+        for candidate_name, description, example_tools in profiles:
+            score = score_tool(
+                tool_name=candidate_name,
+                description=description,
+                arg_names=example_tools,
+                query_lower=query_lower,
+                query_tokens=query_tokens,
+                doc_freq=doc_freq,
+                total_docs=total_profiles,
+            )
+            scored.append((candidate_name, score))
+
+        scored.sort(key=lambda item: (-item[1], item[0]))
+        top_name, top_score = scored[0]
+        second_score = scored[1][1] if len(scored) > 1 else 0.0
+
+        if top_score < _settings.mcp_tool_search_autoload_min_relevance_score:
+            return None
+        if second_score and (top_score - second_score) < _settings.mcp_tool_search_min_relevance_score:
+            return None
+
+        logger.debug(
+            "client tool search: server_name=%r fuzzy-resolved to %r (score=%.2f, second=%.2f)",
+            server_name,
+            top_name,
+            top_score,
+            second_score,
+        )
+        return top_name
 
     def search(
         self,

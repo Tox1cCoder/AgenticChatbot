@@ -93,6 +93,41 @@ def _build_auth_payload(tokens: TokenPair, *, message: str) -> dict[str, Any]:
     }
 
 
+def _assert_single_active_upstream_user(
+    *,
+    target_user_id: str | None = None,
+    target_username: str | None = None,
+) -> None:
+    """
+    Enforce the current client_backend tenancy model.
+
+    The local runtime still uses process-global auth/runtime/MCP/skills state, so
+    one client_backend process may only represent one active upstream user at a time.
+    """
+    auth_service = get_upstream_auth_service()
+    if not auth_service.is_authenticated():
+        return
+
+    current_user_id = auth_service.get_current_user_id()
+    get_current_username = getattr(auth_service, "get_current_username", None)
+    current_username = get_current_username() if callable(get_current_username) else None
+
+    if target_user_id and current_user_id and str(target_user_id) == str(current_user_id):
+        return
+
+    if target_username and current_username:
+        if str(target_username).strip().lower() == str(current_username).strip().lower():
+            return
+
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            "This client_backend process is already bound to a different upstream user. "
+            "Log out first or run a separate client_backend process."
+        ),
+    )
+
+
 async def _start_runtime_bridge_after_auth() -> None:
     """Start the runtime bridge and wait briefly for initial registration."""
     bridge = get_runtime_bridge()
@@ -134,12 +169,16 @@ async def login(request: LoginRequest) -> dict[str, Any]:
     auth_service = get_upstream_auth_service()
 
     try:
-        tokens = await auth_service.login(request.resolved_email(), request.password)
+        resolved_email = request.resolved_email()
+        _assert_single_active_upstream_user(target_username=resolved_email)
+        tokens = await auth_service.login(resolved_email, request.password)
         await _start_runtime_bridge_after_auth()
         return _augment_auth_response(
             _build_auth_payload(tokens, message="Login successful"),
             include_local_session=True,
         )
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
     except Exception as exc:
@@ -208,6 +247,7 @@ async def restore_session(user_id: str) -> dict[str, Any]:
     auth_service = get_upstream_auth_service()
 
     try:
+        _assert_single_active_upstream_user(target_user_id=user_id)
         success = await auth_service.restore_session(user_id)
         if not success:
             raise HTTPException(

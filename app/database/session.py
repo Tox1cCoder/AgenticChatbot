@@ -39,3 +39,13 @@ def get_engine():
         Engine: SQLAlchemy engine
     """
     return engine
+
+
+def get_session_factory():
+    """
+    Get the SQLAlchemy session factory used for short-lived repositories.
+
+    Returns:
+        sessionmaker: Callable that creates new Session instances
+    """
+    return SessionLocal

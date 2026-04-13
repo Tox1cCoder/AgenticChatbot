@@ -28,6 +28,9 @@ class _AuthStub:
     def get_current_access_token(self) -> str | None:
         return self._access_token
 
+    def get_current_username(self) -> str | None:
+        return None
+
 
 @pytest.mark.asyncio
 async def test_require_local_session_accepts_matching_user(monkeypatch):
@@ -98,6 +101,12 @@ async def test_require_local_session_accepts_active_upstream_access_token(monkey
 @pytest.mark.asyncio
 async def test_login_returns_server_shape_with_local_metadata(monkeypatch):
     class _AuthServiceStub:
+        def is_authenticated(self) -> bool:
+            return False
+
+        def get_current_username(self) -> str | None:
+            return None
+
         async def login(self, email: str, password: str) -> TokenPair:
             assert email == "user@example.com"
             assert password == "secret"
@@ -133,6 +142,63 @@ async def test_login_returns_server_shape_with_local_metadata(monkeypatch):
     assert result["data"]["deviceId"] == "device-id-123"
     assert result["data"]["deviceIdentifier"] == "device-identifier-123"
     assert result["data"]["localSessionToken"]
+
+
+@pytest.mark.asyncio
+async def test_login_rejects_switching_active_user_without_logout(monkeypatch):
+    login_calls: list[tuple[str, str]] = []
+
+    class _AuthServiceStub:
+        def is_authenticated(self) -> bool:
+            return True
+
+        def get_current_user_id(self) -> str:
+            return "user-123"
+
+        def get_current_username(self) -> str | None:
+            return "user-one@example.com"
+
+        async def login(self, email: str, password: str) -> TokenPair:
+            login_calls.append((email, password))
+            raise AssertionError("login() should not be called when another user is active")
+
+    monkeypatch.setattr(auth_api, "get_upstream_auth_service", lambda: _AuthServiceStub())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_api.login(
+            auth_api.LoginRequest(email="user-two@example.com", password="secret")
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "log out" in str(exc_info.value.detail).lower()
+    assert login_calls == []
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_switching_active_user_without_logout(monkeypatch):
+    restore_calls: list[str] = []
+
+    class _AuthServiceStub:
+        def is_authenticated(self) -> bool:
+            return True
+
+        def get_current_user_id(self) -> str:
+            return "user-123"
+
+        async def restore_session(self, user_id: str) -> bool:
+            restore_calls.append(user_id)
+            raise AssertionError(
+                "restore_session() should not be called when another user is active"
+            )
+
+    monkeypatch.setattr(auth_api, "get_upstream_auth_service", lambda: _AuthServiceStub())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_api.restore_session("user-456")
+
+    assert exc_info.value.status_code == 409
+    assert "log out" in str(exc_info.value.detail).lower()
+    assert restore_calls == []
 
 
 def test_augment_auth_response_restores_user_context_for_refresh(monkeypatch):

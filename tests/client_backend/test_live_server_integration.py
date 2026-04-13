@@ -244,6 +244,30 @@ def test_live_auth_refresh_restore_and_logout_flow(live_client_backend):
         assert unauthorized_response.status_code == 401
 
 
+def test_live_login_rejects_switching_active_user_without_logout(live_client_backend):
+    with TestClient(app) as client:
+        first_session = _signup_and_login(client, login_path="/auth/login")
+
+        other_identity = _make_identity()
+        _provision_user_on_server(other_identity)
+
+        conflict_response = client.post(
+            "/auth/login",
+            json={
+                "email": other_identity["email"],
+                "password": other_identity["password"],
+            },
+        )
+
+        assert conflict_response.status_code == 409, conflict_response.text
+        conflict_payload = conflict_response.json()
+        assert "log out" in str(conflict_payload["detail"]).lower()
+
+        session_info = client.get("/auth/session").json()
+        assert session_info["authenticated"] is True
+        assert session_info["userId"] == first_session["user_id"]
+
+
 def test_live_conversation_task_plan_and_alias_routes(live_client_backend):
     with TestClient(app) as client:
         session = _signup_and_login(

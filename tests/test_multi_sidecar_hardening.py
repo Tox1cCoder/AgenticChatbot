@@ -282,6 +282,92 @@ class TestReconnectInvalidatesInstanceId:
         error = bridge._validate_tool_request(request)
         assert error is None
 
+    def test_device_runtime_connect_expires_stale_interrupts_without_warning(
+        self, monkeypatch, caplog
+    ):
+        import importlib.util
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from pathlib import Path
+
+        device_id = uuid4()
+        session_id = "session-new"
+        fake_db = object()
+        expired_calls = []
+
+        module_spec = importlib.util.spec_from_file_location(
+            "device_runtime_api_under_test",
+            Path(__file__).resolve().parents[1] / "app" / "api" / "device_runtime.py",
+        )
+        assert module_spec is not None and module_spec.loader is not None
+        device_runtime = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(device_runtime)
+
+        class _StubClientDeviceService:
+            def __init__(self, db):
+                assert db is fake_db
+                self.repository = SimpleNamespace(
+                    get_by_id=lambda _id: SimpleNamespace(id=_id, user_id=uuid4())
+                )
+
+            async def start_session(self, device_id, session_id):
+                return SimpleNamespace(
+                    device_id=device_id,
+                    session_id=session_id,
+                    user_id=uuid4(),
+                )
+
+        class _StubInterruptRepository:
+            def __init__(self, session_factory):
+                self._session_factory = session_factory
+
+            def expire_stale_client_tool_interrupts(self, *, device_id, current_session_id):
+                expired_calls.append(
+                    {
+                        "device_id": device_id,
+                        "current_session_id": current_session_id,
+                        "session_factory": self._session_factory,
+                    }
+                )
+                return 1
+
+        async def _fake_handle_connection(self):
+            await self.websocket.send_json({"type": "ack"})
+            await self.websocket.close()
+
+        monkeypatch.setattr(device_runtime, "ClientDeviceService", _StubClientDeviceService)
+        monkeypatch.setattr(
+            "app.repositories.hitl_interrupt.HITLInterruptRepository",
+            _StubInterruptRepository,
+        )
+        monkeypatch.setattr(
+            device_runtime.DeviceRuntimeGateway,
+            "handle_connection",
+            _fake_handle_connection,
+        )
+        monkeypatch.setattr(settings, "enable_client_runtime_bridge", True)
+
+        app = FastAPI()
+        app.include_router(device_runtime.router)
+        app.dependency_overrides[device_runtime.get_db] = lambda: fake_db
+
+        with caplog.at_level("WARNING", logger="app.api.device_runtime"):
+            with TestClient(app) as client:
+                with client.websocket_connect(
+                    f"/device-runtime/{device_id}/connect?session_id={session_id}"
+                ) as websocket:
+                    assert websocket.receive_json() == {"type": "ack"}
+
+        assert len(expired_calls) == 1
+        assert expired_calls[0]["device_id"] == device_id
+        assert expired_calls[0]["current_session_id"] == session_id
+        assert callable(expired_calls[0]["session_factory"])
+        assert not any(
+            "Interrupt invalidation failed on connect" in record.getMessage()
+            for record in caplog.records
+        )
+
 
 # ---------------------------------------------------------------------------
 # 3. HITL resume rejection when device changes

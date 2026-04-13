@@ -29,6 +29,7 @@ from .mcp_tool_catalog import (
     get_tool_catalog,
 )
 from .tool_context import get_tool_context
+from .tool_search_scoring import build_query_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,8 @@ class ToolSearchInput(BaseModel):
             "Describe the job, target, and environment in natural language. "
             "Prefer specific phrases like 'read local text file', "
             "'run shell command', or 'web search current news'. "
-            "Leave empty to list all available tools."
+            "Leave empty to list all available servers, or combine an empty query "
+            "with server_name to browse one server's tools."
         ),
     )
     top_k: int | None = Field(
@@ -104,8 +106,10 @@ class ToolSearchInput(BaseModel):
     server_name: str | None = Field(
         default=None,
         description=(
-            "Filter results to a specific MCP server. "
-            "Use this to disambiguate when multiple servers provide tools with the same name."
+            "Hard-scope results to a specific MCP server. "
+            "Use this when the user explicitly names an integration and you want "
+            "to inspect or search only that server's tools. Use the exact "
+            "server_name returned by inventory results; do not guess variants."
         ),
     )
 
@@ -125,6 +129,21 @@ class ToolSearchOutput(BaseModel):
     """Output schema for the tool_search tool."""
 
     query: str | None = Field(description="The search query used")
+    mode: str = Field(description="Search mode: discovery, inventory, or per_server_inventory")
+    resolved_server_name: str | None = Field(
+        default=None,
+        description=(
+            "Canonical server name chosen by tool_search when it can resolve a "
+            "named integration or fuzzy server identifier."
+        ),
+    )
+    inventory: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Server inventory summaries returned in inventory mode. Each item includes "
+            "server_name, description, and tool_count."
+        ),
+    )
     results: list[ToolSearchResult] = Field(description="List of matching tools")
     loaded_count: int = Field(
         description="Number of tools that were autoloaded and ready for immediate use"
@@ -154,49 +173,13 @@ async def _execute_tool_search(
         Dict with search results and metadata
     """
     start_time = time.time()
-
-    # Determine search mode based on query and server_name
-    # - query present -> discovery mode
-    # - query absent and no server_name -> global inventory mode (server summaries)
-    # - query absent and server_name present -> per-server inventory mode
-    is_inventory_mode = not query or not str(query).strip()
-    is_per_server_inventory = is_inventory_mode and bool(server_name)
-
-    # Apply mode-appropriate top_k defaults and limits
-    if is_inventory_mode:
-        default_top_k = settings.mcp_tool_search_inventory_default_top_k
-        max_top_k = settings.mcp_tool_search_inventory_max_top_k
-    else:
-        default_top_k = settings.mcp_tool_search_default_top_k
-        max_top_k = settings.mcp_tool_search_max_top_k
-    autoload_top_k = settings.mcp_tool_search_autoload_top_k
-
-    effective_top_k = top_k if top_k is not None else default_top_k
-    effective_top_k = max(1, min(effective_top_k, max_top_k))
     # Get tool context for conversation-scoped loading
     ctx = get_tool_context()
     conversation_id = ctx.conversation_id
     agent_key = ctx.agent_key
     device_id = ctx.device_id
     user_id = ctx.user_id
-
-    # Log query if enabled (gated on mcp_tool_search_log_queries)
-    if settings.mcp_tool_search_log_queries:
-        mode_label = (
-            "inventory" if is_inventory_mode and not is_per_server_inventory
-            else "per_server_inventory" if is_per_server_inventory
-            else "discovery"
-        )
-        logger.info(
-            "tool_search: mode=%s query=%r top_k=%d server=%s conversation=%s agent=%s device=%s",
-            mode_label,
-            query,
-            effective_top_k,
-            server_name,
-            conversation_id,
-            agent_key,
-            device_id[:8] if device_id else None,
-        )
+    resolved_server_name: str | None = None
 
     # Get the MCP manager and catalog for SERVER tools
     unavailable_servers: list[str] = []
@@ -205,6 +188,60 @@ async def _execute_tool_search(
     try:
         mcp_manager = await get_global_mcp_manager()
         catalog = await get_tool_catalog(mcp_manager)
+
+        # Resolve server identifiers before deciding between discovery and
+        # inventory modes so broad integration queries like "Canva" or
+        # plausible variants like "excel-server" can use the correct server
+        # scope without hard-coded aliases.
+        if server_name and hasattr(catalog, "resolve_server_name"):
+            resolved_server_name = catalog.resolve_server_name(server_name)
+            if resolved_server_name:
+                server_name = resolved_server_name
+        elif query and hasattr(catalog, "resolve_server_name"):
+            resolved_server_name = catalog.resolve_server_name(query)
+            if resolved_server_name:
+                query_tokens = build_query_tokens(query)[1]
+                server_name = resolved_server_name
+                if len(query_tokens) <= 1:
+                    query = None
+
+        # Determine search mode based on the resolved query/server_name
+        # - query present -> discovery mode
+        # - query absent and no server_name -> global inventory mode (server summaries)
+        # - query absent and server_name present -> per-server inventory mode
+        is_inventory_mode = not query or not str(query).strip()
+        is_per_server_inventory = is_inventory_mode and bool(server_name)
+
+        # Apply mode-appropriate top_k defaults and limits
+        if is_inventory_mode:
+            default_top_k = settings.mcp_tool_search_inventory_default_top_k
+            max_top_k = settings.mcp_tool_search_inventory_max_top_k
+        else:
+            default_top_k = settings.mcp_tool_search_default_top_k
+            max_top_k = settings.mcp_tool_search_max_top_k
+        autoload_top_k = settings.mcp_tool_search_autoload_top_k
+
+        effective_top_k = top_k if top_k is not None else default_top_k
+        effective_top_k = max(1, min(effective_top_k, max_top_k))
+
+        # Log query if enabled (gated on mcp_tool_search_log_queries)
+        if settings.mcp_tool_search_log_queries:
+            mode_label = (
+                "inventory" if is_inventory_mode and not is_per_server_inventory
+                else "per_server_inventory" if is_per_server_inventory
+                else "discovery"
+            )
+            logger.info(
+                "tool_search: mode=%s query=%r top_k=%d server=%s resolved_server=%s conversation=%s agent=%s device=%s",
+                mode_label,
+                query,
+                effective_top_k,
+                server_name,
+                resolved_server_name,
+                conversation_id,
+                agent_key,
+                device_id[:8] if device_id else None,
+            )
 
         # Global inventory mode: return server summaries without searching tools
         if is_inventory_mode and not is_per_server_inventory:
@@ -219,6 +256,7 @@ async def _execute_tool_search(
             return {
                 "query": None,
                 "mode": "inventory",
+                "resolved_server_name": resolved_server_name,
                 "inventory": inventory,
                 "results": [],
                 "loaded_count": 0,
@@ -244,6 +282,17 @@ async def _execute_tool_search(
     except Exception as e:
         logger.error("Failed to get server tool catalog: %s", e)
         unavailable_servers.append("all_server")
+        is_inventory_mode = not query or not str(query).strip()
+        is_per_server_inventory = is_inventory_mode and bool(server_name)
+        if is_inventory_mode:
+            default_top_k = settings.mcp_tool_search_inventory_default_top_k
+            max_top_k = settings.mcp_tool_search_inventory_max_top_k
+        else:
+            default_top_k = settings.mcp_tool_search_default_top_k
+            max_top_k = settings.mcp_tool_search_max_top_k
+        autoload_top_k = settings.mcp_tool_search_autoload_top_k
+        effective_top_k = top_k if top_k is not None else default_top_k
+        effective_top_k = max(1, min(effective_top_k, max_top_k))
 
     # Get CLIENT tools if device is connected
     client_results = []
@@ -390,13 +439,16 @@ async def _execute_tool_search(
     # Return clean results for model consumption
     # NO internal metadata like server_name, origin, generation, etc.
     mode = "per_server_inventory" if is_per_server_inventory else "discovery"
-    return {
+    result = {
         "query": query,
         "mode": mode,
         "results": public_results,
         "loaded_count": loaded_count,
         "more_available": truncated,
     }
+    if resolved_server_name:
+        result["resolved_server_name"] = resolved_server_name
+    return result
 
 
 def _merge_search_results(
@@ -501,8 +553,20 @@ async def tool_search(
     Use tool_search with a specific query to find and autoload the tool you need,
     then call the discovered tool by name.
 
+    For named integrations:
+    - If you do not yet know the exact server identifier, call tool_search()
+      first and inspect the enabled servers and their descriptions
+    - Then call tool_search(server_name="...") to browse that server's tools
+    - Use the exact server_name returned by tool_search(); do not invent or
+      modify server identifiers
+    - For a specific task inside that integration, use
+      tool_search(query="...", server_name="...")
+    - If the scoped search returns no suitable tool, retry with an unscoped
+      capability query rather than guessing
+
     After searching:
     - Read each result's description and arg_hints before choosing a tool
+    - If resolved_server_name is present, reuse that exact server_name in later calls
     - Prefer task-based queries that include the action and target
     - Refine the query and search again if the results are weak or ambiguous
     - The top results are automatically loaded; any result with is_loaded=true
@@ -512,8 +576,9 @@ async def tool_search(
     - Search for web tools: tool_search(query="search the web")
     - Search for local file tools: tool_search(query="read local text file")
     - Search for computer interaction tools: tool_search(query="run shell command")
-    - List all tools: tool_search()
-    - Filter by server: tool_search(query="search", server_name="tavily")
+    - List all servers: tool_search()
+    - Browse one integration's tools: tool_search(server_name="target_server")
+    - Search within one integration: tool_search(query="specific task", server_name="target_server")
     """
     result = await _execute_tool_search(
         query=query,
@@ -557,9 +622,17 @@ def create_tool_search_tool(allowlist: list[str] | None = None):
         Use tool_search with a specific query to find and autoload the tool you need,
         then call the discovered tool by name.
 
+        For named integrations, identify the exact server first with
+        tool_search(), then inspect that server with tool_search(server_name="...")
+        before narrowing to tool_search(query="...", server_name="...").
+        Use the exact server_name returned by tool_search(); do not invent
+        variants.
+        If the scoped search has no suitable tool, retry with an unscoped query.
+
         After searching, inspect the descriptions and arg_hints, refine the
-        query if needed, and call the best matching tool by name. Results with
-        is_loaded=true are ready to use immediately.
+        query if needed, and call the best matching tool by name. If
+        resolved_server_name is present, reuse that exact server_name in later
+        calls. Results with is_loaded=true are ready to use immediately.
         """
         result = await _execute_tool_search(
             query=query,

@@ -131,8 +131,11 @@ Use search tools when the query requires:
 - Up-to-date statistics, prices, or data
 - Information beyond your training knowledge
 
-CRITICAL - Time-sensitive queries:
-Queries involving "recent", "latest", "current", "today", prices, rates, news, events, weather, scores, or anything beyond your training cutoff require live lookup — do not rely on training knowledge alone. If `get_current_time` is available, call it first to anchor temporal context in your search queries.
+MANDATORY - Before any web search:
+Always call `get_current_time` before executing any web or Tavily search. This anchors temporal context so your queries include the correct date and your results are interpreted relative to now. Do not skip this step even if the query seems timeless — the current date affects result ranking and relevance.
+- If the search tool is not loaded yet, use `tool_search` to load it, but do not execute the search yet
+- Once the search tool is available, call `get_current_time`, then call the web search tool
+- Never make `tavily_search` your first actual web-search call in a turn
 
 Tool discovery:
 - Call `tool_search` before invoking any MCP tool that is not already loaded. Do not guess MCP tool names.
@@ -140,7 +143,7 @@ Tool discovery:
 - If the user wants you to act on their device, files, or local environment, use the appropriate execution tool rather than only describing steps.
 
 Search strategy:
-- Plan what you need before searching; include dates in queries when relevant
+- Call `get_current_time` first, then plan your search queries using the current date where relevant
 - If initial results are incomplete, refine your query or try a different angle
 - Don't repeat identical searches — explore different aspects instead
 - Verify important facts across multiple sources when possible
@@ -206,14 +209,19 @@ TOOL_EXPLORATION_SUFFIX = """
 TOOLS AND ENVIRONMENT:
 IMPORTANT: The examples and text in this prompt are NOT a tool inventory. Do not assume any tool is available based on prompt text alone. The only way to know what tools are actually available is to call `tool_search`.
 
-- When the user asks what tools or integrations are available, call `tool_search()` with no arguments to see the enabled servers and their tool counts. Do NOT answer from prompt memory.
-- When the user names an external system, app, or integration — or asks you to act inside one — search with `tool_search(query="...")` before falling back to local HTML, widgets, or delegating to another agent.
+- When the user asks what tools or integrations are available, call `tool_search()` with no arguments to see the enabled servers, their descriptions, and their tool counts. Do NOT answer from prompt memory.
+- When the user names an external system, app, or integration — or asks you to act inside one — do not start with an unscoped task search unless you already know the exact server identifier from this conversation.
+- If the exact server identifier is unknown, call `tool_search()` first, inspect the enabled servers and their descriptions, and identify the most relevant server before choosing a tool.
+- After identifying the relevant server, call `tool_search(server_name="...")` to inspect that server's tools before deciding whether a suitable tool exists.
+- Use the exact `server_name` returned by `tool_search()`. Do not invent or modify server identifiers.
+- When the task inside that integration is already specific, narrow the search with `tool_search(query="...", server_name="...")`.
+- If the scoped search returns no suitable tool, retry with an unscoped capability query rather than guessing.
 - Some available tools may inspect or act on a connected user device, local files, shell commands, browser state, or other live environment data
 - If the user wants you to perform an action and the necessary tool exists, do it with tools instead of only giving instructions
 - When the answer depends on current state, exact file contents, command output, or anything on the user's computer, inspect with tools instead of guessing
 - Use `tool_search(query="...")` to discover tools for a task. Write queries around the actual task, target, and context.
 - Use `tool_search(server_name="...")` to browse the tools from a specific server.
-- Use `tool_search()` with no arguments to see all available servers and tool counts.
+- Use `tool_search()` with no arguments to see all available servers, short descriptions, and tool counts.
 - After `tool_search`, read each result's description and `arg_hints` before choosing a tool. If `is_loaded` is true, that tool is ready to call immediately. Use the exact `tool_name` shown in the result — do not guess or modify it.
 - If results are weak or ambiguous, refine the query and search again rather than guessing
 - Prefer the smallest sufficient tool and avoid duplicate calls with the same inputs
@@ -541,6 +549,8 @@ YOUR TASK:
 3. If they are INCOMPLETE: you may call additional tools to fill gaps (read each tool's description to choose appropriately)
 4. AVOID repeating the exact same tool call with identical arguments
 5. If a result is only tool discovery output, use the discovered tool instead of stopping at the search results
+6. If the only result so far is tool discovery or you just loaded a web-search tool, call `get_current_time` before your first actual web-search tool
+7. Never make `tavily_search` your first actual web-search call in a turn
 
 CITATION FORMATTING (CRITICAL):
 Tool results contain 'title' and 'url' fields. Extract these and create clickable markdown links.

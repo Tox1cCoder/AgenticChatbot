@@ -236,6 +236,12 @@ class UpstreamAuthService:
         """Get the current authenticated user ID."""
         return self._current_user_id
 
+    def get_current_username(self) -> str | None:
+        """Return the login identifier for the current active upstream session."""
+        if self._credentials is None:
+            return None
+        return self._credentials.username
+
     def is_authenticated(self) -> bool:
         """Check if we have an active authenticated session."""
         return self._current_user_id is not None and self._client.is_authenticated()

@@ -1,12 +1,47 @@
 import contextlib
+import inspect
 import logging
+from typing import Any
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from psycopg_pool import AsyncConnectionPool
 
+from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from app.core.config import Settings
 
+_CHECKPOINT_ALLOWED_TYPES = (
+    AgentType,
+    MessageRole,
+    AgentResponse,
+    AgentMessage,
+)
+
+_CHECKPOINT_ALLOWED_JSON_MODULES: list[tuple[str, ...]] = [
+    (*symbol.__module__.split("."), symbol.__name__) for symbol in _CHECKPOINT_ALLOWED_TYPES
+]
+_CHECKPOINT_ALLOWED_MSGPACK_MODULES: list[tuple[str, str]] = [
+    (symbol.__module__, symbol.__name__) for symbol in _CHECKPOINT_ALLOWED_TYPES
+]
+
 logger = logging.getLogger(__name__)
+
+
+def _build_checkpoint_serializer() -> JsonPlusSerializer:
+    """Build a checkpoint serializer compatible with current and newer LangGraph APIs."""
+    serializer_kwargs: dict[str, Any] = {
+        "allowed_json_modules": _CHECKPOINT_ALLOWED_JSON_MODULES,
+    }
+
+    try:
+        serializer_params = inspect.signature(JsonPlusSerializer.__init__).parameters
+    except (TypeError, ValueError):
+        serializer_params = {}
+
+    if "allowed_msgpack_modules" in serializer_params:
+        serializer_kwargs["allowed_msgpack_modules"] = _CHECKPOINT_ALLOWED_MSGPACK_MODULES
+
+    return JsonPlusSerializer(**serializer_kwargs)
 
 
 class CheckpointManager:
@@ -49,22 +84,16 @@ class CheckpointManager:
             await self._pool.open()
 
             # Create AsyncPostgresSaver with the pool (not a dedicated connection)
-            self.checkpointer = AsyncPostgresSaver(self._pool)
+            serde = _build_checkpoint_serializer()
+            self.checkpointer = AsyncPostgresSaver(self._pool, serde=serde)
 
-            # Run one-time setup using a temporary pooled connection.
-            # autocommit=True is required because LangGraph's setup() issues
-            # CREATE INDEX CONCURRENTLY, which PostgreSQL forbids inside a
-            # transaction block.
+            # Run one-time setup using a temporary pooled connection
             async with self._pool.connection() as conn:
                 await conn.set_autocommit(True)
                 temp_saver = AsyncPostgresSaver(conn)
                 await temp_saver.setup()
 
             self._initialized = True
-            logger.debug(
-                f"Successfully created checkpoint tables in schema '{self.settings.checkpoint_schema}' "
-                f"with pool size {min_size}-{max_size}"
-            )
 
         except Exception as e:
             logger.error(f"Failed to setup checkpoint manager: {e}", exc_info=True)

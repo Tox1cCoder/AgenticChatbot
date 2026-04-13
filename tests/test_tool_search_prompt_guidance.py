@@ -48,3 +48,24 @@ def test_tool_exploration_suffix_mentions_inventory_mode():
         "TOOL_EXPLORATION_SUFFIX must show the no-argument form of tool_search() "
         "for listing all available servers."
     )
+
+
+def test_tool_exploration_suffix_guides_named_integrations_to_inventory_first():
+    """Named integrations should push the agent through inventory/server browsing
+    before unscoped task search so it does not guess the wrong tool surface."""
+    assert "exact server identifier" in TOOL_EXPLORATION_SUFFIX.lower(), (
+        "TOOL_EXPLORATION_SUFFIX must explain what to do when the model does not "
+        "yet know the exact server identifier for a named integration."
+    )
+    assert "tool_search(server_name=" in TOOL_EXPLORATION_SUFFIX, (
+        "TOOL_EXPLORATION_SUFFIX must direct the model to inspect a specific "
+        "server's inventory for named integrations."
+    )
+
+
+def test_tool_exploration_suffix_forbids_inventing_server_identifiers():
+    """Server identifiers must come from tool_search results, not model guesses."""
+    lower_suffix = TOOL_EXPLORATION_SUFFIX.lower()
+    assert "do not invent or modify server" in lower_suffix, (
+        "TOOL_EXPLORATION_SUFFIX must explicitly forbid guessing server identifiers."
+    )

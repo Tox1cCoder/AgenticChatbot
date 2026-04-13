@@ -1,7 +1,7 @@
 import pytest
 
 from app.ai.client_tool_catalog import ClientToolDescriptor
-from app.ai.mcp_tool_catalog import ToolDescriptor
+from app.ai.mcp_tool_catalog import McpToolCatalog, ToolDescriptor
 from app.ai.tool_context import ToolContext
 from app.ai.tool_search_tool import (
     _execute_tool_search,
@@ -60,6 +60,92 @@ async def test_tool_search_without_query_returns_inventory_metadata(monkeypatch)
     servers = {s["server_name"] for s in result["inventory"]}
     assert "tavily" in servers
     assert "time" in servers
+
+
+def test_server_inventory_includes_server_descriptions():
+    """Inventory mode should expose a short server description so the model can
+    identify the right integration before choosing tools."""
+    catalog = McpToolCatalog(mcp_manager=object())
+    catalog._tools_by_server = {
+        "canva-dev": [
+            ToolDescriptor(
+                tool_name="read_canva_docs",
+                server_name="canva-dev",
+                description="Read Canva developer docs.",
+                arg_names=[],
+                required_arg_names=[],
+                schema_fingerprint="fp-1",
+            )
+        ]
+    }
+    catalog._server_descriptions = {"canva-dev": "Canva developer tooling and documentation"}
+
+    inventory = catalog.get_server_inventory()
+
+    assert inventory == [
+        {
+            "server_name": "canva-dev",
+            "description": "Canva developer tooling and documentation",
+            "tool_count": 1,
+        }
+    ]
+
+
+def test_resolve_server_name_fuzzy_matches_tokenized_variant():
+    """Server resolution should recover from plausible identifier variants
+    without requiring hard-coded aliases."""
+    catalog = McpToolCatalog(mcp_manager=object())
+    catalog._tools_by_server = {
+        "excel": [
+            ToolDescriptor(
+                tool_name="excel_read_sheet",
+                server_name="excel",
+                description="Read values from an Excel sheet.",
+                arg_names=["file"],
+                required_arg_names=["file"],
+                schema_fingerprint="fp-excel",
+            )
+        ],
+        "canva-dev": [
+            ToolDescriptor(
+                tool_name="read_canva_docs",
+                server_name="canva-dev",
+                description="Read Canva developer documentation.",
+                arg_names=[],
+                required_arg_names=[],
+                schema_fingerprint="fp-canva",
+            )
+        ],
+    }
+    catalog._server_name_lower_map = {"excel": "excel", "canva-dev": "canva-dev"}
+    catalog._server_descriptions = {
+        "excel": "Excel spreadsheet automation tools",
+        "canva-dev": "Canva developer tooling and documentation",
+    }
+
+    assert catalog.resolve_server_name("excel-server") == "excel"
+
+
+def test_resolve_server_name_fuzzy_returns_none_for_weak_match():
+    """Fuzzy server resolution should stay conservative when the input does not
+    clearly identify a configured server."""
+    catalog = McpToolCatalog(mcp_manager=object())
+    catalog._tools_by_server = {
+        "excel": [
+            ToolDescriptor(
+                tool_name="excel_read_sheet",
+                server_name="excel",
+                description="Read values from an Excel sheet.",
+                arg_names=["file"],
+                required_arg_names=["file"],
+                schema_fingerprint="fp-excel",
+            )
+        ]
+    }
+    catalog._server_name_lower_map = {"excel": "excel"}
+    catalog._server_descriptions = {"excel": "Excel spreadsheet automation tools"}
+
+    assert catalog.resolve_server_name("totally-unrelated") is None
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +235,63 @@ async def test_execute_tool_search_passes_query_through_unchanged(monkeypatch):
 
     assert result["query"] == "edit file on my computer"
     assert fake_catalog.query == "edit file on my computer"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_search_promotes_named_integration_query_to_server_inventory(
+    monkeypatch,
+):
+    class FakeCatalog:
+        def __init__(self):
+            self.calls = []
+
+        def resolve_server_name(self, server_name):
+            if server_name == "Canva":
+                return "canva-dev"
+            return None
+
+        def search(self, query=None, top_k=5, server_name=None, allowlist=None):
+            self.calls.append((query, server_name))
+            return [
+                ToolDescriptor(
+                    tool_name="read_canva_docs",
+                    server_name="canva-dev",
+                    description="Read Canva developer docs.",
+                    arg_names=[],
+                    required_arg_names=[],
+                    schema_fingerprint="fp-canva",
+                )
+            ]
+
+        def is_ambiguous(self, tool_name):
+            return False
+
+    fake_catalog = FakeCatalog()
+
+    async def fake_get_global_mcp_manager():
+        return object()
+
+    async def fake_get_tool_catalog(_manager):
+        return fake_catalog
+
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_global_mcp_manager",
+        fake_get_global_mcp_manager,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_catalog",
+        fake_get_tool_catalog,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_context",
+        lambda: ToolContext(),
+    )
+
+    result = await _execute_tool_search(query="Canva")
+
+    assert result["mode"] == "per_server_inventory"
+    assert result["resolved_server_name"] == "canva-dev"
+    assert fake_catalog.calls == [(None, "canva-dev")]
 
 
 @pytest.mark.asyncio
