@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
+from .tool_scope import ToolScope, resolve_tool_scope
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,10 +32,17 @@ class ToolContext:
     user_id: str | None = None
     agent_key: str | None = None
     device_id: str | None = None
+    tool_scope: str | None = None
 
     def __bool__(self) -> bool:
         """Return True if any context field is set."""
-        return bool(self.conversation_id or self.user_id or self.agent_key or self.device_id)
+        return bool(
+            self.conversation_id
+            or self.user_id
+            or self.agent_key
+            or self.device_id
+            or self.tool_scope
+        )
 
 
 # Context variable for the current tool execution context
@@ -87,6 +96,7 @@ def tool_execution_context(
     user_id: str | None = None,
     agent_key: str | None = None,
     device_id: str | None = None,
+    tool_scope: str | ToolScope | None = None,
 ):
     """
     Context manager that sets tool execution context for the duration of a block.
@@ -112,6 +122,7 @@ def tool_execution_context(
         user_id=user_id,
         agent_key=agent_key,
         device_id=device_id,
+        tool_scope=resolve_tool_scope(device_id=device_id, tool_scope=tool_scope).value,
     )
 
     # Save previous context (for nested contexts, though unlikely)

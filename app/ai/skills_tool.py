@@ -24,7 +24,11 @@ from app.services.client_device_service import ClientDeviceService
 
 from .skill_resolver import (
     get_available_skill_summaries as get_resolved_skill_summaries,
+)
+from .skill_resolver import (
     get_bound_device_session,
+)
+from .skill_resolver import (
     resolve_skill_reference as resolve_runtime_skill_reference,
 )
 from .skills_registry import get_server_skills_registry
@@ -159,7 +163,7 @@ def create_activate_skill_tool(
             user_id=bound_user_id,
             device_id=bound_device_id,
             tool_name="activate_skill",
-            qualified_tool_id="native::activate_skill",
+            qualified_tool_id="client_skill::activate",
             arguments={"skill_name": resolved_skill.name},
             timeout_seconds=settings.client_runtime_ws_timeout_seconds,
             bound_session_id=expected_session_id,

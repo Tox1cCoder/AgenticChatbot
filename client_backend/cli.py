@@ -77,7 +77,6 @@ def _run_doctor(args: argparse.Namespace) -> int:
             "environment": settings.environment,
             "mcp_config_path": str(mcp_manager.config_path),
             "skills_roots": settings.skills_roots,
-            "allowed_shells": settings.allowed_shells,
         },
     }
 

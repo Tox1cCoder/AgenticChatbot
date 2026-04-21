@@ -12,7 +12,6 @@ from app.ai.tool_search_scoring import (
     score_tool,
 )
 
-
 # ---------------------------------------------------------------------------
 # score_tool: basic scoring contracts
 # ---------------------------------------------------------------------------
@@ -149,7 +148,6 @@ def test_rank_and_filter_sorts_descending():
 async def test_is_loaded_false_when_autoload_score_below_threshold(monkeypatch):
     """Tools that score below autoload_min_relevance_score must have is_loaded=False
     even if they appear in search results (above min_relevance_score)."""
-    from app.ai.client_tool_catalog import ClientToolDescriptor
     from app.ai.mcp_tool_catalog import ToolDescriptor
     from app.ai.tool_context import ToolContext
     from app.ai.tool_search_tool import _execute_tool_search
@@ -203,7 +201,9 @@ async def test_is_loaded_false_when_autoload_score_below_threshold(monkeypatch):
     async def fake_get_tool_catalog(_manager):
         return FakeServerCatalog()
 
-    monkeypatch.setattr("app.ai.tool_search_tool.get_global_mcp_manager", fake_get_global_mcp_manager)
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_global_mcp_manager", fake_get_global_mcp_manager
+    )
     monkeypatch.setattr("app.ai.tool_search_tool.get_tool_catalog", fake_get_tool_catalog)
     monkeypatch.setattr("app.ai.tool_search_tool.get_deferred_tool_state", lambda: deferred_state)
     monkeypatch.setattr(

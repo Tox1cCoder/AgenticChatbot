@@ -15,7 +15,11 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from shared.skills.front_matter import extract_yaml_value, parse_skill_front_matter, split_front_matter
+from shared.skills.front_matter import (
+    extract_yaml_value,
+    parse_skill_front_matter,
+    split_front_matter,
+)
 
 logger = logging.getLogger(__name__)
 

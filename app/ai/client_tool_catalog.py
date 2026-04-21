@@ -22,7 +22,6 @@ from app.services.client_device_service import ClientDeviceService, DeviceSessio
 from .client_runtime_tools import (
     CLIENT_TOOL_PREFIX,
     TOOL_ORIGIN_CLIENT_MCP,
-    TOOL_ORIGIN_CLIENT_NATIVE,
 )
 from .text_normalization import sanitize_identifier, tokenize_text
 from .tool_search_scoring import build_query_tokens, rank_and_filter, score_tool
@@ -38,13 +37,13 @@ class ClientToolDescriptor:
     This is the client tool equivalent of ToolDescriptor from mcp_tool_catalog.
     """
 
-    tool_name: str  # The exposed name (e.g., client__shell_execute)
-    server_name: str  # "native" for native tools, or the local MCP server name
+    tool_name: str  # The exposed name (e.g., client__desktop_commander__start_process)
+    server_name: str  # Local MCP server name
     description: str
     arg_names: list[str]
     required_arg_names: list[str]
-    qualified_tool_id: str  # e.g., "native::shell_execute" or "pylance::get_docs"
-    origin: str  # TOOL_ORIGIN_CLIENT_MCP or TOOL_ORIGIN_CLIENT_NATIVE
+    qualified_tool_id: str  # e.g., "desktop_commander::start_process" or "pylance::get_docs"
+    origin: str  # TOOL_ORIGIN_CLIENT_MCP
     device_id: str  # The device this tool belongs to
     session_id: str = ""
     catalog_version: int = 0
@@ -250,18 +249,16 @@ class ClientToolCatalog:
             if not name or not qualified_id:
                 continue
 
-            origin = str(raw_entry.get("origin") or "native").strip().lower()
-            server_name = str(raw_entry.get("server_name") or "native").strip()
+            origin = str(raw_entry.get("origin") or "").strip().lower()
+            server_name = str(raw_entry.get("server_name") or "").strip()
             description = str(raw_entry.get("description") or "").strip()
             input_schema = raw_entry.get("input_schema", {}) or {}
+            if origin != "mcp" or not server_name:
+                continue
 
             # Build the exposed name (with client__ prefix)
-            if origin == "mcp" and server_name:
-                exposed_name = f"{CLIENT_TOOL_PREFIX}{server_name}__{name}".lower()
-                tool_origin = TOOL_ORIGIN_CLIENT_MCP
-            else:
-                exposed_name = f"{CLIENT_TOOL_PREFIX}{name}".lower()
-                tool_origin = TOOL_ORIGIN_CLIENT_NATIVE
+            exposed_name = f"{CLIENT_TOOL_PREFIX}{server_name}__{name}".lower()
+            tool_origin = TOOL_ORIGIN_CLIENT_MCP
 
             # Sanitize exposed name
             exposed_name = sanitize_identifier(exposed_name)
@@ -388,16 +385,12 @@ class ClientToolCatalog:
 
         if top_score < _settings.mcp_tool_search_autoload_min_relevance_score:
             return None
-        if second_score and (top_score - second_score) < _settings.mcp_tool_search_min_relevance_score:
+        if (
+            second_score
+            and (top_score - second_score) < _settings.mcp_tool_search_min_relevance_score
+        ):
             return None
 
-        logger.debug(
-            "client tool search: server_name=%r fuzzy-resolved to %r (score=%.2f, second=%.2f)",
-            server_name,
-            top_name,
-            top_score,
-            second_score,
-        )
         return top_name
 
     def search(
@@ -431,7 +424,9 @@ class ClientToolCatalog:
                 return []
 
         # Start with all tools or server-filtered tools
-        candidates = self._tools_by_server.get(canonical_server, []) if canonical_server else self._tools
+        candidates = (
+            self._tools_by_server.get(canonical_server, []) if canonical_server else self._tools
+        )
 
         # Apply allowlist filtering
         if allowlist:
@@ -500,6 +495,37 @@ class ClientToolCatalog:
                 if t.tool_name in allowlist_set or t.server_name in allowlist_set
             ]
         return list(self._tools)
+
+    def get_server_inventory(self, allowlist: list[str] | None = None) -> list[dict[str, Any]]:
+        """Return inventory summaries grouped by client-side MCP server."""
+        inventory: list[dict[str, Any]] = []
+        for server_name in sorted(self._tools_by_server):
+            tools = self._tools_by_server[server_name]
+            if allowlist:
+                allowlist_set = set(allowlist)
+                if server_name not in allowlist_set and not any(
+                    tool.tool_name in allowlist_set for tool in tools
+                ):
+                    continue
+                tool_count = sum(
+                    1
+                    for tool in tools
+                    if server_name in allowlist_set or tool.tool_name in allowlist_set
+                )
+            else:
+                tool_count = len(tools)
+
+            if tool_count <= 0:
+                continue
+
+            inventory.append(
+                {
+                    "server_name": server_name,
+                    "description": "",
+                    "tool_count": tool_count,
+                }
+            )
+        return inventory
 
     @property
     def tool_count(self) -> int:

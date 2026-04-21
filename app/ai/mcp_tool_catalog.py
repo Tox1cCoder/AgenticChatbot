@@ -449,7 +449,10 @@ class McpToolCatalog:
 
         if top_score < _settings.mcp_tool_search_autoload_min_relevance_score:
             return None
-        if second_score and (top_score - second_score) < _settings.mcp_tool_search_min_relevance_score:
+        if (
+            second_score
+            and (top_score - second_score) < _settings.mcp_tool_search_min_relevance_score
+        ):
             return None
 
         logger.debug(
@@ -473,7 +476,8 @@ class McpToolCatalog:
             if allowlist:
                 allowlist_set = set(allowlist)
                 visible = [
-                    d for d in descriptors
+                    d
+                    for d in descriptors
                     if d.tool_name in allowlist_set or d.server_name in allowlist_set
                 ]
                 if not visible:
@@ -531,7 +535,9 @@ class McpToolCatalog:
                 )
 
         # Start with all tools or server-filtered tools
-        candidates = self._tools_by_server.get(canonical_server, []) if canonical_server else self._tools
+        candidates = (
+            self._tools_by_server.get(canonical_server, []) if canonical_server else self._tools
+        )
 
         # Apply allowlist filtering
         if allowlist:
@@ -573,7 +579,9 @@ class McpToolCatalog:
             if canonical_server is None:
                 return []
 
-        candidates = self._tools_by_server.get(canonical_server, []) if canonical_server else self._tools
+        candidates = (
+            self._tools_by_server.get(canonical_server, []) if canonical_server else self._tools
+        )
 
         if allowlist:
             allowlist_set = set(allowlist)

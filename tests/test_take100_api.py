@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 import requests
 
-
 module_spec = importlib.util.spec_from_file_location(
     "take100_api_under_test",
     Path(__file__).resolve().parents[1] / "skills" / "take100" / "take100_api.py",
@@ -173,7 +172,15 @@ def test_main_list_action_does_not_force_eager_login(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["take100_api.py", "--action", "list", "--email", "user@example.com", "--password", "secret"],
+        [
+            "take100_api.py",
+            "--action",
+            "list",
+            "--email",
+            "user@example.com",
+            "--password",
+            "secret",
+        ],
     )
 
     take100_api.main()

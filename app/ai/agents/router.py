@@ -164,9 +164,20 @@ class Router:
     # the user message explicitly contains at least one of these phrases.
     _WEB_CREATION_TOKENS: frozenset[str] = frozenset(
         {
-            "website", "web page", "webpage", "landing page", "landingpage",
-            "html page", "htmlpage", "web app", "webapp", "web application",
-            "portfolio site", "portfolio page", "home page", "homepage",
+            "website",
+            "web page",
+            "webpage",
+            "landing page",
+            "landingpage",
+            "html page",
+            "htmlpage",
+            "web app",
+            "webapp",
+            "web application",
+            "portfolio site",
+            "portfolio page",
+            "home page",
+            "homepage",
         }
     )
 

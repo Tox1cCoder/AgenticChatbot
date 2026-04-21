@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover - exercised in environments without redi
 from fastapi import status as http_status
 
 from app.ai.suggestion_generator import generate_follow_up_suggestions
+from app.ai.utils import resolve_interrupt_decision_id
 from app.core.config import settings
 from app.core.exceptions import CustomHTTPException, PauseReason
 from app.core.response_constants import (
@@ -190,8 +191,9 @@ class MessageService(IMessageService):
             matched_entries: list[tuple[str, dict[str, Any]]] = []
             for decision in actionable_decisions:
                 lookup_keys = []
-                if decision.task_id:
-                    lookup_keys.append(str(decision.task_id))
+                decision_id = resolve_interrupt_decision_id(decision)
+                if decision_id:
+                    lookup_keys.append(decision_id)
                 if decision.action:
                     action_key = str(decision.action)
                     if action_key not in lookup_keys:
@@ -1231,7 +1233,8 @@ class MessageService(IMessageService):
         for decision in decisions:
             try:
                 is_edit = decision.type == InterruptDecisionType.EDIT
-                orig_key = decision.task_id or decision.action or ""
+                decision_id = resolve_interrupt_decision_id(decision)
+                orig_key = decision_id or decision.action or ""
                 original_args = (
                     stored_original_args.get(orig_key)
                     or stored_original_args.get(decision.action or "")
@@ -1252,7 +1255,7 @@ class MessageService(IMessageService):
                     "user_id": user_id,
                     "interrupt_id": interrupt_id or "unknown",
                     "tool_name": decision.action or "unknown",
-                    "tool_call_id": decision.task_id or "unknown",
+                    "tool_call_id": decision_id or "unknown",
                     "original_args": original_args,
                     "modified_args": decision.args if is_edit else None,
                     "decision": decision_type_map.get(decision.type, DecisionType.REJECT),

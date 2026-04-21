@@ -116,18 +116,10 @@ class ClientSettings(BaseSettings):
         description="Allowed workspace root directories for filesystem operations.",
     )
 
-    # Shell Configuration
-    allowed_shells: list[str] = Field(
-        default=["bash", "sh", "cmd", "powershell"] if _IS_WINDOWS else ["bash", "sh", "zsh"],
-        description="List of allowed shells for script execution.",
-    )
-    shell_timeout_seconds: int = Field(
+    # Local Runtime Execution
+    tool_call_timeout_seconds: int = Field(
         default=60,
-        description="Default timeout for shell command execution.",
-    )
-    shell_max_output_bytes: int = Field(
-        default=1048576,
-        description="Maximum stdout/stderr size for shell commands (1MB default).",
+        description="Default timeout for client-side tool dispatch when the request omits one.",
     )
 
     # Runtime Configuration
@@ -207,18 +199,6 @@ class ClientSettings(BaseSettings):
     @classmethod
     def _normalize_path_list(cls, values: list[str]) -> list[str]:
         return [str(Path(value).expanduser()) for value in values]
-
-    @field_validator("allowed_shells", mode="before")
-    @classmethod
-    def _parse_shell_list(cls, v):
-        if isinstance(v, str):
-            return [s.strip() for s in v.split(",") if s.strip()]
-        return v
-
-    @field_validator("allowed_shells", mode="after")
-    @classmethod
-    def _normalize_shell_list(cls, values: list[str]) -> list[str]:
-        return [value.lower() for value in values]
 
     def get_profile_path(self, *subpaths: str) -> Path:
         """Get a path within the profile directory."""

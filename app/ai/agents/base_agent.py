@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
@@ -35,6 +36,7 @@ from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..skills_tool import create_activate_skill_tool, get_available_skill_summaries
 from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
 from ..tool_execution import _WIDGET_SESSION_BOUND_TOOLS, _bind_widget_session_args
+from ..tool_scope import is_client_only_scope
 from ..utils import (
     coerce_response_text,
     extract_openai_reasoning_summary,
@@ -212,10 +214,8 @@ class BaseAgent(ABC):
             # Try to get server identity for MCP tools; non-MCP tools use ""
             server_name = ""
             if self.mcp_manager:
-                try:
+                with contextlib.suppress(Exception):
                     server_name = self.mcp_manager.get_server_for_tool(tool) or ""
-                except Exception:
-                    pass
             key = (name, server_name)
             if key not in seen:
                 seen[key] = tool
@@ -308,6 +308,7 @@ class BaseAgent(ABC):
         internal_tools: list[BaseTool] | None = None,
         user_id: str | None = None,
         device_id: str | None = None,
+        tool_scope: str | None = None,
     ) -> list[BaseTool]:
         """
         Get the tools to bind to the model for this invocation.
@@ -341,6 +342,7 @@ class BaseAgent(ABC):
             internal_tools = merged_internal
 
         use_deferred = should_use_deferred_loading(self.agent_config_key)
+        client_only_scope = is_client_only_scope(device_id=device_id, tool_scope=tool_scope)
         # When bridge is enabled and device_id is absent, bind zero client tools.
         # This prevents a missing device_id (by accident rather than by design)
         # from falling through to include all loaded client tools.
@@ -354,8 +356,8 @@ class BaseAgent(ABC):
             tools = build_deferred_tool_list(
                 conversation_id=conversation_id,
                 agent_key=self.agent_config_key,
-                mcp_manager=self.mcp_manager,
-                all_mcp_tools=self.tools,  # self.tools contains filtered MCP tools
+                mcp_manager=None if client_only_scope else self.mcp_manager,
+                all_mcp_tools=[] if client_only_scope else self.tools,
                 internal_tools=internal_tools,
                 allowlist=self._get_allowlist(),
             )
@@ -382,7 +384,9 @@ class BaseAgent(ABC):
                 remote_tools = []
         else:
             # Traditional mode: return all tools (with internal tools prepended)
-            if internal_tools:
+            if client_only_scope:
+                tools = list(internal_tools or [])
+            elif internal_tools:
                 # Combine internal tools with MCP tools, avoiding duplicates
                 seen = {t.name for t in internal_tools}
                 tools = list(internal_tools)

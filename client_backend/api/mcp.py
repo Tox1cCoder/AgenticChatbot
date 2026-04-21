@@ -17,6 +17,7 @@ from client_backend.api.common import make_api_response
 from client_backend.core.auth import require_local_session
 from client_backend.core.security import LocalSessionPayload
 from client_backend.services.local_mcp_manager import get_mcp_manager, shutdown_mcp_manager
+from client_backend.services.runtime_bridge import get_runtime_bridge
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
@@ -64,6 +65,13 @@ async def _reload_manager():
     manager = get_mcp_manager()
     await manager.initialize()
     return manager
+
+
+async def _refresh_runtime_bridge_catalogs_if_connected() -> None:
+    bridge = get_runtime_bridge()
+    if not bridge.is_connected() or not bridge.get_registered_device_id():
+        return
+    await bridge.refresh_catalogs()
 
 
 def _manager_tool_lookup() -> dict[str, list[dict[str, Any]]]:
@@ -226,6 +234,7 @@ async def add_mcp_server(
     }
     _write_config_document(document)
     await _reload_manager()
+    await _refresh_runtime_bridge_catalogs_if_connected()
 
     message = f"MCP server '{name}' saved successfully"
     return make_api_response(
@@ -248,6 +257,7 @@ async def add_mcp_server_from_url(
     server_configs[name] = config
     _write_config_document(document)
     await _reload_manager()
+    await _refresh_runtime_bridge_catalogs_if_connected()
 
     message = f"MCP server '{name}' saved successfully"
     return make_api_response(
@@ -272,6 +282,7 @@ async def remove_mcp_server(
     del server_configs[server_name]
     _write_config_document(document)
     await _reload_manager()
+    await _refresh_runtime_bridge_catalogs_if_connected()
 
     message = f"MCP server '{server_name}' removed successfully"
     return make_api_response(
@@ -297,6 +308,7 @@ async def toggle_mcp_server(
     config["enabled"] = enabled
     _write_config_document(document)
     await _reload_manager()
+    await _refresh_runtime_bridge_catalogs_if_connected()
 
     state = "enabled" if enabled else "disabled"
     message = f"MCP server '{server_name}' {state} successfully"
@@ -422,6 +434,7 @@ async def reload_mcp(
 ):
     """Local-only alias to reload MCP configuration."""
     await _reload_manager()
+    await _refresh_runtime_bridge_catalogs_if_connected()
     return make_api_response(
         success=True,
         message="MCP configuration reloaded",

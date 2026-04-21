@@ -11,9 +11,11 @@ from ..core.config import settings
 from .client_runtime_tools import (
     CLIENT_TOOL_PREFIX,
     get_active_client_runtime_session,
+    get_client_runtime_tools,
     get_client_tool_device_id,
     is_client_tool,
 )
+from .tool_scope import is_client_only_scope
 from .tool_search_tool import create_tool_search_tool
 from .utils import extract_content_from_result, normalize_tool_call
 
@@ -232,6 +234,7 @@ async def ensure_agent_tool_map(
     conversation_id: str | None = None,
     user_id: str | None = None,
     device_id: str | None = None,
+    tool_scope: str | None = None,
 ) -> dict[str, Any]:
     """
     Build a tool map for executing tool calls.
@@ -258,6 +261,7 @@ async def ensure_agent_tool_map(
         return {}
 
     initialized_tools = getattr(agent, "tools", None) or []
+    client_only_scope = is_client_only_scope(device_id=device_id, tool_scope=tool_scope)
     if not initialized_tools:
         if hasattr(agent, "_init_mcp"):
             await agent._init_mcp()
@@ -275,6 +279,7 @@ async def ensure_agent_tool_map(
                 conversation_id=conversation_id,
                 user_id=user_id,
                 device_id=device_id,
+                tool_scope=tool_scope,
             )
         except TypeError:
             # Backward-compat fallback for non-keyword signatures.
@@ -288,11 +293,12 @@ async def ensure_agent_tool_map(
             allowlist_key = f"{agent_key}_agent_allowed_tools"
             allowlist = getattr(settings, allowlist_key, None) or []
         tool_search = create_tool_search_tool(allowlist=allowlist)
-        tools = list(initialized_tools)
+        tools = [] if client_only_scope else list(initialized_tools)
         if not any(getattr(t, "name", None) == tool_search.name for t in tools):
             tools.append(tool_search)
         manages_client_tools = False
     else:
+        tools = [] if client_only_scope else list(tools)
         manages_client_tools = False
 
     # Add client runtime tools (device-scoped, separate from server MCP tools)
@@ -343,6 +349,7 @@ async def _refresh_tool_map_after_search(
     conversation_id: str | None,
     user_id: str | None,
     device_id: str | None,
+    tool_scope: str | None = None,
 ) -> None:
     """
     Refresh the tool map after tool_search executes to include newly loaded tools.
@@ -371,6 +378,7 @@ async def _refresh_tool_map_after_search(
 
     try:
         mcp_manager = await get_global_mcp_manager()
+        client_only_scope = is_client_only_scope(device_id=device_id, tool_scope=tool_scope)
 
         # Get the agent key for looking up loaded tools
         agent_key = "default"
@@ -381,22 +389,23 @@ async def _refresh_tool_map_after_search(
         all_mcp_tools = await mcp_manager.get_tools() if mcp_manager else []
 
         # Get the newly loaded deferred server tools
-        deferred_tools = get_deferred_tools_for_binding(
-            conversation_id=conversation_id,
-            agent_key=agent_key,
-            mcp_manager=mcp_manager,
-            all_tools=all_mcp_tools,
-        )
+        if not client_only_scope:
+            deferred_tools = get_deferred_tools_for_binding(
+                conversation_id=conversation_id,
+                agent_key=agent_key,
+                mcp_manager=mcp_manager,
+                all_tools=all_mcp_tools,
+            )
 
-        # Add any new deferred tools to the map
-        for tool in deferred_tools:
-            tool_name = getattr(tool, "name", None)
-            if tool_name and tool_name not in tool_map:
-                tool_map[tool_name] = tool
-                logger.debug(
-                    "Added newly loaded deferred tool '%s' to tool map",
-                    tool_name,
-                )
+            # Add any new deferred tools to the map
+            for tool in deferred_tools:
+                tool_name = getattr(tool, "name", None)
+                if tool_name and tool_name not in tool_map:
+                    tool_map[tool_name] = tool
+                    logger.debug(
+                        "Added newly loaded deferred tool '%s' to tool map",
+                        tool_name,
+                    )
 
         # Also refresh client tools (they may have been loaded via tool_search)
         state = get_deferred_tool_state()
@@ -429,6 +438,85 @@ async def _refresh_tool_map_after_search(
     except Exception as e:
         # Don't fail the entire tool execution if refresh fails
         logger.warning("Failed to refresh tool map after tool_search: %s", e)
+
+
+async def _recover_missing_tool(
+    *,
+    tool_name: str,
+    tool_map: dict[str, Any],
+    agent: Any | None,
+    conversation_id: str | None,
+    user_id: str | None,
+    device_id: str | None,
+    tool_scope: str | None = None,
+) -> Any | None:
+    """
+    Best-effort recovery for exact-name tool calls that are absent from the
+    current execution map.
+
+    This primarily covers client tools discovered through `tool_search` where
+    the model later calls the exact `client__...` name but the execution map
+    was built from stale scope state.
+    """
+    if not tool_name:
+        return None
+
+    if settings.mcp_tool_search_enabled and conversation_id:
+        await _refresh_tool_map_after_search(
+            tool_map=tool_map,
+            agent=agent,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            device_id=device_id,
+            tool_scope=tool_scope,
+        )
+        recovered = tool_map.get(tool_name)
+        if recovered is not None:
+            return recovered
+
+    # Server tool recovery: look up by exact name in the live MCP manager.
+    # Covers the case where a server MCP tool was autoloaded via tool_search,
+    # the graph paused for HITL, and the in-memory deferred state was lost
+    # (server restart, process migration, or LRU eviction past the approval
+    # wait window). The tool is still live on the manager, so we can rebind
+    # it directly by name.
+    if not tool_name.startswith(CLIENT_TOOL_PREFIX):
+        if is_client_only_scope(device_id=device_id, tool_scope=tool_scope):
+            return None
+        try:
+            from .mcp_registry import get_global_mcp_manager
+
+            manager = await get_global_mcp_manager()
+            if manager is not None:
+                for server_tool in await manager.get_tools():
+                    if getattr(server_tool, "name", None) == tool_name:
+                        tool_map[tool_name] = server_tool
+                        logger.debug(
+                            "Recovered missing server tool '%s' from MCP manager",
+                            tool_name,
+                        )
+                        return server_tool
+        except Exception as exc:
+            logger.warning("Failed recovering missing server tool '%s': %s", tool_name, exc)
+        return None
+
+    if not device_id:
+        return None
+
+    try:
+        for client_tool in get_client_runtime_tools(user_id=user_id, device_id=device_id):
+            candidate_name = getattr(client_tool, "name", None)
+            if candidate_name != tool_name:
+                continue
+            tool_map[tool_name] = client_tool
+            logger.debug(
+                "Recovered missing client tool '%s' from active runtime catalog", tool_name
+            )
+            return client_tool
+    except Exception as exc:
+        logger.warning("Failed recovering missing client tool '%s': %s", tool_name, exc)
+
+    return None
 
 
 async def invoke_tool(tool: Any, tool_args: Any) -> Any:
@@ -465,6 +553,7 @@ async def execute_tool_calls(
     agent: Any | None = None,
     conversation_id: str | None = None,
     user_id: str | None = None,
+    tool_scope: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
     """
     Execute a list of tool calls and return outputs, artifacts, and images.
@@ -524,6 +613,16 @@ async def execute_tool_calls(
             continue
 
         tool = tool_map.get(tool_name)
+        if not tool:
+            tool = await _recover_missing_tool(
+                tool_name=tool_name,
+                tool_map=tool_map,
+                agent=agent,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                device_id=device_id,
+                tool_scope=tool_scope,
+            )
         if not tool:
             if settings.mcp_tool_search_enabled:
                 # Check if this looks like a client tool name that isn't available
@@ -604,6 +703,7 @@ async def execute_tool_calls(
                     conversation_id=conversation_id,
                     user_id=user_id,
                     device_id=device_id,
+                    tool_scope=tool_scope,
                 )
         except (ClosedResourceError, BrokenResourceError) as session_exc:
             # MCP session died – attempt reconnect once, then retry

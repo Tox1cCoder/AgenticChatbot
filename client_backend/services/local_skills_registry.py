@@ -9,12 +9,15 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from shared.skills.front_matter import extract_yaml_value, parse_skill_front_matter, split_front_matter
-
 from client_backend.core.config import client_settings
 from client_backend.core.logging import get_logger
 from client_backend.core.paths import get_profile_subdir
 from client_backend.services.upstream_auth import get_upstream_auth_service
+from shared.skills.front_matter import (
+    extract_yaml_value,
+    parse_skill_front_matter,
+    split_front_matter,
+)
 
 logger = get_logger(__name__)
 

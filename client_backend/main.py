@@ -79,15 +79,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS middleware - allow only local origins since we're loopback-bound
+    # CORS middleware - intentionally permissive for local sidecar usage.
     app.add_middleware(
         CORSMiddleware,
-        allow_origin_regex=(
-            r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
-            r"|^https://tauri\.localhost$"
-            r"|^tauri://localhost$"
-        ),
-        allow_credentials=True,
+        allow_origins=["*"],
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )

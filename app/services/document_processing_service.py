@@ -352,14 +352,51 @@ class DocumentProcessingService:
             output_dir.mkdir(parents=True, exist_ok=True)
             self._mineru_output_path = str(output_dir)
 
-            backend = getattr(self.settings, "mineru_backend", "pipeline")
+            backend_raw = (
+                str(getattr(self.settings, "mineru_backend", "pipeline") or "pipeline")
+                .strip()
+                .lower()
+            )
+            backend_aliases = {
+                "vlm": "vlm-auto-engine",
+                "hybrid": "hybrid-auto-engine",
+            }
+            backend = backend_aliases.get(backend_raw, backend_raw)
+            valid_backends = {
+                "pipeline",
+                "hybrid-auto-engine",
+                "hybrid-http-client",
+                "vlm-auto-engine",
+                "vlm-http-client",
+            }
+            if backend not in valid_backends:
+                raise ValueError(
+                    "Invalid MinerU backend "
+                    f"'{backend_raw}'. Allowed values: {', '.join(sorted(valid_backends))}"
+                )
+            if backend != backend_raw:
+                logger.warning("Mapped legacy MinerU backend '%s' -> '%s'", backend_raw, backend)
+
             extra_args: list[str] = list(getattr(self.settings, "mineru_extra_args", []) or [])
+            api_url = str(getattr(self.settings, "mineru_api_url", "") or "").strip()
 
             # Build formula / table flags from settings
-            formula_flag = "true"  # formula recognition is cheap; keep on
+            formula_flag = (
+                "true" if getattr(self.settings, "extract_formulas_from_pdf", True) else "false"
+            )
             table_flag = (
                 "true" if getattr(self.settings, "extract_tables_from_pdf", True) else "false"
             )
+
+            method = str(getattr(self.settings, "mineru_method", "auto") or "auto").strip().lower()
+            valid_methods = {"auto", "txt", "ocr"}
+            if method not in valid_methods:
+                raise ValueError(
+                    f"Invalid MinerU method '{method}'. Allowed values: {', '.join(sorted(valid_methods))}"
+                )
+
+            lang = str(getattr(self.settings, "mineru_lang", "") or "").strip()
+            supports_method_and_lang = backend == "pipeline" or backend.startswith("hybrid-")
 
             cmd = [
                 "mineru",
@@ -373,22 +410,43 @@ class DocumentProcessingService:
                 formula_flag,
                 "-t",
                 table_flag,
-                *extra_args,
             ]
 
+            if supports_method_and_lang:
+                cmd.extend(["-m", method])
+                if lang:
+                    cmd.extend(["-l", lang])
+
+            if api_url:
+                cmd.extend(["--api-url", api_url])
+
+            cmd.extend(extra_args)
+
             logger.info(
-                "Running MinerU (backend=%s) for document %s: %s",
+                "Running MinerU (backend=%s, method=%s, api_url=%s) for document %s: %s",
                 backend,
+                method if supports_method_and_lang else "n/a",
+                "configured" if api_url else "auto-local",
                 document_id,
                 " ".join(cmd),
             )
 
+            parse_started_at = time.perf_counter()
             result = subprocess.run(
                 cmd,
                 timeout=self.settings.mineru_timeout,
                 check=True,
                 capture_output=True,
                 text=True,
+            )
+            parse_elapsed = time.perf_counter() - parse_started_at
+            logger.info(
+                "MinerU completed for %s in %.2fs (backend=%s, method=%s, api_url=%s)",
+                document_id,
+                parse_elapsed,
+                backend,
+                method if supports_method_and_lang else "n/a",
+                "configured" if api_url else "auto-local",
             )
 
             if result.stdout:
@@ -535,9 +593,12 @@ class DocumentProcessingService:
         except subprocess.CalledProcessError as exc:
             # MinerU routes progress/errors to stdout; log both streams.
             combined = "\n".join(filter(None, [exc.stdout, exc.stderr]))
+            backend_for_log = locals().get(
+                "backend", getattr(self.settings, "mineru_backend", "pipeline")
+            )
             logger.error(
                 "MinerU (backend=%s) failed (exit %s) while processing %s:\n%s",
-                getattr(self.settings, "mineru_backend", "pipeline"),
+                backend_for_log,
                 exc.returncode,
                 file_path,
                 combined or "(no output captured)",

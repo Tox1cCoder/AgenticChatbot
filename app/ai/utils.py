@@ -398,6 +398,22 @@ def extract_rejection_reason(decision: Any) -> str | None:
     return None
 
 
+def resolve_interrupt_decision_id(decision: Any) -> str | None:
+    """Resolve the tool decision target ID across task_id/tool_call_id spellings."""
+    if isinstance(decision, dict):
+        for key in ("task_id", "tool_call_id", "taskId", "toolCallId"):
+            value = decision.get(key)
+            if value not in (None, ""):
+                return str(value)
+        return None
+
+    for attr in ("task_id", "tool_call_id", "taskId", "toolCallId"):
+        value = getattr(decision, attr, None)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
 def build_rejection_tool_message(
     tool_call: Any,
     decision: dict[str, Any] | None = None,
@@ -630,10 +646,9 @@ def apply_hitl_decisions(
     decisions = human_decisions if isinstance(human_decisions, list) else [human_decisions]
     decision_map: dict[str, Any] = {}
     for d in decisions:
-        if isinstance(d, dict):
-            task_id = d.get("task_id") or d.get("tool_call_id")
-            if task_id:
-                decision_map[task_id] = d
+        task_id = resolve_interrupt_decision_id(d)
+        if task_id:
+            decision_map[task_id] = d
 
     approved: list[dict[str, Any]] = []
     rejected_feedback: dict[str, str] = {}
@@ -641,7 +656,7 @@ def apply_hitl_decisions(
         tool_call_id = tc.get("id")
         tool_name = tc.get("name")
         decision = decision_map.get(tool_call_id, {})
-        decision_type = decision.get("type", "reject")
+        decision_type = decision.get("type", "reject") if isinstance(decision, dict) else "reject"
 
         if decision_type == "approve":
             approved.append(tc)

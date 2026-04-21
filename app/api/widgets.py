@@ -21,7 +21,6 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import Text, cast, select
 
 from app.core.auth import get_current_user_id
-from app.core.container import get_container
 from app.models.message import Message
 from app.services.widget_runtime import (
     get_widget_connection_manager,
@@ -32,6 +31,12 @@ from app.services.widget_runtime import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/widgets", tags=["widgets"])
 WIDGET_POLL_INTERVAL_SECONDS = 0.5
+
+
+def _get_container():
+    from app.core.container import get_container
+
+    return get_container()
 
 
 def _parse_conversation_uuid(session_id: str | None) -> UUID | None:
@@ -49,7 +54,7 @@ def _user_can_access_widget_session(user_id: UUID, session_id: str) -> bool:
         return False
 
     try:
-        repository = get_container().conversation_repository()
+        repository = _get_container().conversation_repository()
         return bool(repository.user_owns_conversation(user_id, conversation_id))
     except Exception:
         logger.warning(
@@ -90,7 +95,7 @@ def _message_metadata_contains_widget(metadata: Any, widget_id: str) -> bool:
 
 
 def _iter_widget_messages_for_user(user_id: UUID, widget_id: str) -> list[Message]:
-    repository = get_container().message_repository()
+    repository = _get_container().message_repository()
     session_factory = getattr(repository, "session_factory", None)
     if session_factory is None:
         return []

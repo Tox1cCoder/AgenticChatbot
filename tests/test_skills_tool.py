@@ -1,8 +1,7 @@
 from types import SimpleNamespace
 from uuid import uuid4
 
-from app.ai import skill_resolver
-from app.ai import skills_tool
+from app.ai import skill_resolver, skills_tool
 
 
 def test_available_skill_summaries_include_server_and_client_sources(monkeypatch):

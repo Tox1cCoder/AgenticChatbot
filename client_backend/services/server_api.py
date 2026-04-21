@@ -4,6 +4,7 @@ Server API client for communicating with the canonical backend.
 This module provides an async HTTP client wrapper for all server API calls.
 """
 
+import contextlib
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any, TypeVar
@@ -170,35 +171,47 @@ class ServerAPIClient:
 
     async def _handle_response(self, response: httpx.Response) -> dict[str, Any]:
         """Handle response and raise appropriate errors."""
+        body = await response.aread()
+
+        def _parse_detail() -> Any:
+            if not body:
+                return None
+            with contextlib.suppress(Exception):
+                return response.json()
+            return body.decode("utf-8", errors="replace")
+
         if response.status_code == 401:
             raise AuthenticationError(
                 "Authentication required",
                 status_code=401,
-                detail=response.json() if response.content else None,
+                detail=_parse_detail(),
             )
 
         if response.status_code == 403:
             raise AuthenticationError(
                 "Access forbidden",
                 status_code=403,
-                detail=response.json() if response.content else None,
+                detail=_parse_detail(),
             )
 
         if response.status_code >= 400:
-            try:
-                detail = response.json()
-            except Exception:
-                detail = response.text
             raise ServerAPIError(
                 f"Server error: {response.status_code}",
                 status_code=response.status_code,
-                detail=detail,
+                detail=_parse_detail(),
             )
 
-        if not response.content:
+        if not body:
             return {}
 
-        return response.json()
+        try:
+            return response.json()
+        except Exception as exc:
+            raise ServerAPIError(
+                f"Server returned a non-JSON response: {response.status_code}",
+                status_code=response.status_code,
+                detail=body.decode("utf-8", errors="replace"),
+            ) from exc
 
     async def request(
         self,
@@ -254,6 +267,10 @@ class ServerAPIClient:
         """
         Stream Server-Sent Events from the server.
 
+        Uses an unbounded read timeout because the server's AI SDK streaming
+        endpoint does not emit heartbeats during tool execution.  The
+        connection stays alive until the server sends ``[DONE]`` or closes.
+
         Args:
             path: API path for the SSE endpoint.
             method: HTTP method (usually POST).
@@ -269,11 +286,21 @@ class ServerAPIClient:
         headers = auth_headers
         headers["Accept"] = "text/event-stream"
 
+        # Streaming needs an unbounded read timeout: the server may pause for
+        # tens of seconds during tool execution without sending any bytes.
+        stream_timeout = httpx.Timeout(
+            connect=min(self.timeout, 30),
+            read=None,
+            write=min(self.timeout, 30),
+            pool=min(self.timeout, 30),
+        )
+
         try:
             async with client.stream(
                 method,
                 path,
                 headers=headers,
+                timeout=stream_timeout,
                 **kwargs,
             ) as response:
                 if response.status_code >= 400:
@@ -287,12 +314,24 @@ class ServerAPIClient:
                         try:
                             import json
 
-                            yield json.loads(data)
+                            parsed = json.loads(data)
                         except Exception:
                             yield {"raw": data}
+                            continue
+
+                        # Filter server heartbeat events - the sidecar's own
+                        # SSE proxy injects keepalive comments independently.
+                        if isinstance(parsed, dict) and parsed.get("type") == "heartbeat":
+                            continue
+
+                        yield parsed
 
         except httpx.ConnectError as e:
             raise ServerConnectionError(f"Cannot connect to server at {self.base_url}: {e}")
+        except httpx.ReadTimeout:
+            logger.warning(
+                "SSE stream read timeout on %s (this should not happen with read=None)", path
+            )
 
     # ── Authentication Methods ──────────────────────────────────────────
 

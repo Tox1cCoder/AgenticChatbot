@@ -9,7 +9,11 @@ import pytest
 
 from app.ai.agents.base_agent import BaseAgent
 from app.ai.client_runtime_tools import _CLIENT_TOOL_CACHE, get_client_runtime_tools
+from app.ai.client_tool_catalog import get_client_tool_catalog, reset_all_client_catalogs
+from app.ai.deferred_tool_state import get_deferred_tool_state, reset_deferred_tool_state
+from app.ai.graph import MultiAgentWorkflow
 from app.ai.hitl_config import requires_human_approval
+from app.ai.mcp_tool_catalog import ToolReference
 from app.ai.schemas import AgentType
 from app.core.config import settings
 from app.core.exceptions.http import CustomHTTPException
@@ -46,6 +50,7 @@ class _BindingTestAgent(BaseAgent):
 async def test_client_runtime_tools_are_scoped_per_user_and_device():
     reset_client_runtime_store()
     _CLIENT_TOOL_CACHE.clear()
+    reset_all_client_catalogs()
 
     store = InMemoryClientRuntimeStore()
     runtime_store_module._store = store
@@ -63,9 +68,10 @@ async def test_client_runtime_tools_are_scoped_per_user_and_device():
             tool_catalog={
                 "tools": [
                     {
-                        "name": "shell_execute",
-                        "origin": "native",
-                        "qualified_id": "native::shell_execute",
+                        "name": "start_process",
+                        "origin": "mcp",
+                        "server_name": "desktop_commander",
+                        "qualified_id": "desktop_commander::start_process",
                         "input_schema": {"type": "object", "properties": {}},
                     }
                 ]
@@ -81,9 +87,10 @@ async def test_client_runtime_tools_are_scoped_per_user_and_device():
             tool_catalog={
                 "tools": [
                     {
-                        "name": "filesystem_read_text",
-                        "origin": "native",
-                        "qualified_id": "native::filesystem_read_text",
+                        "name": "get_current_time",
+                        "origin": "mcp",
+                        "server_name": "time_server",
+                        "qualified_id": "time_server::get_current_time",
                         "input_schema": {"type": "object", "properties": {}},
                     }
                 ]
@@ -97,14 +104,67 @@ async def test_client_runtime_tools_are_scoped_per_user_and_device():
         tools_b = get_client_runtime_tools(user_id=str(user_b), device_id=str(device_b))
         wrong_user_tools = get_client_runtime_tools(user_id=str(user_a), device_id=str(device_b))
 
-        assert [tool.name for tool in tools_a] == ["client__shell_execute"]
-        assert [tool.name for tool in tools_b] == ["client__filesystem_read_text"]
+        assert [tool.name for tool in tools_a] == ["client__desktop_commander__start_process"]
+        assert [tool.name for tool in tools_b] == ["client__time_server__get_current_time"]
         assert wrong_user_tools == []
         assert tools_a[0].metadata["session_id"] == "session-a"
         assert tools_a[0].metadata["catalog_version"] == 1
         assert tools_a[0].metadata["tool_instance_id"]
     finally:
         _CLIENT_TOOL_CACHE.clear()
+        reset_all_client_catalogs()
+        reset_client_runtime_store()
+
+
+@pytest.mark.asyncio
+async def test_client_runtime_tools_ignore_non_mcp_catalog_entries():
+    reset_client_runtime_store()
+    _CLIENT_TOOL_CACHE.clear()
+    reset_all_client_catalogs()
+
+    store = InMemoryClientRuntimeStore()
+    runtime_store_module._store = store
+
+    user_id = uuid4()
+    device_id = uuid4()
+
+    await store.put_session(
+        DeviceSessionRecord(
+            device_id=device_id,
+            session_id="session-mixed",
+            user_id=user_id,
+            tool_catalog={
+                "tools": [
+                    {
+                        "name": "start_process",
+                        "origin": "mcp",
+                        "server_name": "desktop_commander",
+                        "qualified_id": "desktop_commander::start_process",
+                        "input_schema": {"type": "object", "properties": {}},
+                    },
+                    {
+                        "name": "filesystem_read_text",
+                        "origin": "native",
+                        "qualified_id": "native::filesystem_read_text",
+                        "input_schema": {"type": "object", "properties": {}},
+                    },
+                ]
+            },
+            tool_catalog_version=2,
+        )
+    )
+
+    try:
+        runtime_tools = get_client_runtime_tools(user_id=str(user_id), device_id=str(device_id))
+        search_catalog = get_client_tool_catalog(str(device_id), str(user_id))
+
+        assert [tool.name for tool in runtime_tools] == ["client__desktop_commander__start_process"]
+        assert [tool.tool_name for tool in search_catalog.list_all()] == [
+            "client__desktop_commander__start_process"
+        ]
+    finally:
+        _CLIENT_TOOL_CACHE.clear()
+        reset_all_client_catalogs()
         reset_client_runtime_store()
 
 
@@ -112,8 +172,8 @@ def test_deferred_binding_only_includes_loaded_client_tools(monkeypatch):
     agent = _BindingTestAgent(agent_config_key="chat")
 
     server_tool = SimpleNamespace(name="tool_search")
-    loaded_client_tool = SimpleNamespace(name="client__filesystem_read_text")
-    unloaded_client_tool = SimpleNamespace(name="client__shell_execute")
+    loaded_client_tool = SimpleNamespace(name="client__time_server__get_current_time")
+    unloaded_client_tool = SimpleNamespace(name="client__desktop_commander__start_process")
 
     monkeypatch.setattr(
         "app.ai.agents.base_agent.should_use_deferred_loading",
@@ -139,8 +199,14 @@ def test_deferred_binding_only_includes_loaded_client_tools(monkeypatch):
         ):
             assert session_id == "session-a"
             all_tools = [
-                SimpleNamespace(tool_name="client__filesystem_read_text", device_id="device-a"),
-                SimpleNamespace(tool_name="client__shell_execute", device_id="device-b"),
+                SimpleNamespace(
+                    tool_name="client__time_server__get_current_time",
+                    device_id="device-a",
+                ),
+                SimpleNamespace(
+                    tool_name="client__desktop_commander__start_process",
+                    device_id="device-b",
+                ),
             ]
             if device_id:
                 return [t for t in all_tools if t.device_id == str(device_id)]
@@ -159,16 +225,24 @@ def test_deferred_binding_only_includes_loaded_client_tools(monkeypatch):
 
     assert [tool.name for tool in tools] == [
         "tool_search",
-        "client__filesystem_read_text",
+        "client__time_server__get_current_time",
     ]
 
 
-def test_client_tools_require_human_approval_by_default(monkeypatch):
+def test_client_tools_follow_explicit_hitl_allowlist(monkeypatch):
     monkeypatch.setattr(settings, "enable_human_in_the_loop", True)
     monkeypatch.setattr(settings, "hitl_tools_require_approval", [])
 
-    assert requires_human_approval(["client__shell_execute"]) is True
+    assert requires_human_approval(["client__desktop_commander__start_process"]) is False
     assert requires_human_approval(["server_only_tool"]) is False
+
+    monkeypatch.setattr(
+        settings,
+        "hitl_tools_require_approval",
+        ["client__desktop_commander__start_process"],
+    )
+
+    assert requires_human_approval(["client__desktop_commander__start_process"]) is True
 
 
 def test_interrupt_resume_rejects_device_mismatch():
@@ -229,7 +303,7 @@ async def test_refresh_tool_map_after_search_uses_active_session_scope(monkeypat
                     "session_id": session_id,
                 }
             )
-            return [SimpleNamespace(tool_name="client__filesystem_read_text")]
+            return [SimpleNamespace(tool_name="client__time_server__get_current_time")]
 
     async def _get_global_mcp_manager():
         return None
@@ -252,7 +326,7 @@ async def test_refresh_tool_map_after_search_uses_active_session_scope(monkeypat
     )
     monkeypatch.setattr(
         "app.ai.client_runtime_tools.get_client_runtime_tools",
-        lambda **kwargs: [SimpleNamespace(name="client__filesystem_read_text")],
+        lambda **kwargs: [SimpleNamespace(name="client__time_server__get_current_time")],
     )
 
     tool_map = {}
@@ -272,7 +346,7 @@ async def test_refresh_tool_map_after_search_uses_active_session_scope(monkeypat
             "session_id": "session-a",
         }
     ]
-    assert "client__filesystem_read_text" in tool_map
+    assert "client__time_server__get_current_time" in tool_map
 
 
 @pytest.mark.asyncio
@@ -292,8 +366,8 @@ async def test_cleanup_stale_sessions_fails_pending_requests_without_waiting_for
             stale_session,
             ToolDispatchRequest(
                 request_id="req-1",
-                tool_name="shell_execute",
-                qualified_tool_id="native::shell_execute",
+                tool_name="start_process",
+                qualified_tool_id="desktop_commander::start_process",
                 arguments={"command": "echo hi"},
                 timeout_seconds=5,
             ),
@@ -328,3 +402,218 @@ async def test_device_cleanup_still_updates_db_when_runtime_store_fails(monkeypa
     cleaned_count = await service.cleanup_stale_sessions()
 
     assert cleaned_count == 2
+
+
+@pytest.mark.asyncio
+async def test_deferred_tool_snapshot_round_trip_restores_aliases_and_client_scope():
+    reset_client_runtime_store()
+    reset_deferred_tool_state()
+    _CLIENT_TOOL_CACHE.clear()
+    reset_all_client_catalogs()
+
+    store = InMemoryClientRuntimeStore()
+    runtime_store_module._store = store
+
+    user_id = uuid4()
+    device_id = uuid4()
+
+    await store.put_session(
+        DeviceSessionRecord(
+            device_id=device_id,
+            session_id="session-a",
+            user_id=user_id,
+            tool_catalog={
+                "tools": [
+                    {
+                        "name": "start_process",
+                        "origin": "mcp",
+                        "server_name": "desktop_commander",
+                        "qualified_id": "desktop_commander::start_process",
+                        "tool_instance_id": "instance-123",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }
+                ]
+            },
+            tool_catalog_version=2,
+        )
+    )
+
+    try:
+        deferred_state = get_deferred_tool_state()
+        deferred_state.autoload(
+            conversation_id="conversation-1",
+            agent_key="chat",
+            references=[
+                ToolReference(
+                    tool_name="search",
+                    server_name="brave",
+                    call_name="brave__search",
+                )
+            ],
+        )
+        deferred_state.autoload_client_tools(
+            conversation_id="conversation-1",
+            agent_key="chat",
+            references=[
+                SimpleNamespace(
+                    tool_name="client__desktop_commander__start_process",
+                    server_name="desktop_commander",
+                    device_id=str(device_id),
+                    session_id="session-a",
+                    catalog_version=2,
+                    tool_instance_id="instance-123",
+                )
+            ],
+            device_id=str(device_id),
+            session_id="session-a",
+            user_id=str(user_id),
+        )
+
+        snapshot = deferred_state.snapshot(
+            conversation_id="conversation-1",
+            agent_key="chat",
+            device_id=str(device_id),
+            session_id="session-a",
+        )
+
+        reset_deferred_tool_state()
+
+        restored = get_deferred_tool_state().restore(
+            conversation_id="conversation-1",
+            agent_key="chat",
+            snapshot=snapshot,
+            device_id=str(device_id),
+            session_id="session-a",
+            user_id=str(user_id),
+        )
+
+        assert restored == {"server_tools": 1, "client_tools": 1}
+        loaded_server_refs = get_deferred_tool_state().get_loaded("conversation-1", "chat")
+        assert [ref.call_name for ref in loaded_server_refs] == ["brave__search"]
+        assert (
+            get_deferred_tool_state().get_server_for_loaded_tool(
+                "conversation-1",
+                "chat",
+                "brave__search",
+            )
+            == "brave"
+        )
+        assert get_deferred_tool_state().get_all_loaded_tool_names(
+            "conversation-1",
+            "chat",
+            device_id=str(device_id),
+            session_id="session-a",
+        ) == ["brave__search", "client__desktop_commander__start_process"]
+    finally:
+        reset_deferred_tool_state()
+        _CLIENT_TOOL_CACHE.clear()
+        reset_all_client_catalogs()
+        reset_client_runtime_store()
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_tool_calls_persists_deferred_snapshot_to_state_context(monkeypatch):
+    reset_client_runtime_store()
+    reset_deferred_tool_state()
+    _CLIENT_TOOL_CACHE.clear()
+    reset_all_client_catalogs()
+
+    store = InMemoryClientRuntimeStore()
+    runtime_store_module._store = store
+
+    user_id = uuid4()
+    device_id = uuid4()
+
+    await store.put_session(
+        DeviceSessionRecord(
+            device_id=device_id,
+            session_id="session-a",
+            user_id=user_id,
+            tool_catalog={
+                "tools": [
+                    {
+                        "name": "start_process",
+                        "origin": "mcp",
+                        "server_name": "desktop_commander",
+                        "qualified_id": "desktop_commander::start_process",
+                        "tool_instance_id": "instance-123",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }
+                ]
+            },
+            tool_catalog_version=2,
+        )
+    )
+
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    agent = SimpleNamespace(agent_config_key="chat", agent_id="chat_agent")
+    state = {
+        "conversation_id": "conversation-1",
+        "user_id": str(user_id),
+        "device_id": str(device_id),
+        "context": {},
+    }
+
+    async def _fake_execute_tool_calls(**kwargs):
+        deferred_state = get_deferred_tool_state()
+        deferred_state.autoload(
+            conversation_id="conversation-1",
+            agent_key="chat",
+            references=[
+                ToolReference(
+                    tool_name="search",
+                    server_name="brave",
+                    call_name="brave__search",
+                )
+            ],
+        )
+        deferred_state.autoload_client_tools(
+            conversation_id="conversation-1",
+            agent_key="chat",
+            references=[
+                SimpleNamespace(
+                    tool_name="client__desktop_commander__start_process",
+                    server_name="desktop_commander",
+                    device_id=str(device_id),
+                    session_id="session-a",
+                    catalog_version=2,
+                    tool_instance_id="instance-123",
+                )
+            ],
+            device_id=str(device_id),
+            session_id="session-a",
+            user_id=str(user_id),
+        )
+        return ([], [], [])
+
+    monkeypatch.setattr("app.ai.graph.execute_tool_calls", _fake_execute_tool_calls)
+
+    await workflow._execute_agent_tool_calls(
+        state=state,
+        agent=agent,
+        tool_calls=[{"id": "tool-1", "name": "tool_search", "args": {"query": "search"}}],
+        tool_map={"tool_search": SimpleNamespace(name="tool_search")},
+    )
+
+    snapshot = state["context"]["deferred_tool_snapshot"]
+    assert [tool["call_name"] for tool in snapshot["server_tools"]] == ["brave__search"]
+    assert [tool["tool_name"] for tool in snapshot["client_tools"]] == [
+        "client__desktop_commander__start_process"
+    ]
+
+    reset_deferred_tool_state()
+
+    restored = workflow._hydrate_deferred_tool_snapshot_from_state(
+        state,
+        agent=agent,
+    )
+
+    assert restored is True
+    loaded_server_refs = get_deferred_tool_state().get_loaded("conversation-1", "chat")
+    assert [ref.call_name for ref in loaded_server_refs] == ["brave__search"]
+    assert get_deferred_tool_state().get_all_loaded_tool_names(
+        "conversation-1",
+        "chat",
+        device_id=str(device_id),
+        session_id="session-a",
+    ) == ["brave__search", "client__desktop_commander__start_process"]

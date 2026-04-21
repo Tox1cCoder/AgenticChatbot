@@ -2,6 +2,8 @@
 Message and streaming proxy endpoints for the local client backend.
 """
 
+import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -22,25 +24,65 @@ router = APIRouter(tags=["messages"])
 ai_sdk_router = APIRouter(tags=["messages"])
 logger = get_logger(__name__)
 
+# Keepalive interval for SSE proxy responses.  The server's AI SDK endpoint
+# does not emit heartbeats during tool execution, so the sidecar injects its
+# own to prevent the frontend from assuming the stream is dead.
+_SSE_KEEPALIVE_INTERVAL_SECONDS = 2.0
+
 
 def _build_sse_response(
     event_source: AsyncIterator[dict[str, Any]],
     *,
     ai_sdk: bool = False,
 ) -> StreamingResponse:
+    """Build an SSE StreamingResponse with keepalive heartbeats.
+
+    Uses an asyncio.Queue so that keepalive comments can be emitted even when
+    the upstream generator is blocked waiting for the server (e.g. during tool
+    execution over the device-runtime WebSocket).
+    """
+
     async def event_generator():
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+        async def _upstream_reader():
+            try:
+                async for event in event_source:
+                    await queue.put(event)
+            except Exception as exc:
+                if ai_sdk:
+                    await queue.put({"type": "error", "errorText": str(exc)})
+                else:
+                    await queue.put({"type": "error", "error": str(exc)})
+            finally:
+                await queue.put(None)
+
+        reader_task = asyncio.create_task(_upstream_reader())
         try:
-            async for event in event_source:
+            while True:
+                try:
+                    event = await asyncio.wait_for(
+                        queue.get(), timeout=_SSE_KEEPALIVE_INTERVAL_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    # SSE comment line keeps the connection alive without
+                    # appearing as a data event to the client.
+                    yield ": keepalive\n\n"
+                    continue
+
+                if event is None:
+                    break
+
                 if "raw" in event and len(event) == 1:
                     yield f"data: {event['raw']}\n\n"
                 else:
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        except Exception as exc:
-            if ai_sdk:
-                yield f"data: {json.dumps({'type': 'error', 'errorText': str(exc)})}\n\n"
-            else:
-                yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
+        except asyncio.CancelledError:
+            return
         finally:
+            reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reader_task
             if ai_sdk:
                 yield "data: [DONE]\n\n"
 
@@ -69,6 +111,7 @@ async def _ensure_runtime_bridge_for_message_flow() -> None:
     """
     auth_service = get_upstream_auth_service()
     if not auth_service.is_authenticated():
+        logger.debug("Skipping runtime bridge: upstream not authenticated")
         return
 
     bridge = get_runtime_bridge()
@@ -76,14 +119,24 @@ async def _ensure_runtime_bridge_for_message_flow() -> None:
         return
 
     try:
-        started = await bridge.start(wait_for_connection=False)
-        if not started:
-            return
-
+        # Start the background connection loop if not already running, then
+        # wait for it to finish the full handshake (register + WS + catalog
+        # sync).  15 seconds covers MCP init + device registration + WebSocket
+        # handshake + catalog sync in normal conditions.
         await bridge.start(
             wait_for_connection=True,
-            timeout_seconds=min(5, client_settings.server_api_timeout_seconds),
+            timeout_seconds=min(15, client_settings.server_api_timeout_seconds),
         )
+        if bridge.is_connected():
+            logger.info(
+                "Runtime bridge connected for message flow (device_id=%s)",
+                bridge.get_registered_device_id(),
+            )
+        else:
+            logger.warning(
+                "Runtime bridge started but not connected after timeout; "
+                "message will proceed without device context"
+            )
     except Exception as exc:
         logger.warning("Failed to pre-connect runtime bridge for message flow: %s", exc)
 

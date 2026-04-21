@@ -63,6 +63,7 @@ from .utils import (
     find_pending_tool_call_message,
     make_json_safe,
     normalize_tool_call,
+    resolve_interrupt_decision_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -2480,8 +2481,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         resume_data = [
             {
-                "task_id": d.task_id,
-                "tool_call_id": d.task_id,
+                "task_id": resolve_interrupt_decision_id(d),
+                "tool_call_id": resolve_interrupt_decision_id(d),
                 "type": d.type.value if hasattr(d.type, "value") else d.type,
                 "args": d.args,
             }

@@ -14,7 +14,6 @@ import pytest
 from app.ai.skills_registry import SkillsRegistry
 from client_backend.services.local_skills_registry import LocalSkillsRegistry
 
-
 # ---------------------------------------------------------------------------
 # Shared Anthropic-style front-matter fixtures
 # ---------------------------------------------------------------------------
@@ -394,8 +393,7 @@ async def test_real_repo_skill_folder_has_server_client_parity(tmp_path):
     client_registry = LocalSkillsRegistry(skill_roots=[str(REPO_SKILLS_DIR)])
     await client_registry.initialize()
     client_skills = {
-        skill.name: (skill.description, skill.content)
-        for skill in client_registry.get_all_skills()
+        skill.name: (skill.description, skill.content) for skill in client_registry.get_all_skills()
     }
 
     assert client_skills == server_skills

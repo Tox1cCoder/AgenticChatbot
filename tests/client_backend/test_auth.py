@@ -165,9 +165,7 @@ async def test_login_rejects_switching_active_user_without_logout(monkeypatch):
     monkeypatch.setattr(auth_api, "get_upstream_auth_service", lambda: _AuthServiceStub())
 
     with pytest.raises(HTTPException) as exc_info:
-        await auth_api.login(
-            auth_api.LoginRequest(email="user-two@example.com", password="secret")
-        )
+        await auth_api.login(auth_api.LoginRequest(email="user-two@example.com", password="secret"))
 
     assert exc_info.value.status_code == 409
     assert "log out" in str(exc_info.value.detail).lower()

@@ -8,7 +8,7 @@ tool origin - the only difference is the tool list available on each device.
 Key features:
 - Searches server MCP tools (from McpToolCatalog)
 - Searches client device tools (from ClientToolCatalog) when a device is connected
-- Results include origin information (server_mcp, client_mcp, client_native)
+- Results include origin information (server_mcp, client_mcp)
 - Autoloading works for both server and client tools
 """
 
@@ -29,6 +29,7 @@ from .mcp_tool_catalog import (
     get_tool_catalog,
 )
 from .tool_context import get_tool_context
+from .tool_scope import is_client_only_scope
 from .tool_search_scoring import build_query_tokens
 
 logger = logging.getLogger(__name__)
@@ -179,120 +180,115 @@ async def _execute_tool_search(
     agent_key = ctx.agent_key
     device_id = ctx.device_id
     user_id = ctx.user_id
+    client_only_scope = is_client_only_scope(
+        device_id=device_id,
+        tool_scope=getattr(ctx, "tool_scope", None),
+    )
     resolved_server_name: str | None = None
 
     # Get the MCP manager and catalog for SERVER tools
     unavailable_servers: list[str] = []
     server_results = []
     catalog = None
-    try:
-        mcp_manager = await get_global_mcp_manager()
-        catalog = await get_tool_catalog(mcp_manager)
+    is_inventory_mode = not query or not str(query).strip()
+    is_per_server_inventory = is_inventory_mode and bool(server_name)
+    if is_inventory_mode:
+        default_top_k = settings.mcp_tool_search_inventory_default_top_k
+        max_top_k = settings.mcp_tool_search_inventory_max_top_k
+    else:
+        default_top_k = settings.mcp_tool_search_default_top_k
+        max_top_k = settings.mcp_tool_search_max_top_k
+    autoload_top_k = settings.mcp_tool_search_autoload_top_k
+    effective_top_k = top_k if top_k is not None else default_top_k
+    effective_top_k = max(1, min(effective_top_k, max_top_k))
 
-        # Resolve server identifiers before deciding between discovery and
-        # inventory modes so broad integration queries like "Canva" or
-        # plausible variants like "excel-server" can use the correct server
-        # scope without hard-coded aliases.
-        if server_name and hasattr(catalog, "resolve_server_name"):
-            resolved_server_name = catalog.resolve_server_name(server_name)
-            if resolved_server_name:
-                server_name = resolved_server_name
-        elif query and hasattr(catalog, "resolve_server_name"):
-            resolved_server_name = catalog.resolve_server_name(query)
-            if resolved_server_name:
-                query_tokens = build_query_tokens(query)[1]
-                server_name = resolved_server_name
-                if len(query_tokens) <= 1:
-                    query = None
+    if not client_only_scope:
+        try:
+            mcp_manager = await get_global_mcp_manager()
+            catalog = await get_tool_catalog(mcp_manager)
 
-        # Determine search mode based on the resolved query/server_name
-        # - query present -> discovery mode
-        # - query absent and no server_name -> global inventory mode (server summaries)
-        # - query absent and server_name present -> per-server inventory mode
-        is_inventory_mode = not query or not str(query).strip()
-        is_per_server_inventory = is_inventory_mode and bool(server_name)
+            # Resolve server identifiers before deciding between discovery and
+            # inventory modes so broad integration queries like "Canva" or
+            # plausible variants like "excel-server" can use the correct server
+            # scope without hard-coded aliases.
+            if server_name and hasattr(catalog, "resolve_server_name"):
+                resolved_server_name = catalog.resolve_server_name(server_name)
+                if resolved_server_name:
+                    server_name = resolved_server_name
+            elif query and hasattr(catalog, "resolve_server_name"):
+                resolved_server_name = catalog.resolve_server_name(query)
+                if resolved_server_name:
+                    query_tokens = build_query_tokens(query)[1]
+                    server_name = resolved_server_name
+                    if len(query_tokens) <= 1:
+                        query = None
+                        is_inventory_mode = True
+                        is_per_server_inventory = True
+                        default_top_k = settings.mcp_tool_search_inventory_default_top_k
+                        max_top_k = settings.mcp_tool_search_inventory_max_top_k
+                        effective_top_k = top_k if top_k is not None else default_top_k
+                        effective_top_k = max(1, min(effective_top_k, max_top_k))
 
-        # Apply mode-appropriate top_k defaults and limits
-        if is_inventory_mode:
-            default_top_k = settings.mcp_tool_search_inventory_default_top_k
-            max_top_k = settings.mcp_tool_search_inventory_max_top_k
-        else:
-            default_top_k = settings.mcp_tool_search_default_top_k
-            max_top_k = settings.mcp_tool_search_max_top_k
-        autoload_top_k = settings.mcp_tool_search_autoload_top_k
-
-        effective_top_k = top_k if top_k is not None else default_top_k
-        effective_top_k = max(1, min(effective_top_k, max_top_k))
-
-        # Log query if enabled (gated on mcp_tool_search_log_queries)
-        if settings.mcp_tool_search_log_queries:
-            mode_label = (
-                "inventory" if is_inventory_mode and not is_per_server_inventory
-                else "per_server_inventory" if is_per_server_inventory
-                else "discovery"
-            )
-            logger.info(
-                "tool_search: mode=%s query=%r top_k=%d server=%s resolved_server=%s conversation=%s agent=%s device=%s",
-                mode_label,
-                query,
-                effective_top_k,
-                server_name,
-                resolved_server_name,
-                conversation_id,
-                agent_key,
-                device_id[:8] if device_id else None,
-            )
-
-        # Global inventory mode: return server summaries without searching tools
-        if is_inventory_mode and not is_per_server_inventory:
-            inventory = catalog.get_server_inventory(allowlist=allowlist)
-            latency_ms = (time.time() - start_time) * 1000
+            # Log query if enabled (gated on mcp_tool_search_log_queries)
             if settings.mcp_tool_search_log_queries:
-                logger.info(
-                    "tool_search inventory mode: latency=%.1fms servers=%d",
-                    latency_ms,
-                    len(inventory),
+                mode_label = (
+                    "inventory"
+                    if is_inventory_mode and not is_per_server_inventory
+                    else "per_server_inventory"
+                    if is_per_server_inventory
+                    else "discovery"
                 )
-            return {
-                "query": None,
-                "mode": "inventory",
-                "resolved_server_name": resolved_server_name,
-                "inventory": inventory,
-                "results": [],
-                "loaded_count": 0,
-                "more_available": False,
-            }
+                logger.info(
+                    "tool_search: mode=%s query=%r top_k=%d server=%s resolved_server=%s conversation=%s agent=%s device=%s",
+                    mode_label,
+                    query,
+                    effective_top_k,
+                    server_name,
+                    resolved_server_name,
+                    conversation_id,
+                    agent_key,
+                    device_id[:8] if device_id else None,
+                )
 
-        # Search server tools (discovery or per-server inventory mode)
-        # Use search_scored() when available so we have real scores for autoload gating
-        if query and hasattr(catalog, "search_scored"):
-            server_results = catalog.search_scored(
-                query=query,
-                top_k=effective_top_k * 2,
-                server_name=server_name,
-                allowlist=allowlist,
-            )
-        else:
-            server_results = catalog.search(
-                query=query,
-                top_k=effective_top_k * 2,
-                server_name=server_name,
-                allowlist=allowlist,
-            )
-    except Exception as e:
-        logger.error("Failed to get server tool catalog: %s", e)
-        unavailable_servers.append("all_server")
-        is_inventory_mode = not query or not str(query).strip()
-        is_per_server_inventory = is_inventory_mode and bool(server_name)
-        if is_inventory_mode:
-            default_top_k = settings.mcp_tool_search_inventory_default_top_k
-            max_top_k = settings.mcp_tool_search_inventory_max_top_k
-        else:
-            default_top_k = settings.mcp_tool_search_default_top_k
-            max_top_k = settings.mcp_tool_search_max_top_k
-        autoload_top_k = settings.mcp_tool_search_autoload_top_k
-        effective_top_k = top_k if top_k is not None else default_top_k
-        effective_top_k = max(1, min(effective_top_k, max_top_k))
+            # Global inventory mode: return server summaries without searching tools
+            if is_inventory_mode and not is_per_server_inventory:
+                inventory = catalog.get_server_inventory(allowlist=allowlist)
+                latency_ms = (time.time() - start_time) * 1000
+                if settings.mcp_tool_search_log_queries:
+                    logger.info(
+                        "tool_search inventory mode: latency=%.1fms servers=%d",
+                        latency_ms,
+                        len(inventory),
+                    )
+                return {
+                    "query": None,
+                    "mode": "inventory",
+                    "resolved_server_name": resolved_server_name,
+                    "inventory": inventory,
+                    "results": [],
+                    "loaded_count": 0,
+                    "more_available": False,
+                }
+
+            # Search server tools (discovery or per-server inventory mode)
+            # Use search_scored() when available so we have real scores for autoload gating
+            if query and hasattr(catalog, "search_scored"):
+                server_results = catalog.search_scored(
+                    query=query,
+                    top_k=effective_top_k * 2,
+                    server_name=server_name,
+                    allowlist=allowlist,
+                )
+            else:
+                server_results = catalog.search(
+                    query=query,
+                    top_k=effective_top_k * 2,
+                    server_name=server_name,
+                    allowlist=allowlist,
+                )
+        except Exception as e:
+            logger.error("Failed to get server tool catalog: %s", e)
+            unavailable_servers.append("all_server")
 
     # Get CLIENT tools if device is connected
     client_results = []
@@ -301,7 +297,22 @@ async def _execute_tool_search(
     if device_id and user_id:
         try:
             client_catalog = get_client_tool_catalog(device_id, user_id)
+            if client_only_scope and server_name and hasattr(client_catalog, "resolve_server_name"):
+                resolved_client_server_name = client_catalog.resolve_server_name(server_name)
+                if resolved_client_server_name:
+                    server_name = resolved_client_server_name
             if client_catalog.tool_count > 0:
+                if client_only_scope and is_inventory_mode and not is_per_server_inventory:
+                    inventory = client_catalog.get_server_inventory(allowlist=allowlist)
+                    return {
+                        "query": None,
+                        "mode": "inventory",
+                        "resolved_server_name": resolved_server_name,
+                        "inventory": inventory,
+                        "results": [],
+                        "loaded_count": 0,
+                        "more_available": False,
+                    }
                 client_results = client_catalog.search(
                     query=query,
                     top_k=effective_top_k * 2,  # Request extra for merging
@@ -319,7 +330,7 @@ async def _execute_tool_search(
     # Merge and rank results from both sources
     # Returns both public (for model) and internal (for autoloading) versions
     public_results, internal_results = _merge_search_results(
-        server_results=server_results,
+        server_results=[] if client_only_scope else server_results,
         client_results=client_results,
         query=query,
         top_k=effective_top_k + 1,  # Request one extra to detect truncation
@@ -369,7 +380,12 @@ async def _execute_tool_search(
             # Server tool - skip autoloading ambiguous tools without an alias
             # (they can still be autoloaded once they have a call_name alias)
             call_name = internal.get("call_name") or tool_name
-            if catalog and catalog.is_ambiguous(tool_name) and call_name == tool_name and not server_name:
+            if (
+                catalog
+                and catalog.is_ambiguous(tool_name)
+                and call_name == tool_name
+                and not server_name
+            ):
                 logger.debug(
                     "Skipping autoload for ambiguous tool '%s' (multiple servers, no alias)",
                     tool_name,
@@ -415,9 +431,10 @@ async def _execute_tool_search(
     # Mark which tools in the public results are loaded (truthful: from actual loads)
     # Public tool_name is the call_name (alias for ambiguous tools, raw name otherwise)
     for result in public_results:
-        if result["tool_name"] in actually_loaded_names:
-            result["is_loaded"] = True
-        elif result.get("call_name") in actually_loaded_names:
+        if (
+            result["tool_name"] in actually_loaded_names
+            or result.get("call_name") in actually_loaded_names
+        ):
             result["is_loaded"] = True
 
     latency_ms = (time.time() - start_time) * 1000

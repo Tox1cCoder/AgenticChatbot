@@ -5,7 +5,7 @@ Maintains the authenticated outbound runtime connection to the canonical server:
 - registers the current device
 - opens the persistent WebSocket
 - syncs tool and skill catalogs
-- executes client-local tool requests
+- executes client-local MCP tool requests
 """
 
 from __future__ import annotations
@@ -55,14 +55,12 @@ from client_backend.schemas.runtime import (
     ToolDispatchRequest,
     ToolDispatchResult,
 )
-from client_backend.services.filesystem_service import get_filesystem_service
 from client_backend.services.local_mcp_manager import get_mcp_manager, shutdown_mcp_manager
 from client_backend.services.local_skills_registry import (
     get_skills_registry,
     initialize_skills_registry,
 )
 from client_backend.services.server_api import ServerAPIClient, get_server_client
-from client_backend.services.shell_runner import get_shell_runner
 
 logger = get_logger(__name__)
 
@@ -145,6 +143,8 @@ class RuntimeBridgeService:
             return False
 
         if self._runtime_task and not self._runtime_task.done():
+            if not self.is_connected():
+                self._connected_event.clear()
             if not wait_for_connection:
                 return True
             return await self._wait_for_initial_connection(timeout_seconds)
@@ -339,7 +339,6 @@ class RuntimeBridgeService:
 
     async def _register_device(self) -> DeviceRegistrationResult:
         capabilities = {
-            "native_tools": True,
             "local_mcp": True,
             "local_skills": True,
         }
@@ -399,6 +398,7 @@ class RuntimeBridgeService:
             try:
                 await self._receive_loop()
             finally:
+                self._connected_event.clear()
                 if self._heartbeat_task:
                     self._heartbeat_task.cancel()
                     with suppress(asyncio.CancelledError):
@@ -480,6 +480,14 @@ class RuntimeBridgeService:
             )
 
         qualified_id = request.qualified_tool_id
+        if qualified_id == "client_skill::activate":
+            if request.tool_name and request.tool_name != "activate_skill":
+                return (
+                    f"Tool name mismatch: request.tool_name={request.tool_name!r} "
+                    "does not match reserved client skill activation request."
+                )
+            return None
+
         catalog_entry = self._current_tool_catalog.get(qualified_id)
 
         if catalog_entry is None:
@@ -489,14 +497,17 @@ class RuntimeBridgeService:
             )
 
         # Validate tool_instance_id if both sides provided it
-        if request.tool_instance_id and catalog_entry.get("tool_instance_id"):
-            if request.tool_instance_id != catalog_entry["tool_instance_id"]:
-                return (
-                    f"tool_instance_id mismatch for {qualified_id!r}: "
-                    f"server sent {request.tool_instance_id!r} "
-                    f"but catalog has {catalog_entry['tool_instance_id']!r}. "
-                    "The catalog has been updated; re-sync and retry."
-                )
+        if (
+            request.tool_instance_id
+            and catalog_entry.get("tool_instance_id")
+            and request.tool_instance_id != catalog_entry["tool_instance_id"]
+        ):
+            return (
+                f"tool_instance_id mismatch for {qualified_id!r}: "
+                f"server sent {request.tool_instance_id!r} "
+                f"but catalog has {catalog_entry['tool_instance_id']!r}. "
+                "The catalog has been updated; re-sync and retry."
+            )
 
         # Validate tool_name matches catalog record
         catalog_name = catalog_entry.get("name")
@@ -547,14 +558,10 @@ class RuntimeBridgeService:
     async def _execute_tool_request(self, request: ToolDispatchRequest) -> Any:
         qualified_tool_id = request.qualified_tool_id
         arguments = request.arguments
-        timeout_seconds = int(request.timeout_seconds or client_settings.shell_timeout_seconds)
+        timeout_seconds = int(request.timeout_seconds or client_settings.tool_call_timeout_seconds)
 
-        if qualified_tool_id.startswith("native::"):
-            return await self._execute_native_tool(
-                qualified_tool_id=qualified_tool_id,
-                arguments=arguments,
-                timeout_seconds=timeout_seconds,
-            )
+        if qualified_tool_id == "client_skill::activate":
+            return await self._execute_client_skill_request(arguments=arguments)
 
         return await get_mcp_manager().call_tool(
             qualified_tool_id=qualified_tool_id,
@@ -562,103 +569,27 @@ class RuntimeBridgeService:
             timeout=timeout_seconds,
         )
 
-    async def _execute_native_tool(
+    async def _execute_client_skill_request(
         self,
         *,
-        qualified_tool_id: str,
         arguments: dict[str, Any],
-        timeout_seconds: int,
     ) -> Any:
-        filesystem = get_filesystem_service()
-        shell_runner = get_shell_runner()
+        skill_name = str(arguments.get("skill_name") or "").strip()
+        if not skill_name:
+            raise ValueError("skill_name is required")
 
-        if qualified_tool_id == "native::shell_execute":
-            command = str(arguments.get("command") or "").strip()
-            working_dir = arguments.get("working_dir")
-            is_valid, reason = shell_runner.validate_command(
-                command,
-                working_dir=working_dir,
-            )
-            if not is_valid:
-                raise ValueError(reason)
+        skill = get_skills_registry().get_skill(skill_name)
+        if skill is None:
+            raise ValueError(f"Skill '{skill_name}' not found on this device.")
+        if not skill.enabled:
+            raise ValueError(f"Skill '{skill_name}' is disabled on this device.")
 
-            result = await shell_runner.execute(
-                command=command,
-                working_dir=working_dir,
-                timeout=int(arguments.get("timeout") or timeout_seconds),
-                shell=str(arguments.get("shell") or self._default_shell()),
-                env=arguments.get("env"),
-            )
-            return result.to_dict()
-
-        if qualified_tool_id == "native::activate_skill":
-            skill_name = str(arguments.get("skill_name") or "").strip()
-            if not skill_name:
-                raise ValueError("skill_name is required")
-
-            skill = get_skills_registry().get_skill(skill_name)
-            if skill is None:
-                raise ValueError(f"Skill '{skill_name}' not found on this device.")
-            if not skill.enabled:
-                raise ValueError(f"Skill '{skill_name}' is disabled on this device.")
-
-            return f"── Skill: {skill.name} ──\n\n{skill.content}\n\n── End Skill: {skill.name} ──"
-
-        if qualified_tool_id == "native::filesystem_read_text":
-            content = await filesystem.read_file(
-                arguments["file_path"],
-                encoding=str(arguments.get("encoding") or "utf-8"),
-                max_size=arguments.get("max_size"),
-            )
-            return {"content": content}
-
-        if qualified_tool_id == "native::filesystem_write_text":
-            info = await filesystem.write_file(
-                arguments["file_path"],
-                content=str(arguments.get("content") or ""),
-                encoding=str(arguments.get("encoding") or "utf-8"),
-                create_dirs=bool(arguments.get("create_dirs", True)),
-            )
-            return info.to_dict()
-
-        if qualified_tool_id == "native::filesystem_list_directory":
-            entries = await filesystem.list_directory(
-                arguments["dir_path"],
-                recursive=bool(arguments.get("recursive", False)),
-                pattern=arguments.get("pattern"),
-            )
-            return [entry.to_dict() for entry in entries]
-
-        if qualified_tool_id == "native::filesystem_search_files":
-            matches = await filesystem.search_files(
-                arguments["root_path"],
-                pattern=str(arguments.get("pattern") or "*"),
-                content_pattern=arguments.get("content_pattern"),
-                max_results=int(arguments.get("max_results") or 100),
-            )
-            return [
-                {
-                    "file": file_info.to_dict(),
-                    "matching_lines": matching_lines or [],
-                }
-                for file_info, matching_lines in matches
-            ]
-
-        raise ValueError(f"Unsupported native tool: {qualified_tool_id}")
-
-    @staticmethod
-    def _default_shell() -> str:
-        preferred = ["powershell", "bash", "sh", "cmd", "zsh"]
-        for shell_name in preferred:
-            if shell_name in client_settings.allowed_shells:
-                return shell_name
-        return client_settings.allowed_shells[0]
+        return f"── Skill: {skill.name} ──\n\n{skill.content}\n\n── End Skill: {skill.name} ──"
 
     async def _build_tool_catalog(self) -> dict[str, Any]:
-        native_tools = self._build_native_tool_catalog()
         mcp_catalog = get_mcp_manager().get_tool_catalog()
-        tools = list(native_tools)
-        tools.extend(mcp_catalog.get("tools", []))
+        raw_tools = mcp_catalog.get("tools", []) if isinstance(mcp_catalog, dict) else []
+        tools = [dict(entry) for entry in raw_tools if isinstance(entry, dict)]
 
         # Embed tool_instance_id in each entry using the NEXT catalog_version
         # (server increments catalog_version on receive, so use version+1)
@@ -678,96 +609,10 @@ class RuntimeBridgeService:
         return {
             "tools": tools,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "native_tool_count": len(native_tools),
+            "tool_count": len(tools),
             "mcp_server_count": mcp_catalog.get("server_count", 0),
             "active_servers": mcp_catalog.get("active_servers", []),
         }
-
-    def _build_native_tool_catalog(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "name": "shell_execute",
-                "description": (
-                    "Run a shell command on the local device. "
-                    "Provide a working directory only when the command specifically needs one."
-                ),
-                "origin": "native",
-                "qualified_id": "native::shell_execute",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string"},
-                        "working_dir": {"type": "string"},
-                        "timeout": {"type": "integer"},
-                        "shell": {"type": "string"},
-                        "env": {"type": "object"},
-                    },
-                    "required": ["command"],
-                },
-            },
-            {
-                "name": "filesystem_read_text",
-                "description": "Read a UTF-8 text file from the local device.",
-                "origin": "native",
-                "qualified_id": "native::filesystem_read_text",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string"},
-                        "encoding": {"type": "string"},
-                        "max_size": {"type": "integer"},
-                    },
-                    "required": ["file_path"],
-                },
-            },
-            {
-                "name": "filesystem_write_text",
-                "description": "Write a UTF-8 text file on the local device.",
-                "origin": "native",
-                "qualified_id": "native::filesystem_write_text",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string"},
-                        "content": {"type": "string"},
-                        "encoding": {"type": "string"},
-                        "create_dirs": {"type": "boolean"},
-                    },
-                    "required": ["file_path", "content"],
-                },
-            },
-            {
-                "name": "filesystem_list_directory",
-                "description": "List files and directories on the local device.",
-                "origin": "native",
-                "qualified_id": "native::filesystem_list_directory",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "dir_path": {"type": "string"},
-                        "recursive": {"type": "boolean"},
-                        "pattern": {"type": "string"},
-                    },
-                    "required": ["dir_path"],
-                },
-            },
-            {
-                "name": "filesystem_search_files",
-                "description": "Search filenames and optional file contents on the local device.",
-                "origin": "native",
-                "qualified_id": "native::filesystem_search_files",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "root_path": {"type": "string"},
-                        "pattern": {"type": "string"},
-                        "content_pattern": {"type": "string"},
-                        "max_results": {"type": "integer"},
-                    },
-                    "required": ["root_path", "pattern"],
-                },
-            },
-        ]
 
     async def _send_runtime_message(self, message: RuntimeMessage) -> None:
         await self._send_json(dump_runtime_message(message))

@@ -56,16 +56,20 @@ class TestOverlappingToolNames:
         session_b = "session-bbb"
 
         ref_a = SimpleNamespace(
-            tool_name="client__shell_execute",
-            server_name="native",
+            tool_name="client__desktop_commander__start_process",
+            server_name="desktop_commander",
             device_id=device_a,
-            tool_instance_id=_make_instance_id(device_a, session_a, "native::shell_execute", 1),
+            tool_instance_id=_make_instance_id(
+                device_a, session_a, "desktop_commander::start_process", 1
+            ),
         )
         ref_b = SimpleNamespace(
-            tool_name="client__shell_execute",
-            server_name="native",
+            tool_name="client__desktop_commander__start_process",
+            server_name="desktop_commander",
             device_id=device_b,
-            tool_instance_id=_make_instance_id(device_b, session_b, "native::shell_execute", 1),
+            tool_instance_id=_make_instance_id(
+                device_b, session_b, "desktop_commander::start_process", 1
+            ),
         )
 
         state.autoload_client_tools(
@@ -103,8 +107,8 @@ class TestOverlappingToolNames:
 
         for dev, sess in [("dev-x", "sess-x"), ("dev-y", "sess-y")]:
             ref = SimpleNamespace(
-                tool_name="client__shell_execute",
-                server_name="native",
+                tool_name="client__desktop_commander__start_process",
+                server_name="desktop_commander",
                 device_id=dev,
                 tool_instance_id="",
             )
@@ -131,7 +135,7 @@ class TestReconnectInvalidatesInstanceId:
     def test_tool_instance_id_changes_on_new_session(self):
         """Same device+tool but new session produces a different tool_instance_id."""
         device = "device-reconnect"
-        qid = "native::shell_execute"
+        qid = "desktop_commander::start_process"
         old_id = make_tool_instance_id(device, "session-old", qid, 1)
         new_id = make_tool_instance_id(device, "session-new", qid, 1)
         assert old_id != new_id
@@ -140,7 +144,7 @@ class TestReconnectInvalidatesInstanceId:
         """Same device+session+tool but catalog version bump produces new ID."""
         device = "device-bump"
         session = "session-bump"
-        qid = "native::shell_execute"
+        qid = "desktop_commander::start_process"
         v1 = make_tool_instance_id(device, session, qid, 1)
         v2 = make_tool_instance_id(device, session, qid, 2)
         assert v1 != v2
@@ -153,17 +157,17 @@ class TestReconnectInvalidatesInstanceId:
         bridge._session_id = "session-new"
         bridge._tool_catalog_version = 2
         bridge._current_tool_catalog = {
-            "native::shell_execute": {
-                "name": "shell_execute",
-                "qualified_id": "native::shell_execute",
+            "desktop_commander::start_process": {
+                "name": "start_process",
+                "qualified_id": "desktop_commander::start_process",
                 "tool_instance_id": "abc123",
             }
         }
 
         request = ToolDispatchRequest(
             request_id="req-1",
-            tool_name="shell_execute",
-            qualified_tool_id="native::shell_execute",
+            tool_name="start_process",
+            qualified_tool_id="desktop_commander::start_process",
             arguments={},
             expected_session_id="session-old",
             expected_catalog_version=2,
@@ -182,17 +186,17 @@ class TestReconnectInvalidatesInstanceId:
         bridge._session_id = "session-current"
         bridge._tool_catalog_version = 3
         bridge._current_tool_catalog = {
-            "native::shell_execute": {
-                "name": "shell_execute",
-                "qualified_id": "native::shell_execute",
+            "desktop_commander::start_process": {
+                "name": "start_process",
+                "qualified_id": "desktop_commander::start_process",
                 "tool_instance_id": "def456",
             }
         }
 
         request = ToolDispatchRequest(
             request_id="req-2",
-            tool_name="shell_execute",
-            qualified_tool_id="native::shell_execute",
+            tool_name="start_process",
+            qualified_tool_id="desktop_commander::start_process",
             arguments={},
             expected_session_id="session-current",
             expected_catalog_version=2,
@@ -214,7 +218,7 @@ class TestReconnectInvalidatesInstanceId:
         request = ToolDispatchRequest(
             request_id="req-3",
             tool_name="ghost_tool",
-            qualified_tool_id="native::ghost_tool",
+            qualified_tool_id="ghost::tool",
             arguments={},
             expected_session_id="session-1",
             expected_catalog_version=1,
@@ -232,17 +236,17 @@ class TestReconnectInvalidatesInstanceId:
         bridge._session_id = "session-1"
         bridge._tool_catalog_version = 1
         bridge._current_tool_catalog = {
-            "native::shell_execute": {
-                "name": "shell_execute",
-                "qualified_id": "native::shell_execute",
+            "desktop_commander::start_process": {
+                "name": "start_process",
+                "qualified_id": "desktop_commander::start_process",
                 "tool_instance_id": "current_id_abc",
             }
         }
 
         request = ToolDispatchRequest(
             request_id="req-4",
-            tool_name="shell_execute",
-            qualified_tool_id="native::shell_execute",
+            tool_name="start_process",
+            qualified_tool_id="desktop_commander::start_process",
             arguments={},
             expected_session_id="session-1",
             expected_catalog_version=1,
@@ -257,22 +261,22 @@ class TestReconnectInvalidatesInstanceId:
         """_validate_tool_request returns None for a fully valid request."""
         from client_backend.services.runtime_bridge import RuntimeBridgeService
 
-        instance_id = _make_instance_id("dev-1", "sess-1", "native::shell_execute", 1)
+        instance_id = _make_instance_id("dev-1", "sess-1", "desktop_commander::start_process", 1)
         bridge = RuntimeBridgeService.__new__(RuntimeBridgeService)
         bridge._session_id = "sess-1"
         bridge._tool_catalog_version = 1
         bridge._current_tool_catalog = {
-            "native::shell_execute": {
-                "name": "shell_execute",
-                "qualified_id": "native::shell_execute",
+            "desktop_commander::start_process": {
+                "name": "start_process",
+                "qualified_id": "desktop_commander::start_process",
                 "tool_instance_id": instance_id,
             }
         }
 
         request = ToolDispatchRequest(
             request_id="req-5",
-            tool_name="shell_execute",
-            qualified_tool_id="native::shell_execute",
+            tool_name="start_process",
+            qualified_tool_id="desktop_commander::start_process",
             arguments={},
             expected_session_id="sess-1",
             expected_catalog_version=1,
@@ -286,10 +290,10 @@ class TestReconnectInvalidatesInstanceId:
         self, monkeypatch, caplog
     ):
         import importlib.util
+        from pathlib import Path
 
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
-        from pathlib import Path
 
         device_id = uuid4()
         session_id = "session-new"
@@ -437,8 +441,8 @@ class TestHITLResumeSessionValidation:
                 "tool_provenance": {
                     "tool-call-1": {
                         "device_id": str(device_id),
-                        "tool_origin": "client_native",
-                        "qualified_tool_id": "native::shell_execute",
+                        "tool_origin": "client_mcp",
+                        "qualified_tool_id": "desktop_commander::start_process",
                         "session_id": "session-old",
                         "catalog_version": 1,
                         "tool_instance_id": "instance-old",
@@ -469,7 +473,7 @@ class TestHITLResumeSessionValidation:
                 tool_catalog={
                     "tools": [
                         {
-                            "qualified_id": "native::shell_execute",
+                            "qualified_id": "desktop_commander::start_process",
                             "tool_instance_id": "instance-new",
                         }
                     ]
@@ -488,7 +492,7 @@ class TestHITLResumeSessionValidation:
                     InterruptDecision(
                         type=InterruptDecisionType.APPROVE,
                         task_id="tool-call-1",
-                        action="client__shell_execute",
+                        action="client__desktop_commander__start_process",
                     )
                 ],
             )
@@ -515,8 +519,8 @@ class TestHITLResumeSessionValidation:
                 "tool_provenance": {
                     "tool-call-1": {
                         "device_id": str(device_id),
-                        "tool_origin": "client_native",
-                        "qualified_tool_id": "native::shell_execute",
+                        "tool_origin": "client_mcp",
+                        "qualified_tool_id": "desktop_commander::start_process",
                         "session_id": "session-1",
                         "catalog_version": 1,
                         "tool_instance_id": "instance-v1",
@@ -547,7 +551,7 @@ class TestHITLResumeSessionValidation:
                 tool_catalog={
                     "tools": [
                         {
-                            "qualified_id": "native::shell_execute",
+                            "qualified_id": "desktop_commander::start_process",
                             "tool_instance_id": "instance-v2",
                         }
                     ]
@@ -566,7 +570,7 @@ class TestHITLResumeSessionValidation:
                     InterruptDecision(
                         type=InterruptDecisionType.APPROVE,
                         task_id="tool-call-1",
-                        action="client__shell_execute",
+                        action="client__desktop_commander__start_process",
                     )
                 ],
             )
@@ -586,8 +590,8 @@ class TestInterruptScopePersistence:
                     },
                     "client-call": {
                         "device_id": "device-1",
-                        "tool_origin": "client_native",
-                        "qualified_tool_id": "native::shell_execute",
+                        "tool_origin": "client_mcp",
+                        "qualified_tool_id": "desktop_commander::start_process",
                         "session_id": "session-1",
                         "catalog_version": 4,
                         "tool_instance_id": "inst-4",
@@ -834,8 +838,8 @@ class TestNoDeviceBindsZeroTools:
         """autoload_client_tools returns [] when device_id is None."""
         state = DeferredToolState()
         ref = SimpleNamespace(
-            tool_name="client__shell_execute",
-            server_name="native",
+            tool_name="client__desktop_commander__start_process",
+            server_name="desktop_commander",
             device_id="dev-1",
             tool_instance_id="inst-1",
         )

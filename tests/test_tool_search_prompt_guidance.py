@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from app.ai.prompts import TOOL_EXPLORATION_SUFFIX
 
-
 # ---------------------------------------------------------------------------
 # Generic prompt invariants
 # ---------------------------------------------------------------------------
@@ -37,9 +36,9 @@ def test_tool_exploration_suffix_mentions_tool_search():
 def test_tool_exploration_suffix_says_prompt_is_not_inventory():
     """TOOL_EXPLORATION_SUFFIX must explicitly state that the prompt is not inventory."""
     lower = TOOL_EXPLORATION_SUFFIX.lower()
-    assert "not a tool inventory" in lower or "not an inventory" in lower or "not inventory" in lower, (
-        "TOOL_EXPLORATION_SUFFIX must state that prompt text is not a tool inventory."
-    )
+    assert (
+        "not a tool inventory" in lower or "not an inventory" in lower or "not inventory" in lower
+    ), "TOOL_EXPLORATION_SUFFIX must state that prompt text is not a tool inventory."
 
 
 def test_tool_exploration_suffix_mentions_inventory_mode():

@@ -58,6 +58,4 @@ def reload_repo_skills_for_demo() -> dict[str, Any] | None:
         return None
 
     enabled_count = sum(1 for skill in skills if skill.enabled)
-    return {
-        "message": f"Repo skills reloaded: {len(skills)} found ({enabled_count} enabled)"
-    }
+    return {"message": f"Repo skills reloaded: {len(skills)} found ({enabled_count} enabled)"}

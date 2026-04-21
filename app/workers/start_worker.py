@@ -11,12 +11,6 @@ def start_worker():
     project_root = Path(__file__).parent.parent.parent
     os.chdir(project_root)
 
-    if not os.getenv("CELERY_BROKER_URL"):
-        os.environ["CELERY_BROKER_URL"] = "redis://localhost:6379/0"
-
-    if not os.getenv("CELERY_RESULT_BACKEND"):
-        os.environ["CELERY_RESULT_BACKEND"] = "redis://localhost:6379/0"
-
     # Start the worker
     cmd = [
         sys.executable,

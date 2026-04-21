@@ -359,15 +359,39 @@ class Settings(BaseSettings):
         default=300,
         description="Timeout for MinerU subprocess in seconds",
     )
+    mineru_api_url: str = Field(
+        default="",
+        description=(
+            "Optional MinerU FastAPI base URL. When blank, each mineru CLI call starts "
+            "a temporary local mineru-api service (higher startup overhead)."
+        ),
+    )
     mineru_backend: str = Field(
         default="pipeline",
         description=(
-            "MinerU processing backend: 'pipeline' (fast, no large VLM download) "
-            "or 'vlm' (high-quality, requires ~7GB VLM model — run scripts/warm_mineru.py first)"
+            "MinerU processing backend. Supported values: 'pipeline', "
+            "'hybrid-auto-engine', 'hybrid-http-client', 'vlm-auto-engine', "
+            "'vlm-http-client'."
         ),
     )
+    mineru_method: str = Field(
+        default="auto",
+        description=(
+            "MinerU parsing method for pipeline/hybrid backends: 'auto', 'txt', or 'ocr'."
+        ),
+    )
+    mineru_lang: str = Field(
+        default="",
+        description=(
+            "Optional MinerU OCR language for pipeline/hybrid backends (for example: 'en', 'ch')."
+        ),
+    )
+    extract_formulas_from_pdf: bool = Field(
+        default=True,
+        description="Enable formula extraction from PDF documents",
+    )
     mineru_extra_args: list[str] = Field(
-        default=[],
+        default_factory=list,
         description="Extra CLI arguments forwarded verbatim to the mineru command (e.g. ['--device', 'cpu'])",
     )
     document_images_storage_path: str = Field(

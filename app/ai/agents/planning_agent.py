@@ -89,6 +89,7 @@ class PlanningAgent(BaseAgent):
         internal_tools: list[BaseTool] | None = None,
         user_id: str | None = None,
         device_id: str | None = None,
+        tool_scope: str | None = None,
     ) -> list[BaseTool]:
         """
         Ensure write_todos is always present in both binding and execution maps.
@@ -106,6 +107,7 @@ class PlanningAgent(BaseAgent):
             internal_tools=combined_internal,
             user_id=user_id,
             device_id=device_id,
+            tool_scope=tool_scope,
         )
 
     async def _init_tools(self):

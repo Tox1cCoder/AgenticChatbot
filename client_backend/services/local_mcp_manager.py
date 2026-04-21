@@ -220,6 +220,8 @@ class LocalMCPManager:
                             base_dir=config_dir,
                         )
                     )
+                else:
+                    resolved_cwd = self._default_stdio_cwd()
 
                 servers.append(
                     MCPServerConfig(
@@ -326,14 +328,83 @@ class LocalMCPManager:
 
     def _ensure_default_config_exists(self) -> None:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.config_path.exists():
-            return
+        seed_payload = self._load_repo_seed_config()
 
+        existing_payload: dict[str, Any] | None = None
+        if self.config_path.exists():
+            try:
+                existing_payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+            except Exception:
+                existing_payload = None
+
+            if self._has_configured_servers(existing_payload):
+                return
+
+            if seed_payload is None:
+                return
+
+        payload_to_write = seed_payload or {"mcpServers": {}}
         self.config_path.write_text(
-            json.dumps({"mcpServers": {}}, indent=2),
+            json.dumps(payload_to_write, indent=2),
             encoding="utf-8",
         )
-        logger.info("Created default MCP config at %s", self.config_path)
+        if seed_payload is not None:
+            logger.info("Seeded local MCP config at %s from repo config", self.config_path)
+        else:
+            logger.info("Created default MCP config at %s", self.config_path)
+
+    @staticmethod
+    def _has_configured_servers(payload: dict[str, Any] | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+
+        raw_servers = payload.get("mcpServers")
+        if raw_servers is None:
+            raw_servers = payload.get("mcp_servers")
+        return isinstance(raw_servers, dict) and bool(raw_servers)
+
+    def _load_repo_seed_config(self) -> dict[str, Any] | None:
+        """
+        In source/dev mode, seed the local sidecar config from the repo's
+        canonical MCP config so the sidecar starts with the same integrations
+        as the Streamlit/server runtime unless the user chose an explicit file.
+        """
+        if self._explicit_config_path is not None or client_settings.mcp_config_path:
+            return None
+        if str(client_settings.environment).strip().lower() == "production":
+            return None
+
+        candidate_paths = [
+            Path.cwd() / "app" / "ai" / "mcp_config.json",
+            Path(__file__).resolve().parents[2] / "app" / "ai" / "mcp_config.json",
+        ]
+        resolved_target = self.config_path.resolve()
+
+        for candidate in candidate_paths:
+            try:
+                resolved_candidate = candidate.resolve()
+            except Exception:
+                continue
+            if resolved_candidate == resolved_target or not resolved_candidate.exists():
+                continue
+            try:
+                payload = json.loads(resolved_candidate.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if self._has_configured_servers(payload):
+                return payload
+        return None
+
+    @staticmethod
+    def _default_stdio_cwd() -> str | None:
+        workspace_roots = list(client_settings.workspace_roots or [])
+        if not workspace_roots:
+            return None
+
+        first_root = str(workspace_roots[0]).strip()
+        if not first_root:
+            return None
+        return str(normalize_path(first_root))
 
     @staticmethod
     def _expand_env_placeholders(value: str) -> str:

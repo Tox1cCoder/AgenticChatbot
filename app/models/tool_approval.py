@@ -66,7 +66,7 @@ class ToolApproval(Base):
     # Tool provenance fields for audit
     tool_origin = Column(
         String(32), nullable=True, index=True
-    )  # e.g., "client_native", "client_mcp", "server"
+    )  # e.g., "client_mcp", "server_mcp", "internal"
     server_name = Column(
         String(255), nullable=True
     )  # MCP server name when tool_origin is "client_mcp"

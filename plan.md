@@ -1,7 +1,7 @@
 # Client Backend / Server Split Implementation Plan
 
 Status: In Progress
-Date: 2026-04-02
+Date: 2026-04-14
 Repo scope: Same repository, new local-runtime folder
 
 ## Implementation Progress
@@ -90,12 +90,14 @@ Repo scope: Same repository, new local-runtime folder
   - Environment variable filtering and audit redaction
   - Command validation to block dangerous patterns (rm -rf/, fork bombs, etc.)
   - **Verified**: Default 60s timeout, 1MB max output, validation working
+  - **Superseded (2026-04-14)**: removed from the production sidecar; native shell tools are no longer part of the client runtime contract.
 - [x] **Implement filesystem service in client_backend** (2026-03-23)
   - Created `client_backend/services/filesystem_service.py` for file operations
   - Full CRUD: read/write text and binary, list directories, create/delete files/dirs
   - Search functionality: by name pattern and content regex
   - Workspace sandboxing: all operations validated against allowed roots
   - **Verified**: 50MB file size limit, proper path validation
+  - **Superseded (2026-04-14)**: removed from the production sidecar; filesystem access must come from configured MCP servers instead of sidecar-native tools.
 - [x] **Implement local MCP manager in client_backend** (2026-03-23)
   - Created `client_backend/services/local_mcp_manager.py` for MCP server management
   - Features: Config loading from JSON, stdio transport support, process lifecycle management
@@ -131,6 +133,7 @@ Repo scope: Same repository, new local-runtime folder
   - Updated AI SDK chat endpoint to accept `deviceId`/`device_id` passthrough into the shared message schema
   - **Design decision**: Expose client-local tools with a `client__...` prefix so they cannot collide with server-owned tool names while still preserving the original `qualified_tool_id` for dispatch/audit
   - **Verified**: `py_compile` passed for all changed server modules, and a focused runtime-wrapper smoke test confirmed `client__shell_execute` dispatched to `native::shell_execute` with the expected device-scoped arguments/result
+  - **Superseded (2026-04-14)**: the wrapper model remains, but only MCP-backed client tools are eligible. Native wrappers such as `client__shell_execute` were removed.
 - [x] **Dispatch client-local tool calls over WebSocket** (2026-03-23)
   - Added `client_backend/services/runtime_bridge.py` to own device registration, outbound runtime WebSocket lifecycle, heartbeat loop, reconnect policy, and catalog sync
   - Added native client tool catalog definitions for shell execution plus filesystem read/write/list/search
@@ -139,6 +142,7 @@ Repo scope: Same repository, new local-runtime folder
   - Updated health/status endpoints to read runtime state from the runtime bridge service
   - **Design decision**: Start the runtime bridge as a background service after upstream auth succeeds so the desktop can keep the canonical login flow while the device-runtime channel reconnects independently
   - **Verified**: A fake-server smoke test confirmed device registration, tool/skill catalog sync, runtime WebSocket connect/ack, and a full `tool_request` -> local shell execution -> `tool_result` round trip
+  - **Superseded (2026-04-14)**: the WebSocket/catalog flow still stands, but the synced client tool catalog is now MCP-only and the sidecar no longer advertises or executes native shell/filesystem tools.
 - [x] **Return tool results into existing graph flow** (2026-03-23)
   - Reused the existing `execute_tool_calls` path so client-local tool wrappers return standard tool outputs and artifacts without changing LangGraph topology
   - Added interrupt payload staging in `app/ai/graph.py` so pending approvals keep device-aware provenance across checkpoint/recovery paths
@@ -165,6 +169,46 @@ Repo scope: Same repository, new local-runtime folder
   - Updated the client runtime bridge to wait for the canonical backend to observe disconnects before reporting the sidecar as fully stopped
   - Preserved the existing outbound WebSocket model and NAT-safe transport assumptions from the plan's Mermaid diagrams
   - **Verified**: live runtime integration now passes cleanly through connect, server visibility, disconnect, and post-disconnect cleanup
+
+### Architecture Update: MCP-Only Sidecar Tooling (2026-04-14)
+
+- Removed the sidecar-native tool layer from the production runtime:
+  - deleted `client_backend/services/shell_runner.py`
+  - deleted `client_backend/services/filesystem_service.py`
+  - removed native tool advertisement/execution from `client_backend/services/runtime_bridge.py`
+  - removed `client_native` handling from the server-side client tool ingestion path
+- The sidecar tool contract is now explicit:
+  - client tools come only from MCP servers configured for the sidecar
+  - server tools come only from MCP servers configured on the canonical backend
+  - when both sides expose the same capability, search prefers the client-side MCP variant
+- `client__` remains a model-visible namespace only. Real routing/isolation is enforced by:
+  - `device_id`
+  - `session_id`
+  - `catalog_version`
+  - `tool_instance_id`
+- Client-local skills remain supported, but no longer piggyback on a native tool catalog entry:
+  - `activate_skill` now uses an internal `client_skill::activate` dispatch path
+  - this path is not advertised as a client tool and does not reintroduce native tool exposure
+- **Verified (2026-04-14)**:
+  - focused MCP-only/runtime-isolation tests passed
+  - broader regression coverage passed
+  - a live sidecar subprocess against the real backend completed `tool_search` -> client MCP tool -> HITL resume with no native tool exposure
+
+### SSE Keepalive Fix for Sidecar HITL Resume (2026-04-14)
+
+- **Root cause**: After HITL approval, the sidecar-proxied AI SDK SSE stream terminated prematurely because:
+  1. The server's AI SDK SSE endpoint (`_build_ui_message_stream_response`) iterated the event source directly with no keepalive mechanism — unlike the internal endpoint (`_internal_event_stream_response`) which sends periodic heartbeat events.
+  2. The sidecar's `stream_sse` used the default httpx client timeout (60s read) for streaming connections. During the silent period (tool dispatch over WebSocket + model generation), this timeout could fire and drop the connection.
+  3. The Streamlit client was unaffected because it uses the internal endpoint (with heartbeats) and connects directly to the server (no proxy timeout).
+
+- **Fixes applied**:
+  1. **Server AI SDK SSE endpoint** (`app/api/ai_sdk.py`): Refactored `_build_ui_message_stream_response` from a direct async-for loop to a producer-consumer queue pattern (matching the internal endpoint). A 15-second heartbeat interval sends `{"type": "heartbeat"}` events during processing pauses, keeping the connection alive.
+  2. **Sidecar `stream_sse`** (`client_backend/services/server_api.py`): Extended the read timeout to 600 seconds for SSE streaming connections (connect/write/pool remain at the configured default). Added filtering to silently drop heartbeat events so they don't leak through to the desktop client. Added explicit `ReadTimeout` handling.
+
+- **Verified (2026-04-14)**:
+  - 6 new tests: 3 server-side heartbeat tests (slow source, fast source, interrupt handling), 2 sidecar proxy tests (heartbeat filtering, timeout config), 1 live E2E test (AI SDK chat streams complete response through sidecar with no heartbeat leakage)
+  - 90 targeted tests passed (3 skipped for missing server deps), 0 failures
+  - Live sidecar integration: full AI SDK SSE protocol (start → text-delta → finish → [DONE]) streamed correctly through the sidecar proxy
 
 ### Architecture Addendum: Multi-Sidecar Hardening (2026-04-07)
 
@@ -412,6 +456,44 @@ Implementation update (2026-04-10):
 - Refactored the server runtime to use an explicit internal skill resolver that combines server-owned repo skills with device-scoped client skills.
 - Removed the server `/skills/*` HTTP router, related service/schema wiring, and the fallback/admin config flags.
 - Verified with `python -m pytest tests/client_backend/test_skills_registry.py tests/client_backend/test_skills_api.py tests/client_backend/test_runtime_bridge.py tests/test_skills_parity.py tests/test_skills_tool.py tests/test_skills_architecture.py -q` → **32 passed**
+
+### Cross-Client Routing and HITL/Deferred-Loading Audit (2026-04-17)
+
+Audit targets: (a) can the server invoke a tool from the wrong client under any realistic path? (b) do HITL and deferred tool loading conflict?
+
+#### (a) Cross-client tool routing — verified safe
+
+- `ClientToolCatalog` is keyed by `{user_id}:{device_id}` and rebuilt only from that device's own active session. `refresh_from_session()` clears the catalog when `session.user_id` does not match, so catalogs never merge across users/devices.
+- `_to_internal_result()` always stamps `device_id=self._device_id`, so `tool_search` autoload references carry the current request's device. The `device_id or ""` fallback at `tool_search_tool.py:373` never fires for a client-origin descriptor.
+- Tool wrappers built by `client_runtime_tools._build_tool()` capture `bound_device_id`, `bound_session_id`, `bound_catalog_version`, and `tool_instance_id` at build time. `_dispatch_client_tool` re-validates `ctx.device_id`, session liveness, and session equality on every call before dispatching.
+- `ClientDeviceService.dispatch_tool_call()` re-validates `session.user_id`, `bound_session_id`, `bound_catalog_version`, catalog membership, and `tool_instance_id` server-side before queuing the request to the sidecar. The sidecar's `_validate_tool_request()` repeats the checks.
+- **No cross-client routing bug found.** All four validation layers (wrapper closure, dispatch, server-side validation, sidecar-side validation) are device-scoped and consistent.
+
+#### (b) HITL + deferred-loading interaction — verified, with one narrow fix
+
+Claims investigated and disproved against current code:
+
+| Claim | Verdict | Why |
+| --- | --- | --- |
+| Expire-on-reconnect races with approve | Safe | `try_transition_to_resolving` and `expire_stale_client_tool_interrupts` are both atomic `UPDATE ... WHERE status = PENDING`; first-writer wins at the DB. |
+| Session change during pause silently resumes against new session | Safe | `_validate_and_claim_interrupt_resume` checks `session_id`, `catalog_version`, `qualified_tool_id`, and `tool_instance_id` before resume, expiring the interrupt on mismatch. |
+| Autoload during resume pollutes approval audit | Safe | Audit rows are written from stored provenance in `fetched_interrupt_record` before resume; post-resume loads go to the new scope without touching historical rows. |
+| Missing re-bind refresh across resume rounds | Safe | `_get_tools_for_binding` runs on every agent/tool node entry; loaded tools in deferred state are always re-included. |
+| Multi-tool interrupt audit collision | Safe | Provenance is keyed by `tool_call_id` (unique per call); action-name fallback only hits when id is missing. |
+
+Real gap found and fixed:
+
+- When a server MCP tool was autoloaded via `tool_search`, the graph paused for HITL, and the in-memory `DeferredToolState` was subsequently lost (process restart, multi-worker migration, or LRU eviction past the approval wait window), the approved tool was not found at resume time. `_recover_missing_tool` at [tool_execution.py:443-493](app/ai/tool_execution.py#L443-L493) previously only recovered `client__`-prefixed tools.
+- **Fix (2026-04-17)**: extended `_recover_missing_tool` to look up non-prefixed tool names directly from the live MCP manager (`manager.get_tools()`) by exact name when the request is not `client_only` scoped. Client-tool recovery is unchanged. This closes the single real resume-time gap without expanding scope or changing binding semantics.
+
+Other cleanup bundled with this pass:
+
+- Recreated `app/ai/tool_scope.py` (module referenced by `tool_context`, `tool_execution`, `tool_search_tool`, and `base_agent` but missing from the tree). Defines `ToolScope` enum, `resolve_tool_scope()`, and `is_client_only_scope()`. `CLIENT_ONLY` is downgraded to `DEFAULT` when no `device_id` is provided, since `client_only` without a device has nothing to scope to.
+- Removed the `native::activate_skill` legacy alias. The canonical dispatch path is `client_skill::activate` per the 2026-04-14 architecture update; the server and sidecar now use the canonical form exclusively.
+
+Verification:
+
+- `python -m pytest tests/test_client_tool_scope.py tests/client_backend/test_runtime_bridge.py tests/test_multi_sidecar_hardening.py tests/test_unified_tool_search.py -q` → **44 passed**.
 
 ## 1. Objective
 
@@ -1107,7 +1189,7 @@ Recommended client settings:
 - `CLIENT_MCP_CONFIG_PATH`
 - `CLIENT_SKILLS_ROOTS`
 - `CLIENT_WORKSPACE_ROOTS`
-- `CLIENT_ALLOWED_SHELLS`
+- `CLIENT_TOOL_CALL_TIMEOUT_SECONDS`
 - `CLIENT_HEARTBEAT_INTERVAL_SECONDS`
 - `CLIENT_LOG_LEVEL`
 
@@ -1157,17 +1239,15 @@ Exit criteria:
 - server can see active device sessions by user/device
 - same device can host multiple isolated user profiles
 
-### Phase 3: Local Tool Providers
+### Phase 3: Local Runtime Capability Sources
 
-- implement shell runner
-- implement filesystem tool set
 - implement local MCP manager with JSON config compatibility
 - implement local skills registry with device-root scanning
 - generate sanitized tool/skill catalogs
 
 Exit criteria:
 
-- client backend can enumerate and execute local-native and local-MCP tools
+- client backend can enumerate and execute client-local MCP tools only
 - client backend can enumerate enabled local skills
 
 ### Phase 4: Server Tool Dispatch Integration
@@ -1231,8 +1311,7 @@ Because the repo has effectively no automated test coverage today, verification 
 | Auth/session | login, refresh, logout, expired token recovery, local session isolation |
 | Conversations/messages | create/list/update/delete, pagination, history integrity |
 | UI/client/server streaming | long-running SSE, heartbeat continuity, cancellation, reconnect |
-| Local shell/filesystem tools | path sandboxing, timeout, stdout cap, redacted audit args |
-| Local MCP | JSON config parsing, env expansion, relative path handling, tool reload |
+| Local MCP | JSON config parsing, env expansion, relative path handling, tool reload, dispatch, deferred loading, and no native-tool leakage |
 | Skills | repo `skills/` folder loads on server startup, YAML front-matter parity holds across server/client parsers, activation payloads are body-only, enable/disable per profile works on the client, and prompt isolation is preserved |
 | Server skill source | no public `/skills/*` HTTP API remains, server-owned repo skills are resolved through the internal source/resolver path, and runtime does not depend on HTTP admin surfaces for skills |
 | HITL | approval, edit, reject, resume, timeout, device-aware audit rows |
@@ -1275,7 +1354,7 @@ Recommended test split:
 - A new `client_backend/` runtime exists and can serve as the local backend for the desktop app.
 - The Streamlit demo remains untouched and does not depend on the new runtime.
 - The server remains the source of truth for auth, conversations, messages, checkpoints, documents, and provider config.
-- Local filesystem/script/MCP/skills execute only on the client backend.
+- Client-local executable capabilities are sourced from MCP servers on the sidecar only; the sidecar does not expose native shell/filesystem tools.
 - The server can bind and dispatch client-local tools without rewriting the main workflow architecture.
 - MCP config is per-user and local to the device.
 - Server-owned repo skills from `skills/` are first-class production runtime inputs and load successfully at startup.
@@ -1297,7 +1376,7 @@ Recommended test split:
 2. Create `client_backend/` skeleton and upstream auth/session proxy.
 3. Decide and enforce the local runtime concurrency model (`one user per sidecar process` vs `true per-session multi-tenant sidecar`).
 4. Add server-side device registration and runtime WebSocket.
-5. Implement local native tools, local MCP, and local skills on the client.
+5. Implement client-local MCP tooling and client-local skills on the sidecar.
 6. Add server-side remote tool catalog and dispatch path.
 7. Refactor skills to an explicit source/resolver model: promote repo `skills/` to a first-class server source, keep client skills device-scoped, remove `/skills/*` HTTP routes, and unify the server/client parser contract.
 8. Persist parse artifacts and expose artifact APIs if desktop needs them.

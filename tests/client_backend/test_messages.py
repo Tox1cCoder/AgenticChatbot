@@ -89,8 +89,11 @@ async def test_ai_sdk_chat_reconnects_runtime_bridge_and_injects_device_id(monke
     )
     body = await _collect_streaming_body(response)
 
-    assert bridge.start_calls[0][0] is False
-    assert bridge.start_calls[1][0] is True
+    # The bridge should have been started with wait_for_connection=True
+    # so device_id is available before the message is forwarded.
+    assert len(bridge.start_calls) == 1
+    assert bridge.start_calls[0][0] is True  # wait_for_connection
+    assert bridge.start_calls[0][1] == 15  # timeout_seconds
     assert server_client.chat_calls == [
         (
             "conversation-1",
@@ -125,8 +128,8 @@ async def test_ai_sdk_resume_interrupt_reconnects_runtime_bridge_before_forwardi
     )
     body = await _collect_streaming_body(response)
 
-    assert bridge.start_calls[0][0] is False
-    assert bridge.start_calls[1][0] is True
+    assert len(bridge.start_calls) == 1
+    assert bridge.start_calls[0][0] is True
     assert server_client.resume_calls == [
         {
             "threadId": "thread-1",

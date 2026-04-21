@@ -150,7 +150,9 @@ def get_available_skill_summaries(
     device_id: str | None,
 ) -> list[dict[str, Any]]:
     """Return prompt-safe skill summaries for the active request scope."""
-    return [skill.to_summary() for skill in list_resolved_skills(user_id=user_id, device_id=device_id)]
+    return [
+        skill.to_summary() for skill in list_resolved_skills(user_id=user_id, device_id=device_id)
+    ]
 
 
 def resolve_skill_reference(
@@ -163,7 +165,9 @@ def resolve_skill_reference(
     available_skills = list_resolved_skills(user_id=user_id, device_id=device_id)
     available_names = [skill.lookup_name for skill in available_skills]
 
-    exact_lookup_match = next((skill for skill in available_skills if skill.lookup_name == skill_name), None)
+    exact_lookup_match = next(
+        (skill for skill in available_skills if skill.lookup_name == skill_name), None
+    )
     if exact_lookup_match is not None:
         return exact_lookup_match, None
 

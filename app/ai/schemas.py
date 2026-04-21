@@ -49,6 +49,10 @@ class InterruptDecision(BaseModel):
 
     type: InterruptDecisionType = Field(..., description="Type of decision")
     task_id: str | None = Field(None, description="Task ID to apply this decision to")
+    tool_call_id: str | None = Field(
+        None,
+        description="Tool call ID to apply this decision to when the client uses toolCallId.",
+    )
     action: str | None = Field(None, description="Name of the tool/action this decision applies to")
     args: dict[str, Any] | None = Field(
         None,

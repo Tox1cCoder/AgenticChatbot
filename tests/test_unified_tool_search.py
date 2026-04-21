@@ -8,7 +8,6 @@ from app.ai.tool_search_tool import (
     _merge_search_results,
 )
 
-
 # ---------------------------------------------------------------------------
 # Phase 0 Regression: inventory mode
 # ---------------------------------------------------------------------------
@@ -311,13 +310,13 @@ async def test_execute_tool_search_preserves_client_execution_scope_for_autoload
         def search(self, query=None, top_k=5, server_name=None, allowlist=None):
             return [
                 ClientToolDescriptor(
-                    tool_name="client__shell_execute",
-                    server_name="native",
-                    description="Run a shell command locally.",
+                    tool_name="client__desktop_commander__start_process",
+                    server_name="desktop_commander",
+                    description="Start a local process via Desktop Commander.",
                     arg_names=["command"],
                     required_arg_names=["command"],
-                    qualified_tool_id="native::shell_execute",
-                    origin="client_native",
+                    qualified_tool_id="desktop_commander::start_process",
+                    origin="client_mcp",
                     device_id="device-123",
                     session_id="session-7",
                     catalog_version=7,
@@ -370,7 +369,7 @@ async def test_execute_tool_search_preserves_client_execution_scope_for_autoload
         ),
     )
 
-    result = await _execute_tool_search(query="run shell command")
+    result = await _execute_tool_search(query="start local process")
 
     assert result["loaded_count"] == 1
     assert deferred_state.client_calls
@@ -379,6 +378,154 @@ async def test_execute_tool_search_preserves_client_execution_scope_for_autoload
     assert autoload_call["session_id"] == "session-7"
     assert autoload_call["references"][0].tool_instance_id == "instance-7"
     assert autoload_call["references"][0].catalog_version == 7
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_search_client_scope_uses_client_inventory_only(monkeypatch):
+    class FakeServerCatalog:
+        def get_server_inventory(self, allowlist=None):
+            return [
+                {
+                    "server_name": "server-only",
+                    "description": "Server inventory that must be hidden from sidecar scope",
+                    "tool_count": 1,
+                }
+            ]
+
+    class FakeClientCatalog:
+        tool_count = 1
+        session_id = "session-7"
+        catalog_version = 7
+
+        def get_server_inventory(self, allowlist=None):
+            return [
+                {
+                    "server_name": "sidecar-only",
+                    "description": "Client inventory visible from the sidecar",
+                    "tool_count": 1,
+                }
+            ]
+
+    async def fake_get_global_mcp_manager():
+        return object()
+
+    async def fake_get_tool_catalog(_manager):
+        return FakeServerCatalog()
+
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_global_mcp_manager",
+        fake_get_global_mcp_manager,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_catalog",
+        fake_get_tool_catalog,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_client_tool_catalog",
+        lambda device_id, user_id: FakeClientCatalog(),
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_context",
+        lambda: type(
+            "ClientScopeContext",
+            (),
+            {
+                "conversation_id": "conversation-1",
+                "user_id": "user-1",
+                "agent_key": "chat",
+                "device_id": "device-123",
+                "tool_scope": "client_only",
+            },
+        )(),
+    )
+
+    result = await _execute_tool_search(query=None)
+
+    assert result["mode"] == "inventory"
+    assert result["inventory"] == [
+        {
+            "server_name": "sidecar-only",
+            "description": "Client inventory visible from the sidecar",
+            "tool_count": 1,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_search_client_scope_excludes_server_results(monkeypatch):
+    class FakeServerCatalog:
+        def search(self, query=None, top_k=5, server_name=None, allowlist=None):
+            return [
+                ToolDescriptor(
+                    tool_name="server_edit_file",
+                    server_name="server-editor",
+                    description="Edit files on the server runtime.",
+                    arg_names=["path"],
+                    required_arg_names=["path"],
+                    schema_fingerprint="server-fp",
+                )
+            ]
+
+        def is_ambiguous(self, tool_name):
+            return False
+
+    class FakeClientCatalog:
+        tool_count = 1
+        session_id = "session-7"
+        catalog_version = 7
+
+        def search(self, query=None, top_k=5, server_name=None, allowlist=None):
+            return [
+                ClientToolDescriptor(
+                    tool_name="client__desktop_commander__edit_block",
+                    server_name="desktop_commander",
+                    description="Edit files on the connected sidecar.",
+                    arg_names=["file_path"],
+                    required_arg_names=["file_path"],
+                    qualified_tool_id="desktop_commander::edit_block",
+                    origin="client_mcp",
+                    device_id="device-123",
+                )
+            ]
+
+    async def fake_get_global_mcp_manager():
+        return object()
+
+    async def fake_get_tool_catalog(_manager):
+        return FakeServerCatalog()
+
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_global_mcp_manager",
+        fake_get_global_mcp_manager,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_catalog",
+        fake_get_tool_catalog,
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_client_tool_catalog",
+        lambda device_id, user_id: FakeClientCatalog(),
+    )
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_context",
+        lambda: type(
+            "ClientScopeContext",
+            (),
+            {
+                "conversation_id": "conversation-1",
+                "user_id": "user-1",
+                "agent_key": "chat",
+                "device_id": "device-123",
+                "tool_scope": "client_only",
+            },
+        )(),
+    )
+
+    result = await _execute_tool_search(query="edit a local file")
+
+    assert [entry["tool_name"] for entry in result["results"]] == [
+        "client__desktop_commander__edit_block"
+    ]
 
 
 def test_merge_search_results_prefers_client_variant_for_same_qualified_tool():
