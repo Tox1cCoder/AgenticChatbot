@@ -1,140 +1,190 @@
-# Chatbot
+# Sample Chatbot
 
-The repository contains:
+A production-grade, multi-agent chatbot platform built on **FastAPI**, **LangGraph**, **PostgreSQL**, **Redis**, **Celery**, and **Qdrant**. The repository ships two complementary services:
 
-- A canonical server backend in `app/` for auth, persistence, AI orchestration, document processing, provider management, planning, MCP integration, and widget sessions.
-- A local client backend in `client_backend/` for loopback-safe desktop/runtime flows such as local sessions, local shell/filesystem/MCP access, skill discovery, and device-side tool execution.
+- **`app/`** — the canonical **server backend**: authentication, persistence, multi-agent AI orchestration, document ingestion + RAG, task planning, HITL interrupts, per-user provider credentials, MCP tool registry, live widgets, and a client-device runtime bridge.
+- **`client_backend/`** — a **local sidecar runtime** that lets a desktop or embedded UI expose privileged local resources (shell, filesystem, local MCP servers, local skills) to the server through a signed, device-authenticated WebSocket.
+
+A Streamlit **demo UI** ([`demo.py`](demo.py)) and a ready-to-import **Postman collection** ([`Chatbot API.postman_collection.json`](Chatbot%20API.postman_collection.json)) are provided out of the box.
+
+---
+
+## Table of Contents
+
+- [Highlights](#highlights)
+- [Architecture](#architecture)
+- [Tech Stack](#tech-stack)
+- [Repository Layout](#repository-layout)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Environment Variables](#environment-variables)
+- [Database Migrations](#database-migrations)
+- [Running The Services](#running-the-services)
+- [AI Workflow](#ai-workflow)
+- [Document Pipeline & RAG](#document-pipeline--rag)
+- [Provider & Model Configuration](#provider--model-configuration)
+- [MCP Integration](#mcp-integration)
+- [Skills System](#skills-system)
+- [Planning Mode & Task Plans](#planning-mode--task-plans)
+- [Human-in-the-Loop (HITL)](#human-in-the-loop-hitl)
+- [Client Runtime Bridge](#client-runtime-bridge)
+- [Live Widgets](#live-widgets)
+- [API Reference](#api-reference)
+- [Streaming, SSE & WebSocket Endpoints](#streaming-sse--websocket-endpoints)
+- [OpenAPI & Postman](#openapi--postman)
+- [Testing](#testing)
+- [Observability](#observability)
+- [Packaging & Distribution](#packaging--distribution)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Highlights
+
+| Capability | Summary |
+|---|---|
+| **Multi-agent workflow** | LLM-driven router dispatches to specialised agents: `chat`, `rag`, `search`, `image_generator`, `planning`, `canvas`. Implemented as a LangGraph state machine in [`app/ai/graph.py`](app/ai/graph.py). |
+| **Streaming-first API** | SSE streaming with 1-second heartbeats for [`/messages/stream`](app/api/messages.py), [`/messages/resume-interrupt`](app/api/messages.py), and full **Vercel AI SDK** compatibility at [`/api/chat/{conversation_id}`](app/api/ai_sdk.py) and [`/ai/chat/{conversation_id}`](app/api/ai_sdk.py). |
+| **Document RAG** | MinerU + pdfplumber + sentence-transformers + Qdrant pipeline with optional cross-encoder re-ranking, table extraction, formula extraction, per-page image captioning, and cross-page context preservation. |
+| **Agentic RAG** | Optional three-phase scan → deep-dive → backtrack mode ([`agentic_rag_enabled`](app/core/config.py)) for long-document exploration. |
+| **Planning mode** | End-to-end `TaskPlan` lifecycle (`draft` → `ready` → `executing` → `paused` → `completed`) with both AI-generated and manually-authored plans. |
+| **Human-in-the-Loop** | Configurable per-tool approval interrupts with resume/reject semantics, persisted `ToolApproval` records, and Redis-backed timeout cleanup. |
+| **Multi-provider** | Per-user, Fernet-encrypted API keys for **Google Gemini**, **OpenAI**, and **Anthropic**, with per-agent overrides (`agent_model_configs` table). |
+| **MCP-native** | Server-managed MCP registry ([`/mcp/*`](app/api/mcp.py)) plus deferred tool search ([`tool_search`](app/ai/tool_search_tool.py)) to keep agent schemas small at prompt time. |
+| **Client runtime bridge** | Devices register, heartbeat, sync tool/skill catalogs, and receive WebSocket-dispatched tool calls — enabling local shell/filesystem/MCP execution without exposing them to the public network. |
+| **Skills** | Markdown-defined skills with YAML frontmatter, resolved to tools at runtime. Shared registry spans server, client, and device ([`app/ai/skills_registry.py`](app/ai/skills_registry.py), [`client_backend/services/local_skills_registry.py`](client_backend/services/local_skills_registry.py)). |
+| **Live widgets** | Token-minted handshake (`POST /widgets/{id}/connection`) followed by a stateful WebSocket (`/widgets/{id}/connect`) for interactive, server-driven UI components. |
+| **Summarization middleware** | Context-budget-aware rolling summarisation ([`summarization_middleware.py`](app/ai/summarization_middleware.py)) with token/message/fraction triggers, hard summary caps, and fail-closed timeouts. |
+| **Auto-continue** | Automatic continuation rounds when an agent hits iteration limits (`auto_continue_enabled`), with absolute wall-clock and iteration safety caps. |
+| **Thinking / reasoning** | First-class support for Gemini 3 thinking levels (`minimal` / `low` / `medium` / `high`) and Gemini 2.5 thinking budgets, surfaced as streaming `reasoning` events. |
+| **Gemini code execution** | Optional native tool for agentic vision + computation across agents (`enable_gemini_code_execution`). |
+| **Observability** | Opt-in LangSmith tracing, centralised exception handler, per-service health endpoints (`/health`, `/health/celery`, `/health/redis`, `/health/qdrant`, `/health/all`), and structured stream events. |
+
+---
 
 ## Architecture
 
 ```text
-Frontend / Demo UI / Desktop UI
-            |
-            | HTTP
-            v
-  client_backend/ (local loopback runtime)
-    - local auth/session wrapper
-    - local shell + filesystem services
-    - local MCP + local skills registry
-    - runtime bridge + device catalog sync
-    - compatibility proxy for server APIs
-            |
-            | HTTP + WebSocket runtime bridge
-            v
-      app/ (canonical server backend)
-    - JWT auth + persistence
-    - LangGraph agent workflow
-    - planning + HITL interrupts
-    - MCP registry + tool execution
-    - widget session minting
-    - document ingestion + RAG
-            |
-            +--> PostgreSQL
-            +--> Redis
-            +--> Celery workers
-            +--> Qdrant
-            +--> External model providers / MCP servers
+        ┌──────────────────────────────────────────────────────────────┐
+        │   Frontend / Demo UI / Desktop UI / Vercel AI SDK client     │
+        └───────────────┬──────────────────────────┬──────────────────┘
+                        │ HTTP                     │ HTTP + WebSocket
+                        ▼                          ▼
+        ┌──────────────────────────┐   ┌─────────────────────────────┐
+        │  client_backend/         │   │  app/  (canonical server)   │
+        │  loopback sidecar        │──▶│                             │
+        │  ─ local auth wrapper    │   │  ─ FastAPI + JWT auth       │
+        │  ─ local shell/FS        │   │  ─ LangGraph multi-agent    │
+        │  ─ local MCP manager     │   │  ─ Planning + HITL          │
+        │  ─ local skills registry │   │  ─ MCP registry + execution │
+        │  ─ runtime bridge (WS)   │◀──│  ─ Widget session minting   │
+        │  ─ compatibility proxy   │   │  ─ Document ingestion + RAG │
+        └──────────────────────────┘   │  ─ Client-device bridge     │
+                                       └──┬─────────┬─────────┬──────┘
+                                          │         │         │
+                                          ▼         ▼         ▼
+                                  ┌───────────┐ ┌───────┐ ┌────────┐
+                                  │PostgreSQL │ │ Redis │ │ Qdrant │
+                                  └───────────┘ └───┬───┘ └────────┘
+                                                    │
+                                            ┌───────▼────────┐
+                                            │ Celery workers │
+                                            └────────────────┘
 ```
 
-### Server backend
+Both services speak the same schemas (`app/schemas/`). The **client backend** exposes every upstream route under both `/...` and `/api/...` prefixes so legacy consumers continue to work without modification.
 
-`app/` is the source of truth for:
+---
 
-- users, conversations, messages, feedback, and documents
-- agent orchestration and streaming responses
-- task-plan generation and planning mode
-- provider credentials and model configuration
-- server-managed MCP servers and tool execution
-- client-device registration and runtime dispatch
-- widget connection tokens and widget state recovery
+## Tech Stack
 
-Key folders:
+- **Runtime**: Python 3.10+, FastAPI, Uvicorn, asyncio
+- **AI**: LangChain 1.x, LangGraph 1.x, LangSmith, langchain-google-genai, langchain-openai, langchain-mcp-adapters, Tavily
+- **Persistence**: SQLAlchemy 2.x + Alembic (28 migrations), PostgreSQL 14+, psycopg driver
+- **Background**: Celery 5.x + Redis 7.x
+- **Vector search**: Qdrant, sentence-transformers, optional ZeroEntropy / HF cross-encoder re-rankers
+- **Documents**: MinerU (pipeline / hybrid / VLM backends), pdfplumber, python-docx, openpyxl, Pillow, pypdf
+- **Security**: PyJWT, bcrypt, Fernet (cryptography) for provider key encryption
+- **DI**: `dependency-injector` with auto-injection decorators (`AppAutoInjector`)
+- **Demo**: Streamlit + fastapi-radar for live debugging
+
+---
+
+## Repository Layout
 
 ```text
-app/
-  ai/            LangGraph workflow, agents, prompts, tool binding, HITL
-  api/           FastAPI route modules
-  core/          config, DI container, auth helpers, exceptions
-  database/      SQLAlchemy session/engine wiring
-  models/        ORM models
-  repositories/  persistence layer
-  schemas/       Pydantic schemas and API contracts
-  services/      business logic and orchestration
-  workers/       Celery worker entrypoints and tasks
+.
+├── app/                              Canonical server backend (FastAPI)
+│   ├── ai/                           LangGraph workflow, agents, MCP, skills, tools
+│   │   ├── agents/                   chat / rag / search / image / planning / canvas / router
+│   │   ├── mcp_servers/              Built-in MCP servers (calculator, tavily, time, widgets, form_filler, boring_reader)
+│   │   ├── graph.py                  MultiAgentWorkflow + streaming + HITL
+│   │   ├── memory.py                 Conversation memory manager
+│   │   ├── summarization_middleware.py   Rolling summarisation
+│   │   ├── token_instrumentation.py  History-budget + token truncation
+│   │   ├── tool_search_tool.py       Deferred tool loading
+│   │   ├── deferred_tool_*.py        Deferred binding + state machine
+│   │   ├── skills_*.py               Skill registry / resolver / snapshot / tool
+│   │   └── model_factory.py          Provider-agnostic LLM instantiation
+│   ├── api/                          FastAPI route modules (15 routers)
+│   ├── core/                         config, DI container, auth, exceptions, runtime modelling
+│   ├── database/                     session / engine / migration bootstrap
+│   ├── factories/                    Pydantic/domain factories
+│   ├── interfaces/                   Service interface contracts (ABCs)
+│   ├── models/                       15 SQLAlchemy ORM models
+│   ├── repositories/                 persistence + query strategy + command strategy
+│   ├── schemas/                      Pydantic schemas and API contracts
+│   ├── services/                     business logic, orchestration, event listeners
+│   ├── storage/                      document image storage
+│   ├── utils/                        exception handlers, helpers
+│   └── workers/                      Celery app, document processor, cleanup tasks
+├── client_backend/                   Local sidecar runtime
+│   ├── api/                          auth, conversations, messages, documents, runtime,
+│   │                                 mcp, skills, proxy, health
+│   ├── core/                         client config, logging, paths, security
+│   ├── schemas/                      runtime + skills payload models
+│   ├── services/                     runtime_bridge, server_api, local_mcp_manager,
+│   │                                 local_skills_registry, upstream_auth
+│   ├── storage/                      per-user profile storage root
+│   ├── cli.py                        codex-client-backend entrypoint (run / doctor)
+│   └── main.py                       FastAPI app factory
+├── shared/skills/                    Shared skill parsing helpers (front matter)
+├── skills/                           Bundled skills (playwright-cli, take100)
+├── tests/                            Unit + integration tests (server and client_backend)
+├── scripts/build-client-backend-bundle.ps1   Client bundle builder
+├── dist/client-backend-bundle/       Pre-built client distribution
+├── docker-compose.redis.yml          Local Redis with persistence + auth
+├── alembic.ini                       Alembic runtime config
+├── demo.py                           Streamlit demo UI
+├── demo_requirements.txt             Demo-only dependencies
+├── upload_support.py                 Streamlit document upload helper
+├── pyproject.toml                    Project metadata, deps, scripts (codex-client-backend)
+├── environment.yml                   Conda environment snapshot
+├── Chatbot API.postman_collection.json
+└── README.md
 ```
 
-### Client backend
-
-`client_backend/` is the local sidecar/runtime service. It keeps a desktop or local UI from talking directly to privileged local resources while still exposing those resources to the server when a device session is active.
-
-It owns:
-
-- local-session aware auth wrappers around upstream server auth
-- runtime lifecycle endpoints such as `/runtime/connect` and `/runtime/status`
-- local shell execution and filesystem services
-- local MCP server discovery and execution
-- local skill registry loading/toggling
-- device registration, heartbeats, catalog sync, and runtime WebSocket handling
-- compatibility routes at both `/...` and `/api/...` for local consumers
-
-Key folders:
-
-```text
-client_backend/
-  api/       loopback HTTP API and compatibility proxies
-  core/      client config, logging, path and security helpers
-  schemas/   runtime and skills payload models
-  services/  runtime bridge, server API client, shell runner, local MCP
-  cli.py     codex-client-backend entrypoint
-  main.py    FastAPI application entrypoint
-```
-
-## Core Runtime Flows
-
-### AI workflow
-
-The main workflow is implemented in `app/ai/graph.py` and fronts several specialized agents. The router decides when to use:
-
-- chat responses
-- document-aware RAG responses
-- web/search-style responses
-- planning/task decomposition
-- image generation
-- canvas/artifact responses
-
-The workflow also supports:
-
-- streaming token and reasoning events
-- deferred tool loading and MCP tool search
-- HITL approval interrupts and resume flows
-- conversation summarization and history-budget trimming
-- client-device aware tool routing when a local runtime is connected
-
-### Document pipeline
-
-Document uploads are staged to temp storage, queued through Celery, parsed and chunked, then indexed into Qdrant for retrieval. The pipeline also persists document metadata and can recover extracted images/captions for richer RAG responses.
-
-### Client runtime bridge
-
-The server can register client devices and dispatch tool calls to a connected local runtime over WebSocket. The client backend:
-
-- authenticates to the server
-- registers a device session
-- syncs tool and skill catalogs
-- executes approved local tools
-- returns structured tool results back to the server
-
-### Widgets
-
-Live widgets now have a dedicated HTTP handshake and WebSocket channel. The server mints a short-lived widget token via `POST /widgets/{widget_id}/connection`, and the actual widget state stream continues over `WS /widgets/{widget_id}/connect`.
+---
 
 ## Prerequisites
 
-- Python 3.10+
-- PostgreSQL
-- Redis
-- Qdrant if you want document retrieval / RAG
-- One or more model-provider credentials for real AI execution
+| Component | Requirement | Notes |
+|---|---|---|
+| Python | **3.10+** | 3.11 or 3.12 recommended |
+| PostgreSQL | **14+** | Required; holds auth, conversations, plans, feedback, HITL state, LangGraph checkpoints |
+| Redis | **7+** | Strongly recommended. Required for Celery, live widgets, client runtime state, HITL timeouts |
+| Qdrant | latest | Required for document retrieval / RAG |
+| Node.js | optional | Only for consumers using the `@ai-sdk` client |
+| Docker | optional | Helpers provided for Redis + Qdrant |
+
+At least one **LLM provider credential** is required for real AI execution:
+
+- `GEMINI_API_KEY` — the default provider, wired via `langchain-google-genai`
+- per-user OpenAI / Anthropic keys managed through [`/providers`](app/api/providers.py) once `MODEL_ENCRYPTION_KEY` is set
+
+Optional: `TAVILY_API_KEY` for web search agent, `SMITHERY_API_KEY` for hosted MCP servers, `LANGSMITH_API_KEY` for tracing.
+
+---
 
 ## Setup
 
@@ -142,64 +192,202 @@ Live widgets now have a dedicated HTTP handshake and WebSocket channel. The serv
 
 ```bash
 python -m venv .venv
+# Windows
 .venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
+
 pip install -e .[dev]
 ```
 
-For the Streamlit demo:
+For the Streamlit demo only:
 
 ```bash
 pip install -r demo_requirements.txt
 ```
 
+A conda environment snapshot is available as [`environment.yml`](environment.yml):
+
+```bash
+conda env create -f environment.yml
+conda activate sample-chatbot
+```
+
 ### 2. Create environment files
 
-- Copy `.env.example` to `.env`
-- Copy `.env.client.example` to `.env.client` if you plan to run the local client backend
+```bash
+cp .env.example .env
+cp .env.client.example .env.client   # if running the local client backend
+```
 
-Important notes:
+### 3. Generate a provider-key encryption key
 
-- `DATABASE_URL` should point to PostgreSQL.
-- Redis is strongly recommended for Celery, HITL timeouts, client runtime state, and live widgets.
-- `QDRANT_URL` is needed for document indexing/retrieval.
-- `MODEL_ENCRYPTION_KEY` must be set if you want to store per-user provider API keys through `/providers`.
-- `GEMINI_API_KEY` is still the default direct provider path from environment variables, but provider records can also be managed per user through the API.
-
-To generate an encryption key:
+Per-user provider API keys are encrypted at rest with Fernet. Generate and set `MODEL_ENCRYPTION_KEY`:
 
 ```bash
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-### 3. Start infrastructure
+### 4. Start infrastructure
 
-PostgreSQL is required. Redis and Qdrant are optional at startup, but large parts of the platform will be degraded without them.
+**PostgreSQL** — create a database, then set `DATABASE_URL` in `.env`.
 
-Redis helper:
+**Redis** (Docker, with auth enabled by default):
 
 ```bash
 docker compose -f docker-compose.redis.yml up -d redis
 ```
 
-Qdrant helper:
+**Qdrant**:
 
 ```bash
-docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+docker run -d --name qdrant -p 6333:6333 -p 6334:6334 qdrant/qdrant
 ```
 
-### 4. Run database migrations
+---
+
+## Environment Variables
+
+The full schema lives in [`app/core/config.py`](app/core/config.py). Selected highlights:
+
+### Core
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | `postgresql://localhost:5432/chatbot` | SQLAlchemy DSN |
+| `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | Uvicorn bind |
+| `ENVIRONMENT` | `development` | `development` / `staging` / `production` |
+| `SECRET_KEY` | *(ephemeral in dev)* | Must be set in production |
+| `JWT_ALGORITHM` | `HS256` | |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `600` | |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | |
+| `CORS_ORIGINS` | `[]` | JSON list; `["*"]` allows any origin |
+
+### Providers & models
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GEMINI_API_KEY` | — | Default provider; still supported via env |
+| `TAVILY_API_KEY` | — | Web search |
+| `SMITHERY_API_KEY` | — | Hosted MCP registry |
+| `MODEL_ENCRYPTION_KEY` | — | Fernet key for per-user provider credentials |
+| `RAG_AGENT_MODEL` | `gemini-3-pro-preview` | |
+| `CHAT_AGENT_MODEL` | `gemini-3-flash-preview` | |
+| `SEARCH_AGENT_MODEL` | `gemini-3-flash-preview` | |
+| `IMAGE_GENERATOR_MODEL` | `gemini-3-pro-image-preview` | |
+| `IMAGE_CAPTION_MODEL` | `gemini-3-flash-preview` | |
+| `MEDIA_RESOLUTION` | `high` | `low` / `medium` / `high` (Gemini 3 per-part) |
+| `ENABLE_THINKING` | `true` | |
+| `THINKING_LEVEL` | `high` | `minimal` / `low` / `medium` / `high` (Gemini 3) |
+| `THINKING_BUDGET` | `-1` | Token budget for Gemini 2.5 (-1 dynamic, 0 off) |
+| `ENABLE_GEMINI_CODE_EXECUTION` | `true` | Native code-execution tool |
+
+### Vector store / RAG
+
+| Variable | Default |
+|---|---|
+| `QDRANT_URL` | `http://localhost:6333` |
+| `QDRANT_COLLECTION_NAME` | `documents_gemma` |
+| `EMBEDDING_DIMENSION` | `768` |
+| `RAG_TOP_K` | `15` |
+| `RAG_SCORE_THRESHOLD` | `0.2` |
+| `RAG_MAX_CONTEXT_TOKENS` | `30000` |
+| `ENABLE_RERANKING` | `true` |
+| `RERANKER_MODEL` | `zeroentropy/zerank-1-small` |
+| `RERANK_TOP_K` | `10` |
+| `RAG_CHUNKS_IN_PROMPT` | `10` |
+| `MAX_CHUNK_CHARS_IN_PROMPT` | `2000` |
+
+### Conversation memory & history budgets
+
+`MEMORY_MAX_MESSAGES`, `CHAT_HISTORY_MAX_MESSAGES` / `_TOKENS`, `RAG_HISTORY_MAX_*`, `SEARCH_HISTORY_MAX_*`, `PLANNING_HISTORY_MAX_*`.
+
+### Summarization middleware
+
+`ENABLE_SUMMARIZATION`, `SUMMARIZATION_TRIGGER_TOKENS`, `SUMMARIZATION_TRIGGER_MESSAGES`, `SUMMARIZATION_TRIGGER_FRACTION`, `SUMMARIZATION_MODEL_CONTEXT_SIZE`, `SUMMARIZATION_KEEP_MESSAGES`, `SUMMARIZATION_MODEL`, `SUMMARIZATION_MAX_SUMMARY_TOKENS`, `SUMMARIZATION_TIMEOUT_SECONDS`.
+
+### Document processing
+
+`DOCUMENT_CHUNK_SIZE`, `DOCUMENT_CHUNK_OVERLAP`, `MINERU_TIMEOUT`, `MINERU_API_URL`, `MINERU_BACKEND` (`pipeline` / `hybrid-*` / `vlm-*`), `MINERU_METHOD` (`auto` / `txt` / `ocr`), `MINERU_LANG`, `EXTRACT_FORMULAS_FROM_PDF`, `EXTRACT_TABLES_FROM_PDF`, `TABLE_FORMAT`, `MAX_FILE_SIZE_MB`, `TEMP_STORAGE_PATH`, `DOCUMENT_IMAGES_STORAGE_PATH`.
+
+### MCP tool search
+
+`MCP_TOOL_SEARCH_ENABLED`, `MCP_TOOL_SEARCH_DEFAULT_TOP_K`, `MCP_TOOL_SEARCH_AUTOLOAD_TOP_K`, `MCP_TOOL_SEARCH_PINNED_TOOLS`, `MCP_TOOL_SEARCH_MAX_LOADED_TOOLS_PER_CONVERSATION`, `MCP_TOOL_SEARCH_LOADED_TOOLS_TTL_MINUTES`, `MCP_TOOL_SEARCH_MIN_RELEVANCE_SCORE`, `MCP_TOOL_SEARCH_AUTOLOAD_MIN_RELEVANCE_SCORE`.
+
+### HITL & planning
+
+`ENABLE_HUMAN_IN_THE_LOOP`, `HITL_TOOLS_REQUIRE_APPROVAL`, `HITL_APPROVAL_TIMEOUT_MINUTES`, `MAX_AUTO_PLAN_TASKS`, `EXECUTION_CALL_BUDGET`, `PLANNING_MAX_ITERATIONS`, `PLANNING_CONSECUTIVE_ERRORS_LIMIT`.
+
+### Client runtime bridge
+
+`ENABLE_CLIENT_RUNTIME_BRIDGE`, `CLIENT_RUNTIME_WS_TIMEOUT_SECONDS`, `CLIENT_RUNTIME_CATALOG_CACHE_TTL_SECONDS`, `CLIENT_RUNTIME_REQUIRE_CONNECTED_DEVICE_FOR_LOCAL_TOOLS`, `CLIENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS`, `CLIENT_RUNTIME_MAX_TOOL_RESULT_SIZE_BYTES`.
+
+### Redis
+
+The server accepts either a fully-formed URL (`REDIS_URL`) or a hostname + convenience `REDIS_PASSWORD`. Loopback hosts are automatically normalised to `127.0.0.1` on Windows to avoid async-client `localhost` issues. Missing `REDIS_URL` falls back to `CELERY_BROKER_URL`.
+
+### Client backend (`.env.client`)
+
+| Variable | Default |
+|---|---|
+| `CLIENT_SERVER_API_BASE_URL` | `http://localhost:8000` |
+| `CLIENT_SERVER_API_TIMEOUT_SECONDS` | `60` |
+| `CLIENT_BACKEND_HOST` / `CLIENT_BACKEND_PORT` | `127.0.0.1` / `8100` |
+| `CLIENT_ENVIRONMENT` | `production` |
+| `CLIENT_PROFILE_ROOT` | *(OS-default — `%LOCALAPPDATA%\CodexDesktop` on Windows)* |
+| `CLIENT_DEVICE_NAME` | — |
+| `CLIENT_SKILLS_ROOTS` | comma-separated absolute paths for local skill scanning |
+| `CLIENT_MCP_CONFIG_PATH` | optional explicit path |
+| `CLIENT_TOOL_CALL_TIMEOUT_SECONDS` | `60` |
+| `CLIENT_HEARTBEAT_INTERVAL_SECONDS` | `30` |
+| `CLIENT_RECONNECT_DELAY_SECONDS` / `CLIENT_MAX_RECONNECT_ATTEMPTS` | `5` / `10` |
+| `CLIENT_LOG_LEVEL` / `CLIENT_LOG_TO_FILE` | `INFO` / `true` |
+
+---
+
+## Database Migrations
+
+Migrations are Alembic-managed (28 revisions tracked). They are applied **automatically** at application startup via `app.database.migrations.upgrade_database` inside the lifespan hook, so manual migration is only required for dev or out-of-process tooling:
 
 ```bash
 alembic upgrade head
+
+# Generate a new revision
+alembic revision --autogenerate -m "add something"
 ```
+
+Key schemas:
+
+| Table | Role |
+|---|---|
+| `users` | Accounts + auth |
+| `conversations` | Threads, plan lifecycle (`plan_lifecycle`), persona prompt, title |
+| `messages` | User/assistant turns + JSONB metadata (tool calls, artifacts, interrupts) |
+| `feedbacks` | 1-5 rating, categorical tags, text |
+| `documents` | Uploaded files, status, file type, Celery task id |
+| `document_images` | Extracted images (with captions) |
+| `document_parse_artifacts` | Tables / forms / structured extractions |
+| `task_plans` | Plan steps, order, status, metadata |
+| `tool_approvals` | HITL approval decisions, persisted for audit |
+| `hitl_interrupts` | Suspended workflow snapshots |
+| `model_providers` | Fernet-encrypted per-user keys, per-provider metadata |
+| `agent_model_configs` | Per-agent model/provider/temperature overrides |
+| `client_devices` | Device registration, session, heartbeat, catalogs |
+| `skill_settings` | Per-user skill toggles |
+
+LangGraph checkpoints are kept in the same database under `CHECKPOINT_SCHEMA` (default `public`) by `langgraph-checkpoint-postgres`.
+
+---
 
 ## Running The Services
 
-### Canonical server backend
+### Canonical server
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+Startup performs, in order: DB migration, checkpoint-table setup, agent pre-warming, skills pre-scan, Redis availability check, and launches the periodic client-runtime session cleanup task when `ENABLE_CLIENT_RUNTIME_BRIDGE=true`.
 
 ### Celery worker
 
@@ -207,16 +395,24 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 python -m app.workers.start_worker
 ```
 
+Handles:
+
+- `app.workers.document_processor` — ingest → parse → chunk → embed → upsert to Qdrant, with per-image captioning
+- `app.workers.cleanup_tasks` — expired tokens, orphaned files, stale device sessions
+
 ### Local client backend
 
 ```bash
 codex-client-backend run --config .env.client
+# or
+python -m client_backend
 ```
 
-Equivalent module entrypoint:
+Additional CLI:
 
 ```bash
-python -m client_backend
+codex-client-backend doctor --config .env.client        # validate configuration
+codex-client-backend doctor --config .env.client --json # machine-readable diagnostics
 ```
 
 ### Demo UI
@@ -225,57 +421,455 @@ python -m client_backend
 streamlit run demo.py
 ```
 
-## API Surface Summary
+---
 
-### Canonical server routes
+## AI Workflow
 
-The server FastAPI app currently exposes these major route groups:
+The agent workflow is a **LangGraph state machine** defined in [`app/ai/graph.py`](app/ai/graph.py). High-level steps:
 
-- `/auth/*` for signup, login, refresh, logout
-- `/users/*` for user lookups
-- `/conversations/*` for CRUD, title generation, and paginated message listing
-- `/messages/*` for non-streaming, internal SSE streaming, stop, and resume-interrupt flows
-- `/api/chat/{conversation_id}` and `/ai/*` for Vercel AI SDK style chat + conversation APIs
-- `/documents/*` for upload, task status, document CRUD, and conversation document listings
-- `/messages/{message_id}/feedbacks*` for feedback CRUD and stats
-- `/conversations/{conversation_id}/task-plans*` and `/task-plans/*` for planning mode
-- `/providers/*` and `/model-config*` for provider/model management
-- `/mcp/*` for server-managed MCP servers and tool testing
-- `/skills/*` for server skill discovery and toggling
-- `/client-devices/*` and `/device-runtime/*` for local-device registration and connectivity
-- `/widgets/{widget_id}/connection` for widget session handshake
-- `/health*` for health and dependency checks
+1. **Hydrate history** — `MemoryManager` loads past messages (with TTL cache + per-conversation locks) and applies `chat_history_max_messages` / `_tokens` budgets.
+2. **Summarisation middleware** — if token / message / fraction thresholds are exceeded, `summarize_for_state` compresses older turns and keeps the last `SUMMARIZATION_KEEP_MESSAGES` intact (fail-closed on timeout).
+3. **Router** — [`Router`](app/ai/agents/router.py) invokes Gemini with `ROUTER_SYSTEM_PROMPT` and returns one of `chat_agent` / `rag_agent` / `search_agent` / `image_generator_agent` / `planning_agent` / `canvas_agent`.
+4. **Agent execution** — the selected agent runs a ReAct-style loop with deferred tool binding, HITL gating, and streaming.
+5. **Tool execution** — `tool_execution.execute_tool_calls` runs each tool with per-tool timeout, retries, validation, and truncated `ToolMessage` bodies (full artifacts preserved for the UI).
+6. **Auto-continue** — on hitting iteration limits, continuation rounds run until user-configured caps (`auto_continue_max_rounds`, `auto_continue_max_total_iterations`, `auto_continue_timeout_seconds`).
+7. **Stream** — every token, reasoning chunk, tool call, artifact, and interrupt is serialized as a structured SSE event.
+
+### Agent cheat-sheet
+
+| Agent | Responsibility | Key tools |
+|---|---|---|
+| `chat_agent` | General chat + tool use | MCP tools, `tool_search`, skills, handoff |
+| `rag_agent` | Document-grounded QA with citation verification | `search_documents`, optional reranker, agentic RAG phases |
+| `search_agent` | Web/news answers | Tavily, time-context helpers |
+| `image_generator_agent` | Gemini image generation | Aspect-ratio / count controls |
+| `planning_agent` | Creates / edits task plans | `write_todos`, plan tools |
+| `canvas_agent` | Produces canvas/artifact replies | Custom canvas writers |
+
+### Hand-off & delegation
+
+`hand_off_tool` supports inter-agent delegation with `MAX_DELEGATION_DEPTH` safety to prevent loops.
+
+### Deferred tool search
+
+When `MCP_TOOL_SEARCH_ENABLED=true`, only the lightweight [`tool_search`](app/ai/tool_search_tool.py) tool and `MCP_TOOL_SEARCH_PINNED_TOOLS` are bound at start. The agent discovers further tools semantically, with scoring in [`tool_search_scoring.py`](app/ai/tool_search_scoring.py), automatic autoload of the top-`N` above a stricter relevance threshold, TTL eviction, and a per-conversation loaded-tools cap.
+
+### Confidence & hallucination controls
+
+`confidence_threshold_abstain`, `confidence_weight_tool_success` / `_completeness` / `_retrieval`, and `enable_citation_verification` gate RAG and tool-driven responses; see [`app/ai/schemas.py`](app/ai/schemas.py) and [`agents/rag_agent.py`](app/ai/agents/rag_agent.py).
+
+---
+
+## Document Pipeline & RAG
+
+1. **Upload** — `POST /documents/upload` (multipart) stages the file under `TEMP_STORAGE_PATH`, creates a `Document` row, and enqueues a Celery task.
+2. **Parse** — MinerU processes PDFs in one of five backends (`pipeline`, `hybrid-auto-engine`, `hybrid-http-client`, `vlm-auto-engine`, `vlm-http-client`). DOCX / XLSX / PPTX / images are handled in-process. Tables, formulas, and page-level images are extracted and captioned.
+3. **Chunk** — recursive character splitter honoring `DOCUMENT_CHUNK_SIZE` / `DOCUMENT_CHUNK_OVERLAP`, with optional cross-page context preservation.
+4. **Embed & index** — sentence-transformers encoder produces `EMBEDDING_DIMENSION`-sized vectors; Qdrant upsert batches are sized by `QDRANT_UPSERT_BATCH_SIZE`.
+5. **Retrieval** — the RAG agent issues `search_documents` queries, optionally reranks with `RERANKER_MODEL`, and packs chunks into the prompt within `RAG_MAX_CONTEXT_TOKENS`.
+6. **Citation verification** — enabled by default; enforces `MIN_CITATION_COVERAGE` of retrieved docs be referenced.
+7. **Agentic RAG** — when `AGENTIC_RAG_ENABLED=true`, the agent alternates between scans (short previews), deep dives (full chunks), and backtracks — useful for multi-document exploration up to `AGENTIC_MAX_ITERATIONS`.
+
+Document lifecycle events (`UPLOAD_STARTED`, `PROCESSING_STARTED`, `PROCESSING_COMPLETED`, `PROCESSING_FAILED`, `DELETED`) are published on an in-process event bus and logged by [`DocumentEventLogger`](app/services/document_event_listener.py).
+
+---
+
+## Provider & Model Configuration
+
+### Per-user credentials
+
+`POST /providers` stores an API key for a provider type (`gemini`, `openai`, `anthropic`). Keys are encrypted with `MODEL_ENCRYPTION_KEY` before persisting in `model_providers` and never returned in plaintext. Supporting endpoints:
+
+- `GET /providers` — list provider records
+- `GET /providers/{provider_type}`
+- `DELETE /providers/{provider_type}`
+- `POST /providers/{provider_type}/validate` — live credential check
+- `GET /providers/{provider_type}/models` — provider-curated model catalog
+
+### Per-agent model configuration
+
+`PATCH /model-config` sets provider + model + temperature per agent (chat / rag / search / planning). Defaults fall back to environment-configured models. `GET /model-config/options` returns available combinations. `POST /model-config/reset` restores defaults.
+
+---
+
+## MCP Integration
+
+Server-managed MCP servers are registered under [`/mcp/*`](app/api/mcp.py):
+
+- `GET /mcp/servers`, `GET /mcp/servers/{name}`
+- `POST /mcp/servers` — add from JSON spec
+- `POST /mcp/servers/from-url` — add a hosted MCP server from a Smithery-style URL
+- `DELETE /mcp/servers/{name}` · `PATCH /mcp/servers/{name}/toggle`
+- `GET /mcp/tools`, `GET /mcp/tools/{name}`
+- `POST /mcp/tools/{name}/execute`
+
+The bundled in-process MCP servers are under [`app/ai/mcp_servers/`](app/ai/mcp_servers/):
+
+| Server | Purpose |
+|---|---|
+| `calculator_server.py` | Arithmetic |
+| `time_server.py` | Current time with timezone handling |
+| `tavily_server.py` | Web search adapter |
+| `widgets_server.py` | Emits interactive widget state + mints tokens |
+| `form_filler_server.py` | Structured-form population |
+| `boring_servers/boring_reader_server.py` | Local PDF/image/OCR exploration (ships its own Tesseract + YOLO artifacts under `boring_servers/`) |
+
+The same endpoints are exposed by `client_backend` at `/mcp/*` so a desktop UI can configure MCP both globally (server) and per-device (client).
+
+### Deferred tool binding
+
+`DeferredToolBinding` + `DeferredToolState` ([`app/ai/deferred_tool_*.py`](app/ai/)) record discovery decisions per conversation, enforce TTL, and survive turn boundaries through the LangGraph checkpoint.
+
+---
+
+## Skills System
+
+Skills are markdown files with YAML frontmatter describing a capability (name, description, allowed-tools, optional arguments). They are loaded by:
+
+- **Server** — [`SkillsRegistry`](app/ai/skills_registry.py) (+ [`skill_resolver.py`](app/ai/skill_resolver.py), [`skills_snapshot.py`](app/ai/skills_snapshot.py))
+- **Client** — [`LocalSkillsRegistry`](client_backend/services/local_skills_registry.py), scanning `CLIENT_SKILLS_ROOTS`
+
+Both registries share frontmatter parsing in [`shared/skills/front_matter.py`](shared/skills/front_matter.py). Bundled examples:
+
+- [`skills/playwright-cli/`](skills/playwright-cli/) — Playwright CLI browser automation
+- [`skills/take100/`](skills/take100/) — HTTP-based timesheet automation
+
+API:
+
+- Server: `/skills/*` (list / detail / toggle / reload)
+- Client: `/skills`, `/skills/{name}`, `/skills/{name}/toggle`, `/skills/reload`
+
+When a skill is resolved to a tool (`skills_tool.py`), the agent's skill summaries are injected into its system prompt so it knows *what* is available without paying the schema cost for every skill.
+
+---
+
+## Planning Mode & Task Plans
+
+Conversations can be put into **planning mode** (`planning_mode_enabled`) to materialise a `TaskPlan` that orchestrates multi-step work.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /conversations/{id}/task-plans` | AI-generated plan from a prompt |
+| `POST /conversations/{id}/task-plans/manual` | Manually-authored plan |
+| `GET /conversations/{id}/task-plans` | List tasks |
+| `GET /task-plans/{task_id}` | Retrieve one |
+| `PATCH /task-plans/{task_id}` | Update status / order / metadata |
+| `POST /task-plans/{task_id}/complete` | Mark complete |
+| `DELETE /task-plans/{task_id}` | Remove |
+| `GET /conversations/{id}/planning-status` | Plan lifecycle snapshot |
+
+Plan lifecycle: `draft` → `ready` → `executing` → `paused` / `completed`. The planning agent's execution-call budget is capped by `EXECUTION_CALL_BUDGET` and max tasks by `MAX_AUTO_PLAN_TASKS`.
+
+---
+
+## Human-in-the-Loop (HITL)
+
+HITL is global (`ENABLE_HUMAN_IN_THE_LOOP=true`) with a per-tool opt-in list (`HITL_TOOLS_REQUIRE_APPROVAL`). When the agent attempts an approvable tool:
+
+1. Execution suspends via `langgraph.types.interrupt(...)`.
+2. A `ToolApproval` record is persisted and the message response returns with HTTP **202** plus an interrupt payload.
+3. The UI presents the payload to the operator, collects a decision (`approve` / `reject` / edit), and calls `POST /messages/resume-interrupt` (or the equivalent AI-SDK route) with the signed decision.
+4. The graph resumes, applies the decision to pending tool calls, and continues streaming.
+
+Timeout handling is Redis-backed; after `HITL_APPROVAL_TIMEOUT_MINUTES` the interrupt is auto-rejected or cleaned up.
+
+---
+
+## Client Runtime Bridge
+
+The bridge lets a trusted local device execute privileged tools without opening its network surface.
+
+**Device lifecycle** — server side ([`/client-devices/*`](app/api/client_devices.py)):
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /client-devices/register` | Register device, receive `session_id` |
+| `POST /client-devices/heartbeat` | Keep-alive |
+| `GET /client-devices/me` | List this user's devices |
+| `PUT /client-devices/{id}/tool-catalog` | Sync locally-available tools |
+| `PUT /client-devices/{id}/skill-catalog` | Sync locally-available skills |
+| `GET /client-devices/{id}` | Device details |
+
+**Runtime WebSocket** — [`/device-runtime/{device_id}/connect`](app/api/device_runtime.py) is a bidirectional channel where the server dispatches tool calls and the device responds with structured results. `GET /device-runtime/connected-devices` lists currently-connected devices. Results exceeding `CLIENT_RUNTIME_MAX_TOOL_RESULT_SIZE_BYTES` (1 MB default) are truncated with a warning.
+
+**Client side** — [`client_backend/services/runtime_bridge.py`](client_backend/services/runtime_bridge.py):
+
+- authenticates against the server
+- opens and maintains the runtime WebSocket with exponential reconnect
+- services tool dispatches through `LocalMCPManager` and the local skills registry
+- enforces per-tool timeouts and permission scopes
+- periodically syncs tool + skill catalogs back to the server
+
+Configured by `CLIENT_HEARTBEAT_INTERVAL_SECONDS`, `CLIENT_TOOL_CALL_TIMEOUT_SECONDS`, `CLIENT_RECONNECT_*`.
+
+---
+
+## Live Widgets
+
+Widgets are interactive UI elements rendered by the frontend but driven by the agent.
+
+1. The agent triggers a widget by calling the `widgets` MCP server.
+2. The server mints a short-lived widget token via `POST /widgets/{widget_id}/connection`.
+3. The frontend opens a stateful WebSocket at `/widgets/{widget_id}/connect`.
+4. The server streams widget state, collects user input, and emits terminal events.
+
+Widget state is Redis-backed (see startup banner `"Widget runtime: Redis-backed storage active"`). Without Redis, widget flows degrade; a warning is logged at startup.
+
+---
+
+## API Reference
+
+The server mounts 15 routers; the client backend mirrors most of them and proxies everything else. URL paths below are server-side.
+
+### Authentication ([`/auth`](app/api/auth.py))
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/auth/signup` | Create account |
+| `POST` | `/auth/login` | Issue access + refresh tokens |
+| `POST` | `/auth/refresh` | Refresh access token |
+| `POST` | `/auth/logout` | Invalidate session |
+
+### Users ([`/users`](app/api/users.py))
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/users/{user_id}` | Profile lookup |
+
+### Conversations ([`/conversations`](app/api/conversations.py))
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/conversations/generate-title` | LLM title synthesis |
+| `POST` | `/conversations/` | Create |
+| `GET` | `/conversations/` | Paginated list |
+| `GET` | `/conversations/{id}` | Retrieve |
+| `GET` | `/conversations/{id}/messages` | Paginated messages |
+| `PATCH` | `/conversations/{id}` | Update title / persona / planning mode |
+| `DELETE` | `/conversations/{id}` | Delete |
+
+### Messages ([`/messages`](app/api/messages.py))
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/messages/` | Non-streaming create; returns **202** if interrupted |
+| `POST` | `/messages/stream` | **SSE stream** with heartbeats |
+| `POST` | `/messages/stop` | Cancel in-flight generation |
+| `POST` | `/messages/resume-interrupt` | **SSE stream** resuming after HITL decision |
+| `GET` | `/messages/{id}` | Retrieve |
+| `GET` | `/messages/` | Paginated |
+
+### Feedback ([`/messages/{id}/feedbacks`](app/api/feedback.py))
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/messages/{id}/feedbacks` | Create / upsert |
+| `GET` | `/messages/{id}/feedbacks` | List |
+| `GET` | `/messages/{id}/feedbacks/user` | Current user's record |
+| `GET` | `/messages/{id}/feedbacks/stats` | Aggregated rating counts |
+| `PUT` | `/messages/{id}/feedbacks/{fid}` | Update |
+
+### Documents ([`/documents`](app/api/documents.py))
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/documents/upload` | Multipart upload + enqueue |
+| `GET` | `/documents/task/{task_id}` | Celery task status |
+| `GET` | `/documents/{id}` | Document details |
+| `GET` | `/documents/conversation/{conversation_id}` | Documents for a conversation |
+| `PUT` | `/documents/{id}` | Update metadata |
+| `DELETE` | `/documents/{id}` | Delete + Qdrant purge |
+
+### Task Plans ([`/task-plans` + `/conversations/{id}/task-plans`](app/api/task_plans.py))
+
+See [Planning Mode](#planning-mode--task-plans).
+
+### Providers ([`/providers`](app/api/providers.py))
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/providers` | Store encrypted key |
+| `GET` | `/providers` | List |
+| `GET` | `/providers/{type}` | Retrieve |
+| `DELETE` | `/providers/{type}` | Delete |
+| `POST` | `/providers/{type}/validate` | Verify key |
+| `GET` | `/providers/{type}/models` | Available models |
+
+### Model Configuration ([`/model-config`](app/api/model_config.py))
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/model-config` | Current per-agent configuration |
+| `GET` | `/model-config/options` | Available providers + models |
+| `PATCH` | `/model-config` | Update per-agent |
+| `POST` | `/model-config/reset` | Restore defaults |
+
+### MCP ([`/mcp`](app/api/mcp.py))
+
+See [MCP Integration](#mcp-integration).
+
+### Client Devices ([`/client-devices`](app/api/client_devices.py))
+
+See [Client Runtime Bridge](#client-runtime-bridge).
+
+### Device Runtime ([`/device-runtime`](app/api/device_runtime.py))
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/device-runtime/connected-devices` | Currently-online devices |
+| `WS`  | `/device-runtime/{device_id}/connect` | Runtime WebSocket |
+
+### Widgets ([`/widgets`](app/api/widgets.py))
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/widgets/{widget_id}/connection` | Mint short-lived handshake token |
+| `WS`  | `/widgets/{widget_id}/connect` | Widget state WebSocket |
+
+### AI SDK surface ([`/ai/*` + `/api/chat/*`](app/api/ai_sdk.py))
+
+Vercel AI SDK compatible streaming + UIMessage-format routes:
+
+| Method | Path |
+|---|---|
+| `POST` | `/ai/conversations` |
+| `GET` | `/ai/conversations` |
+| `GET` | `/ai/conversations/{conversation_id}` |
+| `PATCH` | `/ai/conversations/{conversation_id}` |
+| `DELETE` | `/ai/conversations/{conversation_id}` |
+| `GET` | `/ai/conversations/{conversation_id}/messages` |
+| `POST` | `/api/chat/{conversation_id}` |
+| `POST` | `/ai/chat/{conversation_id}` |
+| `POST` | `/ai/resume-interrupt` |
+
+Responses set `X-Vercel-Ai-UI-Message-Stream: v1` (whitelisted as a CORS expose-header).
+
+### Health
+
+`/health`, `/health/celery`, `/health/redis`, `/health/qdrant`, `/health/all` — the aggregate endpoint returns `degraded` if any dependency is unhealthy.
 
 ### Client backend routes
 
-The local client backend provides:
+In addition to proxying most server routes under both `/...` and `/api/...`, the client backend adds:
 
-- local auth/session routes under `/auth/*`
-- runtime lifecycle routes under `/runtime/*`
-- local MCP management under `/mcp/*`
-- local skills inspection under `/skills/*`
-- local message and AI SDK proxy routes under `/messages*` and `/api/chat/*`
-- compatibility proxy routes for selected upstream resources under both `/...` and `/api/...`
+- `/runtime/status`, `/runtime/connect`, `/runtime/disconnect`, `/runtime/refresh-catalogs`
+- `/skills`, `/skills/{name}`, `/skills/{name}/toggle`, `/skills/reload`
+- `/mcp/*` — local MCP lifecycle
+- `/auth/restore`, `/auth/session`, `/auth/verify-local-token` — local-session wrappers
+- `/status`, `/device` — local-runtime state
 
-## OpenAPI And Postman
+---
 
-- Server OpenAPI: `http://localhost:8000/docs`
+## Streaming, SSE & WebSocket Endpoints
+
+| Transport | Endpoint | Notes |
+|---|---|---|
+| SSE | `POST /messages/stream` | `token`, `reasoning`, `tool_call`, `tool_result`, `interrupt`, `heartbeat`, `complete`, `error` |
+| SSE | `POST /messages/resume-interrupt` | Same event vocabulary; resumes a suspended graph |
+| SSE | `POST /api/chat/{conversation_id}` | Vercel AI SDK wire format (`text`, `tool-call`, `tool-result`, `finish`, `error`) |
+| SSE | `POST /ai/chat/{conversation_id}` | As above |
+| SSE | `POST /ai/resume-interrupt` | As above |
+| WS  | `/device-runtime/{device_id}/connect` | Tool dispatch + results |
+| WS  | `/widgets/{widget_id}/connect` | Widget state streaming |
+
+Heartbeat interval for SSE: **1 s**. `SUPPRESS_INTERNAL_STREAM_CHUNKS=true` drops internal events (e.g. summarisation output) before they reach clients.
+
+---
+
+## OpenAPI & Postman
+
+- Server OpenAPI: `http://localhost:8000/docs` (ReDoc at `/redoc`)
 - Client backend OpenAPI: `http://127.0.0.1:8100/docs`
-- Postman collection: `Chatbot API.postman_collection.json`
+- Postman collection: [`Chatbot API.postman_collection.json`](Chatbot%20API.postman_collection.json)
 
-The Postman collection is maintained for the canonical server HTTP API. It includes the newer planning, provider, model-config, MCP, skills, client-device, widget-token, and AI SDK surfaces.
+The Postman collection covers every HTTP route — planning, providers, model config, MCP, skills, client-device registration, widget-token handshake, AI SDK — but **does not** model the WebSocket flows (`/device-runtime/{device_id}/connect`, `/widgets/{widget_id}/connect`). Use a WebSocket client (e.g. `wscat`, Postman's WebSocket workspace) for those.
 
-It does not attempt to model the WebSocket-only flows:
+---
 
-- `/device-runtime/{device_id}/connect`
-- `/widgets/{widget_id}/connect`
+## Testing
 
-## Tests
-
-Run the full suite:
+Run the suite:
 
 ```bash
 pytest
 ```
 
-Some tests exercise only the server, while `tests/client_backend/` covers the local runtime and compatibility layer.
+Curated subsets:
+
+```bash
+pytest tests/test_graph_streaming_summarization.py   # summarisation + streaming
+pytest tests/test_router.py                          # router LLM selection
+pytest tests/test_tool_search_scoring.py \
+       tests/test_tool_search_prompt_guidance.py \
+       tests/test_unified_tool_search.py             # deferred tool search
+pytest tests/test_hitl_config.py tests/test_hitl_decision_mapping.py
+pytest tests/test_widget_runtime.py tests/test_widgets_api.py
+pytest tests/test_skills_*                           # skills architecture + parity
+pytest tests/client_backend                          # local sidecar
+```
+
+Coverage spans:
+
+- multi-agent streaming + summarisation
+- HITL decision mapping and config wiring
+- checkpoint serialisation / tool execution recovery / multi-sidecar hardening
+- tool scope isolation, per-agent tool allowlists
+- MCP adapter utilities and config-Redis wiring
+- widget API + runtime
+- skills architecture, parity, and snapshot
+- client-backend bundle, auth, CORS, conversations, SSE keepalive, runtime bridge, local MCP manager
+
+Fixtures live under [`tests/fixtures/`](tests/fixtures/).
+
+---
+
+## Observability
+
+- **LangSmith** — set `LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY` to stream traces to `LANGSMITH_PROJECT` (default `sample-chatbot`). The config module translates these into the `LANGCHAIN_*` variables LangChain expects.
+- **Centralised exceptions** — `register_exception_handlers` wires `APIException` → structured JSON with `{status, error_code, message, details}`.
+- **Health endpoints** — see above.
+- **Event bus** — `app.core.events.get_event_bus()` publishes `DocumentEvent` values consumed by `DocumentEventLogger`.
+
+---
+
+## Packaging & Distribution
+
+The client backend can be bundled for desktop distribution:
+
+```bash
+pwsh -File scripts/build-client-backend-bundle.ps1
+```
+
+Pre-built artifacts are kept under [`dist/client-backend-bundle/`](dist/client-backend-bundle/). `pyproject.toml` defines the console script:
+
+```toml
+[project.scripts]
+codex-client-backend = "client_backend.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app", "client_backend"]
+```
+
+Wheels can be built with `python -m build`.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause & fix |
+|---|---|
+| `Widget runtime: Redis unavailable` warning | Start Redis (`docker compose -f docker-compose.redis.yml up -d redis`) and set `REDIS_URL`. Widget flows degrade without it. |
+| `Router Gemini client not initialized` | Missing `GEMINI_API_KEY`. Set it or register a Gemini provider via `POST /providers`. |
+| SSE disconnects after 60 s | Some proxies buffer; deploy with HTTP/2 or disable proxy buffering. The in-app heartbeat is 1 s. |
+| Checkpoint table errors on startup | Ensure `langgraph-checkpoint-postgres` migrations run by not disabling `ENABLE_LANGGRAPH_CHECKPOINTS` before first boot. |
+| Provider key decryption fails | `MODEL_ENCRYPTION_KEY` changed. Re-create provider records or restore the prior key. |
+| Windows + async + `localhost` Redis | The config normaliser rewrites `localhost` → `127.0.0.1` automatically on `win32`. |
+| Document uploads stuck in `processing` | Celery worker not running: `python -m app.workers.start_worker`. Check `/health/celery`. |
+| Reranker download slow | First run fetches the HF model. Pin `RERANKER_MODEL` or disable with `ENABLE_RERANKING=false`. |
+| Client-device tool calls fail | Device offline or `CLIENT_RUNTIME_REQUIRE_CONNECTED_DEVICE_FOR_LOCAL_TOOLS=true`. Inspect `GET /device-runtime/connected-devices`. |
+
+---
+
+## License
+
+Internal / unspecified. Add a `LICENSE` file before distribution.

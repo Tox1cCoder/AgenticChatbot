@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from .text_normalization import filter_stopwords, tokenize_text
+from .text_normalization import tokenize_text
 
 
 def score_tool(
@@ -54,7 +54,6 @@ def score_tool(
     # IDF-weighted token overlap across name + description + args
     searchable = f"{tool_name} {description} {' '.join(arg_names)}"
     tool_tokens = set(tokenize_text(searchable))
-    tool_tokens = set(filter_stopwords(list(tool_tokens)))
 
     overlap = query_tokens & tool_tokens
     if overlap:
@@ -72,13 +71,10 @@ def build_query_tokens(query: str) -> tuple[str, set[str]]:
     Normalize and tokenize a query for scoring.
 
     Returns:
-        (query_lower, query_tokens_set_without_stopwords)
+        (query_lower, query_tokens_set)
     """
     query_lower = query.lower().strip()
-    raw_tokens = tokenize_text(query)
-    filtered = filter_stopwords(raw_tokens)
-    # Keep the filtered set; if all tokens were stopwords, fall back to raw
-    query_tokens = set(filtered) if filtered else set(raw_tokens)
+    query_tokens = set(tokenize_text(query))
     return query_lower, query_tokens
 
 
