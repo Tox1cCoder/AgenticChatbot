@@ -260,58 +260,45 @@ planning_agent, canvas_agent."""
 
 ROUTER_SYSTEM_PROMPT = """Route the user's message to the most appropriate agent. Respond with ONLY the agent name.
 
+Choose from the available agents by reasoning about the user's intent, conversation
+context, active documents, and planning state. Do not rely on exact phrase matching
+or product names alone.
+
 Available agents:
-- chat_agent: General conversation, explanations, advice, opinions, Q&A, knowledge questions
-- rag_agent: Questions about uploaded documents, document analysis, summaries of uploaded content
-- search_agent: Current events, news, recent information, fact-checking, time-sensitive queries
-- image_generator_agent: Creating images, drawing, illustrating, visual content generation
-- planning_agent: Creating/editing task plans, adding/removing tasks, discussing task breakdown
-- canvas_agent: Creating websites, web pages, or web-based interactive components
+- chat_agent: General conversation, explanations, advice, opinions, Q&A, coding help,
+  and in-chat visual aids handled through widget tools.
+- rag_agent: Questions about uploaded documents, document analysis, and summaries of
+  uploaded content.
+- search_agent: Current events, news, recent information, fact-checking, and
+  time-sensitive queries.
+- image_generator_agent: Pixel/raster image creation, drawing, illustration, and
+  non-code visual generation.
+- planning_agent: Creating, editing, viewing, or executing task plans.
+- canvas_agent: Authoring standalone browser-rendered artifacts such as websites,
+  pages, web apps, interactive components, games, calculators, visualizations, SVG,
+  or React/HTML/CSS/JavaScript artifacts for the canvas preview.
 
-Routing rules (strict priority):
-1. If documents are available, prefer rag_agent by default.
-2. Override rag_agent only when intent is clearly one of:
-   - planning/task-list management -> planning_agent
-   - website creation request -> canvas_agent
-   - explicit current/web lookup intent -> search_agent
-   - explicit image creation intent -> image_generator_agent
-3. If no documents are available:
-   - plan creation/modification/view -> planning_agent
-   - website creation -> canvas_agent
-   - current/recent/web lookup -> search_agent
-   - image creation -> image_generator_agent
-   - otherwise -> chat_agent
+Routing priorities:
+1. If uploaded documents are available, prefer rag_agent unless the user's current
+   intent is clearly unrelated to document analysis.
+2. Prefer planning_agent when the user is managing a task plan or working through
+   an existing plan.
+3. Prefer canvas_agent when the user wants a standalone authored browser artifact
+   or a larger interactive experience in the canvas preview.
+4. Prefer chat_agent, rag_agent, or search_agent with widget tools for bounded
+   in-chat visual aids that clarify an answer, summarize data, collect input, or
+   present choices inside the conversation.
+5. Prefer search_agent for current or externally changing information.
+6. Prefer image_generator_agent for generated images that are not code artifacts.
+7. Otherwise use chat_agent.
 
-Canvas clarification:
-- Route TO canvas_agent: "create a website", "build a landing page", "make a portfolio site", "build a web page for my business"
-- Route TO chat_agent (NOT canvas_agent): in-chat visual aids like "show a comparison table", "render a chart of these results", "make a dashboard in chat", "let me pick from options" — these are handled by the current agent using widget tools
-- Route TO chat_agent: code explanations, algorithm discussions, non-web development tasks
-- Route TO image_generator_agent: pixel images, illustrations, graphics (not code-based)
-
-Planning clarification:
-- Route TO planning_agent: "create a plan", "add task", "remove task", "modify plan", "show tasks"
-- Route TO planning_agent: "start the plan", "work on task 1", "implement step 2" when planning mode is active or a plan already exists
-- Route TO chat_agent: "implement step 2" when there is no plan and the user is asking for general help rather than plan execution
-
-Examples:
-Hello -> chat_agent
-Explain quantum physics -> chat_agent
-Latest AI news -> search_agent
-Draw a sunset -> image_generator_agent
-Create a website for my restaurant -> canvas_agent
-Build a personal portfolio page -> canvas_agent
-Make a landing page -> canvas_agent
-Create a plan to build a website -> planning_agent
-What's in my document? -> rag_agent (if documents available)
-Summarize the report -> rag_agent (if documents available)
-Documents available + "Summarize this" -> rag_agent
-Documents available + "What happened in the news today?" -> search_agent
-Documents available + "Draw a logo" -> image_generator_agent
-Documents available + "Create a website" -> canvas_agent
-Show me a comparison table -> chat_agent
-Render a chart of these results -> chat_agent
-Make a dashboard for this data -> chat_agent
-Let me pick from options in the chat -> chat_agent"""
+Canvas and LiveUI boundary:
+- canvas_agent is for standalone artifacts rendered in the canvas panel.
+- LiveUI widgets are for compact in-chat aids owned by the responding agent.
+- Do not route to canvas_agent merely because a widget, chart, table, form, or
+  dashboard could be useful inside the chat response.
+- Do route to canvas_agent when the user is asking you to build the artifact itself
+  as a browser-rendered deliverable rather than to explain something with a widget."""
 
 
 def _build_persona_block(persona: str) -> str:

@@ -731,8 +731,8 @@ class TestPromptUpdates:
     def test_router_prompt_routes_visual_aids_to_chat(self):
         from app.ai.prompts import ROUTER_SYSTEM_PROMPT
 
-        assert "comparison table -> chat_agent" in ROUTER_SYSTEM_PROMPT
-        assert "in-chat visual aids" in ROUTER_SYSTEM_PROMPT
+        assert "LiveUI widgets are for compact in-chat aids" in ROUTER_SYSTEM_PROMPT
+        assert "Do not route to canvas_agent merely because a widget" in ROUTER_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------

@@ -48,15 +48,8 @@ def test_extract_agent_name_handles_surrounding_text_without_regex():
     )
 
 
-# ---------------------------------------------------------------------------
-# Phase 4: Router canvas_agent guard
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_canvas_agent_not_routed_for_product_name_without_web_intent(monkeypatch):
-    """A query that contains a product/app name but no explicit web-creation
-    keywords must NOT be routed to canvas_agent."""
+async def test_route_message_honors_llm_non_canvas_decision_for_product_names(monkeypatch):
     monkeypatch.setattr(
         Router,
         "_init_gemini",
@@ -64,19 +57,17 @@ async def test_canvas_agent_not_routed_for_product_name_without_web_intent(monke
     )
     router = Router()
 
-    # LLM incorrectly returns canvas_agent for a product name query
     async def fake_call_llm(prompt: str, available_agents: list[str]) -> str | None:
-        return "canvas_agent"
+        assert "Use Figma to design this icon" in prompt
+        return "chat_agent"
 
     monkeypatch.setattr(router, "_call_llm", fake_call_llm)
 
-    # "Use Figma" — a product name, no explicit website creation intent
     result = await router.route_message(
         AgentMessage(role=MessageRole.USER, content="Use Figma to design this icon"),
         ["chat_agent", "search_agent", "canvas_agent"],
     )
 
-    # The guard should override canvas_agent -> chat_agent
     assert result == "chat_agent"
 
 
@@ -103,13 +94,36 @@ async def test_canvas_agent_routed_for_explicit_website_request(monkeypatch):
     assert result == "canvas_agent"
 
 
-def test_has_web_creation_intent_detects_website():
-    assert Router._has_web_creation_intent("build me a website") is True
+@pytest.mark.asyncio
+async def test_canvas_agent_honors_llm_decision_for_browser_artifact_request(monkeypatch):
+    """Router should not second-guess the LLM with local phrase matching."""
+    monkeypatch.setattr(
+        Router,
+        "_init_gemini",
+        lambda self: setattr(self, "gemini_client", None),
+    )
+    router = Router()
+
+    async def fake_call_llm(prompt: str, available_agents: list[str]) -> str | None:
+        return "canvas_agent"
+
+    monkeypatch.setattr(router, "_call_llm", fake_call_llm)
+
+    result = await router.route_message(
+        AgentMessage(
+            role=MessageRole.USER,
+            content="Build an online ordering experience for my restaurant",
+        ),
+        ["chat_agent", "search_agent", "canvas_agent"],
+    )
+
+    assert result == "canvas_agent"
 
 
-def test_has_web_creation_intent_rejects_product_name():
-    assert Router._has_web_creation_intent("open this song on Figma") is False
+def test_router_prompt_uses_semantic_canvas_liveui_boundary():
+    from app.ai.prompts import ROUTER_SYSTEM_PROMPT
 
-
-def test_has_web_creation_intent_detects_landing_page():
-    assert Router._has_web_creation_intent("Create a landing page for my startup") is True
+    assert "Do not rely on exact phrase matching" in ROUTER_SYSTEM_PROMPT
+    assert "standalone artifacts rendered in the canvas panel" in ROUTER_SYSTEM_PROMPT
+    assert "LiveUI widgets are for compact in-chat aids" in ROUTER_SYSTEM_PROMPT
+    assert "Examples:" not in ROUTER_SYSTEM_PROMPT

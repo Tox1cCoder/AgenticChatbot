@@ -1,12 +1,17 @@
+from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
+
 from app.ai.schemas import InterruptDecision as AIInterruptDecision
+from app.ai.utils import apply_hitl_decisions
+from app.core.exceptions import CustomHTTPException
+from app.models.hitl_interrupt import HITLInterruptStatus
 from app.schemas.message import InterruptResumeRequest
-from app.schemas.workflow import InterruptDecision
+from app.schemas.workflow import InterruptDecision, InterruptDecisionType
 from app.services.message_service import MessageService
-from app.ai.utils import build_interrupt_resume_payload
 
 
 def test_interrupt_resume_request_preserves_tool_call_id():
@@ -54,6 +59,33 @@ def test_runtime_validation_provenance_matches_tool_call_id():
     assert matched == [("tool-1", record.interrupt_metadata_json["tool_provenance"]["tool-1"])]
 
 
+def test_apply_hitl_decisions_prefers_explicit_tool_call_id_over_task_id():
+    tool_calls = [{"id": "tool-1", "name": "client__tool", "args": {"path": "."}}]
+    decisions = [
+        {
+            "type": "approve",
+            "task_id": "legacy-task-1",
+            "tool_call_id": "tool-1",
+        }
+    ]
+
+    approved, rejected = apply_hitl_decisions(tool_calls, decisions)
+
+    assert approved == tool_calls
+    assert rejected == {}
+
+
+def test_apply_hitl_decisions_rejects_partial_explicit_decision_set():
+    tool_calls = [
+        {"id": "tool-1", "name": "client__first", "args": {}},
+        {"id": "tool-2", "name": "client__second", "args": {}},
+    ]
+    decisions = [{"type": "approve", "tool_call_id": "tool-1"}]
+
+    with pytest.raises(ValueError, match="Missing HITL decision"):
+        apply_hitl_decisions(tool_calls, decisions)
+
+
 def test_utils_exposes_decision_target_helper():
     utils = import_module("app.ai.utils")
 
@@ -61,6 +93,7 @@ def test_utils_exposes_decision_target_helper():
 
 
 def test_resume_payload_builder_preserves_explicit_tool_call_id():
+    utils = import_module("app.ai.utils")
     decision = InterruptDecision.model_validate(
         {
             "type": "approve",
@@ -69,7 +102,7 @@ def test_resume_payload_builder_preserves_explicit_tool_call_id():
         }
     )
 
-    payload = build_interrupt_resume_payload([decision])
+    payload = utils.build_interrupt_resume_payload([decision])
 
     assert payload == [
         {
@@ -79,3 +112,67 @@ def test_resume_payload_builder_preserves_explicit_tool_call_id():
             "args": None,
         }
     ]
+
+
+def test_interrupt_resume_rejects_incomplete_multi_tool_decisions():
+    conversation_id = uuid4()
+    user_id = uuid4()
+    interrupt_record = SimpleNamespace(
+        interrupt_id="interrupt-1",
+        conversation_id=conversation_id,
+        thread_id="thread-1",
+        user_id=user_id,
+        device_id=None,
+        status=HITLInterruptStatus.PENDING,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        action_requests_json=[
+            {
+                "task_id": "tool-1",
+                "tool_call_id": "tool-1",
+                "action": "client__first",
+                "args": {},
+            },
+            {
+                "task_id": "tool-2",
+                "tool_call_id": "tool-2",
+                "action": "client__second",
+                "args": {},
+            },
+        ],
+        interrupt_metadata_json={},
+        session_id=None,
+        catalog_version=None,
+        tool_instance_id=None,
+    )
+    transitions: list[str] = []
+    service = MessageService(
+        message_repository=SimpleNamespace(),
+        conversation_validation_utils=SimpleNamespace(
+            validate_conversation_access=lambda _user_id, _conversation_id: None,
+        ),
+        message_validation_utils=SimpleNamespace(),
+        ai_service=SimpleNamespace(),
+        hitl_interrupt_repository=SimpleNamespace(
+            get_by_id=lambda _interrupt_id: interrupt_record,
+            try_transition_to_resolving=lambda **_kwargs: transitions.append("claimed") or True,
+        ),
+    )
+    service.redis_client = None
+
+    with pytest.raises(CustomHTTPException) as exc_info:
+        service._validate_and_claim_interrupt_resume(
+            thread_id="thread-1",
+            conversation_id=conversation_id,
+            user_id=user_id,
+            interrupt_id="interrupt-1",
+            device_id=None,
+            decisions=[
+                InterruptDecision(
+                    type=InterruptDecisionType.APPROVE,
+                    tool_call_id="tool-1",
+                )
+            ],
+        )
+
+    assert exc_info.value.error_code == "INTERRUPT_INCOMPLETE_DECISIONS"
+    assert transitions == []

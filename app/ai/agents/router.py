@@ -71,15 +71,6 @@ class Router:
 
         selected_agent = await self._call_llm(prompt, available_agents)
         if selected_agent:
-            # Guard: canvas_agent requires explicit web-creation intent in the message.
-            # A product name alone (e.g. "open Figma", "use Canva") should NOT route
-            # to canvas_agent — only explicit website/web-page creation requests should.
-            if selected_agent == "canvas_agent" and not self._has_web_creation_intent(content):
-                logger.debug(
-                    "Router overriding canvas_agent -> chat_agent: no web-creation intent in %r",
-                    content[:80],
-                )
-                selected_agent = "chat_agent"
             return selected_agent
 
         # LLM returned something unparseable — default to chat_agent
@@ -159,33 +150,6 @@ class Router:
 
         prompt_parts.append(f"\n\nUser message: {content}")
         return "\n".join(prompt_parts)
-
-    # Web-creation intent keywords. The router only routes to canvas_agent when
-    # the user message explicitly contains at least one of these phrases.
-    _WEB_CREATION_TOKENS: frozenset[str] = frozenset(
-        {
-            "website",
-            "web page",
-            "webpage",
-            "landing page",
-            "landingpage",
-            "html page",
-            "htmlpage",
-            "web app",
-            "webapp",
-            "web application",
-            "portfolio site",
-            "portfolio page",
-            "home page",
-            "homepage",
-        }
-    )
-
-    @classmethod
-    def _has_web_creation_intent(cls, content: str) -> bool:
-        """Return True if the message explicitly requests web/HTML artifact creation."""
-        lower = content.lower()
-        return any(token in lower for token in cls._WEB_CREATION_TOKENS)
 
     @staticmethod
     def _extract_agent_name(response_text: str, available_agents: list[str]) -> str | None:

@@ -401,17 +401,64 @@ def extract_rejection_reason(decision: Any) -> str | None:
 def resolve_interrupt_decision_id(decision: Any) -> str | None:
     """Resolve the tool decision target ID across task_id/tool_call_id spellings."""
     if isinstance(decision, dict):
-        for key in ("task_id", "tool_call_id", "taskId", "toolCallId"):
+        for key in ("tool_call_id", "toolCallId", "task_id", "taskId"):
             value = decision.get(key)
             if value not in (None, ""):
                 return str(value)
         return None
 
-    for attr in ("task_id", "tool_call_id", "taskId", "toolCallId"):
+    for attr in ("tool_call_id", "toolCallId", "task_id", "taskId"):
         value = getattr(decision, attr, None)
         if value not in (None, ""):
             return str(value)
     return None
+
+
+def _get_decision_field(decision: Any, *field_names: str) -> Any:
+    if isinstance(decision, dict):
+        for field_name in field_names:
+            value = decision.get(field_name)
+            if value not in (None, ""):
+                return value
+        return None
+
+    for field_name in field_names:
+        value = getattr(decision, field_name, None)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def build_interrupt_resume_payload(decisions: Sequence[Any]) -> list[dict[str, Any]]:
+    """
+    Normalize API-facing HITL decisions into the graph resume payload.
+
+    ``task_id`` is a UI/request identifier, while ``tool_call_id`` is the
+    LangChain tool-call identifier that must line up with ToolMessages.  Older
+    clients often send only one of them, so missing fields fall back to the
+    resolved target.  When both are present, keep both unchanged.
+    """
+    payload: list[dict[str, Any]] = []
+    for decision in decisions:
+        resolved_id = resolve_interrupt_decision_id(decision)
+        task_id = _get_decision_field(decision, "task_id", "taskId") or resolved_id
+        tool_call_id = (
+            _get_decision_field(decision, "tool_call_id", "toolCallId") or resolved_id
+        )
+        decision_type = _get_decision_field(decision, "type")
+        if hasattr(decision_type, "value"):
+            decision_type = decision_type.value
+
+        payload.append(
+            {
+                "task_id": str(task_id) if task_id is not None else None,
+                "tool_call_id": str(tool_call_id) if tool_call_id is not None else None,
+                "type": decision_type,
+                "args": _get_decision_field(decision, "args"),
+            }
+        )
+
+    return payload
 
 
 def build_rejection_tool_message(
@@ -644,6 +691,7 @@ def apply_hitl_decisions(
         rejected_feedback: mapping of tool_call_id -> rejection reason message
     """
     decisions = human_decisions if isinstance(human_decisions, list) else [human_decisions]
+    explicit_decisions = [d for d in decisions if d]
     decision_map: dict[str, Any] = {}
     for d in decisions:
         task_id = resolve_interrupt_decision_id(d)
@@ -655,7 +703,13 @@ def apply_hitl_decisions(
     for tc in tool_calls:
         tool_call_id = tc.get("id")
         tool_name = tc.get("name")
-        decision = decision_map.get(tool_call_id, {})
+        decision = decision_map.get(tool_call_id)
+        if decision is None and explicit_decisions:
+            raise ValueError(
+                f"Missing HITL decision for tool_call_id '{tool_call_id}' "
+                f"({tool_name or 'unknown'}). Resume decisions must cover every pending tool call."
+            )
+        decision = decision or {}
         decision_type = decision.get("type", "reject") if isinstance(decision, dict) else "reject"
 
         if decision_type == "approve":

@@ -59,6 +59,7 @@ from .tool_execution import (
 )
 from .utils import (
     apply_hitl_decisions,
+    build_interrupt_resume_payload,
     coerce_response_text,
     find_pending_tool_call_message,
     make_json_safe,
@@ -2479,15 +2480,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         if "approval" not in state_snapshot.next:
             raise ValueError(f"Unexpected interrupt state: next nodes are {state_snapshot.next}")
 
-        resume_data = [
-            {
-                "task_id": resolve_interrupt_decision_id(d),
-                "tool_call_id": resolve_interrupt_decision_id(d),
-                "type": d.type.value if hasattr(d.type, "value") else d.type,
-                "args": d.args,
-            }
-            for d in decisions
-        ]
+        resume_data = build_interrupt_resume_payload(decisions)
 
         selected_agent = state_snapshot.values.get("selected_agent", "search_agent")
         conversation_id = state_snapshot.values.get("conversation_id")

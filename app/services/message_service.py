@@ -242,6 +242,75 @@ class MessageService(IMessageService):
                 resolution_source=resolution_source,
             )
 
+    @staticmethod
+    def _decision_action(decision: Any) -> str | None:
+        if isinstance(decision, dict):
+            value = decision.get("action")
+        else:
+            value = getattr(decision, "action", None)
+        if value in (None, ""):
+            return None
+        return str(value)
+
+    @classmethod
+    def _validate_complete_interrupt_decisions(
+        cls,
+        *,
+        record: Any,
+        decisions: list[InterruptDecision] | None,
+    ) -> None:
+        pending_requests = getattr(record, "action_requests_json", None)
+        if not isinstance(pending_requests, list) or not pending_requests:
+            return
+
+        action_counts: dict[str, int] = {}
+        for request in pending_requests:
+            if not isinstance(request, dict):
+                continue
+            action = request.get("action")
+            if action not in (None, ""):
+                action_key = str(action)
+                action_counts[action_key] = action_counts.get(action_key, 0) + 1
+
+        decision_keys: set[str] = set()
+        for decision in decisions or []:
+            decision_id = resolve_interrupt_decision_id(decision)
+            if decision_id:
+                decision_keys.add(str(decision_id))
+            action = cls._decision_action(decision)
+            if action:
+                decision_keys.add(action)
+
+        missing: list[str] = []
+        for request in pending_requests:
+            if not isinstance(request, dict):
+                continue
+
+            request_keys: list[str] = []
+            for key in ("tool_call_id", "task_id"):
+                value = request.get(key)
+                if value not in (None, ""):
+                    request_keys.append(str(value))
+
+            action = request.get("action")
+            if action not in (None, "") and action_counts.get(str(action)) == 1:
+                request_keys.append(str(action))
+
+            if request_keys and not any(key in decision_keys for key in request_keys):
+                missing.append(request_keys[0])
+
+        if missing:
+            display_missing = ", ".join(missing[:5])
+            extra = "" if len(missing) <= 5 else f", +{len(missing) - 5} more"
+            raise CustomHTTPException(
+                status_code=422,
+                detail=(
+                    "Resume decisions must include an explicit approve, edit, or reject decision "
+                    f"for every pending tool call. Missing decisions for: {display_missing}{extra}."
+                ),
+                error_code="INTERRUPT_INCOMPLETE_DECISIONS",
+            )
+
     def _get_conversation_context(
         self, conversation_id: UUID, user_id: UUID | None = None
     ) -> tuple[UUID | None, str | None]:
@@ -1021,6 +1090,11 @@ class MessageService(IMessageService):
                     detail="This interrupt has already been resolved.",
                     error_code="INTERRUPT_ALREADY_RESOLVED",
                 )
+
+            self._validate_complete_interrupt_decisions(
+                record=record,
+                decisions=decisions,
+            )
 
             runtime_provenance = self._get_runtime_validation_provenance(
                 record,
