@@ -631,13 +631,15 @@ class ToolEventHandler(EventHandler):
                 state.pending_tool_call_ids.remove(tool_call_id)
 
         output = event.get("result")
-        yield _sse(
-            {
-                "type": "tool-output-available",
-                "toolCallId": tool_call_id,
-                "output": _coerce_json_object(_clean_tool_output(output)),
-            }
-        )
+        payload = {
+            "type": "tool-output-available",
+            "toolCallId": tool_call_id,
+            "output": _coerce_json_object(_clean_tool_output(output)),
+        }
+        render = event.get("render")
+        if isinstance(render, dict):
+            payload["render"] = render
+        yield _sse(payload)
 
 
 class InterruptEventHandler(EventHandler):

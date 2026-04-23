@@ -2497,6 +2497,168 @@ def render_tool_result_payload(payload: Any, use_expander: bool = False) -> None
             st.code(json.dumps(parsed, ensure_ascii=False), language="json")
 
 
+def _get_render_structured_content(render: dict[str, Any]) -> Any:
+    if not isinstance(render, dict):
+        return None
+    return render.get("structured_content") or render.get("structuredContent")
+
+
+def _render_table_tool_result(render: dict[str, Any]) -> bool:
+    structured = _get_render_structured_content(render)
+    if not isinstance(structured, dict):
+        return False
+
+    columns = structured.get("columns")
+    rows = structured.get("rows")
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        return False
+
+    normalized_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            normalized_rows.append(row)
+        elif isinstance(row, list):
+            normalized_rows.append(
+                {
+                    str(column): row[index] if index < len(row) else None
+                    for index, column in enumerate(columns)
+                }
+            )
+
+    if not normalized_rows:
+        st.caption("Table result contained no rows.")
+        return True
+
+    st.dataframe(normalized_rows, width="stretch", hide_index=True)
+    return True
+
+
+def _render_chart_tool_result(render: dict[str, Any]) -> bool:
+    structured = _get_render_structured_content(render)
+    if not isinstance(structured, dict):
+        return False
+
+    labels = structured.get("labels")
+    datasets = structured.get("datasets")
+    if not isinstance(labels, list) or not isinstance(datasets, list):
+        return False
+
+    chart_rows: list[dict[str, Any]] = []
+    for label_index, label in enumerate(labels):
+        row: dict[str, Any] = {"label": label}
+        for dataset in datasets:
+            if not isinstance(dataset, dict):
+                continue
+            name = str(dataset.get("label") or f"Series {len(row)}")
+            data = dataset.get("data")
+            if isinstance(data, list) and label_index < len(data):
+                row[name] = data[label_index]
+        chart_rows.append(row)
+
+    if not chart_rows:
+        st.caption("Chart result contained no plottable values.")
+        return True
+
+    chart_type = str(structured.get("chart_type") or structured.get("chartType") or "line").lower()
+    chart_data = {
+        row["label"]: {k: v for k, v in row.items() if k != "label"} for row in chart_rows
+    }
+    if chart_type == "bar":
+        st.bar_chart(chart_data)
+    elif chart_type == "area":
+        st.area_chart(chart_data)
+    else:
+        st.line_chart(chart_data)
+
+    with st.expander("Chart data", expanded=False):
+        st.dataframe(chart_rows, width="stretch", hide_index=True)
+    return True
+
+
+def _render_resource_tool_result(render: dict[str, Any]) -> bool:
+    resources = render.get("resources")
+    if not isinstance(resources, list) or not resources:
+        return False
+
+    for resource in resources:
+        if not isinstance(resource, dict):
+            continue
+        uri = str(resource.get("uri") or "")
+        title = str(resource.get("title") or uri or "Resource")
+        mime_type = str(resource.get("mime_type") or resource.get("mimeType") or "")
+        if uri.startswith(("http://", "https://")):
+            st.link_button(title, uri, width="stretch")
+        else:
+            st.markdown(f"**{title}**")
+            st.code(uri, language="text")
+        if mime_type:
+            st.caption(mime_type)
+    return True
+
+
+def _render_mcp_app_tool_result(render: dict[str, Any]) -> bool:
+    template_uri = render.get("template_uri") or render.get("templateUri")
+    if not isinstance(template_uri, str) or not template_uri.strip():
+        return False
+
+    title = render.get("title") or "MCP app view"
+    st.info(
+        "This tool returned an MCP app template. The Streamlit demo cannot mount "
+        "arbitrary MCP app iframes yet, but the frontend can use this URI to render it."
+    )
+    st.markdown(f"**{html.escape(str(title))}**", unsafe_allow_html=True)
+    st.code(template_uri, language="text")
+
+    structured = _get_render_structured_content(render)
+    if structured not in (None, "", [], {}):
+        with st.expander("Structured app data", expanded=False):
+            render_tool_result_payload(structured, use_expander=False)
+    return True
+
+
+def render_tool_render_payload(render: Any, fallback_output: Any = None) -> bool:
+    if not isinstance(render, dict):
+        return False
+
+    render_type = str(render.get("type") or "").lower()
+    title = render.get("title")
+    if isinstance(title, str) and title.strip():
+        st.markdown(f"**{html.escape(title.strip())}**", unsafe_allow_html=True)
+
+    if render_type == "error":
+        error = render.get("error") or render.get("text") or fallback_output
+        st.error(str(error or "Tool execution failed."))
+        return True
+
+    if render_type == "mcp_app":
+        rendered = _render_mcp_app_tool_result(render)
+    elif render_type == "table":
+        rendered = _render_table_tool_result(render)
+    elif render_type == "chart":
+        rendered = _render_chart_tool_result(render)
+    elif render_type in {"resource", "image"}:
+        rendered = _render_resource_tool_result(render)
+    elif render_type == "text":
+        text = render.get("text") or fallback_output
+        if text not in (None, ""):
+            st.markdown(str(text))
+            rendered = True
+        else:
+            rendered = False
+    else:
+        structured = _get_render_structured_content(render)
+        if structured not in (None, "", [], {}):
+            render_tool_result_payload(structured, use_expander=False)
+            rendered = True
+        else:
+            rendered = False
+
+    with st.expander("Raw render metadata", expanded=False):
+        render_tool_result_payload(render, use_expander=False)
+
+    return rendered
+
+
 def add_mcp_server(server_config: dict[str, Any]) -> dict[str, Any] | None:
     """Add a new MCP server"""
     response = make_api_request("POST", "/mcp/servers", server_config)
@@ -4744,6 +4906,7 @@ def _build_tool_trace_items_from_artifacts(
                 "state": state,
                 "args": artifact.get("args"),
                 "result": artifact.get("output"),
+                "render": artifact.get("render"),
                 "error": artifact.get("error"),
                 "hint": artifact.get("hint"),
                 "duration_ms": duration_ms,
@@ -4785,7 +4948,19 @@ def _render_trace_tool_card(tool_item: dict[str, Any], index: int) -> None:
         )
 
     result = tool_item.get("result")
-    if result not in (None, ""):
+    render = tool_item.get("render")
+    if isinstance(render, dict):
+        st.markdown(
+            '<div class="trace-preview-label">Result Preview</div>',
+            unsafe_allow_html=True,
+        )
+        if not render_tool_render_payload(render, fallback_output=result):
+            _render_trace_preview_block(
+                "Result Preview",
+                result,
+                f"Full output for {tool_name}",
+            )
+    elif result not in (None, ""):
         _render_trace_preview_block(
             "Result Preview",
             result,
@@ -5059,11 +5234,17 @@ def render_tool_artifacts(tool_artifacts: list[dict[str, Any]]):
 
             # Show output/result if present
             output = artifact.get("output")
-            if output is not None:
+            render = artifact.get("render")
+            if output is not None or isinstance(render, dict):
                 st.markdown("**Output:**")
-                if isinstance(output, (dict, list)):
+                if isinstance(render, dict) and render_tool_render_payload(
+                    render,
+                    fallback_output=output,
+                ):
+                    pass
+                elif isinstance(output, (dict, list)):
                     render_json_output(output, label=f"{tool_name} Output", expanded=False)
-                else:
+                elif output is not None:
                     st.code(str(output), language="text")
 
             # Show error if present

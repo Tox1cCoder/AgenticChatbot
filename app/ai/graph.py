@@ -64,7 +64,6 @@ from .utils import (
     find_pending_tool_call_message,
     make_json_safe,
     normalize_tool_call,
-    resolve_interrupt_decision_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -1243,6 +1242,22 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 user_id=user_id,
             )
 
+    @staticmethod
+    def _lookup_tool_render_payload(
+        state_values: dict[str, Any] | None,
+        tool_call_id: Any,
+    ) -> dict[str, Any] | None:
+        if not state_values or not tool_call_id:
+            return None
+        context = state_values.get("context")
+        if not isinstance(context, dict):
+            return None
+        render_results = context.get("tool_render_results")
+        if not isinstance(render_results, dict):
+            return None
+        render = render_results.get(str(tool_call_id))
+        return render if isinstance(render, dict) else None
+
     def _apply_tool_outputs_to_state(
         self,
         state: GraphState,
@@ -1291,6 +1306,14 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             existing_artifacts = list(context.get("tool_artifacts", []))
             existing_artifacts.extend(tool_artifacts)
             context["tool_artifacts"] = existing_artifacts
+        render_results = dict(context.get("tool_render_results", {}))
+        for output in tool_outputs:
+            tool_call_id = output.get("tool_call_id")
+            render = output.get("render")
+            if tool_call_id and isinstance(render, dict):
+                render_results[str(tool_call_id)] = make_json_safe(render)
+        if render_results:
+            context["tool_render_results"] = render_results
         if all_images:
             existing_images = list(context.get("tool_images", []))
             existing_images.extend(all_images)
@@ -1443,7 +1466,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         non_search_tool_calls = [
             tc for tc in normalized_tool_calls if tc.get("name") != "search_documents"
         ]
-        non_search_outputs_by_id: dict[str, str] = {}
+        non_search_outputs_by_id: dict[str, dict[str, Any]] = {}
         rejected_feedback: dict[str, str] = {}
         selected_agent_name = state.get("selected_agent")
         agent = self.agents.get(selected_agent_name) if selected_agent_name else None
@@ -1470,7 +1493,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     )
 
                 for tc_id, feedback in rejected_feedback.items():
-                    non_search_outputs_by_id[tc_id] = feedback
+                    non_search_outputs_by_id[tc_id] = {"content": feedback}
 
             if rejected_feedback:
                 tool_artifacts.extend(
@@ -1515,7 +1538,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     )
                 for output in outputs:
                     if output.get("tool_call_id"):
-                        non_search_outputs_by_id[output["tool_call_id"]] = output["content"]
+                        non_search_outputs_by_id[output["tool_call_id"]] = output
                 tool_artifacts.extend(artifacts)
                 all_images.extend(images)
 
@@ -1525,15 +1548,19 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             tool_args = tool_call_data.get("args", {})
 
             if tool_name != "search_documents":
-                tool_outputs.append(
-                    {
-                        "tool_call_id": tool_id,
-                        "name": tool_name,
-                        "content": non_search_outputs_by_id.get(
-                            tool_id, f"Error: Tool {tool_name} not found"
-                        ),
-                    }
-                )
+                stored = non_search_outputs_by_id.get(tool_id)
+                entry: dict[str, Any] = {
+                    "tool_call_id": tool_id,
+                    "name": tool_name,
+                }
+                if stored is not None:
+                    entry["content"] = stored.get("content", "")
+                    render = stored.get("render")
+                    if isinstance(render, dict):
+                        entry["render"] = render
+                else:
+                    entry["content"] = f"Error: Tool {tool_name} not found"
+                tool_outputs.append(entry)
                 continue
 
             result, _ = await execute_search_documents_action(
@@ -1572,6 +1599,14 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             existing_artifacts = context.get("tool_artifacts", [])
             existing_artifacts.extend(tool_artifacts)
             context["tool_artifacts"] = existing_artifacts
+        render_results = dict(context.get("tool_render_results", {}))
+        for output in tool_outputs:
+            tool_call_id = output.get("tool_call_id")
+            render = output.get("render")
+            if tool_call_id and isinstance(render, dict):
+                render_results[str(tool_call_id)] = make_json_safe(render)
+        if render_results:
+            context["tool_render_results"] = render_results
         if all_images:
             existing_images = context.get("tool_images", [])
             existing_images.extend(all_images)
@@ -2775,14 +2810,25 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                                                         }
 
                                         elif isinstance(last_msg, ToolMessage):
-                                            yield {
+                                            tool_call_id = getattr(last_msg, "tool_call_id", None)
+                                            event_payload = {
                                                 "type": "tool_end",
                                                 "name": getattr(last_msg, "name", "unknown"),
-                                                "tool_call_id": getattr(
-                                                    last_msg, "tool_call_id", None
-                                                ),
+                                                "tool_call_id": tool_call_id,
                                                 "result": make_json_safe(last_msg.content),
                                             }
+                                            render_payload = self._lookup_tool_render_payload(
+                                                last_state_values,
+                                                tool_call_id,
+                                            ) or self._lookup_tool_render_payload(
+                                                node_state
+                                                if isinstance(node_state, dict)
+                                                else None,
+                                                tool_call_id,
+                                            )
+                                            if render_payload:
+                                                event_payload["render"] = render_payload
+                                            yield event_payload
                     else:
                         logger.debug(f"Unexpected stream chunk format: {type(chunk)}")
 
@@ -3476,14 +3522,25 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
                                         # Handle ToolMessage (result)
                                         elif isinstance(last_msg, ToolMessage):
-                                            yield {
+                                            tool_call_id = getattr(last_msg, "tool_call_id", None)
+                                            event_payload = {
                                                 "type": "tool_end",
                                                 "name": getattr(last_msg, "name", "unknown"),
-                                                "tool_call_id": getattr(
-                                                    last_msg, "tool_call_id", None
-                                                ),
+                                                "tool_call_id": tool_call_id,
                                                 "result": make_json_safe(last_msg.content),
                                             }
+                                            render_payload = self._lookup_tool_render_payload(
+                                                last_state_values,
+                                                tool_call_id,
+                                            ) or self._lookup_tool_render_payload(
+                                                node_state
+                                                if isinstance(node_state, dict)
+                                                else None,
+                                                tool_call_id,
+                                            )
+                                            if render_payload:
+                                                event_payload["render"] = render_payload
+                                            yield event_payload
                     else:
                         # Single mode or legacy format - try to handle gracefully
                         logger.debug(f"Unexpected stream chunk format: {type(chunk)}")

@@ -15,9 +15,10 @@ from .client_runtime_tools import (
     get_client_tool_device_id,
     is_client_tool,
 )
+from .tool_result_rendering import normalize_tool_result_for_rendering
 from .tool_scope import is_client_only_scope
 from .tool_search_tool import create_tool_search_tool
-from .utils import extract_content_from_result, normalize_tool_call
+from .utils import normalize_tool_call
 
 if TYPE_CHECKING:
     pass
@@ -71,6 +72,7 @@ def build_tool_artifact(
     error: str | None,
     status: str | None = None,
     max_output_chars: int = 1000,
+    render: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     artifact: dict[str, Any] = {
         "tool_call_id": tool_call_id,
@@ -87,6 +89,9 @@ def build_tool_artifact(
         artifact["output"] = (
             output_text[:max_output_chars] if len(output_text) > max_output_chars else output_text
         )
+
+    if render is not None:
+        artifact["render"] = render
 
     return artifact
 
@@ -593,11 +598,17 @@ async def execute_tool_calls(
 
         if not tool_name:
             error_msg = "Error: Tool name missing"
+            normalized_result = normalize_tool_result_for_rendering(
+                error_msg,
+                tool_name=tool_name or "unknown",
+                error=error_msg,
+            )
             outputs.append(
                 {
                     "tool_call_id": tool_id,
                     "name": tool_name or "unknown",
-                    "content": error_msg,
+                    "content": normalized_result.model_content,
+                    "render": normalized_result.render,
                 }
             )
             artifacts.append(
@@ -608,6 +619,7 @@ async def execute_tool_calls(
                     output_text=None,
                     error=error_msg,
                     max_output_chars=artifact_max_output_chars,
+                    render=normalized_result.render,
                 )
             )
             continue
@@ -640,7 +652,19 @@ async def execute_tool_calls(
                     )
             else:
                 error_msg = f"Error: Tool {tool_name} not found"
-            outputs.append({"tool_call_id": tool_id, "name": tool_name, "content": error_msg})
+            normalized_result = normalize_tool_result_for_rendering(
+                error_msg,
+                tool_name=tool_name,
+                error=error_msg,
+            )
+            outputs.append(
+                {
+                    "tool_call_id": tool_id,
+                    "name": tool_name,
+                    "content": normalized_result.model_content,
+                    "render": normalized_result.render,
+                }
+            )
             artifacts.append(
                 build_tool_artifact(
                     tool_call_id=tool_id,
@@ -649,6 +673,7 @@ async def execute_tool_calls(
                     output_text=None,
                     error=error_msg,
                     max_output_chars=artifact_max_output_chars,
+                    render=normalized_result.render,
                 )
             )
             continue
@@ -656,8 +681,18 @@ async def execute_tool_calls(
         # Validate client tool device binding before execution
         device_error = _validate_client_tool_device_binding(tool, device_id, tool_name)
         if device_error:
+            normalized_result = normalize_tool_result_for_rendering(
+                f"Error: {device_error}",
+                tool_name=tool_name,
+                error=device_error,
+            )
             outputs.append(
-                {"tool_call_id": tool_id, "name": tool_name, "content": f"Error: {device_error}"}
+                {
+                    "tool_call_id": tool_id,
+                    "name": tool_name,
+                    "content": normalized_result.model_content,
+                    "render": normalized_result.render,
+                }
             )
             artifacts.append(
                 build_tool_artifact(
@@ -667,16 +702,27 @@ async def execute_tool_calls(
                     output_text=None,
                     error=device_error,
                     max_output_chars=artifact_max_output_chars,
+                    render=normalized_result.render,
                 )
             )
             continue
 
         try:
             result = await invoke_tool(tool, tool_args)
-            result = extract_content_from_result(result)
-            result_text = str(result)
+            normalized_result = normalize_tool_result_for_rendering(
+                result,
+                tool_name=tool_name,
+            )
+            result_text = normalized_result.model_content
 
-            outputs.append({"tool_call_id": tool_id, "name": tool_name, "content": result_text})
+            outputs.append(
+                {
+                    "tool_call_id": tool_id,
+                    "name": tool_name,
+                    "content": result_text,
+                    "render": normalized_result.render,
+                }
+            )
             artifacts.append(
                 build_tool_artifact(
                     tool_call_id=tool_id,
@@ -685,6 +731,7 @@ async def execute_tool_calls(
                     output_text=result_text,
                     error=None,
                     max_output_chars=artifact_max_output_chars,
+                    render=normalized_result.render,
                 )
             )
             if capture_images:
@@ -722,14 +769,18 @@ async def execute_tool_calls(
                     # Update tool_map so later calls in the same batch also use it
                     tool_map[tool_name] = fresh_tool
                     result = await invoke_tool(fresh_tool, tool_args)
-                    result = extract_content_from_result(result)
-                    result_text = str(result)
+                    normalized_result = normalize_tool_result_for_rendering(
+                        result,
+                        tool_name=tool_name,
+                    )
+                    result_text = normalized_result.model_content
 
                     outputs.append(
                         {
                             "tool_call_id": tool_id,
                             "name": tool_name,
                             "content": result_text,
+                            "render": normalized_result.render,
                         }
                     )
                     artifacts.append(
@@ -740,6 +791,7 @@ async def execute_tool_calls(
                             output_text=result_text,
                             error=None,
                             max_output_chars=artifact_max_output_chars,
+                            render=normalized_result.render,
                         )
                     )
                     if capture_images:
@@ -754,24 +806,48 @@ async def execute_tool_calls(
                 )
 
             if not reconnected:
-                error_msg = (
-                    f"Error: MCP session lost for tool {tool_name}. "
-                    f"Reconnection failed. Please try again."
+                reason = (
+                    f"MCP session lost for tool {tool_name}. Reconnection failed. Please try again."
                 )
-                outputs.append({"tool_call_id": tool_id, "name": tool_name, "content": error_msg})
+                normalized_result = normalize_tool_result_for_rendering(
+                    f"Error: {reason}",
+                    tool_name=tool_name,
+                    error=reason,
+                )
+                outputs.append(
+                    {
+                        "tool_call_id": tool_id,
+                        "name": tool_name,
+                        "content": normalized_result.model_content,
+                        "render": normalized_result.render,
+                    }
+                )
                 artifacts.append(
                     build_tool_artifact(
                         tool_call_id=tool_id,
                         tool_name=tool_name,
                         tool_args=tool_args,
                         output_text=None,
-                        error=str(session_exc),
+                        error=reason,
                         max_output_chars=artifact_max_output_chars,
+                        render=normalized_result.render,
                     )
                 )
         except Exception as exc:
             error_msg = f"Error: {exc}"
-            outputs.append({"tool_call_id": tool_id, "name": tool_name, "content": error_msg})
+            normalized_result = normalize_tool_result_for_rendering(
+                error_msg,
+                tool_name=tool_name,
+                error=str(exc),
+            )
+            outputs.append(
+                {
+                    "tool_call_id": tool_id,
+                    "name": tool_name,
+                    "content": normalized_result.model_content,
+                    "render": normalized_result.render,
+                }
+            )
             artifacts.append(
                 build_tool_artifact(
                     tool_call_id=tool_id,
@@ -780,6 +856,7 @@ async def execute_tool_calls(
                     output_text=None,
                     error=str(exc),
                     max_output_chars=artifact_max_output_chars,
+                    render=normalized_result.render,
                 )
             )
 

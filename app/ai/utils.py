@@ -442,9 +442,7 @@ def build_interrupt_resume_payload(decisions: Sequence[Any]) -> list[dict[str, A
     for decision in decisions:
         resolved_id = resolve_interrupt_decision_id(decision)
         task_id = _get_decision_field(decision, "task_id", "taskId") or resolved_id
-        tool_call_id = (
-            _get_decision_field(decision, "tool_call_id", "toolCallId") or resolved_id
-        )
+        tool_call_id = _get_decision_field(decision, "tool_call_id", "toolCallId") or resolved_id
         decision_type = _get_decision_field(decision, "type")
         if hasattr(decision_type, "value"):
             decision_type = decision_type.value

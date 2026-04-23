@@ -232,6 +232,7 @@ class AIService:
                     tool_call_id=tool_call_id,
                     result=result,
                     duration_ms=duration_ms,
+                    render=make_json_safe(event.get("render")),
                 )
 
             elif event_type == "complete":

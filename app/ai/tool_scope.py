@@ -58,7 +58,4 @@ def is_client_only_scope(
     tool_scope: str | ToolScope | None = None,
 ) -> bool:
     """Return ``True`` when the effective scope is ``CLIENT_ONLY``."""
-    return (
-        resolve_tool_scope(device_id=device_id, tool_scope=tool_scope)
-        is ToolScope.CLIENT_ONLY
-    )
+    return resolve_tool_scope(device_id=device_id, tool_scope=tool_scope) is ToolScope.CLIENT_ONLY

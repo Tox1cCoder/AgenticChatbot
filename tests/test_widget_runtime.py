@@ -458,6 +458,29 @@ class TestBuildBotMetadataWidgets:
         assert "live_widgets" in metadata
         assert metadata["live_widgets"][0]["widget_id"] == "w-merged"
 
+    def test_preserves_render_payload_in_tool_artifacts(self):
+        render = {
+            "version": 1,
+            "type": "mcp_app",
+            "template_uri": "ui://canva/presentation-viewer.html",
+        }
+
+        class FakeResponse:
+            metadata = {}
+            tool_artifacts = [
+                {
+                    "tool": "canva_create_presentation",
+                    "output": "Created presentation",
+                    "status": "success",
+                    "render": render,
+                }
+            ]
+
+        metadata = build_bot_metadata(FakeResponse())
+
+        assert metadata["tool_artifacts"][0]["render"] == render
+        assert "live_widgets" not in metadata
+
 
 # ---------------------------------------------------------------------------
 # build_tool_artifact — widget output compaction
@@ -497,6 +520,46 @@ class TestBuildToolArtifactWidgets:
             error=None,
         )
         assert len(artifact["output"]) == 1000
+
+    def test_tool_artifact_preserves_render_payload(self):
+        render = {
+            "version": 1,
+            "type": "mcp_app",
+            "template_uri": "ui://canva/presentation-viewer.html",
+            "structured_content": {"presentation_id": "deck_123"},
+        }
+
+        artifact = build_tool_artifact(
+            tool_call_id="tc-render",
+            tool_name="canva_create_presentation",
+            tool_args={"prompt": "roadmap"},
+            output_text="Created presentation",
+            error=None,
+            render=render,
+        )
+
+        assert artifact["output"] == "Created presentation"
+        assert artifact["render"] == render
+
+    def test_error_tool_artifact_preserves_error_render_payload(self):
+        render = {
+            "version": 1,
+            "type": "error",
+            "model_content": "Error: permission denied",
+            "error": "permission denied",
+        }
+
+        artifact = build_tool_artifact(
+            tool_call_id="tc-error",
+            tool_name="dangerous_tool",
+            tool_args={},
+            output_text="Error: permission denied",
+            error="permission denied",
+            render=render,
+        )
+
+        assert artifact["status"] == "error"
+        assert artifact["render"]["type"] == "error"
 
 
 # ---------------------------------------------------------------------------

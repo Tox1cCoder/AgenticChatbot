@@ -67,6 +67,7 @@ def build_canonical_tool_event(
     result: Any = None,
     duration_ms: int | None = None,
     state: str | None = None,
+    render: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_phase = normalize_tool_phase(phase) or "unknown"
     payload: dict[str, Any] = {
@@ -86,5 +87,8 @@ def build_canonical_tool_event(
 
     if duration_ms is not None:
         payload["duration_ms"] = duration_ms
+
+    if render is not None:
+        payload["render"] = render
 
     return payload

@@ -520,6 +520,30 @@ The same endpoints are exposed by `client_backend` at `/mcp/*` so a desktop UI c
 
 `DeferredToolBinding` + `DeferredToolState` ([`app/ai/deferred_tool_*.py`](app/ai/)) record discovery decisions per conversation, enforce TTL, and survive turn boundaries through the LangGraph checkpoint.
 
+### Tool result rendering contract
+
+The backend preserves rich tool render metadata in two places:
+
+- Persisted assistant message metadata: `messageMetadata.tool_artifacts[].render`
+- AI SDK streams: `tool-output-available.render`
+
+The model-facing tool message remains compact text. Frontends should render from
+`render` when present and fall back to `output` when it is absent.
+
+Supported backend render types:
+
+- `mcp_app`: MCP/App result with a UI template URI such as `_meta["openai/outputTemplate"]`
+- `live_widget`: in-repo live widget created by the `widgets` MCP server
+- `chart`: structured chart payload
+- `table`: structured table payload
+- `image`: image content block
+- `resource`: MCP resource without an app template
+- `json`: structured payload without a richer type
+- `text`: plain text payload
+- `error`: failed tool result
+
+The frontend owns component rendering. Unknown render types must fall back to JSON or text.
+
 ---
 
 ## Skills System

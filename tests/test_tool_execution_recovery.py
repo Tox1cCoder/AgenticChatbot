@@ -60,6 +60,7 @@ async def test_execute_tool_calls_recovers_missing_client_tool_from_active_catal
             "tool_call_id": "tool-1",
             "name": "client__desktop_commander__start_process",
             "content": "started",
+            "render": artifacts[0]["render"],
         }
     ]
     assert artifacts[0]["status"] == "success"

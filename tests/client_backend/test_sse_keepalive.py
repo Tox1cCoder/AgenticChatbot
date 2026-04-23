@@ -9,6 +9,7 @@ Covers:
 """
 
 import asyncio
+import json
 
 import pytest
 
@@ -215,3 +216,111 @@ def test_stream_sse_uses_extended_read_timeout():
     # The stream_sse method internally uses read=600.0 (documented in code)
     # We can't easily test the httpx.Timeout passed per-request without mocking,
     # but the test_stream_sse_filters_heartbeat_events above exercises the path.
+
+
+@_skip_server
+@pytest.mark.asyncio
+async def test_ai_sdk_tool_output_event_preserves_render_payload():
+    async def tool_event_source():
+        yield {
+            "type": "tool",
+            "phase": "start",
+            "name": "canva_create_presentation",
+            "tool_call_id": "tool-call-1",
+            "args": {"prompt": "roadmap"},
+        }
+        yield {
+            "type": "tool",
+            "phase": "end",
+            "name": "canva_create_presentation",
+            "tool_call_id": "tool-call-1",
+            "result": "Created presentation",
+            "render": {
+                "version": 1,
+                "type": "mcp_app",
+                "template_uri": "ui://canva/presentation-viewer.html",
+            },
+        }
+        yield {
+            "type": "complete",
+            "response": {
+                "content": "Created presentation",
+                "message_metadata": {},
+            },
+        }
+
+    state = StreamState(message_id="msg-render", text_id="txt-render", reasoning_id="rsn-render")
+
+    response = _build_ui_message_stream_response(tool_event_source, state)
+    collected: list[str] = []
+    async for chunk in response.body_iterator:
+        collected.append(chunk)
+
+    events = [
+        line[6:]
+        for line in "".join(collected).split("\n")
+        if line.startswith("data: ") and line[6:] != "[DONE]"
+    ]
+
+    tool_output_events = [
+        json.loads(event) for event in events if '"tool-output-available"' in event
+    ]
+
+    assert len(tool_output_events) == 1
+    assert tool_output_events[0]["output"] == "Created presentation"
+    assert tool_output_events[0]["render"]["type"] == "mcp_app"
+    assert tool_output_events[0]["render"]["template_uri"] == (
+        "ui://canva/presentation-viewer.html"
+    )
+
+
+@_skip_server
+@pytest.mark.asyncio
+async def test_ai_sdk_render_payload_preserves_structure_and_text_type():
+    """Render must survive the SSE wrapper without being collapsed by output cleaning:
+    text-typed render stays a dict; content arrays stay arrays."""
+
+    async def tool_event_source():
+        yield {
+            "type": "tool",
+            "phase": "end",
+            "name": "answer_tool",
+            "tool_call_id": "tool-call-text",
+            "result": "The answer is 42.",
+            "render": {
+                "version": 1,
+                "type": "text",
+                "text": "The answer is 42.",
+                "model_content": "The answer is 42.",
+                "content": [{"type": "text", "text": "The answer is 42."}],
+            },
+        }
+        yield {
+            "type": "complete",
+            "response": {"content": "The answer is 42.", "message_metadata": {}},
+        }
+
+    state = StreamState(message_id="msg-x", text_id="txt-x", reasoning_id="rsn-x")
+
+    response = _build_ui_message_stream_response(tool_event_source, state)
+    collected: list[str] = []
+    async for chunk in response.body_iterator:
+        collected.append(chunk)
+
+    events = [
+        line[6:]
+        for line in "".join(collected).split("\n")
+        if line.startswith("data: ") and line[6:] != "[DONE]"
+    ]
+    tool_output_events = [
+        json.loads(event) for event in events if '"tool-output-available"' in event
+    ]
+
+    assert len(tool_output_events) == 1
+    render = tool_output_events[0]["render"]
+    assert isinstance(render, dict), "render must remain a dict, not be collapsed to a string"
+    assert render["type"] == "text"
+    assert render["text"] == "The answer is 42."
+    assert isinstance(render["content"], list)
+    assert render["content"][0]["type"] == "text"
+    assert render["content"][0]["text"] == "The answer is 42."
