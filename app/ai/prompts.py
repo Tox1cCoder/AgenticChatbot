@@ -209,29 +209,13 @@ TOOL_EXPLORATION_SUFFIX = """
 TOOLS AND ENVIRONMENT:
 IMPORTANT: The examples and text in this prompt are NOT a tool inventory. Do not assume any tool is available based on prompt text alone. The only way to know what tools are actually available is to call `tool_search`.
 
-- When the user asks what tools or integrations are available, call `tool_search()` with no arguments to see the enabled servers, their descriptions, and their tool counts. Do NOT answer from prompt memory.
-- When the user names an external system, app, or integration — or asks you to act inside one — do not start with an unscoped task search unless you already know the exact server identifier from this conversation.
-- If the exact server identifier is unknown, call `tool_search()` first, inspect the enabled servers and their descriptions, and identify the most relevant server before choosing a tool.
-- After identifying the relevant server, call `tool_search(server_name="...")` to inspect that server's tools before deciding whether a suitable tool exists.
-- Use the exact `server_name` returned by `tool_search()`. Do not invent or modify server identifiers.
-- When the task inside that integration is already specific, narrow the search with `tool_search(query="...", server_name="...")`.
-- If the scoped search returns no suitable tool, retry with an unscoped capability query rather than guessing.
-- Some available tools may inspect or act on a connected user device, local files, shell commands, browser state, or other live environment data
-- If the user wants you to perform an action and the necessary tool exists, do it with tools instead of only giving instructions
-- When the answer depends on current state, exact file contents, command output, or anything on the user's computer, inspect with tools instead of guessing
-- Use `tool_search(query="...")` to discover tools for a task. Write queries around the actual task, target, and context.
-- Use `tool_search(server_name="...")` to browse the tools from a specific server.
-- Use `tool_search()` with no arguments to see all available servers, short descriptions, and tool counts.
-- After `tool_search`, read each result's description and `arg_hints` before choosing a tool. If `is_loaded` is true, that tool is ready to call immediately. Use the exact `tool_name` shown in the result — do not guess or modify it.
-- If results are weak or ambiguous, refine the query and search again rather than guessing
-- Prefer the smallest sufficient tool and avoid duplicate calls with the same inputs
-- For live in-chat visual aids or concept explainers (tables, charts, dashboards, process breakdowns, taxonomies, decision guides, structured choosers), use widget tools proactively when they would materially improve comprehension
-- If widget tools are already available in your bound tools, call them directly; otherwise search for them with `tool_search(query="create widget")`
-- Prefer canonical widget state shapes so the frontend can render them reliably: chart widgets should usually use `chart_type`, `labels`, and `datasets`, and dashboard widgets should use `panels`
-- For interactive widgets, keep the control model explicit: top-level `controls`, current values in `control_values`, and alternate render payloads in `views` or `variants`
-- If the built-in structured widget types cannot express the desired UI cleanly, create `widget_type="html"` and put a compact self-contained HTML/CSS/JS micro-app in `initial_state.html`
-- Keep HTML widgets bounded to the current chat turn context; use `canvas_agent` instead for standalone pages, websites, or larger authored artifacts
-- Do NOT hand off to canvas_agent for in-chat visuals — widgets are handled directly by the current agent"""
+- Treat available tools as dynamic and scoped to the current conversation, agent, and current user/device session. Do not reuse tool availability from prompt memory, other conversations, or other client devices.
+- For tool-capable requests, before giving a text-only or locally generated answer, explore your available capabilities with `tool_search`.
+- When the user asks what tools or integrations are available, call `tool_search()` in this request context. Do NOT answer from prompt memory.
+- If the user names an integration and you do not know the exact server identifier, call `tool_search()` first, then inspect that server with `tool_search(server_name="...")`. Use the exact `server_name` returned by `tool_search()`. Do not invent or modify server identifiers.
+- When the task is already specific, narrow with `tool_search(query="...", server_name="...")`; otherwise use `tool_search(query="...")` with the actual task, target, and context.
+- After `tool_search`, read the descriptions and `arg_hints`. If a suitable tool exists, use it instead of guessing, only giving instructions, or substituting a local artifact. If results are weak or ambiguous, refine the search and try again.
+- For in-chat structured visuals, use widget tools directly when already bound, or discover them with `tool_search(query="create widget")`. Keep widgets in-chat; use `canvas_agent` only for standalone browser artifacts."""
 
 TOOL_CONTEXT_SUFFIX = """
 
@@ -266,7 +250,8 @@ or product names alone.
 
 Available agents:
 - chat_agent: General conversation, explanations, advice, opinions, Q&A, coding help,
-  and in-chat visual aids handled through widget tools.
+  in-chat visual aids handled through widget tools, and tool-backed work in external integrations,
+  accounts, apps, or real environments.
 - rag_agent: Questions about uploaded documents, document analysis, and summaries of
   uploaded content.
 - search_agent: Current events, news, recent information, fact-checking, and
@@ -288,15 +273,21 @@ Routing priorities:
 4. Prefer chat_agent, rag_agent, or search_agent with widget tools for bounded
    in-chat visual aids that clarify an answer, summarize data, collect input, or
    present choices inside the conversation.
-5. Prefer search_agent for current or externally changing information.
-6. Prefer image_generator_agent for generated images that are not code artifacts.
-7. Otherwise use chat_agent.
+5. Prefer chat_agent for tool-backed work in external integrations or real-world
+   deliverables, even when the output is visual or editable.
+6. Prefer search_agent for current or externally changing information.
+7. Prefer image_generator_agent for generated images that are not code artifacts.
+8. Otherwise use chat_agent.
 
 Canvas and LiveUI boundary:
 - canvas_agent is for standalone artifacts rendered in the canvas panel.
 - LiveUI widgets are for compact in-chat aids owned by the responding agent.
 - Do not route to canvas_agent merely because a widget, chart, table, form, or
   dashboard could be useful inside the chat response.
+- Do not route to canvas_agent for tool-backed work in external integrations.
+- Requests for slides, presentations, documents, designs, or spreadsheets created
+  through tools/integrations belong on chat_agent unless the user explicitly wants
+  browser code or a canvas preview artifact.
 - Do route to canvas_agent when the user is asking you to build the artifact itself
   as a browser-rendered deliverable rather than to explain something with a widget."""
 

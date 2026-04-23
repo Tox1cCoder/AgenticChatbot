@@ -127,3 +127,18 @@ def test_router_prompt_uses_semantic_canvas_liveui_boundary():
     assert "standalone artifacts rendered in the canvas panel" in ROUTER_SYSTEM_PROMPT
     assert "LiveUI widgets are for compact in-chat aids" in ROUTER_SYSTEM_PROMPT
     assert "Examples:" not in ROUTER_SYSTEM_PROMPT
+
+
+def test_router_prompt_keeps_tool_backed_deliverables_off_canvas():
+    from app.ai.prompts import ROUTER_SYSTEM_PROMPT
+
+    assert "tool-backed work in external integrations" in ROUTER_SYSTEM_PROMPT
+    assert "slides, presentations, documents, designs, or spreadsheets" in ROUTER_SYSTEM_PROMPT
+
+
+def test_canvas_system_prompt_self_corrects_non_browser_requests():
+    from app.ai.agents.canvas_agent import _CANVAS_SYSTEM_PROMPT
+
+    assert "not actually for a standalone browser artifact" in _CANVAS_SYSTEM_PROMPT
+    assert "`tool_search`" in _CANVAS_SYSTEM_PROMPT
+    assert "`hand_off`" in _CANVAS_SYSTEM_PROMPT

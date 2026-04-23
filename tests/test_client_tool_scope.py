@@ -74,3 +74,22 @@ def test_client_scoped_binding_excludes_server_mcp_tools(monkeypatch):
         "tool_search",
         "client__time__get_current_time",
     ]
+
+
+def test_deferred_binding_keeps_hand_off_available(monkeypatch):
+    agent = _BindingTestAgent(agent_config_key="canvas")
+    agent.tools = []
+    agent.mcp_manager = None
+
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.should_use_deferred_loading",
+        lambda _agent_key: True,
+    )
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.get_available_skill_summaries",
+        lambda **kwargs: [],
+    )
+
+    tools = agent._get_tools_for_binding(conversation_id="conversation-1")
+
+    assert "hand_off" in [tool.name for tool in tools]

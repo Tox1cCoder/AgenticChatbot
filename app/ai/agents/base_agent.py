@@ -329,17 +329,25 @@ class BaseAgent(ABC):
         Returns:
             List of tools to bind to the model
         """
-        # Prepend activate_skill to internal tools when skills are active
+        # Keep always-on internal tools available even in deferred mode.
         skills_tools = self._get_skills_internal_tools(user_id=user_id, device_id=device_id)
-        if skills_tools:
-            merged_internal = list(skills_tools)
-            if internal_tools:
-                seen = {t.name for t in merged_internal}
-                for t in internal_tools:
-                    if t.name not in seen:
-                        merged_internal.append(t)
-                        seen.add(t.name)
-            internal_tools = merged_internal
+        merged_internal: list[BaseTool] = []
+        seen_internal: set[str] = set()
+
+        def _add_internal(tool: BaseTool) -> None:
+            if tool.name not in seen_internal:
+                merged_internal.append(tool)
+                seen_internal.add(tool.name)
+
+        for tool in skills_tools:
+            _add_internal(tool)
+
+        _add_internal(_hand_off_tool)
+
+        for tool in internal_tools or []:
+            _add_internal(tool)
+
+        internal_tools = merged_internal or None
 
         use_deferred = should_use_deferred_loading(self.agent_config_key)
         client_only_scope = is_client_only_scope(device_id=device_id, tool_scope=tool_scope)

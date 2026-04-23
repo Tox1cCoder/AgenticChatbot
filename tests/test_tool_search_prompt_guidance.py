@@ -68,3 +68,20 @@ def test_tool_exploration_suffix_forbids_inventing_server_identifiers():
     assert "do not invent or modify server" in lower_suffix, (
         "TOOL_EXPLORATION_SUFFIX must explicitly forbid guessing server identifiers."
     )
+
+
+def test_tool_exploration_suffix_encourages_capability_exploration_before_text_fallback():
+    """The shared prompt should make the model explore dynamic capabilities
+    before committing to a text-only/local answer for tool-relevant requests."""
+    lower_suffix = TOOL_EXPLORATION_SUFFIX.lower()
+    assert "before giving a text-only or locally generated answer" in lower_suffix
+    assert "explore your available capabilities" in lower_suffix
+
+
+def test_tool_exploration_suffix_scopes_discovery_to_current_runtime_context():
+    """Capability discovery must stay scoped to the active request context so
+    client-side tools from one device/session are not implied for another."""
+    lower_suffix = TOOL_EXPLORATION_SUFFIX.lower()
+    assert "current conversation" in lower_suffix
+    assert "current user/device session" in lower_suffix
+    assert "other client devices" in lower_suffix
