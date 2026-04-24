@@ -374,8 +374,6 @@ class DocumentProcessingService:
                     "Invalid MinerU backend "
                     f"'{backend_raw}'. Allowed values: {', '.join(sorted(valid_backends))}"
                 )
-            if backend != backend_raw:
-                logger.warning("Mapped legacy MinerU backend '%s' -> '%s'", backend_raw, backend)
 
             extra_args: list[str] = list(getattr(self.settings, "mineru_extra_args", []) or [])
             api_url = str(getattr(self.settings, "mineru_api_url", "") or "").strip()
