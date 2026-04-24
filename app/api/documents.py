@@ -26,6 +26,13 @@ from app.utils.validation.document_validation import DocumentValidationUtils
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
+# Single source of truth for accepted document types. The sidecar may
+# optionally short-circuit obviously invalid requests for UX, but this set
+# is the authoritative server-owned gate.
+SUPPORTED_UPLOAD_EXTENSIONS: frozenset[str] = frozenset(
+    {".txt", ".pdf", ".docx", ".pptx", ".xlsx", ".html", ".md"}
+)
+
 
 @router.post(
     "/upload",

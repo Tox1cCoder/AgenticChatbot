@@ -28,7 +28,9 @@ from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.repositories.conversation import ConversationRepository
 from app.repositories.document import DocumentRepository
+from app.repositories.document_chunk import DocumentChunkRepository
 from app.repositories.document_image import DocumentImageRepository
+from app.repositories.document_parse_artifact import DocumentParseArtifactRepository
 from app.repositories.feedback import FeedbackRepository
 from app.repositories.hitl_interrupt import HITLInterruptRepository
 from app.repositories.message import MessageRepository
@@ -39,6 +41,8 @@ from app.repositories.user import UserRepository
 from app.services.ai_service import AIService
 from app.services.auth_service import AuthService
 from app.services.conversation_service import ConversationService
+from app.services.document_chunk_builder import DocumentChunkBuilder
+from app.services.document_index_service import DocumentIndexService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
 from app.services.feedback_service import FeedbackService
@@ -92,11 +96,21 @@ class Container(containers.DeclarativeContainer):
         url=settings.qdrant_url,
     )
 
-    # Embedding model
+    # Embedding model — name comes from settings so it stays in sync with
+    # the Qdrant collection's vector dimension. Device is selected at
+    # container-build time so dev machines without CUDA fall back to CPU.
+    def _select_embedding_device() -> str:
+        try:
+            import torch
+
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            return "cpu"
+
     embedding_model = providers.Singleton(
         SentenceTransformer,
-        "google/embeddinggemma-300m",
-        device="cuda",
+        settings.rag_embedding_model,
+        device=_select_embedding_device(),
     )
 
     # JWT Service
@@ -145,6 +159,16 @@ class Container(containers.DeclarativeContainer):
 
     document_image_repository = providers.Factory(
         DocumentImageRepository,
+        session_factory=db.provided.session,
+    )
+
+    document_chunk_repository = providers.Factory(
+        DocumentChunkRepository,
+        session_factory=db.provided.session,
+    )
+
+    document_parse_artifact_repository = providers.Factory(
+        DocumentParseArtifactRepository,
         session_factory=db.provided.session,
     )
 
@@ -298,6 +322,24 @@ class Container(containers.DeclarativeContainer):
         jwt_service=jwt_service,
     )
 
+    document_index_service = providers.Factory(
+        DocumentIndexService,
+        chunk_repository=document_chunk_repository,
+        qdrant_client=qdrant_client,
+        embedding_model=embedding_model,
+        collection_name=settings.qdrant_collection_name,
+        embedding_model_name=settings.rag_embedding_model,
+        embedding_dimension=settings.embedding_dimension,
+        index_batch_size=getattr(settings, "rag_index_batch_size", 16),
+    )
+
+    document_chunk_builder = providers.Factory(
+        DocumentChunkBuilder,
+        target_tokens=settings.rag_chunk_target_tokens,
+        overlap_tokens=settings.rag_chunk_overlap_tokens,
+        max_tokens=settings.rag_chunk_max_tokens,
+    )
+
     document_processing_service = providers.Factory(
         DocumentProcessingService,
         settings=providers.Object(settings),
@@ -305,6 +347,9 @@ class Container(containers.DeclarativeContainer):
         qdrant_client=qdrant_client,
         embedding_model=embedding_model,
         document_image_repository=document_image_repository,
+        document_index_service=document_index_service,
+        document_chunk_builder=document_chunk_builder,
+        document_parse_artifact_repository=document_parse_artifact_repository,
     )
 
     document_service: providers.Provider[IDocumentService] = providers.Factory(
@@ -312,8 +357,7 @@ class Container(containers.DeclarativeContainer):
         document_repository=document_repository,
         document_processing_service=document_processing_service,
         document_validation_utils=document_validation_utils,
-        qdrant_client=qdrant_client,
-        embedding_model=embedding_model,
+        document_index_service=document_index_service,
     )
 
     mcp_service = providers.Factory(

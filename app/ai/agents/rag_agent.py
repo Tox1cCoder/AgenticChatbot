@@ -14,6 +14,7 @@ from google.genai import types
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
+from sqlalchemy import func
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     FieldCondition,
@@ -27,19 +28,21 @@ from ...core.config import Settings, settings
 from ...core.runtime_modeling import ResolvedRuntimeModelConfig
 from ...database.session import SessionLocal
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
+from ...models.document import Document
+from ...models.document_chunk import DocumentChunk
+from ...repositories.document_chunk import DocumentChunkRepository
 from ...repositories.document_image import DocumentImageRepository
 from ..agent_config import (
     build_gemini_generate_config,
 )
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_factory import ModelFactory
-from ..prompts import AGENTIC_RAG_SYSTEM_PROMPT, TOOL_EXPLORATION_SUFFIX, build_rag_prompt
+from ..prompts import AGENTIC_RAG_SYSTEM_PROMPT, TOOL_EXPLORATION_SUFFIX
 from ..rag_tools import create_search_documents_tool
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..utils import (
     coerce_response_text,
     extract_agent_execution_info,
-    get_error_recovery_hint,
 )
 from .base_agent import BaseAgent
 
@@ -78,8 +81,7 @@ class RAGAgent(BaseAgent):
         # Thinking support
         self._last_thinking_summary = None
 
-        # Agentic RAG mode
-        self.agentic_mode = settings.agentic_rag_enabled
+        # Agentic RAG tuning — agentic is the only mode.
         self.agentic_max_iterations = settings.agentic_max_iterations
         self.agentic_preview_chars = settings.agentic_preview_chars
 
@@ -100,14 +102,7 @@ class RAGAgent(BaseAgent):
         return "rag_agent"
 
     def _get_base_system_prompt(self) -> str:
-        """Return the default agentic RAG system prompt.
-
-        RAGAgent uses different prompts for different paths (traditional
-        RAG uses ``build_rag_prompt()``, agentic uses
-        ``AGENTIC_RAG_SYSTEM_PROMPT``).  This base implementation returns
-        the agentic prompt as the default; callers that need the
-        traditional prompt construct it themselves via ``build_rag_prompt()``.
-        """
+        """Return the agentic RAG system prompt (the only prompt path)."""
         return AGENTIC_RAG_SYSTEM_PROMPT
 
     def _init_reranker(self):
@@ -121,12 +116,7 @@ class RAGAgent(BaseAgent):
         user_id: str | None = None,
         device_id: str | None = None,
     ) -> str:
-        """Return base prompt + active skills suffix.
-
-        RAGAgent doesn't have a single base prompt — different paths use
-        different prompts, so caller passes the base in.  Overrides
-        BaseAgent's no-arg version.
-        """
+        """Return base prompt + tool exploration suffix + active skills suffix."""
         prompt = f"{base_prompt}{TOOL_EXPLORATION_SUFFIX}"
         suffix = self._build_skills_suffix(user_id=user_id, device_id=device_id)
         if suffix:
@@ -163,12 +153,11 @@ class RAGAgent(BaseAgent):
             self.tools = []
             self.mcp_manager = None  # Mark as failed but continue
 
-        # ALWAYS add search_documents tool for agentic mode (even if MCP failed)
-        if self.agentic_mode:
-            search_documents_tool = create_search_documents_tool()
-            tool_names = {tool.name for tool in self.tools}
-            if search_documents_tool.name not in tool_names:
-                self.tools.insert(0, search_documents_tool)
+        # search_documents is always bound — agentic RAG is the only path.
+        search_documents_tool = create_search_documents_tool()
+        tool_names = {tool.name for tool in self.tools}
+        if search_documents_tool.name not in tool_names:
+            self.tools.insert(0, search_documents_tool)
 
     def _create_agent_executor(self, llm: Any, tools: list[BaseTool], system_prompt: str):
 
@@ -190,276 +179,10 @@ class RAGAgent(BaseAgent):
         message: AgentMessage,
         conversation_id: str | None = None,
     ) -> AgentResponse:
-
-        query = message.content or ""
-        conversation_history = message.metadata.get("history", [])
-        persona = message.metadata.get("persona")
-        model_request = message.metadata.get("model_request")
-        request_user_id = message.metadata.get("user_id")
-        request_device_id = message.metadata.get("device_id")
-        history_summary = message.metadata.get("history_summary")
-
-        # Initialize tools if not done yet
+        """Agentic RAG is the only execution path."""
         if self.mcp_manager is None:
             await self._init_tools()
-
-        # === Agentic Mode Path ===
-        # If agentic mode is enabled, use the LLM with search_documents tool
-        # The graph will handle the tool execution and loop back
-        if self.agentic_mode:
-            return await self._process_message_agentic(message, conversation_id)
-
-        # === Traditional RAG Path ===
-        retrieved_docs = await self._search(query, conversation_id=conversation_id)
-
-        doc_grouping = {}
-        next_doc_num = 1
-
-        for doc in retrieved_docs:
-            # Use document_id as primary key, fallback to source
-            # Normalize empty strings to None to prevent duplicate grouping
-            raw_doc_id = doc.get("document_id")
-            doc_key = raw_doc_id if raw_doc_id else doc.get("source", "unknown")
-
-            if doc_key not in doc_grouping:
-                doc_grouping[doc_key] = {
-                    "document_id": doc.get("document_id"),
-                    "source": doc.get("source", "unknown"),
-                    "document_number": next_doc_num,
-                    "chunks": [],
-                }
-                next_doc_num += 1
-
-            # Add chunk details to document group
-            chunk_details = {
-                "chunk_index": doc.get("chunk_index", 0),
-                "score": doc.get("score", 0.0),
-                "character_count": len(doc.get("content", "")),
-                "content": doc.get("content", ""),
-                "page_number": doc.get("page_number"),
-            }
-            doc_grouping[doc_key]["chunks"].append(chunk_details)
-
-        has_images = any(doc.get("image_ids") for doc in retrieved_docs)
-        images = []
-        if has_images:
-            images = await self._fetch_images_for_chunks(retrieved_docs)
-
-        prompt = build_rag_prompt(
-            query,
-            retrieved_docs,
-            conversation_history,
-            persona=persona,
-            has_images=bool(images),
-            history_summary=history_summary,
-        )
-
-        # Append active skills to the prompt
-        prompt = self._get_full_system_prompt(
-            prompt,
-            user_id=request_user_id,
-            device_id=request_device_id,
-        )
-
-        tools_for_binding = self._get_tools_for_binding(
-            conversation_id=conversation_id,
-            user_id=request_user_id,
-            device_id=request_device_id,
-        )
-        has_tool_binding = bool(tools_for_binding)
-
-        response_text: str = ""
-        tools_used: list[str] = []
-        tool_artifacts: list[dict[str, Any]] = []
-        error_message: str | None = None
-        runtime_config = self._resolve_runtime_model_config(request_user_id, model_request)
-
-        try:
-            if images and has_tool_binding:
-                (
-                    tool_response_text,
-                    tools_used,
-                    tool_artifacts,
-                    runtime_config,
-                ) = await self._generate_with_tools(
-                    prompt,
-                    runtime_config=runtime_config,
-                    user_id=request_user_id,
-                    conversation_id=conversation_id,
-                    tools_to_bind=tools_for_binding,
-                )
-
-                multimodal_prompt = self._augment_prompt_with_tool_context(
-                    prompt, tool_response_text, tool_artifacts
-                )
-                response_text, runtime_config = await self._generate_with_vision(
-                    multimodal_prompt,
-                    images,
-                    runtime_config=runtime_config,
-                    user_id=request_user_id,
-                )
-            elif images:
-                response_text, runtime_config = await self._generate_with_vision(
-                    prompt,
-                    images,
-                    runtime_config=runtime_config,
-                    user_id=request_user_id,
-                )
-            elif has_tool_binding:
-                (
-                    response_text,
-                    tools_used,
-                    tool_artifacts,
-                    runtime_config,
-                ) = await self._generate_with_tools(
-                    prompt,
-                    runtime_config=runtime_config,
-                    user_id=request_user_id,
-                    conversation_id=conversation_id,
-                    tools_to_bind=tools_for_binding,
-                )
-            else:
-                response_text, runtime_config = await self._generate(
-                    prompt,
-                    runtime_config=runtime_config,
-                    user_id=request_user_id,
-                )
-        except Exception as exc:
-            logger.error("Error generating RAG response: %s", exc, exc_info=True)
-            error_message = f"{type(exc).__name__}: {exc}"
-            tools_used = []
-            tool_artifacts = [
-                {
-                    "tool": "rag_agent",
-                    "args": {},
-                    "error": error_message,
-                    "hint": get_error_recovery_hint(exc, "rag_agent", {}),
-                }
-            ]
-
-        response_text = coerce_response_text(response_text)
-
-        response_message = AgentMessage(role=MessageRole.ASSISTANT, content=response_text)
-
-        # Build grouped citations structure (documents_cited)
-        documents_cited = []
-        for _, doc_info in doc_grouping.items():
-            # Calculate aggregate stats for this document
-            chunks = doc_info["chunks"]
-            total_chunks = len(chunks)
-            avg_score = sum(c["score"] for c in chunks) / total_chunks if total_chunks > 0 else 0.0
-
-            document_entry = {
-                "document_id": doc_info["document_id"],
-                "source": doc_info["source"],
-                "document_number": doc_info["document_number"],
-                "chunks": chunks,
-                "total_chunks": total_chunks,
-                "avg_score": avg_score,
-            }
-            documents_cited.append(document_entry)
-
-        # Sort by document number for consistency
-        documents_cited.sort(key=lambda x: x["document_number"])
-
-        # Build legacy flat citations for backward compatibility
-        all_citations = [
-            {
-                "source": doc.get("source", "unknown"),
-                "score": doc.get("score", 0.0),
-                "chunk_index": doc.get("chunk_index", 0),
-                "character_count": len(doc.get("content", "")),
-            }
-            for doc in retrieved_docs
-        ]
-
-        # Apply citation verification if enabled
-        citations = all_citations
-        citation_verification_enabled = False
-        citation_coverage = 100.0
-
-        if self.settings.enable_citation_verification and retrieved_docs:
-            verified_citations = self._verify_citations(
-                response_text, retrieved_docs, all_citations, doc_grouping
-            )
-            if verified_citations is not None:
-                citations = verified_citations
-                citation_verification_enabled = True
-                citation_coverage = (
-                    (len(citations) / len(all_citations) * 100) if all_citations else 0.0
-                )
-
-        # Calculate retrieval statistics
-        avg_score = (
-            sum(doc.get("score", 0.0) for doc in retrieved_docs) / len(retrieved_docs)
-            if retrieved_docs
-            else 0.0
-        )
-
-        # Build metadata
-        metadata = {
-            "conversation_id": conversation_id,
-            "documents_found": len(doc_grouping),  # Number of unique documents
-            "chunks_retrieved": len(retrieved_docs),  # Total number of chunks
-            "documents_cited": documents_cited,
-            "citations": citations,
-            "context_messages": len(conversation_history),
-            "retrieval_stats": {
-                "total_retrieved": len(retrieved_docs),
-                "avg_score": avg_score,
-            },
-            "persona_used": persona,
-            "citation_verification_enabled": citation_verification_enabled,
-            "citation_coverage": citation_coverage,
-            "has_images": bool(images),
-            "images_count": len(images) if images else 0,
-        }
-        self._apply_runtime_metadata(metadata, runtime_config)
-
-        # Add image data to metadata for frontend display
-        if images:
-            metadata["images"] = [
-                {
-                    "data": img["data"],
-                    "mime": img["mime_type"],
-                    "name": img.get("caption")
-                    or f"Document Image (Page {img.get('page_number', '?')})",
-                    "page_number": img.get("page_number"),
-                    "caption": img.get("caption"),
-                }
-                for img in images
-            ]
-
-        # Add tool usage metadata if tools were used
-        if tools_used:
-            metadata["tools_used"] = tools_used
-            metadata["tool_calls_count"] = len(tools_used)
-        if tool_artifacts:
-            metadata["tool_artifacts"] = tool_artifacts
-            if not error_message:
-                error_entries = [
-                    artifact.get("error") for artifact in tool_artifacts if artifact.get("error")
-                ]
-                if error_entries:
-                    error_message = error_entries[0]
-                    metadata["error"] = error_message
-        elif error_message:
-            metadata["error"] = error_message
-
-        # Add thinking summary if available
-        if self._last_thinking_summary:
-            metadata["thinking_summary"] = self._last_thinking_summary
-            # Clear after use
-            self._last_thinking_summary = None
-
-        return AgentResponse(
-            agent_type=AgentType.RAG,
-            agent_id="rag_agent",
-            message=response_message,
-            metadata=metadata,
-            tool_artifacts=tool_artifacts if tool_artifacts else None,
-            error=error_message,
-        )
+        return await self._process_message_agentic(message, conversation_id)
 
     async def stream_message(
         self,
@@ -818,7 +541,11 @@ class RAGAgent(BaseAgent):
         return "\n\n".join(sections)
 
     async def _search(
-        self, query: str, top_k: int = None, conversation_id: str | None = None
+        self,
+        query: str,
+        top_k: int = None,
+        conversation_id: str | None = None,
+        user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         # Use configured top_k if not specified
         if top_k is None:
@@ -826,14 +553,17 @@ class RAGAgent(BaseAgent):
 
         query_embedding = self.embedding_model.encode(query).tolist()
 
-        search_filter = None
-
+        must_conditions: list[FieldCondition] = []
         if conversation_id:
-            search_filter = Filter(
-                must=[
-                    FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id))
-                ]
+            must_conditions.append(
+                FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id))
             )
+        if user_id:
+            must_conditions.append(
+                FieldCondition(key="user_id", match=MatchValue(value=user_id))
+            )
+
+        search_filter = Filter(must=must_conditions) if must_conditions else None
 
         search_results = self.qdrant_client.query_points(
             collection_name=self.collection_name,
@@ -843,24 +573,84 @@ class RAGAgent(BaseAgent):
             query_filter=search_filter,
         ).points
 
+        hydrated_chunks: dict[str, Any] = {}
+        chunk_ids: list[UUID] = []
+        for result in search_results:
+            raw_chunk_id = result.payload.get("chunk_id") if result.payload else None
+            if not raw_chunk_id:
+                continue
+            try:
+                chunk_ids.append(UUID(str(raw_chunk_id)))
+            except Exception:
+                logger.warning("Skipping invalid chunk_id in Qdrant payload: %s", raw_chunk_id)
+
+        if chunk_ids:
+            try:
+                chunk_repo = DocumentChunkRepository(SessionLocal)
+                hydrated_chunks = {
+                    str(chunk.id): chunk for chunk in chunk_repo.get_by_ids(chunk_ids)
+                }
+            except Exception:
+                logger.exception("Failed to hydrate SQL chunks for RAG search")
+
+        image_repo = DocumentImageRepository(SessionLocal) if hydrated_chunks else None
+
         results = []
         for result in search_results:
+            payload = result.payload or {}
+            raw_chunk_id = payload.get("chunk_id")
+            if not raw_chunk_id:
+                logger.warning(
+                    "Skipping Qdrant result without chunk_id for document_id=%s",
+                    payload.get("document_id"),
+                )
+                continue
+
+            chunk = hydrated_chunks.get(str(raw_chunk_id)) if raw_chunk_id else None
+
+            if chunk is not None:
+                chunk_images = []
+                if image_repo is not None:
+                    try:
+                        chunk_images = image_repo.get_by_chunk_id(chunk.id)
+                    except Exception:
+                        logger.exception("Failed to hydrate images for chunk %s", chunk.id)
+
+                document = getattr(chunk, "document", None)
+                source = getattr(document, "filename", None) or payload.get("source", "unknown")
+                page_start = getattr(chunk, "page_start", None)
+                page_end = getattr(chunk, "page_end", None)
+                page_number = page_start if page_start is not None and page_start == page_end else None
+                image_ids = [str(image.id) for image in chunk_images]
+                image_paths = [image.image_path for image in chunk_images]
+                image_captions = [image.image_caption or "" for image in chunk_images]
+                content = chunk.content
+                document_id = str(chunk.document_id)
+                chunk_index = chunk.chunk_index
+            else:
+                logger.error(
+                    "Qdrant returned chunk_id=%s but no SQL document_chunks row exists",
+                    raw_chunk_id,
+                )
+                continue
+
             results.append(
                 {
-                    "content": result.payload.get("content", ""),
-                    "source": result.payload.get("source", "unknown"),
+                    "content": content,
+                    "source": source,
                     "score": result.score,
-                    "page_number": result.payload.get("page_number"),
-                    "page_start": result.payload.get("page_start"),
-                    "page_end": result.payload.get("page_end"),
-                    "document_id": result.payload.get("document_id") or None,
-                    "conversation_id": result.payload.get("conversation_id") or None,
-                    "chunk_index": result.payload.get("chunk_index", 0),
-                    "has_tables": result.payload.get("has_tables", False),
-                    "table_count": result.payload.get("table_count", 0),
-                    "image_ids": result.payload.get("image_ids", []),
-                    "image_paths": result.payload.get("image_paths", []),
-                    "image_captions": result.payload.get("image_captions", []),
+                    "page_number": page_number,
+                    "page_start": page_start,
+                    "page_end": page_end,
+                    "document_id": document_id,
+                    "conversation_id": payload.get("conversation_id") or None,
+                    "chunk_id": str(raw_chunk_id) if raw_chunk_id else None,
+                    "chunk_index": chunk_index,
+                    "has_tables": payload.get("has_tables", False),
+                    "table_count": payload.get("table_count", 0),
+                    "image_ids": image_ids,
+                    "image_paths": image_paths,
+                    "image_captions": image_captions,
                 }
             )
 
@@ -1212,34 +1002,12 @@ class RAGAgent(BaseAgent):
 
     async def get_document_full_content(self, document_id: str) -> str | None:
         try:
-            all_results = []
-            offset = None
-
-            while True:
-                results, offset = self.qdrant_client.scroll(
-                    collection_name=self.collection_name,
-                    scroll_filter=Filter(
-                        must=[
-                            FieldCondition(key="document_id", match=MatchValue(value=document_id))
-                        ]
-                    ),
-                    limit=1000,
-                    offset=offset,
-                    with_payload=True,
-                )
-
-                all_results.extend(results)
-                if offset is None:
-                    break
-
-            if not all_results:
+            chunk_repo = DocumentChunkRepository(SessionLocal)
+            chunks = chunk_repo.get_by_document_ordered(UUID(document_id))
+            if not chunks:
                 return None
 
-            sorted_results = sorted(all_results, key=lambda r: r.payload.get("chunk_index", 0))
-
-            content = "\n\n".join(r.payload.get("content", "") for r in sorted_results)
-
-            return content
+            return "\n\n".join(chunk.content for chunk in chunks)
 
         except Exception as e:
             logger.error(
@@ -1273,44 +1041,29 @@ class RAGAgent(BaseAgent):
 
     async def list_conversation_documents(self, conversation_id: str) -> list[dict[str, Any]]:
         try:
-            all_results = []
-            offset = None
-
-            while True:
-                results, offset = self.qdrant_client.scroll(
-                    collection_name=self.collection_name,
-                    scroll_filter=Filter(
-                        must=[
-                            FieldCondition(
-                                key="conversation_id",
-                                match=MatchValue(value=conversation_id),
-                            )
-                        ]
-                    ),
-                    limit=10000,
-                    offset=offset,
-                    with_payload=["document_id", "source", "chunk_index"],
+            conversation_uuid = UUID(conversation_id)
+            with SessionLocal() as db:
+                rows = (
+                    db.query(
+                        Document.id,
+                        Document.filename,
+                        func.count(DocumentChunk.id).label("chunk_count"),
+                    )
+                    .outerjoin(DocumentChunk, DocumentChunk.document_id == Document.id)
+                    .filter(Document.conversation_id == conversation_uuid)
+                    .group_by(Document.id, Document.filename, Document.upload_time)
+                    .order_by(Document.upload_time.desc())
+                    .all()
                 )
 
-                all_results.extend(results)
-                if offset is None:
-                    break
-
-            doc_map: dict[str, dict[str, Any]] = {}
-            for point in all_results:
-                doc_id = point.payload.get("document_id")
-                if not doc_id:
-                    continue
-
-                if doc_id not in doc_map:
-                    doc_map[doc_id] = {
-                        "document_id": doc_id,
-                        "filename": point.payload.get("source", "unknown"),
-                        "chunk_count": 0,
-                    }
-                doc_map[doc_id]["chunk_count"] += 1
-
-            return list(doc_map.values())
+            return [
+                {
+                    "document_id": str(row.id),
+                    "filename": row.filename,
+                    "chunk_count": int(row.chunk_count or 0),
+                }
+                for row in rows
+            ]
 
         except Exception as e:
             logger.error(

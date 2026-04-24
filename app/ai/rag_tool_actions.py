@@ -49,6 +49,7 @@ async def execute_search_documents_action(
     tool_args: dict[str, Any],
     context: dict[str, Any],
     max_agentic_images: int,
+    user_id: str | None = None,
 ) -> tuple[str, str]:
     """
     Execute one search_documents action.
@@ -86,7 +87,11 @@ async def execute_search_documents_action(
         elif action == DocumentAction.SEARCH_CHUNKS.value:
             query = tool_args.get("query")
             if query:
-                search_results = await rag_agent._search(query, conversation_id=conversation_id)
+                search_results = await rag_agent._search(
+                    query,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                )
                 if search_results:
                     attached_count = 0
                     try:

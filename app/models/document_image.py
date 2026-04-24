@@ -13,7 +13,12 @@ class DocumentImage(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False, index=True)
-    chunk_id = Column(UUID(as_uuid=True), nullable=True)
+    chunk_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("document_chunks.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     image_path = Column(String(500), nullable=False)
     image_caption = Column(Text, nullable=True)
     page_number = Column(Integer, nullable=True)
@@ -22,6 +27,7 @@ class DocumentImage(Base):
 
     # Relationships
     document = relationship("Document", back_populates="images")
+    chunk = relationship("DocumentChunk", back_populates="images")
 
     __table_args__ = (
         Index("idx_document_images_document_id", "document_id"),

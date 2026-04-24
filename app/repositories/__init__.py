@@ -16,12 +16,13 @@ _MODULE_MAP = {
     "MessageRepository": "message",
     "FeedbackRepository": "feedback",
     "DocumentRepository": "document",
-    "DocumentChunkRepository": "document",
+    "DocumentChunkRepository": "document_chunk",
 }
 
 if TYPE_CHECKING:
     from .conversation import ConversationRepository
-    from .document import DocumentChunkRepository, DocumentRepository
+    from .document import DocumentRepository
+    from .document_chunk import DocumentChunkRepository
     from .feedback import FeedbackRepository
     from .message import MessageRepository
     from .user import UserRepository

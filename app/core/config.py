@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     model_config = {
         "env_file": str(dotenv_path) if dotenv_path.exists() else ".env",
         "env_file_encoding": "utf-8",
+        # Tolerate stale env vars from retired settings (e.g. AGENTIC_RAG_ENABLED)
+        # rather than failing hard on startup after the Phase 9 cleanup.
+        "extra": "ignore",
     }
     # Database settings
     database_url: str = Field(
@@ -181,9 +184,39 @@ class Settings(BaseSettings):
     )
 
     # Agent Model Configuration
-    rag_agent_model: str = Field(default="gemini-3-pro-preview")
+    rag_agent_model: str = Field(default="gemini-3.1-pro-preview")
     chat_agent_model: str = Field(default="gemini-3-flash-preview")
     search_agent_model: str = Field(default="gemini-3-flash-preview")
+
+    # RAG Embedding / Reranker / Chunking
+    rag_embedding_model: str = Field(
+        default="google/embeddinggemma-300m",
+        description="SentenceTransformer model name used for RAG embeddings.",
+    )
+    rag_embedding_dimension: int = Field(
+        default=768,
+        description="Embedding vector dimension produced by rag_embedding_model.",
+    )
+    rag_reranker_model: str = Field(
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        description="Cross-encoder used to rerank top-k retrieved chunks.",
+    )
+    rag_chunk_target_tokens: int = Field(
+        default=400,
+        description="Preferred token count per generated chunk.",
+    )
+    rag_chunk_overlap_tokens: int = Field(
+        default=40,
+        description="Token overlap applied when splitting long text.",
+    )
+    rag_chunk_max_tokens: int = Field(
+        default=800,
+        description="Hard ceiling on per-chunk token count.",
+    )
+    rag_index_batch_size: int = Field(
+        default=16,
+        description="Batch size used when embedding chunks during indexing.",
+    )
 
     # Media Resolution Configuration (for vision models)
     media_resolution: str = Field(
@@ -347,14 +380,6 @@ class Settings(BaseSettings):
     )
 
     # Document Processing Configuration
-    document_chunk_size: int = Field(
-        default=1000,
-        description="Chunk size for text splitting in characters",
-    )
-    document_chunk_overlap: int = Field(
-        default=200,
-        description="Overlap between chunks in characters",
-    )
     mineru_timeout: int = Field(
         default=300,
         description="Timeout for MinerU subprocess in seconds",
@@ -408,19 +433,15 @@ class Settings(BaseSettings):
         default=0.2,
         description="Minimum similarity score for retrieval",
     )
-    rag_max_context_tokens: int = Field(
-        default=30000,
-        description="Maximum tokens to include in RAG context",
-    )
-
     # Re-ranking Configuration
     enable_reranking: bool = Field(
         default=True,
         description="Enable re-ranking of retrieved chunks",
     )
     reranker_model: str = Field(
-        default="zeroentropy/zerank-1-small",
-        description="Re-ranker model name",
+        default="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        description="Re-ranker model name (kept for backward compat; canonical "
+        "setting is rag_reranker_model).",
     )
     rerank_top_k: int = Field(
         default=10,
@@ -433,12 +454,6 @@ class Settings(BaseSettings):
         description="Batch size for Qdrant upsert operations (points per batch)",
     )
 
-    # Advanced Chunking Configuration
-    preserve_cross_page_context: bool = Field(
-        default=True,
-        description="Preserve context across PDF pages",
-    )
-
     # Table Processing Configuration
     extract_tables_from_pdf: bool = Field(
         default=True, description="Enable table extraction from PDF documents"
@@ -446,16 +461,6 @@ class Settings(BaseSettings):
     table_format: str = Field(
         default="markdown",
         description="Format for extracted tables (markdown, grid, plain)",
-    )
-
-    # Prompt Configuration
-    rag_chunks_in_prompt: int = Field(
-        default=10,
-        description="Maximum number of chunks to include in prompt (0 = all)",
-    )
-    max_chunk_chars_in_prompt: int = Field(
-        default=2000,
-        description="Maximum characters per chunk in prompt (0 = no limit)",
     )
 
     # Search Agent Configuration
@@ -636,10 +641,6 @@ class Settings(BaseSettings):
     )
 
     # Agentic RAG Configuration
-    agentic_rag_enabled: bool = Field(
-        default=False,
-        description="Enable agentic document exploration mode for RAG (three-phase: scan, deep dive, backtrack)",
-    )
     agentic_max_iterations: int = Field(
         default=10,
         description="Maximum tool calls in agentic RAG mode before forcing final answer",

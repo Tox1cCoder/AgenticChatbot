@@ -1569,6 +1569,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 tool_args=tool_args,
                 context=context,
                 max_agentic_images=max_agentic_images,
+                user_id=state.get("user_id"),
             )
 
             tool_outputs.append(
@@ -1615,9 +1616,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         return state
 
     def _should_call_rag_tools(self, state: GraphState) -> str:
-        if not settings.agentic_rag_enabled:
-            return "end"
-
         messages = state.get("messages", [])
         if not messages:
             return "end"
@@ -3122,69 +3120,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         yield {"type": "agent_selected", "agent": selected_agent}
 
-        # For traditional RAG we use the agent's custom streaming implementation.
-        # For agentic RAG we must stream the LangGraph execution so tool calls can run.
-        rag_provider = None
-        model_request = initial_state.get("model_request")
-        if isinstance(model_request, dict):
-            rag_cfg = model_request.get("rag")
-            if not isinstance(rag_cfg, dict):
-                rag_cfg = model_request.get("all")
-            if isinstance(rag_cfg, dict):
-                rag_provider = str(rag_cfg.get("provider") or "").strip().lower() or None
-
-        if (
-            selected_agent == "rag_agent"
-            and not settings.agentic_rag_enabled
-            and rag_provider != "openai"
-        ):
-            # Traditional RAG streaming — bypasses the graph pipeline.
-            history_summary = await self._run_fast_path_summarization(config, thread_id)
-
-            conversation_history = await self._get_conversation_history(
-                conversation_id, user_id, agent_key="rag"
-            )
-
-            agent_msg = AgentMessage(
-                role=MessageRole.USER,
-                content=message,
-                metadata={
-                    "history": conversation_history,
-                    "persona": persona,
-                    "model_request": initial_state.get("model_request"),
-                    "user_id": user_id,
-                    "history_summary": history_summary,
-                },
-                attachments=attachments,
-            )
-
-            try:
-                fast_path_response: AgentResponse | None = None
-                async for event in self.rag_agent.stream_message(agent_msg, conversation_id):
-                    event_type = event.get("type")
-                    if event_type in ["thinking", "token", "tool_start", "tool_end"]:
-                        yield event
-                    elif event_type == "complete":
-                        fast_path_response = event.get("response")
-                        if fast_path_response:
-                            yield {
-                                "type": "complete",
-                                "response": fast_path_response,
-                            }
-                        # Persist turn to checkpoint so subsequent
-                        # summarization runs see the full conversation.
-                        await self._persist_fast_path_turn(
-                            config, thread_id, message, fast_path_response
-                        )
-                        return
-                    elif event_type == "error":
-                        yield event
-                        return
-                yield {"type": "error", "error": "RAG agent stream ended unexpectedly"}
-            except Exception as e:
-                yield {"type": "error", "error": str(e)}
-            return
-
+        # Agentic RAG is the only path. Document-aware chat streams through the
+        # LangGraph pipeline so the search_documents tool loop can execute.
         accumulated_content = ""
         accumulated_thinking = ""  # Track thinking content for non-RAG agents
         current_tool_calls = {}  # Track tool call chunks by index

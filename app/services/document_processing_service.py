@@ -12,13 +12,14 @@ import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
-from langchain_community.document_loaders import Docx2txtLoader, TextLoader
+from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from PIL import Image
 from qdrant_client import QdrantClient
@@ -29,6 +30,7 @@ from app.core.config import Settings
 from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.repositories.document_image import DocumentImageRepository
 from app.schemas.document_image import DocumentImageCreate
+from app.services.document_chunk_builder import DocumentChunkBuilder, NormalizedBlock
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +43,22 @@ class DocumentProcessingService:
         qdrant_client: QdrantClient,
         embedding_model: SentenceTransformer,
         document_image_repository: DocumentImageRepository,
+        document_index_service: Any | None = None,
+        document_chunk_builder: DocumentChunkBuilder | None = None,
+        document_parse_artifact_repository: Any | None = None,
     ):
         self.settings = settings
         self.celery_app = celery_app
         self.qdrant_client = qdrant_client
         self.embedding_model = embedding_model
         self.document_image_repository = document_image_repository
+        self.document_index_service = document_index_service
+        self.document_chunk_builder = document_chunk_builder or DocumentChunkBuilder(
+            target_tokens=settings.rag_chunk_target_tokens,
+            overlap_tokens=settings.rag_chunk_overlap_tokens,
+            max_tokens=settings.rag_chunk_max_tokens,
+        )
+        self.document_parse_artifact_repository = document_parse_artifact_repository
         self.collection_name = settings.qdrant_collection_name
         self.embedding_dimension = settings.embedding_dimension
         self._event_bus = get_event_bus()
@@ -111,13 +123,20 @@ class DocumentProcessingService:
             "size_mb": round(file_size / (1024 * 1024), 2),
         }
 
-    @staticmethod
-    def _validate_file_extension(filename: str) -> str:
-        allowed_extensions = {".txt", ".pdf", ".docx"}
+    SUPPORTED_UPLOAD_EXTENSIONS: frozenset[str] = frozenset(
+        {".txt", ".pdf", ".docx", ".pptx", ".xlsx", ".html", ".md"}
+    )
+    MINERU_EXTENSIONS: frozenset[str] = frozenset(
+        {".pdf", ".docx", ".pptx", ".xlsx", ".html", ".md"}
+    )
+
+    @classmethod
+    def _validate_file_extension(cls, filename: str) -> str:
         file_extension = os.path.splitext(filename)[1].lower()
-        if file_extension not in allowed_extensions:
+        if file_extension not in cls.SUPPORTED_UPLOAD_EXTENSIONS:
+            allowed = ", ".join(sorted(cls.SUPPORTED_UPLOAD_EXTENSIONS))
             raise ValueError(
-                f"Unsupported file type '{file_extension}'. Allowed: {', '.join(allowed_extensions)}"
+                f"Unsupported file type '{file_extension}'. Allowed: {allowed}"
             )
         return file_extension
 
@@ -289,61 +308,102 @@ class DocumentProcessingService:
         filename: str,
         document_id: str,
         conversation_id: str | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         start_time = time.time()
 
         chunks_with_metadata = []
         self._extracted_images = []
 
-        # Load documents
-        if filename.lower().endswith(".txt"):
+        # Dispatch on extension.
+        # * .txt goes through the plain-text loader.
+        # * Rich formats (.pdf, .docx, .pptx, .xlsx, .html, .md) all go
+        #   through the unified MinerU pipeline so they produce normalized
+        #   blocks with page/section metadata.
+        ext = os.path.splitext(filename)[1].lower()
+        if ext == ".txt":
             loader = TextLoader(file_path, encoding="utf-8")
             documents = loader.load()
             chunks = self._create_chunks(documents)
             chunks_with_metadata = [{"text": chunk} for chunk in chunks]
 
-        elif filename.lower().endswith(".pdf"):
-            chunks_with_metadata = await self._process_pdf_with_mineru(
+        elif ext in self.MINERU_EXTENSIONS:
+            chunks_with_metadata = await self._process_with_mineru(
                 file_path, document_id, filename
             )
-
-        elif filename.lower().endswith(".docx"):
-            loader = Docx2txtLoader(file_path)
-            documents = loader.load()
-            chunks = self._create_chunks(documents)
-            chunks_with_metadata = [{"text": chunk} for chunk in chunks]
 
         else:
             raise ValueError(f"Unsupported file type: {filename}")
 
-        store_result = await self._store_chunks(
-            chunks_with_metadata, filename, document_id, conversation_id
-        )
-
-        # Store images if extracted
         images_stored = 0
-        if hasattr(self, "_extracted_images") and self._extracted_images:
-            images_stored = await self._store_images(
-                self._extracted_images,
-                document_id,
-                store_result.get("chunk_id_mapping", {}),
-                chunks_with_metadata,
+        index_service = getattr(self, "document_index_service", None)
+        if index_service is not None:
+            prepared_images = []
+            if hasattr(self, "_extracted_images") and self._extracted_images:
+                prepared_images = await self._prepare_images_for_indexing(
+                    self._extracted_images,
+                    document_id,
+                )
+                self._attach_prepared_images_to_chunks(
+                    chunks_with_metadata,
+                    prepared_images,
+                )
+
+            built_chunks = self._build_chunks_for_indexing(chunks_with_metadata)
+            persisted_chunks = index_service.index_document(
+                document=self._document_ref(document_id, conversation_id, user_id),
+                built_chunks=built_chunks,
+                parse_artifact_id=None,
             )
 
-            # Update chunks with image metadata in Qdrant
-            await self._update_chunks_with_images(document_id)
+            if prepared_images:
+                images_stored = await self._store_prepared_images(
+                    prepared_images,
+                    document_id,
+                    persisted_chunks,
+                )
+
+            store_result = {
+                "chunks_stored": len(persisted_chunks),
+                "chunk_id_mapping": {
+                    chunk.chunk_index: str(chunk.id) for chunk in persisted_chunks
+                },
+            }
+            chunks_created = len(built_chunks)
+        else:
+            store_result = await self._store_chunks(
+                chunks_with_metadata,
+                filename,
+                document_id,
+                conversation_id,
+                user_id=user_id,
+            )
+
+            # Store images if extracted
+            if hasattr(self, "_extracted_images") and self._extracted_images:
+                images_stored = await self._store_images(
+                    self._extracted_images,
+                    document_id,
+                    store_result.get("chunk_id_mapping", {}),
+                    chunks_with_metadata,
+                )
+
+                # Update chunks with image metadata in Qdrant for the legacy path.
+                await self._update_chunks_with_images(document_id)
+
+            chunks_created = len(chunks_with_metadata)
 
         processing_time = time.time() - start_time
 
         return {
-            "chunks_created": len(chunks_with_metadata),
+            "chunks_created": chunks_created,
             "chunks_stored": store_result.get("chunks_stored", 0),
             "images_stored": images_stored,
             "processing_time": processing_time,
             "filename": filename,
         }
 
-    async def _process_pdf_with_mineru(
+    async def _process_with_mineru(
         self, file_path: str, document_id: str, original_filename: str | None = None
     ) -> list[dict[str, Any]]:
         try:
@@ -545,7 +605,7 @@ class DocumentProcessingService:
                 chunks_with_metadata = self._create_chunks_with_page_metadata(
                     content_blocks,
                     page_to_images,
-                    max_chunk_size=self.settings.document_chunk_size,
+                    max_chunk_size=self._legacy_char_chunk_size(),
                 )
             else:
                 with open(markdown_file, encoding="utf-8") as f:
@@ -606,17 +666,27 @@ class DocumentProcessingService:
             logger.error("Unexpected MinerU error while processing %s: %s", file_path, exc)
             raise RuntimeError(f"Unexpected error in MinerU processing: {str(exc)}") from exc
 
+    def _legacy_char_chunk_size(self) -> int:
+        """Approximate char count for a target-token chunk.
+
+        Bridges between the legacy char-based splitter and the token-based
+        settings. ~4 characters per token is the standard heuristic.
+        """
+        return max(200, int(self.settings.rag_chunk_target_tokens * 4))
+
+    def _legacy_char_overlap(self) -> int:
+        return max(0, int(self.settings.rag_chunk_overlap_tokens * 4))
+
     def _create_chunks(
         self,
         documents: list,
         max_chunk_size: int = None,
         overlap: int = None,
     ) -> list[str]:
-        # Use configured parameters if not specified
         if max_chunk_size is None:
-            max_chunk_size = self.settings.document_chunk_size
+            max_chunk_size = self._legacy_char_chunk_size()
         if overlap is None:
-            overlap = self.settings.document_chunk_overlap
+            overlap = self._legacy_char_overlap()
         separators = ["\n\n", "\n", " ", ""]
 
         text_splitter = RecursiveCharacterTextSplitter(
@@ -660,7 +730,7 @@ class DocumentProcessingService:
         - Associate images and tables with their source pages
         """
         if max_chunk_size is None:
-            max_chunk_size = self.settings.document_chunk_size
+            max_chunk_size = self._legacy_char_chunk_size()
 
         chunks_with_metadata: list[dict[str, Any]] = []
         current_chunk_text = ""
@@ -1058,12 +1128,260 @@ class DocumentProcessingService:
 
         raise RuntimeError(f"MinerU output missing markdown file for {ordered_candidates[0]}")
 
+    def _build_chunks_for_indexing(self, chunks_with_metadata: list[dict[str, Any]]):
+        blocks: list[NormalizedBlock] = []
+        for index, chunk_data in enumerate(chunks_with_metadata):
+            if isinstance(chunk_data, dict):
+                text = str(chunk_data.get("text", "") or "")
+                page_start = chunk_data.get("page_start")
+                page_end = chunk_data.get("page_end")
+                metadata = {
+                    "source_chunk_index": index,
+                    "page_end": self._display_page_number(page_end),
+                    "has_images": bool(chunk_data.get("has_images", False)),
+                    "image_count": int(chunk_data.get("image_count") or 0),
+                    "has_tables": bool(chunk_data.get("has_tables", False)),
+                    "table_count": int(chunk_data.get("table_count") or 0),
+                }
+            else:
+                text = str(chunk_data)
+                page_start = None
+                metadata = {"source_chunk_index": index}
+
+            if not text.strip():
+                continue
+
+            blocks.append(
+                NormalizedBlock(
+                    block_id=f"parsed-chunk-{index}",
+                    kind="text",
+                    text=text,
+                    page=self._display_page_number(page_start),
+                    section_path=[],
+                    metadata=metadata,
+                )
+            )
+
+        if not blocks:
+            return []
+
+        builder = getattr(self, "document_chunk_builder", None)
+        if builder is None:
+            builder = DocumentChunkBuilder(
+                target_tokens=self.settings.rag_chunk_target_tokens,
+                overlap_tokens=self.settings.rag_chunk_overlap_tokens,
+                max_tokens=self.settings.rag_chunk_max_tokens,
+            )
+            self.document_chunk_builder = builder
+
+        return builder.build(blocks)
+
+    async def _prepare_images_for_indexing(
+        self,
+        images_data: list[dict[str, Any]],
+        document_id: str,
+    ) -> list[dict[str, Any]]:
+        prepared_images: list[dict[str, Any]] = []
+        seen_source_paths: set[str] = set()
+
+        storage_path = Path(self.settings.document_images_storage_path)
+        if not storage_path.is_absolute():
+            storage_path = (Path.cwd() / storage_path).resolve()
+
+        doc_storage_path = storage_path / document_id
+        doc_storage_path.mkdir(parents=True, exist_ok=True)
+
+        for img_data in images_data:
+            source_path = Path(img_data["path"])
+            source_key = str(source_path.resolve()) if source_path.exists() else str(source_path)
+            if source_key in seen_source_paths:
+                continue
+            seen_source_paths.add(source_key)
+
+            if not source_path.exists():
+                logger.warning("Skipping missing extracted image %s", source_path)
+                continue
+
+            dest_path = doc_storage_path / source_path.name
+            shutil.copy2(source_path, dest_path)
+
+            caption = self._caption_from_image_metadata(img_data)
+            if self.gemini_client:
+                try:
+                    with Image.open(dest_path) as img:
+                        rgb_img = img.convert("RGB")
+                        buffer = io.BytesIO()
+                        rgb_img.save(buffer, format="JPEG")
+                    image_bytes = buffer.getvalue()
+
+                    generated_caption = await self._generate_image_caption_with_retry(
+                        image_bytes=image_bytes,
+                        image_name=dest_path.name,
+                    )
+                    if generated_caption:
+                        caption = generated_caption
+                except Exception as e:
+                    logger.error(
+                        f"Failed to generate caption for {dest_path.name}: {str(e)}",
+                        exc_info=True,
+                    )
+
+            try:
+                relative_image_path = dest_path.relative_to(Path.cwd())
+            except ValueError:
+                relative_image_path = dest_path
+
+            prepared_images.append(
+                {
+                    **img_data,
+                    "stored_path": str(relative_image_path),
+                    "caption": caption,
+                    "page_number": img_data.get("page_number"),
+                    "mime_type": img_data["mime_type"],
+                }
+            )
+
+        return prepared_images
+
+    def _attach_prepared_images_to_chunks(
+        self,
+        chunks_with_metadata: list[dict[str, Any]],
+        prepared_images: list[dict[str, Any]],
+    ) -> None:
+        if not prepared_images:
+            return
+
+        for chunk_index, chunk_data in enumerate(chunks_with_metadata):
+            if not isinstance(chunk_data, dict):
+                continue
+
+            matching_images = [
+                image
+                for image in prepared_images
+                if self._image_matches_chunk(image, chunk_data, chunk_index)
+            ]
+            if not matching_images:
+                continue
+
+            existing_images = list(chunk_data.get("images") or [])
+            image_context_lines = []
+            for image in matching_images:
+                if image not in existing_images:
+                    existing_images.append(image)
+                caption = str(image.get("caption") or "").strip()
+                if caption:
+                    image_context_lines.append(f"[Image: {caption}]")
+                else:
+                    image_name = Path(str(image.get("stored_path") or image.get("path"))).name
+                    image_context_lines.append(f"[Image: {image_name}]")
+
+            text = str(chunk_data.get("text", "") or "").rstrip()
+            for line in image_context_lines:
+                if line not in text:
+                    text = f"{text}\n{line}" if text else line
+
+            chunk_data["text"] = text
+            chunk_data["images"] = existing_images
+            chunk_data["has_images"] = True
+            chunk_data["image_count"] = len(existing_images)
+
+    async def _store_prepared_images(
+        self,
+        prepared_images: list[dict[str, Any]],
+        document_id: str,
+        persisted_chunks: list[Any],
+    ) -> int:
+        stored_count = 0
+        for img_data in prepared_images:
+            chunk_id = self._chunk_id_for_image(img_data, persisted_chunks)
+            page_number = img_data.get("page_number")
+            image_record_data = DocumentImageCreate(
+                document_id=uuid.UUID(document_id),
+                chunk_id=chunk_id,
+                image_path=img_data["stored_path"],
+                image_caption=img_data.get("caption"),
+                page_number=page_number + 1 if page_number is not None else None,
+                mime_type=img_data["mime_type"],
+            )
+            self.document_image_repository.create(image_record_data)
+            stored_count += 1
+        return stored_count
+
+    @staticmethod
+    def _caption_from_image_metadata(img_data: dict[str, Any]) -> str | None:
+        raw_caption = img_data.get("caption") or img_data.get("image_caption")
+        if isinstance(raw_caption, list):
+            return " ".join(str(item) for item in raw_caption if item).strip() or None
+        if raw_caption:
+            return str(raw_caption).strip() or None
+        return None
+
+    @staticmethod
+    def _image_matches_chunk(
+        image: dict[str, Any],
+        chunk_data: dict[str, Any],
+        chunk_index: int,
+    ) -> bool:
+        page_number = image.get("page_number")
+        if page_number is None:
+            return chunk_index == 0
+
+        page_start = chunk_data.get("page_start")
+        page_end = chunk_data.get("page_end")
+        if page_start is None and page_end is None:
+            return chunk_index == 0
+
+        start = page_start if page_start is not None else page_end
+        end = page_end if page_end is not None else page_start
+        return start <= page_number <= end
+
+    @staticmethod
+    def _chunk_id_for_image(image: dict[str, Any], persisted_chunks: list[Any]) -> UUID | None:
+        if not persisted_chunks:
+            return None
+
+        page_number = image.get("page_number")
+        if page_number is None:
+            return persisted_chunks[0].id
+
+        page_candidates = {page_number, page_number + 1}
+        for chunk in persisted_chunks:
+            page_start = getattr(chunk, "page_start", None)
+            page_end = getattr(chunk, "page_end", None)
+            if page_start is None and page_end is None:
+                continue
+            start = page_start if page_start is not None else page_end
+            end = page_end if page_end is not None else page_start
+            if any(start <= candidate <= end for candidate in page_candidates):
+                return chunk.id
+
+        return persisted_chunks[0].id
+
+    @staticmethod
+    def _display_page_number(value: Any) -> int | None:
+        if value is None:
+            return None
+        return int(value) + 1
+
+    @staticmethod
+    def _document_ref(
+        document_id: str,
+        conversation_id: str | None,
+        user_id: str | None,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=uuid.UUID(document_id),
+            conversation_id=(uuid.UUID(conversation_id) if conversation_id else None),
+            user_id=(uuid.UUID(user_id) if user_id else None),
+        )
+
     async def _store_chunks(
         self,
         chunks_with_metadata: list[dict[str, Any]],
         filename: str,
         document_id: str,
         conversation_id: str | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         points = []
         chunk_id_mapping = {}
@@ -1083,6 +1401,7 @@ class DocumentProcessingService:
                 "source": filename,
                 "document_id": document_id,
                 "conversation_id": conversation_id,
+                "user_id": user_id,
                 "chunk_index": i,
                 "timestamp": datetime.now().isoformat(),
                 "file_type": (filename.split(".")[-1] if "." in filename else "unknown"),

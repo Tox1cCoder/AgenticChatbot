@@ -26,3 +26,8 @@ class Document(Base):
     # Relationships
     conversation = relationship("Conversation", back_populates="documents")
     images = relationship("DocumentImage", back_populates="document", cascade="all, delete-orphan")
+    chunks = relationship(
+        "DocumentChunk",
+        back_populates="document",
+        cascade="all, delete-orphan",
+    )

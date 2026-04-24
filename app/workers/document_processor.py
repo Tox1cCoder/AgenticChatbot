@@ -14,6 +14,7 @@ from app.core.container import get_container
 from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.database.session import SessionLocal
 from app.models.document import Document
+from app.models.conversation import Conversation
 from app.repositories.document import DocumentRepository
 from app.schemas.document import DocumentStatus, DocumentUpdate
 from app.workers.celery_app import celery_app
@@ -77,6 +78,18 @@ def process_document_task(
         container = get_container()
         processing_service = container.document_processing_service()
 
+        # Resolve the conversation owner so the chunk payload can be scoped
+        # by user_id for multi-user retrieval isolation.
+        owner_id: str | None = None
+        with SessionLocal() as session:
+            conversation = (
+                session.query(Conversation)
+                .filter(Conversation.id == document.conversation_id)
+                .one_or_none()
+            )
+            if conversation and conversation.owner_id is not None:
+                owner_id = str(conversation.owner_id)
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
@@ -86,6 +99,7 @@ def process_document_task(
                 filename=filename,
                 document_id=str(document_id),
                 conversation_id=str(document.conversation_id),
+                user_id=owner_id,
             )
         )
 

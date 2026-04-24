@@ -57,6 +57,7 @@ class DocumentParseArtifact(Base):
 
     # Relationships
     document = relationship("Document", backref="parse_artifacts")
+    chunks = relationship("DocumentChunk", back_populates="parse_artifact")
 
     def __repr__(self) -> str:
         return (
