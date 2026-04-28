@@ -62,9 +62,7 @@ def _create_full_schema() -> None:
         sa.Column(
             "block_provenance", JSONB(), nullable=False, server_default=sa.text("'[]'::jsonb")
         ),
-        sa.Column(
-            "chunk_metadata", JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")
-        ),
+        sa.Column("chunk_metadata", JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")),
         sa.Column(
             "index_status",
             sa.String(length=32),
@@ -89,19 +87,19 @@ def _create_full_schema() -> None:
             server_default=sa.text("now()"),
         ),
         sa.ForeignKeyConstraint(
-            ["document_id"], ["documents.id"], ondelete="CASCADE",
+            ["document_id"],
+            ["documents.id"],
+            ondelete="CASCADE",
             name="document_chunks_document_id_fkey",
         ),
         sa.ForeignKeyConstraint(
-            ["parse_artifact_id"], ["document_parse_artifacts.id"], ondelete="SET NULL",
+            ["parse_artifact_id"],
+            ["document_parse_artifacts.id"],
+            ondelete="SET NULL",
             name="document_chunks_parse_artifact_id_fkey",
         ),
-        sa.UniqueConstraint(
-            "qdrant_point_id", name="document_chunks_qdrant_point_id_key"
-        ),
-        sa.UniqueConstraint(
-            "document_id", "chunk_index", name="uq_document_chunk_document_index"
-        ),
+        sa.UniqueConstraint("qdrant_point_id", name="document_chunks_qdrant_point_id_key"),
+        sa.UniqueConstraint("document_id", "chunk_index", name="uq_document_chunk_document_index"),
     )
 
 
@@ -112,23 +110,21 @@ def _add_new_columns_to_existing_table() -> None:
         "document_chunks", sa.Column("content_sha256", sa.String(length=64), nullable=True)
     )
     op.add_column("document_chunks", sa.Column("char_count", sa.Integer(), nullable=True))
-    op.add_column("document_chunks", sa.Column("parse_artifact_id", UUID(as_uuid=True), nullable=True))
+    op.add_column(
+        "document_chunks", sa.Column("parse_artifact_id", UUID(as_uuid=True), nullable=True)
+    )
     op.add_column("document_chunks", sa.Column("page_start", sa.Integer(), nullable=True))
     op.add_column("document_chunks", sa.Column("page_end", sa.Integer(), nullable=True))
     op.add_column("document_chunks", sa.Column("section_path", JSONB(), nullable=True))
     op.add_column("document_chunks", sa.Column("block_provenance", JSONB(), nullable=True))
     op.add_column("document_chunks", sa.Column("chunk_metadata", JSONB(), nullable=True))
-    op.add_column(
-        "document_chunks", sa.Column("index_status", sa.String(length=32), nullable=True)
-    )
+    op.add_column("document_chunks", sa.Column("index_status", sa.String(length=32), nullable=True))
     op.add_column("document_chunks", sa.Column("index_error", sa.Text(), nullable=True))
     op.add_column(
         "document_chunks", sa.Column("indexed_at", sa.DateTime(timezone=True), nullable=True)
     )
     op.add_column("document_chunks", sa.Column("embedding_model", sa.String(), nullable=True))
-    op.add_column(
-        "document_chunks", sa.Column("embedding_dimension", sa.Integer(), nullable=True)
-    )
+    op.add_column("document_chunks", sa.Column("embedding_dimension", sa.Integer(), nullable=True))
     op.add_column(
         "document_chunks", sa.Column("qdrant_collection_name", sa.String(), nullable=True)
     )

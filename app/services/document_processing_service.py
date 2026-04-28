@@ -98,18 +98,14 @@ class DocumentProcessingService:
         {".txt", ".pdf", ".docx", ".pptx", ".xlsx", ".html", ".md"}
     )
     EXCEL_EXTENSIONS: frozenset[str] = frozenset({".xlsx"})
-    MINERU_EXTENSIONS: frozenset[str] = frozenset(
-        {".pdf", ".docx", ".pptx", ".html", ".md"}
-    )
+    MINERU_EXTENSIONS: frozenset[str] = frozenset({".pdf", ".docx", ".pptx", ".html", ".md"})
 
     @classmethod
     def _validate_file_extension(cls, filename: str) -> str:
         file_extension = os.path.splitext(filename)[1].lower()
         if file_extension not in cls.SUPPORTED_UPLOAD_EXTENSIONS:
             allowed = ", ".join(sorted(cls.SUPPORTED_UPLOAD_EXTENSIONS))
-            raise ValueError(
-                f"Unsupported file type '{file_extension}'. Allowed: {allowed}"
-            )
+            raise ValueError(f"Unsupported file type '{file_extension}'. Allowed: {allowed}")
         return file_extension
 
     async def stage_upload_file(self, upload_file: Any, filename: str) -> dict[str, Any]:
@@ -305,9 +301,7 @@ class DocumentProcessingService:
             chunks_with_metadata = self._process_excel_workbook(file_path, filename)
 
         elif ext in self.MINERU_EXTENSIONS:
-            chunks_with_metadata = await self._process_with_mineru(
-                file_path, document_id, filename
-            )
+            chunks_with_metadata = await self._process_with_mineru(file_path, document_id, filename)
 
         else:
             raise ValueError(f"Unsupported file type: {filename}")
@@ -766,8 +760,7 @@ class DocumentProcessingService:
 
         padded_rows = [row + [""] * (column_count - len(row)) for row in rows]
         header = [
-            value if value else f"Column {index + 1}"
-            for index, value in enumerate(padded_rows[0])
+            value if value else f"Column {index + 1}" for index, value in enumerate(padded_rows[0])
         ]
         data_rows = padded_rows[1:]
 
@@ -794,12 +787,7 @@ class DocumentProcessingService:
 
     @staticmethod
     def _escape_markdown_table_cell(value: str) -> str:
-        return (
-            value.replace("\\", "\\\\")
-            .replace("|", "\\|")
-            .replace("\r", " ")
-            .replace("\n", " ")
-        )
+        return value.replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
     def _parse_content_list_json(self, content_list_path: Path) -> list[dict[str, Any]]:
         """
@@ -1497,9 +1485,7 @@ class DocumentProcessingService:
             )
 
             embedding = list(
-                self.embedding_service.embed_documents(
-                    [chunk_text], titles=[filename]
-                )[0]
+                self.embedding_service.embed_documents([chunk_text], titles=[filename])[0]
             )
 
             safe_point_id = str(uuid.uuid4())

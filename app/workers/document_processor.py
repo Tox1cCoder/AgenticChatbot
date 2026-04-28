@@ -13,8 +13,8 @@ from app.core.config import get_settings
 from app.core.container import get_container
 from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.database.session import SessionLocal
-from app.models.document import Document
 from app.models.conversation import Conversation
+from app.models.document import Document
 from app.repositories.document import DocumentRepository
 from app.schemas.document import DocumentStatus, DocumentUpdate
 from app.workers.celery_app import celery_app

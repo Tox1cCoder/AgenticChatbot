@@ -77,7 +77,7 @@ class SentenceTransformerRAGEmbeddingService:
 class GeminiRAGEmbeddingService:
     api_key: str
     model_name: str = "gemini-embedding-2"
-    dimension: int = 768
+    dimension: int = 3072
     query_task: str = "search result"
     provider: str = field(default="gemini", init=False)
     client: Any = field(default=None, init=False, repr=False)
@@ -151,9 +151,7 @@ class GeminiRAGEmbeddingService:
     def _single_embedding(response: Any) -> list[float]:
         embeddings = list(getattr(response, "embeddings", []) or [])
         if len(embeddings) != 1:
-            raise RuntimeError(
-                f"Expected one embedding, got {len(embeddings)}"
-            )
+            raise RuntimeError(f"Expected one embedding, got {len(embeddings)}")
         values = getattr(embeddings[0], "values", None)
         if values is None:
             raise RuntimeError("Embedding response missing values")

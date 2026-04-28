@@ -10,8 +10,6 @@ from __future__ import annotations
 import inspect
 from hashlib import sha256
 
-import pytest
-
 
 def _block(
     *,
@@ -65,7 +63,7 @@ def test_chunk_content_sha256_is_deterministic():
     blocks = [_block(block_id="b1", kind="paragraph", text="Hello world.", page=1)]
     chunks = _build(blocks)
     assert len(chunks) == 1
-    expected = sha256("Hello world.".encode("utf-8")).hexdigest()
+    expected = sha256(b"Hello world.").hexdigest()
     assert chunks[0].content_sha256 == expected
 
 
@@ -136,9 +134,7 @@ def test_large_table_splits_by_row_groups_not_arbitrary_chars():
         assert non_empty_lines, f"empty chunk: {chunk.content!r}"
         # No row is truncated mid-line.
         for line in non_empty_lines:
-            assert line.strip().startswith("|"), (
-                f"Table row appears split mid-line: {line!r}"
-            )
+            assert line.strip().startswith("|"), f"Table row appears split mid-line: {line!r}"
 
 
 def test_page_spans_are_preserved_across_multi_page_chunks():
@@ -156,9 +152,13 @@ def test_page_spans_are_preserved_across_multi_page_chunks():
 
 def test_small_orphan_blocks_merge_with_neighbors():
     blocks = [
-        _block(block_id="p1", kind="paragraph", text="This is a longer paragraph that stands alone."),
+        _block(
+            block_id="p1", kind="paragraph", text="This is a longer paragraph that stands alone."
+        ),
         _block(block_id="p2", kind="paragraph", text="tiny"),
-        _block(block_id="p3", kind="paragraph", text="Another moderate sentence follows the orphan."),
+        _block(
+            block_id="p3", kind="paragraph", text="Another moderate sentence follows the orphan."
+        ),
     ]
     chunks = _build(blocks, target=400, overlap=0, max_tokens=800)
     # Orphan merges — single chunk, all content present.

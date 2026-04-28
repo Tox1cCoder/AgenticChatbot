@@ -6,8 +6,9 @@ data layer.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.orm import joinedload
@@ -36,9 +37,9 @@ class DocumentChunkRepository:
         any deterministic ``id`` / ``qdrant_point_id`` they want.
         """
         with self.session_factory() as db:
-            db.query(DocumentChunk).filter(
-                DocumentChunk.document_id == document_id
-            ).delete(synchronize_session=False)
+            db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id).delete(
+                synchronize_session=False
+            )
 
             created: list[DocumentChunk] = []
             for row in chunk_rows:
@@ -137,9 +138,9 @@ class DocumentChunkRepository:
                 # joining to the conversation owner.
                 from app.models.conversation import Conversation
 
-                query = query.join(Conversation, Document.conversation_id == Conversation.id).filter(
-                    Conversation.owner_id == user_id
-                )
+                query = query.join(
+                    Conversation, Document.conversation_id == Conversation.id
+                ).filter(Conversation.owner_id == user_id)
             return query.order_by(DocumentChunk.chunk_index.asc()).all()
 
     def get_by_ids(self, chunk_ids: Iterable[UUID]) -> list[DocumentChunk]:

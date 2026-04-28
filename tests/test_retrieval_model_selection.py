@@ -1,11 +1,11 @@
 """Phase 9 + Phase 11 guards: model & config selection for the RAG path.
 
-  * Container wires the embedding service from ``rag_embedding_*`` settings.
-  * Reranker defaults to the cross-encoder model the plan specifies.
-  * RAG agent model standardizes on ``gemini-3.1-pro-preview``.
-  * Retired settings are absent from the Settings schema.
-  * Phase 11: active embedding provider is Gemini and ``embedding_dimension``
-    is no longer a field on Settings.
+* Container wires the embedding service from ``rag_embedding_*`` settings.
+* Reranker defaults to the cross-encoder model the plan specifies.
+* RAG agent model standardizes on ``gemini-3.1-pro-preview``.
+* Retired settings are absent from the Settings schema.
+* Phase 11: active embedding provider is Gemini and ``embedding_dimension``
+  is no longer a field on Settings.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ def test_rag_embedding_settings_are_present():
     fields = Settings.model_fields
     assert fields["rag_embedding_provider"].default == "gemini"
     assert fields["rag_embedding_model"].default == "gemini-embedding-2"
-    assert fields["rag_embedding_dimension"].default == 768
+    assert fields["rag_embedding_dimension"].default == 3072
     assert fields["rag_embedding_query_task"].default == "search result"
     assert fields["rag_multimodal_image_embeddings_enabled"].default is False
     assert fields["rag_reranker_model"].default == "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -38,7 +38,7 @@ def test_qdrant_collection_default_matches_phase11_namespace():
 
     assert (
         Settings.model_fields["qdrant_collection_name"].default
-        == "documents_gemini_embedding_2_768"
+        == "documents_gemini_embedding_2_3072"
     )
 
 
@@ -101,6 +101,4 @@ def test_no_settings_embedding_dimension_reads_in_app_or_tests():
             text = path.read_text(encoding="utf-8")
             if pattern.search(text):
                 leaks.append(str(path.relative_to(repo_root)))
-    assert not leaks, (
-        f"Legacy settings.embedding_dimension still read from: {leaks}"
-    )
+    assert not leaks, f"Legacy settings.embedding_dimension still read from: {leaks}"

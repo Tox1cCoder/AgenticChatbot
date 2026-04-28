@@ -287,10 +287,10 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | Variable | Default |
 |---|---|
 | `QDRANT_URL` | `http://localhost:6333` |
-| `QDRANT_COLLECTION_NAME` | `documents_gemini_embedding_2_768` |
+| `QDRANT_COLLECTION_NAME` | `documents_gemini_embedding_2_3072` |
 | `RAG_EMBEDDING_PROVIDER` | `gemini` (alt: `sentence_transformers`) |
 | `RAG_EMBEDDING_MODEL` | `gemini-embedding-2` |
-| `RAG_EMBEDDING_DIMENSION` | `768` |
+| `RAG_EMBEDDING_DIMENSION` | `3072` |
 | `RAG_EMBEDDING_QUERY_TASK` | `search result` (or `question answering`) |
 | `RAG_MULTIMODAL_IMAGE_EMBEDDINGS_ENABLED` | `false` |
 | `RAG_TOP_K` | `15` |
@@ -478,7 +478,7 @@ When `MCP_TOOL_SEARCH_ENABLED=true`, only the lightweight [`tool_search`](app/ai
 2. **Parse** — MinerU handles rich document formats (`.pdf`, `.docx`, `.pptx`, `.html`, `.md`) through the server pipeline. Excel workbooks (`.xlsx`) are parsed server-side with `openpyxl` into markdown tables, and plain `.txt` files are loaded directly. Parser output may include markdown, structured content blocks, tables, formulas, page spans, and extracted image files.
 3. **Caption images before indexing** — extracted page images are copied to `DOCUMENT_IMAGES_STORAGE_PATH`; when a Gemini key is available, the image captioning model describes each image. Captions are appended to the matching chunk text before embedding so questions about image-only content can be retrieved semantically.
 4. **Chunk** — `DocumentChunkBuilder` creates token-aware chunks from normalized blocks using `RAG_CHUNK_TARGET_TOKENS`, `RAG_CHUNK_OVERLAP_TOKENS`, and `RAG_CHUNK_MAX_TOKENS`. Tables stay atomic when possible, large tables split on row groups, page spans are preserved, and tiny orphan text merges with neighbors.
-5. **Persist & index** — `document_chunks` rows are the canonical content store. `DocumentIndexService` replaces chunks idempotently by `document_id`, embeds chunk content through `GeminiRAGEmbeddingService` (`gemini-embedding-2`, `output_dimensionality=768`) using the document-format prompt `title: {filename} | text: {content}`, and upserts Qdrant points containing lookup metadata only (`document_id`, `chunk_id`, `conversation_id`, `user_id`, page/source metadata, `embedding_provider="gemini"`, `modality="text"`). Queries are embedded with the matching `task: {query_task} | query: ...` prefix.
+5. **Persist & index** — `document_chunks` rows are the canonical content store. `DocumentIndexService` replaces chunks idempotently by `document_id`, embeds chunk content through `GeminiRAGEmbeddingService` (`gemini-embedding-2`, `output_dimensionality=3072`) using the document-format prompt `title: {filename} | text: {content}`, and upserts Qdrant points containing lookup metadata only (`document_id`, `chunk_id`, `conversation_id`, `user_id`, page/source metadata, `embedding_provider="gemini"`, `modality="text"`). Queries are embedded with the matching `task: {query_task} | query: ...` prefix.
 6. **Retrieval** — the RAG agent uses Qdrant for vector candidate IDs, then hydrates chunk text, filenames, page metadata, and linked image captions/files from PostgreSQL. If a Qdrant point references a missing SQL chunk, it is treated as an index consistency error and skipped rather than serving raw Qdrant payload content.
 7. **Agentic RAG** — document-aware chat always uses the agentic `search_documents` tool path. Available actions include `SCAN_ALL`, `READ_DOCUMENT`, `SEARCH_CHUNKS`, `GREP_DOCUMENT`, `LIST_DOCUMENTS`, and `VIEW_IMAGES`.
 
@@ -497,7 +497,7 @@ Vectors from the two providers live in different spaces — they are not
 portable. Treat the cutover as a cold migration:
 
 1. Set `GEMINI_API_KEY` (required when `RAG_EMBEDDING_PROVIDER=gemini`).
-2. Deploy with the new defaults — `QDRANT_COLLECTION_NAME=documents_gemini_embedding_2_768`
+2. Deploy with the new defaults — `QDRANT_COLLECTION_NAME=documents_gemini_embedding_2_3072`
    and `RAG_EMBEDDING_MODEL=gemini-embedding-2`. The startup hook in
    `app/main.py` calls `DocumentIndexService.ensure_collection()` to create
    the collection at the configured `RAG_EMBEDDING_DIMENSION`.
@@ -513,11 +513,11 @@ portable. Treat the cutover as a cold migration:
    of `index_status='indexed'` rows in `document_chunks`. Optionally drop
    the legacy `documents_gemma` collection after a soak window.
 
-The current `RAG_EMBEDDING_DIMENSION` is `768`. A future upgrade to `1536`
-or `3072` should be planned as a separate cold migration with a new
+The current `RAG_EMBEDDING_DIMENSION` is `3072`. Any future dimension change
+should be planned as a separate cold migration with a new
 `QDRANT_COLLECTION_NAME` namespace. Mixing Gemma (`google/embeddinggemma-300m`)
-and Gemini vectors in the same collection is unsupported and rejected by
-`ensure_collection`.
+and Gemini vectors, or Gemini vectors of different dimensions, in the same
+collection is unsupported and rejected by `ensure_collection`.
 
 Raw multimodal image embeddings are disabled by default
 (`RAG_MULTIMODAL_IMAGE_EMBEDDINGS_ENABLED=false`); caption-augmented chunks

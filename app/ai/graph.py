@@ -2965,9 +2965,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         thread_id = self._resolve_thread_id(request.thread_id, conversation_id)
         config = self._build_graph_config(thread_id)
         user_id = request.user_id
-        message = request.message
-        persona = request.persona
-        attachments = request.attachments
 
         # Prefetch conversation history in parallel with the router LLM call.
         # By the time the agent node needs history, the cache will be warm.

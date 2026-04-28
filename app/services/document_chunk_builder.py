@@ -76,10 +76,7 @@ def _finalize_chunk(
         if b.section_path:
             section_path = list(b.section_path)
 
-    provenance = [
-        {"block_id": b.block_id, "kind": b.kind, "page": b.page}
-        for b in buffered_blocks
-    ]
+    provenance = [{"block_id": b.block_id, "kind": b.kind, "page": b.page} for b in buffered_blocks]
 
     metadata: dict[str, Any] = {}
     if any(_is_table(b) for b in buffered_blocks):
@@ -107,7 +104,7 @@ def _split_large_table(block: NormalizedBlock, *, target_tokens: int) -> list[st
 
     # The first two lines are header + separator for a markdown-style table.
     header_lines = lines[:2] if len(lines) >= 2 and "---" in lines[1] else lines[:1]
-    row_lines = lines[len(header_lines):]
+    row_lines = lines[len(header_lines) :]
 
     header_tokens = estimate_tokens("\n".join(header_lines))
     out: list[str] = []
@@ -186,9 +183,7 @@ class DocumentChunkBuilder:
             if not buffered:
                 return
             # Merge tiny orphan trailing blocks into the previous chunk if possible.
-            chunks.append(
-                _finalize_chunk(chunk_index=chunk_index, buffered_blocks=list(buffered))
-            )
+            chunks.append(_finalize_chunk(chunk_index=chunk_index, buffered_blocks=list(buffered)))
             chunk_index += 1
             buffered = []
             buffered_tokens = 0
@@ -202,9 +197,7 @@ class DocumentChunkBuilder:
                 emit_buffered()
 
                 if block_tokens <= self.max_tokens:
-                    chunks.append(
-                        _finalize_chunk(chunk_index=chunk_index, buffered_blocks=[block])
-                    )
+                    chunks.append(_finalize_chunk(chunk_index=chunk_index, buffered_blocks=[block]))
                     chunk_index += 1
                     continue
 
@@ -219,9 +212,7 @@ class DocumentChunkBuilder:
                         metadata={**block.metadata, "is_table_split_piece": True},
                     )
                     chunks.append(
-                        _finalize_chunk(
-                            chunk_index=chunk_index, buffered_blocks=[synthetic]
-                        )
+                        _finalize_chunk(chunk_index=chunk_index, buffered_blocks=[synthetic])
                     )
                     chunk_index += 1
                 continue
@@ -243,9 +234,7 @@ class DocumentChunkBuilder:
                         metadata=block.metadata,
                     )
                     chunks.append(
-                        _finalize_chunk(
-                            chunk_index=chunk_index, buffered_blocks=[synthetic]
-                        )
+                        _finalize_chunk(chunk_index=chunk_index, buffered_blocks=[synthetic])
                     )
                     chunk_index += 1
                 continue

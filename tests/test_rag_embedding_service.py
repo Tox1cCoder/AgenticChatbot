@@ -28,7 +28,7 @@ def _make_response(*vectors: list[float]):
     return SimpleNamespace(embeddings=embeddings)
 
 
-def _build_service(monkeypatch, *, dimension: int = 768, query_task: str = "search result"):
+def _build_service(monkeypatch, *, dimension: int = 3072, query_task: str = "search result"):
     from app.services import rag_embedding_service as mod
 
     fake_client = MagicMock()
@@ -47,18 +47,18 @@ def _build_service(monkeypatch, *, dimension: int = 768, query_task: str = "sear
 def test_embed_documents_uses_doc_format_and_output_dimensionality(monkeypatch):
     service, client = _build_service(monkeypatch)
     client.models.embed_content.side_effect = [
-        _make_response([0.1] * 768),
+        _make_response([0.1] * 3072),
     ]
 
     vectors = service.embed_documents(["body"], titles=["file.pdf"])
 
-    assert vectors == [[0.1] * 768]
+    assert vectors == [[0.1] * 3072]
     call = client.models.embed_content.call_args
     kwargs = call.kwargs
     assert kwargs["model"] == "gemini-embedding-2"
     assert kwargs["contents"] == "title: file.pdf | text: body"
     config = kwargs["config"]
-    assert getattr(config, "output_dimensionality", None) == 768
+    assert getattr(config, "output_dimensionality", None) == 3072
 
 
 def test_embed_documents_returns_list_of_list_of_floats(monkeypatch):
@@ -83,12 +83,12 @@ def test_embed_documents_titles_must_match_texts_length(monkeypatch):
 
 def test_embed_query_prefixes_with_task_and_returns_single_vector(monkeypatch):
     service, client = _build_service(monkeypatch)
-    client.models.embed_content.side_effect = [_make_response([0.7] * 768)]
+    client.models.embed_content.side_effect = [_make_response([0.7] * 3072)]
 
     vector = service.embed_query("what changed?")
 
     assert isinstance(vector, list)
-    assert len(vector) == 768
+    assert len(vector) == 3072
     assert all(isinstance(v, float) for v in vector)
     call = client.models.embed_content.call_args
     assert call.kwargs["contents"] == "task: search result | query: what changed?"
@@ -96,7 +96,7 @@ def test_embed_query_prefixes_with_task_and_returns_single_vector(monkeypatch):
 
 def test_embed_query_uses_configured_query_task(monkeypatch):
     service, client = _build_service(monkeypatch, query_task="question answering")
-    client.models.embed_content.side_effect = [_make_response([0.0] * 768)]
+    client.models.embed_content.side_effect = [_make_response([0.0] * 3072)]
 
     service.embed_query("explain")
 
@@ -117,22 +117,22 @@ def test_embed_image_accepts_bytes_and_mime_type(monkeypatch):
     """The image path is gated by a config flag at the caller — the service
     method must still accept (bytes, mime_type) when invoked."""
     service, client = _build_service(monkeypatch)
-    client.models.embed_content.side_effect = [_make_response([0.0] * 768)]
+    client.models.embed_content.side_effect = [_make_response([0.0] * 3072)]
 
     vector = service.embed_image(b"\x89PNG...", mime_type="image/png")
 
     assert isinstance(vector, list)
-    assert len(vector) == 768
+    assert len(vector) == 3072
     call = client.models.embed_content.call_args
     # contents should be a Part (or anything truthy) — we don't assert on the
     # exact Part shape because google-genai's Part API surface evolves.
     assert call.kwargs["contents"] is not None
     config = call.kwargs["config"]
-    assert getattr(config, "output_dimensionality", None) == 768
+    assert getattr(config, "output_dimensionality", None) == 3072
 
 
 def test_service_exposes_provider_model_dimension(monkeypatch):
     service, _ = _build_service(monkeypatch)
     assert service.provider == "gemini"
     assert service.model_name == "gemini-embedding-2"
-    assert service.dimension == 768
+    assert service.dimension == 3072

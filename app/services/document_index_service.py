@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 from uuid import UUID
 
 from qdrant_client.models import (
@@ -91,8 +92,7 @@ class DocumentIndexService:
             )
         except Exception as exc:
             logger.warning(
-                "Could not connect to Qdrant for ensure_collection: %s. "
-                "Collection check skipped.",
+                "Could not connect to Qdrant for ensure_collection: %s. Collection check skipped.",
                 exc,
             )
             return
@@ -128,9 +128,7 @@ class DocumentIndexService:
         """Replace chunks for ``document`` with ``built_chunks`` and index them."""
         document_id = self._coerce_uuid(document.id)
 
-        chunk_rows = [
-            self._built_chunk_to_row(bc, parse_artifact_id) for bc in built_chunks
-        ]
+        chunk_rows = [self._built_chunk_to_row(bc, parse_artifact_id) for bc in built_chunks]
         persisted = self.chunk_repository.replace_document_chunks(document_id, chunk_rows)
 
         # Delete any existing Qdrant points for this document (idempotent reindex).
@@ -146,7 +144,9 @@ class DocumentIndexService:
                 try:
                     self.chunk_repository.mark_index_failed(chunk.id, str(exc))
                 except Exception:
-                    logger.exception("Failed to mark chunk %s as failed", getattr(chunk, "id", None))
+                    logger.exception(
+                        "Failed to mark chunk %s as failed", getattr(chunk, "id", None)
+                    )
             raise
 
         for chunk in persisted:
@@ -304,9 +304,7 @@ class DocumentIndexService:
                 ),
             )
         except Exception:
-            logger.exception(
-                "Qdrant delete-by-filter failed for document_id=%s", document_id
-            )
+            logger.exception("Qdrant delete-by-filter failed for document_id=%s", document_id)
             raise
 
     @staticmethod

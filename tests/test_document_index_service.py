@@ -127,7 +127,7 @@ def _build_service(
     chunk_repo=None,
     qdrant_client=None,
     embedding_service=None,
-    collection_name: str = "documents_gemini_embedding_2_768",
+    collection_name: str = "documents_gemini_embedding_2_3072",
     embedding_model_name: str = "gemini-embedding-2",
     embedding_dimension: int = 8,
     embedding_provider: str = "gemini",
@@ -171,7 +171,9 @@ def test_index_document_replaces_sql_chunks_first():
     # Replace runs before qdrant upsert.
     assert repo.replace_document_chunks.called
     replace_call = repo.replace_document_chunks.call_args
-    assert replace_call.kwargs.get("document_id") == document.id or replace_call.args[0] == document.id
+    assert (
+        replace_call.kwargs.get("document_id") == document.id or replace_call.args[0] == document.id
+    )
 
 
 def test_index_document_writes_authorization_metadata_to_qdrant_payload():
@@ -243,7 +245,9 @@ def test_index_document_passes_titles_to_embedding_service():
 
     assert embedding.doc_calls, "embed_documents must be called for indexing"
     texts, titles = embedding.doc_calls[0]
-    assert titles == ["quarterly.pdf"], f"document title must be threaded into titles list: {titles}"
+    assert titles == ["quarterly.pdf"], (
+        f"document title must be threaded into titles list: {titles}"
+    )
 
 
 def test_index_document_does_not_lazy_load_document_from_detached_chunks():
@@ -313,7 +317,7 @@ def test_index_document_marks_chunks_indexed_after_qdrant_upsert():
         assert "point_id" in kwargs
         assert kwargs["embedding_model"] == "gemini-embedding-2"
         assert kwargs["embedding_dimension"] == 8
-        assert kwargs["collection_name"] == "documents_gemini_embedding_2_768"
+        assert kwargs["collection_name"] == "documents_gemini_embedding_2_3072"
 
 
 def test_index_document_marks_failed_and_raises_on_qdrant_error():
@@ -370,9 +374,11 @@ def test_ensure_collection_creates_if_absent():
     service = _build_service(chunk_repo=repo, qdrant_client=qdrant)
     service.ensure_collection()
 
-    assert qdrant.create_collection.called, "Missing collection must be created by ensure_collection"
+    assert qdrant.create_collection.called, (
+        "Missing collection must be created by ensure_collection"
+    )
     create_kwargs = qdrant.create_collection.call_args.kwargs
-    assert create_kwargs["collection_name"] == "documents_gemini_embedding_2_768"
+    assert create_kwargs["collection_name"] == "documents_gemini_embedding_2_3072"
     vectors = create_kwargs["vectors_config"]
     assert getattr(vectors, "size", None) == 8
 
@@ -383,7 +389,7 @@ def test_ensure_collection_validates_dimension_match():
     repo = MagicMock()
     qdrant = MagicMock()
     qdrant.get_collections.return_value = SimpleNamespace(
-        collections=[SimpleNamespace(name="documents_gemini_embedding_2_768")]
+        collections=[SimpleNamespace(name="documents_gemini_embedding_2_3072")]
     )
     info = SimpleNamespace(
         config=SimpleNamespace(params=SimpleNamespace(vectors=SimpleNamespace(size=512)))

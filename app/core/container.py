@@ -44,16 +44,16 @@ from app.services.document_chunk_builder import DocumentChunkBuilder
 from app.services.document_index_service import DocumentIndexService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
-from app.services.rag_embedding_service import (
-    GeminiRAGEmbeddingService,
-    SentenceTransformerRAGEmbeddingService,
-)
 from app.services.feedback_service import FeedbackService
 from app.services.jwt_service import JwtService
 from app.services.mcp_service import MCPService
 from app.services.message_service import MessageService
 from app.services.model_config_service import ModelConfigService
 from app.services.provider_service import ProviderService
+from app.services.rag_embedding_service import (
+    GeminiRAGEmbeddingService,
+    SentenceTransformerRAGEmbeddingService,
+)
 from app.services.task_plan_service import TaskPlanService
 from app.services.user_service import UserService
 from app.utils.validation.conversation_validation import ConversationValidationUtils
@@ -134,9 +134,7 @@ class Container(containers.DeclarativeContainer):
                 model_name=settings.rag_embedding_model,
                 dimension=settings.rag_embedding_dimension,
             )
-        raise ValueError(
-            f"Unknown rag_embedding_provider: {settings.rag_embedding_provider}"
-        )
+        raise ValueError(f"Unknown rag_embedding_provider: {settings.rag_embedding_provider}")
 
     rag_embedding_service = providers.Singleton(_build_rag_embedding_service)
 

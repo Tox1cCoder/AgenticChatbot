@@ -21,7 +21,9 @@ from app.schemas.document_image import DocumentImageCreate
 from app.services.document_processing_service import DocumentProcessingService
 
 
-def _build_service(tmp_path: Path, captured_payloads: list[dict] | None = None) -> DocumentProcessingService:
+def _build_service(
+    tmp_path: Path, captured_payloads: list[dict] | None = None
+) -> DocumentProcessingService:
     service = object.__new__(DocumentProcessingService)
     service.settings = MagicMock()
     service.settings.temp_storage_path = str(tmp_path)
@@ -176,9 +178,7 @@ def test_process_document_indexes_generated_image_caption_and_links_sql_chunk(tm
     )
 
     service.document_index_service.index_document.assert_called_once()
-    indexed_chunks = service.document_index_service.index_document.call_args.kwargs[
-        "built_chunks"
-    ]
+    indexed_chunks = service.document_index_service.index_document.call_args.kwargs["built_chunks"]
     assert indexed_chunks
     assert "red bar chart" in indexed_chunks[0].content
 
@@ -217,9 +217,7 @@ def test_process_document_passes_filename_to_index_document_reference(tmp_path):
         )
     )
 
-    document_ref = service.document_index_service.index_document.call_args.kwargs[
-        "document"
-    ]
+    document_ref = service.document_index_service.index_document.call_args.kwargs["document"]
     assert document_ref.filename == "Blue-whale-A4-fact-sheet.pdf"
 
 
@@ -257,9 +255,7 @@ def test_process_document_parses_xlsx_without_mineru(tmp_path):
         )
     )
 
-    built_chunks = service.document_index_service.index_document.call_args.kwargs[
-        "built_chunks"
-    ]
+    built_chunks = service.document_index_service.index_document.call_args.kwargs["built_chunks"]
     content = "\n".join(chunk.content for chunk in built_chunks)
     assert "Sheet: Sheet1" in content
     assert "Thu nhap" in content

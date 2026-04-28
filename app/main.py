@@ -126,8 +126,7 @@ def _ensure_qdrant_collection():
         )
     except Exception as exc:
         logger.warning(
-            "ensure_collection failed at startup: %s. "
-            "Indexing will retry on first write.",
+            "ensure_collection failed at startup: %s. Indexing will retry on first write.",
             exc,
         )
 

@@ -202,7 +202,7 @@ class Settings(BaseSettings):
         "HuggingFace model id.",
     )
     rag_embedding_dimension: int = Field(
-        default=768,
+        default=3072,
         description="Output dimensionality requested from the embedding "
         "provider. Must match the Qdrant collection vector size.",
     )
@@ -287,7 +287,7 @@ class Settings(BaseSettings):
         description="Qdrant vector database URL",
     )
     qdrant_collection_name: str = Field(
-        default="documents_gemini_embedding_2_768",
+        default="documents_gemini_embedding_2_3072",
         description="Qdrant collection name for document storage. The default "
         "is namespaced by embedding provider/model/dimension so swapping "
         "providers requires a deliberate collection cutover.",

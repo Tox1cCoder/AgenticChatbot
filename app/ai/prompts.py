@@ -1,5 +1,5 @@
 from app.core.config import settings
-from app.utils.text_processing import estimate_tokens, truncate_text
+from app.utils.text_processing import estimate_tokens
 
 CHAT_SYSTEM_PROMPT = """You are an expert AI assistant and knowledgeable conversationalist. Provide accurate, thorough, and genuinely useful responses.
 

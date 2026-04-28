@@ -103,7 +103,10 @@ def test_document_relationships_back_populate_chunks():
     assert hasattr(Document, "chunks"), "Document must expose .chunks"
     doc_rel = Document.__mapper__.relationships.get("chunks")
     assert doc_rel is not None
-    assert doc_rel.argument == "DocumentChunk" or getattr(doc_rel.mapper.class_, "__name__", "") == "DocumentChunk"
+    assert (
+        doc_rel.argument == "DocumentChunk"
+        or getattr(doc_rel.mapper.class_, "__name__", "") == "DocumentChunk"
+    )
     assert doc_rel.back_populates == "document"
 
     chunk_rel = DocumentChunk.__mapper__.relationships.get("document")
@@ -125,8 +128,8 @@ def test_parse_artifact_relationships_back_populate_chunks():
 
 
 def test_document_image_chunk_relationship_wires_to_document_chunk():
-    from app.models.document_image import DocumentImage
     from app.models import DocumentChunk
+    from app.models.document_image import DocumentImage
 
     # DocumentImage.chunk_id must be a real FK to document_chunks.id.
     chunk_id_col = DocumentImage.__table__.c["chunk_id"]

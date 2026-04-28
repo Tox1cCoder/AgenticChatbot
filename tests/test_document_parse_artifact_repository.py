@@ -13,8 +13,6 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock
 from uuid import uuid4
 
-import pytest
-
 from app.models.document_parse_artifact import DocumentParseArtifact
 from app.repositories.document_parse_artifact import DocumentParseArtifactRepository
 

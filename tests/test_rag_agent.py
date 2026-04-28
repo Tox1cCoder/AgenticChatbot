@@ -92,9 +92,7 @@ def test_read_document_helper_accepts_server_context_filters():
     """get_document_full_content must accept user_id/conversation_id filters."""
     sig = inspect.signature(RAGAgent.get_document_full_content)
     params = sig.parameters
-    assert "user_id" in params, (
-        "get_document_full_content must accept server-context user_id"
-    )
+    assert "user_id" in params, "get_document_full_content must accept server-context user_id"
     assert "conversation_id" in params, (
         "get_document_full_content must accept server-context conversation_id"
     )
@@ -153,9 +151,7 @@ def test_get_document_full_content_hydrates_when_filters_match():
     with patch("app.ai.agents.rag_agent.DocumentChunkRepository") as repo_cls:
         repo_cls.return_value = chunk_repo
         result = asyncio.run(
-            agent.get_document_full_content(
-                str(uuid4()), user_id="u", conversation_id="c"
-            )
+            agent.get_document_full_content(str(uuid4()), user_id="u", conversation_id="c")
         )
 
     assert result == "alpha\n\nbeta"
@@ -177,11 +173,7 @@ def test_list_conversation_documents_filters_by_user_when_provided():
     fake_db.query.return_value = fake_query
 
     with patch("app.ai.agents.rag_agent.SessionLocal", return_value=fake_db):
-        asyncio.run(
-            agent.list_conversation_documents(
-                str(uuid4()), user_id=str(uuid4())
-            )
-        )
+        asyncio.run(agent.list_conversation_documents(str(uuid4()), user_id=str(uuid4())))
 
     # The filter must be applied at the SQL layer — that means at least one
     # ``filter(...)`` call applies a user-id condition. We don't introspect the

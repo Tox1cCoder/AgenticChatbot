@@ -64,6 +64,4 @@ def test_process_document_routes_supported_rich_formats_to_server_parsers():
     assert "_process_excel_workbook" in src
     for ext in (".pdf", ".docx", ".pptx", ".html", ".md"):
         assert ext in DocumentProcessingService.MINERU_EXTENSIONS
-        assert ext in src, (
-            f"Expected process_document to dispatch {ext} through MinerU routing"
-        )
+        assert ext in src, f"Expected process_document to dispatch {ext} through MinerU routing"

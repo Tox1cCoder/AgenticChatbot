@@ -29,8 +29,8 @@ def _build_minimal_rag_agent(qdrant_stub, embedding_stub) -> RAGAgent:
     agent.settings.enable_citation_verification = False
     agent.qdrant_client = qdrant_stub
     agent.embedding_service = embedding_stub
-    agent.collection_name = "documents_gemini_embedding_2_768"
-    agent.embedding_dimension = 768
+    agent.collection_name = "documents_gemini_embedding_2_3072"
+    agent.embedding_dimension = 3072
     agent.top_k = 5
     agent.score_threshold = 0.0
     agent.enable_reranking = False
@@ -226,9 +226,7 @@ def test_rag_search_does_not_return_raw_qdrant_content_when_sql_chunk_is_missing
 
     with patch("app.ai.agents.rag_agent.DocumentChunkRepository") as chunk_repo_cls:
         chunk_repo_cls.return_value = chunk_repo
-        results = asyncio.run(
-            agent._search(query="q", conversation_id="conv-1", user_id="user-1")
-        )
+        results = asyncio.run(agent._search(query="q", conversation_id="conv-1", user_id="user-1"))
 
     assert results == []
 
@@ -281,7 +279,9 @@ def test_rag_search_hydrates_sql_chunk_content_and_images_from_lookup_payload():
         chunk_repo_cls.return_value = chunk_repo
         image_repo_cls.return_value = image_repo
         results = asyncio.run(
-            agent._search(query="what does the chart show", conversation_id="conv-1", user_id="user-1")
+            agent._search(
+                query="what does the chart show", conversation_id="conv-1", user_id="user-1"
+            )
         )
 
     assert len(results) == 1

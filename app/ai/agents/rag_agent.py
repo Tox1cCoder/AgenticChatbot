@@ -14,7 +14,6 @@ from google.genai import types
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
-from sqlalchemy import func
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     FieldCondition,
@@ -23,6 +22,7 @@ from qdrant_client.models import (
     MatchValue,
 )
 from sentence_transformers import CrossEncoder
+from sqlalchemy import func
 
 from ...core.config import Settings, settings
 from ...core.runtime_modeling import ResolvedRuntimeModelConfig
@@ -55,7 +55,7 @@ class RAGAgent(BaseAgent):
         settings: Settings,
         qdrant_client: QdrantClient,
         embedding_service: Any,
-        collection_name: str = "documents_gemini_embedding_2_768",
+        collection_name: str = "documents_gemini_embedding_2_3072",
         runtime_model_resolver: IRuntimeModelResolver | None = None,
     ):
         # Initialise BaseAgent (sets model_name, gemini_client, langchain_model,
@@ -559,9 +559,7 @@ class RAGAgent(BaseAgent):
                 FieldCondition(key="conversation_id", match=MatchValue(value=conversation_id))
             )
         if user_id:
-            must_conditions.append(
-                FieldCondition(key="user_id", match=MatchValue(value=user_id))
-            )
+            must_conditions.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
 
         search_filter = Filter(must=must_conditions) if must_conditions else None
 
@@ -620,7 +618,9 @@ class RAGAgent(BaseAgent):
                 source = getattr(document, "filename", None) or payload.get("source", "unknown")
                 page_start = getattr(chunk, "page_start", None)
                 page_end = getattr(chunk, "page_end", None)
-                page_number = page_start if page_start is not None and page_start == page_end else None
+                page_number = (
+                    page_start if page_start is not None and page_start == page_end else None
+                )
                 image_ids = [str(image.id) for image in chunk_images]
                 image_paths = [image.image_path for image in chunk_images]
                 image_captions = [image.image_caption or "" for image in chunk_images]
@@ -939,12 +939,8 @@ class RAGAgent(BaseAgent):
                 "collection_exists": collection_exists,
                 "collection_name": self.collection_name,
                 "vectors_count": (collection_info.vectors_count if collection_info else 0),
-                "embedding_model": getattr(
-                    self.embedding_service, "model_name", "unknown"
-                ),
-                "embedding_provider": getattr(
-                    self.embedding_service, "provider", "unknown"
-                ),
+                "embedding_model": getattr(self.embedding_service, "model_name", "unknown"),
+                "embedding_provider": getattr(self.embedding_service, "provider", "unknown"),
                 "embedding_dimension": self.embedding_dimension,
             }
         except Exception as e:
