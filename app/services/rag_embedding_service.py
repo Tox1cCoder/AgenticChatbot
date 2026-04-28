@@ -39,45 +39,10 @@ class RAGEmbeddingService(Protocol):
 
 
 @dataclass
-class SentenceTransformerRAGEmbeddingService:
-    """Offline-development fallback that wraps a local SentenceTransformer.
-
-    Implements the same surface as :class:`GeminiRAGEmbeddingService` so the
-    rest of the system can stay provider-agnostic. Only intended for dev
-    environments without internet access — production should use Gemini.
-    """
-
-    model: Any
-    model_name: str
-    dimension: int
-    provider: str = field(default="sentence_transformers", init=False)
-
-    def embed_documents(
-        self,
-        texts: list[str],
-        *,
-        titles: list[str | None] | None = None,
-    ) -> list[list[float]]:
-        # SentenceTransformer ignores titles; we accept them for API parity.
-        if titles is not None and len(titles) != len(texts):
-            raise ValueError("titles must match texts length")
-        result = self.model.encode(list(texts))
-        if hasattr(result, "tolist"):
-            result = result.tolist()
-        return [list(map(float, vector)) for vector in result]
-
-    def embed_query(self, query: str) -> list[float]:
-        result = self.model.encode(query)
-        if hasattr(result, "tolist"):
-            result = result.tolist()
-        return [float(value) for value in result]
-
-
-@dataclass
 class GeminiRAGEmbeddingService:
     api_key: str
     model_name: str = "gemini-embedding-2"
-    dimension: int = 3072
+    dimension: int = 768
     query_task: str = "search result"
     provider: str = field(default="gemini", init=False)
     client: Any = field(default=None, init=False, repr=False)
