@@ -7713,9 +7713,10 @@ def render_documents_tab():
         uploader_key = f"doc_uploader_{conversation_id}"
         uploaded_file = st.file_uploader(
             "Select a file",
-            type=["txt", "pdf", "docx", "md"],
+            # Mirror app/api/documents.py::SUPPORTED_UPLOAD_EXTENSIONS.
+            type=["txt", "pdf", "docx", "pptx", "xlsx", "html", "md"],
             key=uploader_key,
-            help="Supported formats: TXT, PDF, DOCX, MD",
+            help="Supported formats: TXT, PDF, DOCX, PPTX, XLSX, HTML, MD",
         )
 
         if uploaded_file is not None:

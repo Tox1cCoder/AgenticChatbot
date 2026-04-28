@@ -4,7 +4,6 @@ Dependency Injection Container.
 
 from dependency_injector import containers, providers
 from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
 
 from app.ai.agents.planning_agent import PlanningAgent
 from app.ai.checkpoint import CheckpointManager
@@ -45,6 +44,10 @@ from app.services.document_chunk_builder import DocumentChunkBuilder
 from app.services.document_index_service import DocumentIndexService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
+from app.services.rag_embedding_service import (
+    GeminiRAGEmbeddingService,
+    SentenceTransformerRAGEmbeddingService,
+)
 from app.services.feedback_service import FeedbackService
 from app.services.jwt_service import JwtService
 from app.services.mcp_service import MCPService
@@ -96,22 +99,46 @@ class Container(containers.DeclarativeContainer):
         url=settings.qdrant_url,
     )
 
-    # Embedding model — name comes from settings so it stays in sync with
-    # the Qdrant collection's vector dimension. Device is selected at
-    # container-build time so dev machines without CUDA fall back to CPU.
-    def _select_embedding_device() -> str:
-        try:
-            import torch
+    # Active RAG embedding adapter. Selected at container-build time based on
+    # ``rag_embedding_provider``. The Gemini path requires GEMINI_API_KEY and
+    # uses ``gemini-embedding-2`` at the configured ``rag_embedding_dimension``.
+    # The sentence_transformers fallback is for offline development only.
+    def _build_rag_embedding_service():
+        provider = (settings.rag_embedding_provider or "gemini").lower()
+        if provider == "gemini":
+            api_key = settings.gemini_api_key
+            if not api_key:
+                raise RuntimeError(
+                    "GEMINI_API_KEY is required when rag_embedding_provider='gemini'"
+                )
+            if api_key.startswith("GEMINI_API_KEY="):
+                api_key = api_key.split("=", 1)[-1].strip()
+            return GeminiRAGEmbeddingService(
+                api_key=api_key,
+                model_name=settings.rag_embedding_model,
+                dimension=settings.rag_embedding_dimension,
+                query_task=settings.rag_embedding_query_task,
+            )
+        if provider == "sentence_transformers":
+            from sentence_transformers import SentenceTransformer
 
-            return "cuda" if torch.cuda.is_available() else "cpu"
-        except Exception:
-            return "cpu"
+            try:
+                import torch
 
-    embedding_model = providers.Singleton(
-        SentenceTransformer,
-        settings.rag_embedding_model,
-        device=_select_embedding_device(),
-    )
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            except Exception:
+                device = "cpu"
+            model = SentenceTransformer(settings.rag_embedding_model, device=device)
+            return SentenceTransformerRAGEmbeddingService(
+                model=model,
+                model_name=settings.rag_embedding_model,
+                dimension=settings.rag_embedding_dimension,
+            )
+        raise ValueError(
+            f"Unknown rag_embedding_provider: {settings.rag_embedding_provider}"
+        )
+
+    rag_embedding_service = providers.Singleton(_build_rag_embedding_service)
 
     # JWT Service
     jwt_service = providers.Factory(
@@ -267,7 +294,7 @@ class Container(containers.DeclarativeContainer):
         checkpointer = Container._get_checkpointer()
         workflow_runtime = create_workflow(
             qdrant_client=container.qdrant_client(),
-            embedding_model=container.embedding_model(),
+            embedding_service=container.rag_embedding_service(),
             checkpointer=checkpointer,
             document_repository=container.document_repository(),
             runtime_model_resolver=container.model_config_service(),
@@ -326,10 +353,11 @@ class Container(containers.DeclarativeContainer):
         DocumentIndexService,
         chunk_repository=document_chunk_repository,
         qdrant_client=qdrant_client,
-        embedding_model=embedding_model,
+        embedding_service=rag_embedding_service,
         collection_name=settings.qdrant_collection_name,
         embedding_model_name=settings.rag_embedding_model,
-        embedding_dimension=settings.embedding_dimension,
+        embedding_dimension=settings.rag_embedding_dimension,
+        embedding_provider=settings.rag_embedding_provider,
         index_batch_size=getattr(settings, "rag_index_batch_size", 16),
     )
 
@@ -345,7 +373,7 @@ class Container(containers.DeclarativeContainer):
         settings=providers.Object(settings),
         celery_app=providers.Object(celery_app),
         qdrant_client=qdrant_client,
-        embedding_model=embedding_model,
+        embedding_service=rag_embedding_service,
         document_image_repository=document_image_repository,
         document_index_service=document_index_service,
         document_chunk_builder=document_chunk_builder,

@@ -14,7 +14,6 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
 
 from ..core.config import settings
 from ..core.response_constants import NO_RESPONSE_GENERATED
@@ -78,7 +77,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     def __init__(
         self,
         qdrant_client: QdrantClient,
-        embedding_model: SentenceTransformer,
+        embedding_service: Any,
         checkpointer: BaseCheckpointSaver | None = None,
         document_repository: Optional["DocumentRepository"] = None,
         runtime_model_resolver: IRuntimeModelResolver | None = None,
@@ -89,7 +88,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         self.rag_agent = RAGAgent(
             settings=settings,
             qdrant_client=qdrant_client,
-            embedding_model=embedding_model,
+            embedding_service=embedding_service,
             collection_name=settings.qdrant_collection_name,
             runtime_model_resolver=runtime_model_resolver,
         )
@@ -2960,136 +2959,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         except Exception as e:
             yield {"type": "error", "error": str(e)}
 
-    # ------------------------------------------------------------------
-    # Fast-path helpers (traditional RAG streaming)
-    # ------------------------------------------------------------------
-
-    async def _run_fast_path_summarization(
-        self, config: dict[str, Any], thread_id: str | None
-    ) -> str | None:
-        """Load checkpoint state and run summarization for fast-path RAG.
-
-        The LangGraph pipeline (summarize node) is bypassed on the
-        traditional-RAG streaming path.  This helper replicates the
-        rolling summarization logic so fast-path and graph-path behave
-        identically.
-
-        Fail-closed: on any error or timeout the existing summary is returned
-        unchanged and no checkpoint updates are performed.
-
-        Returns the (possibly updated) history_summary, or ``None``.
-        """
-        if not self.checkpointer or not thread_id:
-            return None
-
-        try:
-            cp_snapshot = await self.graph.aget_state(config)
-            cp_values = cp_snapshot.values if cp_snapshot else {}
-            history_summary = cp_values.get("history_summary")
-
-            cp_messages = cp_values.get("messages", [])
-            if not cp_messages:
-                return history_summary
-
-            from .summarization_middleware import (
-                _get_config as _get_summ_config,
-            )
-            from .summarization_middleware import (
-                apply_summarization_to_state,
-                generate_summary,
-                get_messages_to_summarize,
-                should_summarize,
-            )
-
-            # Ignore persisted conversation_summarized flag — each
-            # fast-path request is a fresh opportunity for rolling
-            # summarization.
-            if not should_summarize(cp_messages, already_summarized=False):
-                return history_summary
-
-            s_cfg = _get_summ_config()
-            to_summarize = get_messages_to_summarize(cp_messages, s_cfg)
-            if not to_summarize:
-                return history_summary
-
-            timeout_seconds: int = settings.summarization_timeout_seconds
-            try:
-                new_summary = await asyncio.wait_for(
-                    generate_summary(to_summarize, s_cfg, existing_summary=history_summary),
-                    timeout=timeout_seconds,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Fast-path summarization timed out after %ds — keeping existing summary",
-                    timeout_seconds,
-                )
-                return history_summary
-            except Exception as gen_err:
-                logger.warning(
-                    "Fast-path generate_summary failed — keeping existing summary: %s",
-                    gen_err,
-                )
-                return history_summary
-
-            # Only persist checkpoint updates on genuine success.
-            _tmp_state: dict[str, Any] = {
-                "messages": cp_messages,
-                "context": cp_values.get("context", {}),
-            }
-            apply_summarization_to_state(
-                _tmp_state,
-                new_summary,
-                to_summarize,
-                s_cfg,
-                conversation_id=str(cp_values.get("conversation_id") or ""),
-            )
-            await self.graph.aupdate_state(
-                config,
-                {
-                    "history_summary": _tmp_state["history_summary"],
-                    "history_summary_updated_at": _tmp_state["history_summary_updated_at"],
-                    "summary_cursor_message_id": _tmp_state.get("summary_cursor_message_id"),
-                    "messages": _tmp_state["messages"],
-                    "context": _tmp_state["context"],
-                },
-            )
-            return new_summary
-        except Exception:
-            return None
-
-    async def _persist_fast_path_turn(
-        self,
-        config: dict[str, Any],
-        thread_id: str | None,
-        user_message: str,
-        response: AgentResponse | None,
-    ) -> None:
-        """Persist user + assistant messages to checkpoint after fast-path RAG.
-
-        The fast path bypasses graph execution, so messages are never
-        written to checkpoint state.  This helper appends them so that
-        subsequent summarization runs see the full conversation.
-        """
-        if not self.checkpointer or not thread_id:
-            return
-
-        try:
-            reply_content = response.message.content if response and response.message else ""
-            await self.graph.aupdate_state(
-                config,
-                {
-                    "messages": [
-                        HumanMessage(content=user_message),
-                        AIMessage(content=reply_content),
-                    ],
-                },
-            )
-        except Exception as cp_err:
-            logger.warning(
-                "Fast-path: failed to persist turn to checkpoint: %s",
-                cp_err,
-            )
-
     async def execute_request_stream(self, request: WorkflowExecutionRequest):
         initial_state = self._build_initial_state_from_request(request)
         conversation_id = request.conversation_id
@@ -3689,7 +3558,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
 def create_workflow(
     qdrant_client: QdrantClient,
-    embedding_model: SentenceTransformer,
+    embedding_service: Any,
     checkpointer: BaseCheckpointSaver | None = None,
     document_repository: Optional["DocumentRepository"] = None,
     runtime_model_resolver: IRuntimeModelResolver | None = None,
@@ -3699,7 +3568,7 @@ def create_workflow(
     """
     return MultiAgentWorkflow(
         qdrant_client=qdrant_client,
-        embedding_model=embedding_model,
+        embedding_service=embedding_service,
         checkpointer=checkpointer,
         document_repository=document_repository,
         runtime_model_resolver=runtime_model_resolver,

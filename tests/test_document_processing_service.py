@@ -27,7 +27,7 @@ def _build_service(tmp_path: Path, captured_payloads: list[dict] | None = None) 
     service.settings.temp_storage_path = str(tmp_path)
     service.settings.qdrant_collection_name = "documents_gemma"
     service.settings.qdrant_upsert_batch_size = 100
-    service.settings.embedding_dimension = 768
+    service.settings.rag_embedding_dimension = 768
     service.settings.max_file_size_mb = 10
     service.settings.rag_chunk_target_tokens = 400
     service.settings.rag_chunk_overlap_tokens = 40
@@ -47,8 +47,12 @@ def _build_service(tmp_path: Path, captured_payloads: list[dict] | None = None) 
     service.qdrant_client = qdrant
 
     embedding = MagicMock()
-    embedding.encode.return_value.tolist.return_value = [0.0] * 768
-    service.embedding_model = embedding
+    embedding.embed_documents.return_value = [[0.0] * 768]
+    embedding.embed_query.return_value = [0.0] * 768
+    embedding.dimension = 768
+    embedding.model_name = "gemini-embedding-2"
+    embedding.provider = "gemini"
+    service.embedding_service = embedding
 
     service.document_image_repository = MagicMock()
     service.document_index_service = None
@@ -186,3 +190,34 @@ def test_process_document_indexes_generated_image_caption_and_links_sql_chunk(tm
     assert image_record.image_caption == "A red bar chart showing revenue increasing each quarter."
     assert result["chunks_stored"] == 1
     assert result["images_stored"] == 1
+
+
+def test_process_document_passes_filename_to_index_document_reference(tmp_path):
+    """The indexer needs the upload filename for Gemini document-title formatting."""
+    service = _build_service(tmp_path)
+
+    async def _fake_process_with_mineru(*_args, **_kwargs):
+        return [{"text": "blue whale facts", "page_start": 0, "page_end": 0}]
+
+    service._process_with_mineru = _fake_process_with_mineru
+    service.document_index_service = MagicMock()
+    service.document_index_service.index_document.return_value = []
+
+    document_id = uuid4()
+    conversation_id = uuid4()
+    user_id = uuid4()
+
+    asyncio.run(
+        service.process_document(
+            file_path=str(tmp_path / "blue-whale.pdf"),
+            filename="Blue-whale-A4-fact-sheet.pdf",
+            document_id=str(document_id),
+            conversation_id=str(conversation_id),
+            user_id=str(user_id),
+        )
+    )
+
+    document_ref = service.document_index_service.index_document.call_args.kwargs[
+        "document"
+    ]
+    assert document_ref.filename == "Blue-whale-A4-fact-sheet.pdf"

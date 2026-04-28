@@ -76,7 +76,11 @@ async def execute_search_documents_action(
         elif action == DocumentAction.READ_DOCUMENT.value:
             document_id = tool_args.get("document_id")
             if document_id:
-                content = await rag_agent.get_document_full_content(document_id)
+                content = await rag_agent.get_document_full_content(
+                    document_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                )
                 if content:
                     result = f"DOCUMENT CONTENT ({document_id}):\n\n{content}"
                 else:
@@ -156,13 +160,20 @@ async def execute_search_documents_action(
             document_id = tool_args.get("document_id")
             pattern = tool_args.get("pattern")
             if document_id and pattern:
-                result = await rag_agent.grep_document(document_id, pattern)
+                result = await rag_agent.grep_document(
+                    document_id,
+                    pattern,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                )
             else:
                 result = "Error: document_id and pattern required for GREP_DOCUMENT"
 
         elif action == DocumentAction.LIST_DOCUMENTS.value:
             if conversation_id:
-                documents = await rag_agent.list_conversation_documents(conversation_id)
+                documents = await rag_agent.list_conversation_documents(
+                    conversation_id, user_id=user_id
+                )
                 if documents:
                     result = "AVAILABLE DOCUMENTS:\n\n"
                     for i, doc in enumerate(documents, 1):

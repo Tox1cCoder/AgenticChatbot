@@ -45,8 +45,8 @@ A Streamlit **demo UI** ([`demo.py`](demo.py)) and a ready-to-import **Postman c
 |---|---|
 | **Multi-agent workflow** | LLM-driven router dispatches to specialised agents: `chat`, `rag`, `search`, `image_generator`, `planning`, `canvas`. Implemented as a LangGraph state machine in [`app/ai/graph.py`](app/ai/graph.py). |
 | **Streaming-first API** | SSE streaming with 1-second heartbeats for [`/messages/stream`](app/api/messages.py), [`/messages/resume-interrupt`](app/api/messages.py), and full **Vercel AI SDK** compatibility at [`/api/chat/{conversation_id}`](app/api/ai_sdk.py) and [`/ai/chat/{conversation_id}`](app/api/ai_sdk.py). |
-| **Document RAG** | MinerU + pdfplumber + sentence-transformers + Qdrant pipeline with optional cross-encoder re-ranking, table extraction, formula extraction, per-page image captioning, and cross-page context preservation. |
-| **Agentic RAG** | Optional three-phase scan → deep-dive → backtrack mode ([`agentic_rag_enabled`](app/core/config.py)) for long-document exploration. |
+| **Document RAG** | Server-owned ingestion with MinerU parsing, structure-aware chunking, PostgreSQL as the canonical chunk store, Qdrant as the vector lookup index, optional cross-encoder re-ranking, and image captions indexed before embedding. |
+| **Agentic RAG** | The only runtime RAG path. The agent uses `search_documents` actions to scan, read, grep, search chunks, list documents, and load images for long-document exploration. |
 | **Planning mode** | End-to-end `TaskPlan` lifecycle (`draft` → `ready` → `executing` → `paused` → `completed`) with both AI-generated and manually-authored plans. |
 | **Human-in-the-Loop** | Configurable per-tool approval interrupts with resume/reject semantics, persisted `ToolApproval` records, and Redis-backed timeout cleanup. |
 | **Multi-provider** | Per-user, Fernet-encrypted API keys for **Google Gemini**, **OpenAI**, and **Anthropic**, with per-agent overrides (`agent_model_configs` table). |
@@ -102,7 +102,7 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 - **AI**: LangChain 1.x, LangGraph 1.x, LangSmith, langchain-google-genai, langchain-openai, langchain-mcp-adapters, Tavily
 - **Persistence**: SQLAlchemy 2.x + Alembic (28 migrations), PostgreSQL 14+, psycopg driver
 - **Background**: Celery 5.x + Redis 7.x
-- **Vector search**: Qdrant, sentence-transformers, optional ZeroEntropy / HF cross-encoder re-rankers
+- **Vector search**: Qdrant, Gemini Embedding API (`gemini-embedding-2`) with optional sentence-transformers fallback for offline development, HF cross-encoder re-rankers
 - **Documents**: MinerU (pipeline / hybrid / VLM backends), pdfplumber, python-docx, openpyxl, Pillow, pypdf
 - **Security**: PyJWT, bcrypt, Fernet (cryptography) for provider key encryption
 - **DI**: `dependency-injector` with auto-injection decorators (`AppAutoInjector`)
@@ -271,7 +271,7 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | `TAVILY_API_KEY` | — | Web search |
 | `SMITHERY_API_KEY` | — | Hosted MCP registry |
 | `MODEL_ENCRYPTION_KEY` | — | Fernet key for per-user provider credentials |
-| `RAG_AGENT_MODEL` | `gemini-3-pro-preview` | |
+| `RAG_AGENT_MODEL` | `gemini-3.1-pro-preview` | |
 | `CHAT_AGENT_MODEL` | `gemini-3-flash-preview` | |
 | `SEARCH_AGENT_MODEL` | `gemini-3-flash-preview` | |
 | `IMAGE_GENERATOR_MODEL` | `gemini-3-pro-image-preview` | |
@@ -287,16 +287,27 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | Variable | Default |
 |---|---|
 | `QDRANT_URL` | `http://localhost:6333` |
-| `QDRANT_COLLECTION_NAME` | `documents_gemma` |
-| `EMBEDDING_DIMENSION` | `768` |
+| `QDRANT_COLLECTION_NAME` | `documents_gemini_embedding_2_768` |
+| `RAG_EMBEDDING_PROVIDER` | `gemini` (alt: `sentence_transformers`) |
+| `RAG_EMBEDDING_MODEL` | `gemini-embedding-2` |
+| `RAG_EMBEDDING_DIMENSION` | `768` |
+| `RAG_EMBEDDING_QUERY_TASK` | `search result` (or `question answering`) |
+| `RAG_MULTIMODAL_IMAGE_EMBEDDINGS_ENABLED` | `false` |
 | `RAG_TOP_K` | `15` |
 | `RAG_SCORE_THRESHOLD` | `0.2` |
-| `RAG_MAX_CONTEXT_TOKENS` | `30000` |
 | `ENABLE_RERANKING` | `true` |
-| `RERANKER_MODEL` | `zeroentropy/zerank-1-small` |
+| `RAG_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
+| `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
 | `RERANK_TOP_K` | `10` |
-| `RAG_CHUNKS_IN_PROMPT` | `10` |
-| `MAX_CHUNK_CHARS_IN_PROMPT` | `2000` |
+| `RAG_CHUNK_TARGET_TOKENS` | `400` |
+| `RAG_CHUNK_OVERLAP_TOKENS` | `40` |
+| `RAG_CHUNK_MAX_TOKENS` | `800` |
+| `RAG_INDEX_BATCH_SIZE` | `16` |
+
+`GEMINI_API_KEY` is required when `RAG_EMBEDDING_PROVIDER=gemini`. The
+`sentence_transformers` fallback is for offline development; switching
+providers requires a deliberate Qdrant collection cutover (see "RAG
+embedding migration" below).
 
 ### Conversation memory & history budgets
 
@@ -308,7 +319,7 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 
 ### Document processing
 
-`DOCUMENT_CHUNK_SIZE`, `DOCUMENT_CHUNK_OVERLAP`, `MINERU_TIMEOUT`, `MINERU_API_URL`, `MINERU_BACKEND` (`pipeline` / `hybrid-*` / `vlm-*`), `MINERU_METHOD` (`auto` / `txt` / `ocr`), `MINERU_LANG`, `EXTRACT_FORMULAS_FROM_PDF`, `EXTRACT_TABLES_FROM_PDF`, `TABLE_FORMAT`, `MAX_FILE_SIZE_MB`, `TEMP_STORAGE_PATH`, `DOCUMENT_IMAGES_STORAGE_PATH`.
+`MINERU_TIMEOUT`, `MINERU_API_URL`, `MINERU_BACKEND` (`pipeline` / `hybrid-*` / `vlm-*`), `MINERU_METHOD` (`auto` / `txt` / `ocr`), `MINERU_LANG`, `MINERU_EXTRA_ARGS`, `EXTRACT_FORMULAS_FROM_PDF`, `EXTRACT_TABLES_FROM_PDF`, `TABLE_FORMAT`, `MAX_FILE_SIZE_MB`, `TEMP_STORAGE_PATH`, `DOCUMENT_IMAGES_STORAGE_PATH`, `IMAGE_CAPTION_MODEL`, `IMAGE_CAPTION_MAX_RETRY_ATTEMPTS`, `IMAGE_CAPTION_RETRY_DELAY_SECONDS`.
 
 ### MCP tool search
 
@@ -365,8 +376,9 @@ Key schemas:
 | `messages` | User/assistant turns + JSONB metadata (tool calls, artifacts, interrupts) |
 | `feedbacks` | 1-5 rating, categorical tags, text |
 | `documents` | Uploaded files, status, file type, Celery task id |
-| `document_images` | Extracted images (with captions) |
-| `document_parse_artifacts` | Tables / forms / structured extractions |
+| `document_chunks` | Canonical parsed chunk content, page spans, provenance, and index status |
+| `document_images` | Extracted images, generated captions, and optional linked chunk IDs |
+| `document_parse_artifacts` | Source and parser output artifacts such as MinerU markdown / JSON metadata |
 | `task_plans` | Plan steps, order, status, metadata |
 | `tool_approvals` | HITL approval decisions, persisted for audit |
 | `hitl_interrupts` | Suspended workflow snapshots |
@@ -397,7 +409,7 @@ python -m app.workers.start_worker
 
 Handles:
 
-- `app.workers.document_processor` — ingest → parse → chunk → embed → upsert to Qdrant, with per-image captioning
+- `app.workers.document_processor` — ingest → parse → caption images → chunk → persist SQL chunks → embed → upsert Qdrant lookup points
 - `app.workers.cleanup_tasks` — expired tokens, orphaned files, stale device sessions
 
 ### Local client backend
@@ -463,12 +475,53 @@ When `MCP_TOOL_SEARCH_ENABLED=true`, only the lightweight [`tool_search`](app/ai
 ## Document Pipeline & RAG
 
 1. **Upload** — `POST /documents/upload` (multipart) stages the file under `TEMP_STORAGE_PATH`, creates a `Document` row, and enqueues a Celery task.
-2. **Parse** — MinerU processes PDFs in one of five backends (`pipeline`, `hybrid-auto-engine`, `hybrid-http-client`, `vlm-auto-engine`, `vlm-http-client`). DOCX / XLSX / PPTX / images are handled in-process. Tables, formulas, and page-level images are extracted and captioned.
-3. **Chunk** — recursive character splitter honoring `DOCUMENT_CHUNK_SIZE` / `DOCUMENT_CHUNK_OVERLAP`, with optional cross-page context preservation.
-4. **Embed & index** — sentence-transformers encoder produces `EMBEDDING_DIMENSION`-sized vectors; Qdrant upsert batches are sized by `QDRANT_UPSERT_BATCH_SIZE`.
-5. **Retrieval** — the RAG agent issues `search_documents` queries, optionally reranks with `RERANKER_MODEL`, and packs chunks into the prompt within `RAG_MAX_CONTEXT_TOKENS`.
-6. **Citation verification** — enabled by default; enforces `MIN_CITATION_COVERAGE` of retrieved docs be referenced.
-7. **Agentic RAG** — when `AGENTIC_RAG_ENABLED=true`, the agent alternates between scans (short previews), deep dives (full chunks), and backtracks — useful for multi-document exploration up to `AGENTIC_MAX_ITERATIONS`.
+2. **Parse** — MinerU handles rich formats (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.html`, `.md`) through the server pipeline. Plain `.txt` files are loaded directly. Parser output may include markdown, structured content blocks, tables, formulas, page spans, and extracted image files.
+3. **Caption images before indexing** — extracted page images are copied to `DOCUMENT_IMAGES_STORAGE_PATH`; when a Gemini key is available, the image captioning model describes each image. Captions are appended to the matching chunk text before embedding so questions about image-only content can be retrieved semantically.
+4. **Chunk** — `DocumentChunkBuilder` creates token-aware chunks from normalized blocks using `RAG_CHUNK_TARGET_TOKENS`, `RAG_CHUNK_OVERLAP_TOKENS`, and `RAG_CHUNK_MAX_TOKENS`. Tables stay atomic when possible, large tables split on row groups, page spans are preserved, and tiny orphan text merges with neighbors.
+5. **Persist & index** — `document_chunks` rows are the canonical content store. `DocumentIndexService` replaces chunks idempotently by `document_id`, embeds chunk content through `GeminiRAGEmbeddingService` (`gemini-embedding-2`, `output_dimensionality=768`) using the document-format prompt `title: {filename} | text: {content}`, and upserts Qdrant points containing lookup metadata only (`document_id`, `chunk_id`, `conversation_id`, `user_id`, page/source metadata, `embedding_provider="gemini"`, `modality="text"`). Queries are embedded with the matching `task: {query_task} | query: ...` prefix.
+6. **Retrieval** — the RAG agent uses Qdrant for vector candidate IDs, then hydrates chunk text, filenames, page metadata, and linked image captions/files from PostgreSQL. If a Qdrant point references a missing SQL chunk, it is treated as an index consistency error and skipped rather than serving raw Qdrant payload content.
+7. **Agentic RAG** — document-aware chat always uses the agentic `search_documents` tool path. Available actions include `SCAN_ALL`, `READ_DOCUMENT`, `SEARCH_CHUNKS`, `GREP_DOCUMENT`, `LIST_DOCUMENTS`, and `VIEW_IMAGES`.
+
+After upgrading from the older direct-Qdrant index format, run the reindex utility so existing Qdrant points reference SQL chunks:
+
+```bash
+python scripts/reindex_documents.py --dry-run
+python scripts/reindex_documents.py --all --continue-on-error
+```
+
+### RAG embedding migration
+
+Phase 11 swapped the embedding provider from the local `google/embeddinggemma-300m`
+SentenceTransformer to the Gemini Embeddings API (`gemini-embedding-2`).
+Vectors from the two providers live in different spaces — they are not
+portable. Treat the cutover as a cold migration:
+
+1. Set `GEMINI_API_KEY` (required when `RAG_EMBEDDING_PROVIDER=gemini`).
+2. Deploy with the new defaults — `QDRANT_COLLECTION_NAME=documents_gemini_embedding_2_768`
+   and `RAG_EMBEDDING_MODEL=gemini-embedding-2`. The startup hook in
+   `app/main.py` calls `DocumentIndexService.ensure_collection()` to create
+   the collection at the configured `RAG_EMBEDDING_DIMENSION`.
+3. Re-embed the existing chunks into the new collection — chunk text is
+   already in PostgreSQL, so no re-parse is required:
+
+   ```bash
+   python scripts/reindex_embeddings.py --dry-run
+   python scripts/reindex_embeddings.py --all --continue-on-error
+   ```
+
+4. Verify `qdrant_client.get_collection(name).points_count` equals the count
+   of `index_status='indexed'` rows in `document_chunks`. Optionally drop
+   the legacy `documents_gemma` collection after a soak window.
+
+The current `RAG_EMBEDDING_DIMENSION` is `768`. A future upgrade to `1536`
+or `3072` should be planned as a separate cold migration with a new
+`QDRANT_COLLECTION_NAME` namespace. Mixing Gemma (`google/embeddinggemma-300m`)
+and Gemini vectors in the same collection is unsupported and rejected by
+`ensure_collection`.
+
+Raw multimodal image embeddings are disabled by default
+(`RAG_MULTIMODAL_IMAGE_EMBEDDINGS_ENABLED=false`); caption-augmented chunks
+remain the primary image-retrieval path.
 
 Document lifecycle events (`UPLOAD_STARTED`, `PROCESSING_STARTED`, `PROCESSING_COMPLETED`, `PROCESSING_FAILED`, `DELETED`) are published on an in-process event bus and logged by [`DocumentEventLogger`](app/services/document_event_listener.py).
 

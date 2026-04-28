@@ -49,7 +49,8 @@ def render_upload_section():
 
         uploaded_file = st.file_uploader(
             "Choose a file",
-            type=["txt", "pdf", "docx", "md"],
+            # Mirror app/api/documents.py::SUPPORTED_UPLOAD_EXTENSIONS.
+            type=["txt", "pdf", "docx", "pptx", "xlsx", "html", "md"],
             help="Upload documents for this conversation",
             key=f"uploader_{st.session_state.current_conversation_id}",  # Unique key per conversation
         )

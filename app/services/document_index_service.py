@@ -1,13 +1,16 @@
 """Document index service.
 
 The single owner of chunk persistence in PostgreSQL, vector embedding, and
-Qdrant upsert. Exposes three operations:
+Qdrant upsert. Exposes:
 
   * ``index_document`` — replace SQL chunks, embed in batches, upsert
     Qdrant points, mark chunks indexed.
   * ``delete_document_index`` — remove Qdrant points and SQL chunks for a
     document.
   * ``reindex_document`` — re-embed existing SQL chunks and sync Qdrant.
+  * ``ensure_collection`` — create the configured Qdrant collection at
+    the configured vector dimension if absent; validate vector size if
+    present. The single owner of collection bootstrap.
 
 All write paths are idempotent by ``document_id``. Qdrant payloads hold
 only lookup metadata; canonical text lives in SQL.
@@ -21,11 +24,13 @@ from typing import Any, Iterable
 from uuid import UUID
 
 from qdrant_client.models import (
+    Distance,
     FieldCondition,
     Filter,
     FilterSelector,
     MatchValue,
     PointStruct,
+    VectorParams,
 )
 
 from app.models.document_chunk import DocumentChunk
@@ -41,23 +46,78 @@ class DocumentIndexService:
         *,
         chunk_repository: DocumentChunkRepository,
         qdrant_client: Any,
-        embedding_model: Any,
+        embedding_service: Any,
         collection_name: str,
-        embedding_model_name: str,
-        embedding_dimension: int,
+        embedding_model_name: str | None = None,
+        embedding_dimension: int | None = None,
+        embedding_provider: str | None = None,
         index_batch_size: int = 16,
     ):
         self.chunk_repository = chunk_repository
         self.qdrant_client = qdrant_client
-        self.embedding_model = embedding_model
+        self.embedding_service = embedding_service
         self.collection_name = collection_name
-        self.embedding_model_name = embedding_model_name
-        self.embedding_dimension = embedding_dimension
+        # Prefer values reported by the embedding service when caller didn't
+        # supply explicit overrides. Keeping all three as kwargs lets tests
+        # pin specific values without poking at the service stub.
+        self.embedding_model_name = embedding_model_name or getattr(
+            embedding_service, "model_name", "unknown"
+        )
+        self.embedding_dimension = (
+            int(embedding_dimension)
+            if embedding_dimension is not None
+            else int(getattr(embedding_service, "dimension", 0))
+        )
+        self.embedding_provider = embedding_provider or getattr(
+            embedding_service, "provider", "unknown"
+        )
         self.index_batch_size = max(1, int(index_batch_size))
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def ensure_collection(self) -> None:
+        """Create the configured Qdrant collection if it does not exist.
+
+        Raises ``ValueError`` if the collection exists but its configured
+        vector size does not match ``embedding_dimension``. This is the
+        only place collections are created.
+        """
+        try:
+            collections = self.qdrant_client.get_collections()
+            exists = any(
+                getattr(c, "name", None) == self.collection_name
+                for c in getattr(collections, "collections", []) or []
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not connect to Qdrant for ensure_collection: %s. "
+                "Collection check skipped.",
+                exc,
+            )
+            return
+
+        if not exists:
+            self.qdrant_client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(
+                    size=self.embedding_dimension,
+                    distance=Distance.COSINE,
+                ),
+            )
+            return
+
+        info = self.qdrant_client.get_collection(self.collection_name)
+        try:
+            actual_size = int(info.config.params.vectors.size)
+        except AttributeError:
+            return
+        if actual_size != self.embedding_dimension:
+            raise ValueError(
+                f"Collection '{self.collection_name}' has vector size "
+                f"{actual_size}, expected {self.embedding_dimension}"
+            )
+
     def index_document(
         self,
         *,
@@ -114,11 +174,11 @@ class DocumentIndexService:
 
         self._delete_points_for_document(document_id)
 
-        # Build a minimal document-shaped namespace — reindex only sees the
-        # stored chunk content, so we don't need the real Document row here.
-        # The conversation/user IDs for Qdrant payloads come from existing chunk
-        # payloads or a manifest outside this method's scope; for reindex we
-        # reuse whatever the chunk row captured during the original index pass.
+        # Reindex only sees stored chunk content. Conversation/user payload
+        # fields are reconstructed from the chunk's joined Document row when
+        # available; otherwise they're omitted (the original index pass set
+        # them, and a stale collection should be recreated rather than
+        # patched in place).
         self._embed_and_upsert(
             document=None,
             persisted_chunks=chunks,
@@ -168,10 +228,13 @@ class DocumentIndexService:
         if not persisted:
             return
 
+        title = self._title_for_document(document, persisted)
+
         points: list[PointStruct] = []
         for batch in _batched(persisted, self.index_batch_size):
             texts = [chunk.content for chunk in batch]
-            vectors = self._embed_batch(texts)
+            titles = [title] * len(texts)
+            vectors = self.embedding_service.embed_documents(texts, titles=titles)
             for chunk, vector in zip(batch, vectors, strict=True):
                 points.append(
                     PointStruct(
@@ -188,13 +251,22 @@ class DocumentIndexService:
             points=points,
         )
 
-    def _embed_batch(self, texts: list[str]):
-        result = self.embedding_model.encode(texts)
-        # SentenceTransformer returns numpy array; MagicMock returns whatever
-        # the test sets. Normalize to a list of lists of floats.
-        if hasattr(result, "tolist"):
-            return result.tolist()
-        return list(result)
+    @staticmethod
+    def _title_for_document(document: Any, chunks: list[DocumentChunk]) -> str | None:
+        """Best-effort document title for the Gemini doc-format prompt."""
+        if document is not None:
+            for attr in ("filename", "title", "name"):
+                value = getattr(document, attr, None)
+                if value:
+                    return str(value)
+            return None
+        if chunks:
+            doc_obj = getattr(chunks[0], "document", None)
+            if doc_obj is not None:
+                value = getattr(doc_obj, "filename", None)
+                if value:
+                    return str(value)
+        return None
 
     def _payload_for_chunk(self, document: Any, chunk: DocumentChunk) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -206,6 +278,8 @@ class DocumentIndexService:
             "page_end": chunk.page_end,
             "section_path": list(chunk.section_path or []),
             "embedding_model": self.embedding_model_name,
+            "embedding_provider": self.embedding_provider,
+            "modality": "text",
         }
         if document is not None:
             if getattr(document, "conversation_id", None) is not None:

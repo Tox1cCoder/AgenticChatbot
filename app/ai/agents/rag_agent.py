@@ -22,7 +22,7 @@ from qdrant_client.models import (
     FilterSelector,
     MatchValue,
 )
-from sentence_transformers import CrossEncoder, SentenceTransformer
+from sentence_transformers import CrossEncoder
 
 from ...core.config import Settings, settings
 from ...core.runtime_modeling import ResolvedRuntimeModelConfig
@@ -54,8 +54,8 @@ class RAGAgent(BaseAgent):
         self,
         settings: Settings,
         qdrant_client: QdrantClient,
-        embedding_model: SentenceTransformer,
-        collection_name: str = "documents_gemma",
+        embedding_service: Any,
+        collection_name: str = "documents_gemini_embedding_2_768",
         runtime_model_resolver: IRuntimeModelResolver | None = None,
     ):
         # Initialise BaseAgent (sets model_name, gemini_client, langchain_model,
@@ -68,9 +68,9 @@ class RAGAgent(BaseAgent):
         # RAG-specific fields
         self.settings = settings
         self.qdrant_client = qdrant_client
-        self.embedding_model = embedding_model
+        self.embedding_service = embedding_service
         self.collection_name = collection_name
-        self.embedding_dimension = settings.embedding_dimension
+        self.embedding_dimension = settings.rag_embedding_dimension
 
         # Retrieval parameters
         self.top_k = settings.rag_top_k
@@ -551,7 +551,7 @@ class RAGAgent(BaseAgent):
         if top_k is None:
             top_k = self.top_k
 
-        query_embedding = self.embedding_model.encode(query).tolist()
+        query_embedding = list(self.embedding_service.embed_query(query))
 
         must_conditions: list[FieldCondition] = []
         if conversation_id:
@@ -939,7 +939,12 @@ class RAGAgent(BaseAgent):
                 "collection_exists": collection_exists,
                 "collection_name": self.collection_name,
                 "vectors_count": (collection_info.vectors_count if collection_info else 0),
-                "embedding_model": self.embedding_model,
+                "embedding_model": getattr(
+                    self.embedding_service, "model_name", "unknown"
+                ),
+                "embedding_provider": getattr(
+                    self.embedding_service, "provider", "unknown"
+                ),
                 "embedding_dimension": self.embedding_dimension,
             }
         except Exception as e:
@@ -1000,10 +1005,26 @@ class RAGAgent(BaseAgent):
 
     # === Agentic RAG Content Retrieval Methods ===
 
-    async def get_document_full_content(self, document_id: str) -> str | None:
+    async def get_document_full_content(
+        self,
+        document_id: str,
+        *,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> str | None:
         try:
             chunk_repo = DocumentChunkRepository(SessionLocal)
-            chunks = chunk_repo.get_by_document_ordered(UUID(document_id))
+            doc_uuid = UUID(document_id)
+
+            if user_id is not None or conversation_id is not None:
+                chunks = chunk_repo.get_by_document_for_scope(
+                    doc_uuid,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                )
+            else:
+                chunks = chunk_repo.get_by_document_ordered(doc_uuid)
+
             if not chunks:
                 return None
 
@@ -1039,11 +1060,16 @@ class RAGAgent(BaseAgent):
 
         return content
 
-    async def list_conversation_documents(self, conversation_id: str) -> list[dict[str, Any]]:
+    async def list_conversation_documents(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         try:
             conversation_uuid = UUID(conversation_id)
             with SessionLocal() as db:
-                rows = (
+                query = (
                     db.query(
                         Document.id,
                         Document.filename,
@@ -1051,7 +1077,15 @@ class RAGAgent(BaseAgent):
                     )
                     .outerjoin(DocumentChunk, DocumentChunk.document_id == Document.id)
                     .filter(Document.conversation_id == conversation_uuid)
-                    .group_by(Document.id, Document.filename, Document.upload_time)
+                )
+                if user_id is not None:
+                    from ...models.conversation import Conversation
+
+                    query = query.join(
+                        Conversation, Document.conversation_id == Conversation.id
+                    ).filter(Conversation.owner_id == user_id)
+                rows = (
+                    query.group_by(Document.id, Document.filename, Document.upload_time)
                     .order_by(Document.upload_time.desc())
                     .all()
                 )
@@ -1072,12 +1106,21 @@ class RAGAgent(BaseAgent):
             )
             return []
 
-    async def grep_document(self, document_id: str, pattern: str) -> str | None:
+    async def grep_document(
+        self,
+        document_id: str,
+        pattern: str,
+        *,
+        user_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> str | None:
         """
         Search for regex pattern in a document's content.
         Used for agentic GREP_DOCUMENT action.
         """
-        content = await self.get_document_full_content(document_id)
+        content = await self.get_document_full_content(
+            document_id, user_id=user_id, conversation_id=conversation_id
+        )
         if not content:
             return f"Error: Document {document_id} not found"
 

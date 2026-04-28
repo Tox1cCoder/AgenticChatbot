@@ -1,15 +1,18 @@
-"""Phase 6 guards: DocumentIndexService.
+"""Phase 6 + Phase 11 guards: DocumentIndexService.
 
 The index service is the single owner of: chunk persistence in SQL, vector
 embedding, Qdrant upsert, and chunk <-> point consistency.
 
 Tests pin:
   * SQL chunks are replaced before indexing (idempotent by document_id).
-  * Chunks are embedded in batches.
-  * Qdrant payloads carry document_id, chunk_id, conversation_id, user_id.
+  * Chunks are embedded in batches via the embedding service adapter.
+  * Document titles are passed to ``embed_documents`` for the Gemini doc-format prompt.
+  * Qdrant payloads carry document_id, chunk_id, conversation_id, user_id,
+    embedding_provider, and modality (Phase 11).
   * Chunks are marked ``indexed`` on success, ``failed`` on error.
   * Deletion removes both Qdrant points and SQL chunks.
   * The service does not instantiate RAGAgent.
+  * ``ensure_collection`` is the single owner of Qdrant collection bootstrap.
 """
 
 from __future__ import annotations
@@ -19,13 +22,20 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
+from sqlalchemy.orm.exc import DetachedInstanceError
 
-def _make_document(user_id: UUID | None = None, conversation_id: UUID | None = None):
+
+def _make_document(
+    user_id: UUID | None = None,
+    conversation_id: UUID | None = None,
+    filename: str = "test.pdf",
+):
     doc_id = uuid4()
     return SimpleNamespace(
         id=doc_id,
         conversation_id=conversation_id or uuid4(),
         user_id=user_id or uuid4(),
+        filename=filename,
     )
 
 
@@ -65,28 +75,62 @@ def _persisted_chunk(document_id: UUID, chunk_index: int):
     return chunk
 
 
-class _EmbeddingStub:
-    def __init__(self, dim: int = 8):
-        self.dim = dim
-        self.calls: list[list[str]] = []
+class _DetachedDocumentRelationshipChunk:
+    def __init__(self, document_id: UUID, chunk_index: int):
+        self.id = uuid4()
+        self.document_id = document_id
+        self.chunk_index = chunk_index
+        self.content = f"content-{chunk_index}"
+        self.content_sha256 = f"sha-{chunk_index}"
+        self.char_count = len(self.content)
+        self.token_count = 4
+        self.page_start = 1
+        self.page_end = 1
+        self.section_path = []
+        self.block_provenance = []
+        self.chunk_metadata = {}
+        self.embedding_model = None
+        self.qdrant_point_id = None
 
-    def encode(self, texts, **_kwargs):
-        if isinstance(texts, str):
-            self.calls.append([texts])
-            return [0.0] * self.dim
+    @property
+    def document(self):
+        raise DetachedInstanceError(
+            "Parent instance is not bound to a Session; lazy load cannot proceed"
+        )
+
+
+class _EmbeddingStub:
+    """Stand-in for ``GeminiRAGEmbeddingService`` that records calls."""
+
+    provider = "gemini"
+
+    def __init__(self, dim: int = 8, model_name: str = "gemini-embedding-2"):
+        self.dim = dim
+        self.model_name = model_name
+        self.dimension = dim
+        self.doc_calls: list[tuple[list[str], list[str | None]]] = []
+        self.query_calls: list[str] = []
+
+    def embed_documents(self, texts, *, titles=None):
         texts_list = list(texts)
-        self.calls.append(texts_list)
+        title_list = list(titles) if titles is not None else [None] * len(texts_list)
+        self.doc_calls.append((texts_list, title_list))
         return [[0.0] * self.dim for _ in texts_list]
+
+    def embed_query(self, query: str):
+        self.query_calls.append(query)
+        return [0.0] * self.dim
 
 
 def _build_service(
     *,
     chunk_repo=None,
     qdrant_client=None,
-    embedding_model=None,
-    collection_name: str = "documents_gemma",
-    embedding_model_name: str = "google/embeddinggemma-300m",
+    embedding_service=None,
+    collection_name: str = "documents_gemini_embedding_2_768",
+    embedding_model_name: str = "gemini-embedding-2",
     embedding_dimension: int = 8,
+    embedding_provider: str = "gemini",
     batch_size: int = 2,
 ):
     from app.services.document_index_service import DocumentIndexService
@@ -94,10 +138,11 @@ def _build_service(
     return DocumentIndexService(
         chunk_repository=chunk_repo or MagicMock(),
         qdrant_client=qdrant_client or MagicMock(),
-        embedding_model=embedding_model or _EmbeddingStub(dim=embedding_dimension),
+        embedding_service=embedding_service or _EmbeddingStub(dim=embedding_dimension),
         collection_name=collection_name,
         embedding_model_name=embedding_model_name,
         embedding_dimension=embedding_dimension,
+        embedding_provider=embedding_provider,
         index_batch_size=batch_size,
     )
 
@@ -155,6 +200,69 @@ def test_index_document_writes_authorization_metadata_to_qdrant_payload():
     assert payload["user_id"] == str(document.user_id)
 
 
+def test_index_document_payload_includes_phase11_provider_and_modality():
+    document = _make_document()
+    persisted = [_persisted_chunk(document.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+    qdrant = MagicMock()
+
+    service = _build_service(chunk_repo=repo, qdrant_client=qdrant)
+    service.index_document(
+        document=document,
+        built_chunks=[_make_built_chunk(0, "hello")],
+        parse_artifact_id=None,
+    )
+
+    points = qdrant.upsert.call_args.kwargs.get("points")
+    payload = points[0].payload
+    assert payload["embedding_provider"] == "gemini"
+    assert payload["modality"] == "text"
+    assert payload["embedding_model"] == "gemini-embedding-2"
+
+
+def test_index_document_passes_titles_to_embedding_service():
+    document = _make_document(filename="quarterly.pdf")
+    persisted = [_persisted_chunk(document.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+
+    embedding = _EmbeddingStub(dim=4)
+    service = _build_service(
+        chunk_repo=repo,
+        embedding_service=embedding,
+        embedding_dimension=4,
+        batch_size=2,
+    )
+
+    service.index_document(
+        document=document,
+        built_chunks=[_make_built_chunk(0, "body")],
+        parse_artifact_id=None,
+    )
+
+    assert embedding.doc_calls, "embed_documents must be called for indexing"
+    texts, titles = embedding.doc_calls[0]
+    assert titles == ["quarterly.pdf"], f"document title must be threaded into titles list: {titles}"
+
+
+def test_index_document_does_not_lazy_load_document_from_detached_chunks():
+    document = SimpleNamespace(id=uuid4(), conversation_id=uuid4(), user_id=uuid4())
+    persisted = [_DetachedDocumentRelationshipChunk(document.id, 0)]
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+
+    service = _build_service(chunk_repo=repo)
+
+    service.index_document(
+        document=document,
+        built_chunks=[_make_built_chunk(0, "body")],
+        parse_artifact_id=None,
+    )
+
+    assert repo.mark_indexed.called
+
+
 def test_index_document_embeds_in_batches():
     document = _make_document()
     persisted = [_persisted_chunk(document.id, i) for i in range(5)]
@@ -168,7 +276,7 @@ def test_index_document_embeds_in_batches():
     service = _build_service(
         chunk_repo=repo,
         qdrant_client=qdrant,
-        embedding_model=embedding,
+        embedding_service=embedding,
         embedding_dimension=4,
         batch_size=2,
     )
@@ -179,7 +287,7 @@ def test_index_document_embeds_in_batches():
     )
 
     # batch_size=2 across 5 chunks should produce 3 embed calls: [2, 2, 1].
-    batch_sizes = [len(batch) for batch in embedding.calls]
+    batch_sizes = [len(texts) for texts, _ in embedding.doc_calls]
     assert batch_sizes == [2, 2, 1], f"Expected batches [2,2,1], got {batch_sizes}"
 
 
@@ -203,9 +311,9 @@ def test_index_document_marks_chunks_indexed_after_qdrant_upsert():
     for call in repo.mark_indexed.call_args_list:
         kwargs = call.kwargs
         assert "point_id" in kwargs
-        assert kwargs["embedding_model"] == "google/embeddinggemma-300m"
+        assert kwargs["embedding_model"] == "gemini-embedding-2"
         assert kwargs["embedding_dimension"] == 8
-        assert kwargs["collection_name"] == "documents_gemma"
+        assert kwargs["collection_name"] == "documents_gemini_embedding_2_768"
 
 
 def test_index_document_marks_failed_and_raises_on_qdrant_error():
@@ -252,3 +360,37 @@ def test_index_service_does_not_instantiate_rag_agent():
     assert "RAGAgent" not in source, (
         "DocumentIndexService must not couple to RAGAgent — indexing has no model"
     )
+
+
+def test_ensure_collection_creates_if_absent():
+    repo = MagicMock()
+    qdrant = MagicMock()
+    qdrant.get_collections.return_value = SimpleNamespace(collections=[])
+
+    service = _build_service(chunk_repo=repo, qdrant_client=qdrant)
+    service.ensure_collection()
+
+    assert qdrant.create_collection.called, "Missing collection must be created by ensure_collection"
+    create_kwargs = qdrant.create_collection.call_args.kwargs
+    assert create_kwargs["collection_name"] == "documents_gemini_embedding_2_768"
+    vectors = create_kwargs["vectors_config"]
+    assert getattr(vectors, "size", None) == 8
+
+
+def test_ensure_collection_validates_dimension_match():
+    import pytest
+
+    repo = MagicMock()
+    qdrant = MagicMock()
+    qdrant.get_collections.return_value = SimpleNamespace(
+        collections=[SimpleNamespace(name="documents_gemini_embedding_2_768")]
+    )
+    info = SimpleNamespace(
+        config=SimpleNamespace(params=SimpleNamespace(vectors=SimpleNamespace(size=512)))
+    )
+    qdrant.get_collection.return_value = info
+
+    service = _build_service(chunk_repo=repo, qdrant_client=qdrant, embedding_dimension=8)
+
+    with pytest.raises(ValueError, match="vector size"):
+        service.ensure_collection()

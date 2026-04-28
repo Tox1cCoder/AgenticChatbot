@@ -24,7 +24,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from PIL import Image
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
-from sentence_transformers import SentenceTransformer
 
 from app.core.config import Settings
 from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
@@ -41,7 +40,7 @@ class DocumentProcessingService:
         settings: Settings,
         celery_app,
         qdrant_client: QdrantClient,
-        embedding_model: SentenceTransformer,
+        embedding_service: Any,
         document_image_repository: DocumentImageRepository,
         document_index_service: Any | None = None,
         document_chunk_builder: DocumentChunkBuilder | None = None,
@@ -50,7 +49,7 @@ class DocumentProcessingService:
         self.settings = settings
         self.celery_app = celery_app
         self.qdrant_client = qdrant_client
-        self.embedding_model = embedding_model
+        self.embedding_service = embedding_service
         self.document_image_repository = document_image_repository
         self.document_index_service = document_index_service
         self.document_chunk_builder = document_chunk_builder or DocumentChunkBuilder(
@@ -60,12 +59,11 @@ class DocumentProcessingService:
         )
         self.document_parse_artifact_repository = document_parse_artifact_repository
         self.collection_name = settings.qdrant_collection_name
-        self.embedding_dimension = settings.embedding_dimension
+        self.embedding_dimension = settings.rag_embedding_dimension
         self._event_bus = get_event_bus()
         self._mineru_output_path = None
         self.gemini_client = None
         self._init_gemini()
-        self._ensure_collection_exists()
 
     def _init_gemini(self):
         api_key = self.settings.gemini_api_key
@@ -80,33 +78,6 @@ class DocumentProcessingService:
             self.gemini_client = genai.Client(api_key=api_key)
         except Exception:
             self.gemini_client = None
-
-    def _ensure_collection_exists(self):
-        from qdrant_client.models import Distance, VectorParams
-
-        try:
-            collections = self.qdrant_client.get_collections()
-            exists = any(c.name == self.collection_name for c in collections.collections)
-        except Exception as e:
-            logger.warning(f"Could not connect to Qdrant: {e}. Collection check skipped.")
-            return
-
-        if not exists:
-            self.qdrant_client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=VectorParams(
-                    size=self.embedding_dimension, distance=Distance.COSINE
-                ),
-            )
-        else:
-            info = self.qdrant_client.get_collection(self.collection_name)
-            actual_size = info.config.params.vectors.size
-
-            if actual_size != self.embedding_dimension:
-                raise ValueError(
-                    f"Collection '{self.collection_name}' has vector size {actual_size}, "
-                    f"expected {self.embedding_dimension}"
-                )
 
     async def validate_upload_file(self, filename: str, file_size: int) -> dict[str, Any]:
         max_size_bytes = self.settings.max_file_size_mb * 1024 * 1024
@@ -351,7 +322,7 @@ class DocumentProcessingService:
 
             built_chunks = self._build_chunks_for_indexing(chunks_with_metadata)
             persisted_chunks = index_service.index_document(
-                document=self._document_ref(document_id, conversation_id, user_id),
+                document=self._document_ref(document_id, conversation_id, user_id, filename),
                 built_chunks=built_chunks,
                 parse_artifact_id=None,
             )
@@ -1368,11 +1339,13 @@ class DocumentProcessingService:
         document_id: str,
         conversation_id: str | None,
         user_id: str | None,
+        filename: str | None = None,
     ) -> SimpleNamespace:
         return SimpleNamespace(
             id=uuid.UUID(document_id),
             conversation_id=(uuid.UUID(conversation_id) if conversation_id else None),
             user_id=(uuid.UUID(user_id) if user_id else None),
+            filename=filename,
         )
 
     async def _store_chunks(
@@ -1391,7 +1364,11 @@ class DocumentProcessingService:
                 chunk_data.get("text", chunk_data) if isinstance(chunk_data, dict) else chunk_data
             )
 
-            embedding = self.embedding_model.encode(chunk_text).tolist()
+            embedding = list(
+                self.embedding_service.embed_documents(
+                    [chunk_text], titles=[filename]
+                )[0]
+            )
 
             safe_point_id = str(uuid.uuid4())
             chunk_id_mapping[i] = safe_point_id  # Store mapping

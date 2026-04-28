@@ -189,13 +189,34 @@ class Settings(BaseSettings):
     search_agent_model: str = Field(default="gemini-3-flash-preview")
 
     # RAG Embedding / Reranker / Chunking
+    rag_embedding_provider: str = Field(
+        default="gemini",
+        description="Active RAG embedding provider. 'gemini' uses the Gemini "
+        "Embeddings API (gemini-embedding-2). 'sentence_transformers' is a "
+        "local-only fallback for offline development.",
+    )
     rag_embedding_model: str = Field(
-        default="google/embeddinggemma-300m",
-        description="SentenceTransformer model name used for RAG embeddings.",
+        default="gemini-embedding-2",
+        description="Embedding model identifier. With provider 'gemini' this "
+        "is a Gemini API model name; with 'sentence_transformers' it is a "
+        "HuggingFace model id.",
     )
     rag_embedding_dimension: int = Field(
         default=768,
-        description="Embedding vector dimension produced by rag_embedding_model.",
+        description="Output dimensionality requested from the embedding "
+        "provider. Must match the Qdrant collection vector size.",
+    )
+    rag_embedding_query_task: str = Field(
+        default="search result",
+        description="Gemini Embeddings 2 retrieval task hint for queries. "
+        "Use 'search result' for keyword-style retrieval or "
+        "'question answering' for QA-style retrieval.",
+    )
+    rag_multimodal_image_embeddings_enabled: bool = Field(
+        default=False,
+        description="When True, raw document images are embedded as separate "
+        "multimodal Qdrant points. Disabled by default — caption-augmented "
+        "text chunks are the primary image-retrieval path.",
     )
     rag_reranker_model: str = Field(
         default="cross-encoder/ms-marco-MiniLM-L-6-v2",
@@ -266,13 +287,10 @@ class Settings(BaseSettings):
         description="Qdrant vector database URL",
     )
     qdrant_collection_name: str = Field(
-        default="documents_gemma",
-        description="Qdrant collection name for document storage",
-    )
-
-    embedding_dimension: int = Field(
-        default=768,
-        description="Dimension of the embedding vectors",
+        default="documents_gemini_embedding_2_768",
+        description="Qdrant collection name for document storage. The default "
+        "is namespaced by embedding provider/model/dimension so swapping "
+        "providers requires a deliberate collection cutover.",
     )
 
     # Conversation Memory Configuration

@@ -12,6 +12,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import joinedload
 
+from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 
 
@@ -107,6 +108,39 @@ class DocumentChunkRepository:
                 .order_by(DocumentChunk.chunk_index.asc())
                 .all()
             )
+
+    def get_by_document_for_scope(
+        self,
+        document_id: UUID,
+        *,
+        user_id: Any | None = None,
+        conversation_id: Any | None = None,
+    ) -> list[DocumentChunk]:
+        """Return chunks for ``document_id`` only when the parent ``Document``
+        matches the given server-context filters.
+
+        Auth filtering happens in the SQL ``WHERE`` clause via a join on
+        ``Document``. Returns an empty list when filters don't match.
+        """
+        with self.session_factory() as db:
+            query = (
+                db.query(DocumentChunk)
+                .options(joinedload(DocumentChunk.document))
+                .join(Document, DocumentChunk.document_id == Document.id)
+                .filter(DocumentChunk.document_id == document_id)
+            )
+            if conversation_id is not None:
+                query = query.filter(Document.conversation_id == conversation_id)
+            if user_id is not None:
+                # Documents are scoped via ``Conversation.owner_id``; the model
+                # exposes this through the relationship, so we restrict by
+                # joining to the conversation owner.
+                from app.models.conversation import Conversation
+
+                query = query.join(Conversation, Document.conversation_id == Conversation.id).filter(
+                    Conversation.owner_id == user_id
+                )
+            return query.order_by(DocumentChunk.chunk_index.asc()).all()
 
     def get_by_ids(self, chunk_ids: Iterable[UUID]) -> list[DocumentChunk]:
         ids = list(chunk_ids)

@@ -28,8 +28,8 @@ def _build_minimal_rag_agent(qdrant_stub, embedding_stub) -> RAGAgent:
     agent.settings.rerank_top_k = 5
     agent.settings.enable_citation_verification = False
     agent.qdrant_client = qdrant_stub
-    agent.embedding_model = embedding_stub
-    agent.collection_name = "documents_gemma"
+    agent.embedding_service = embedding_stub
+    agent.collection_name = "documents_gemini_embedding_2_768"
     agent.embedding_dimension = 768
     agent.top_k = 5
     agent.score_threshold = 0.0
@@ -44,7 +44,11 @@ def _build_minimal_rag_agent(qdrant_stub, embedding_stub) -> RAGAgent:
 
 def _fake_embedding(dim: int = 768):
     fake = MagicMock()
-    fake.encode.return_value.tolist.return_value = [0.0] * dim
+    fake.embed_query.return_value = [0.0] * dim
+    fake.embed_documents.return_value = [[0.0] * dim]
+    fake.dimension = dim
+    fake.model_name = "gemini-embedding-2"
+    fake.provider = "gemini"
     return fake
 
 

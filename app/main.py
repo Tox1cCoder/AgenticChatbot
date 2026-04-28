@@ -108,6 +108,30 @@ def _log_widget_runtime_status():
         logger.warning("Widget runtime: Redis unavailable (%s) — widget flows will be degraded", e)
 
 
+def _ensure_qdrant_collection():
+    """Bootstrap the Qdrant collection through DocumentIndexService.
+
+    Single owner of collection bootstrap after Phase 11. Reads
+    ``settings.qdrant_collection_name`` and ``settings.rag_embedding_dimension``
+    from the same source as the rest of the indexing path, so a misconfigured
+    deployment surfaces immediately at startup.
+    """
+    try:
+        index_service = get_container().document_index_service()
+        index_service.ensure_collection()
+        logger.info(
+            "Qdrant collection ready: %s (dim=%d)",
+            settings.qdrant_collection_name,
+            settings.rag_embedding_dimension,
+        )
+    except Exception as exc:
+        logger.warning(
+            "ensure_collection failed at startup: %s. "
+            "Indexing will retry on first write.",
+            exc,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
@@ -118,6 +142,7 @@ async def lifespan(app: FastAPI):
     await init_agents()
     await init_skills()
     _log_widget_runtime_status()
+    _ensure_qdrant_collection()
     if settings.enable_client_runtime_bridge:
         _client_runtime_cleanup_task = asyncio.create_task(
             periodic_session_cleanup_task(
