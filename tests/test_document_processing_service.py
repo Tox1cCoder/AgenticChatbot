@@ -221,3 +221,47 @@ def test_process_document_passes_filename_to_index_document_reference(tmp_path):
         "document"
     ]
     assert document_ref.filename == "Blue-whale-A4-fact-sheet.pdf"
+
+
+def test_process_document_parses_xlsx_without_mineru(tmp_path):
+    """Excel uploads need a server-side parser because MinerU may emit no markdown."""
+    from openpyxl import Workbook
+
+    workbook_path = tmp_path / "Book1.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Sheet1"
+    worksheet.append(["Thang", "Thu nhap", "Thue", "Nhan"])
+    worksheet.append([1, 1000, 0.08, "=B2*(1-C2)"])
+    worksheet.append([2, 1500, 0.10, "=B3*(1-C3)"])
+    workbook.save(workbook_path)
+
+    service = _build_service(tmp_path)
+    service._process_with_mineru = AsyncMock(
+        side_effect=AssertionError(".xlsx should not be routed through MinerU")
+    )
+    service.document_index_service = MagicMock()
+    service.document_index_service.index_document.return_value = []
+
+    document_id = uuid4()
+    conversation_id = uuid4()
+    user_id = uuid4()
+
+    asyncio.run(
+        service.process_document(
+            file_path=str(workbook_path),
+            filename="Book1.xlsx",
+            document_id=str(document_id),
+            conversation_id=str(conversation_id),
+            user_id=str(user_id),
+        )
+    )
+
+    built_chunks = service.document_index_service.index_document.call_args.kwargs[
+        "built_chunks"
+    ]
+    content = "\n".join(chunk.content for chunk in built_chunks)
+    assert "Sheet: Sheet1" in content
+    assert "Thu nhap" in content
+    assert "1000" in content
+    assert "=B2*(1-C2)" in content

@@ -4,6 +4,7 @@ Tests pin:
   * The server owns a single ``SUPPORTED_UPLOAD_EXTENSIONS`` set.
   * MinerU helpers are format-neutral (no PDF-only naming).
   * Rich formats (``.pdf``, ``.docx``, ``.pptx``, ``.xlsx``, ``.html``, ``.md``) are accepted.
+  * Excel workbooks use the server-side openpyxl path, not MinerU markdown output.
   * Unknown extensions are rejected.
 """
 
@@ -55,11 +56,14 @@ def test_mineru_helper_names_are_format_neutral():
         )
 
 
-def test_process_document_routes_rich_formats_through_mineru():
-    """The dispatch switch treats all rich formats uniformly."""
+def test_process_document_routes_supported_rich_formats_to_server_parsers():
+    """The dispatch switch keeps Excel off the MinerU markdown path."""
     src = inspect.getsource(DocumentProcessingService.process_document)
-    # Rich formats must share a single MinerU entry point.
-    for ext in (".pdf", ".docx", ".pptx", ".xlsx", ".html", ".md"):
+    assert ".xlsx" in DocumentProcessingService.EXCEL_EXTENSIONS
+    assert ".xlsx" not in DocumentProcessingService.MINERU_EXTENSIONS
+    assert "_process_excel_workbook" in src
+    for ext in (".pdf", ".docx", ".pptx", ".html", ".md"):
+        assert ext in DocumentProcessingService.MINERU_EXTENSIONS
         assert ext in src, (
             f"Expected process_document to dispatch {ext} through MinerU routing"
         )

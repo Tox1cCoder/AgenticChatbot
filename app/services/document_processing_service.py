@@ -97,8 +97,9 @@ class DocumentProcessingService:
     SUPPORTED_UPLOAD_EXTENSIONS: frozenset[str] = frozenset(
         {".txt", ".pdf", ".docx", ".pptx", ".xlsx", ".html", ".md"}
     )
+    EXCEL_EXTENSIONS: frozenset[str] = frozenset({".xlsx"})
     MINERU_EXTENSIONS: frozenset[str] = frozenset(
-        {".pdf", ".docx", ".pptx", ".xlsx", ".html", ".md"}
+        {".pdf", ".docx", ".pptx", ".html", ".md"}
     )
 
     @classmethod
@@ -288,15 +289,20 @@ class DocumentProcessingService:
 
         # Dispatch on extension.
         # * .txt goes through the plain-text loader.
-        # * Rich formats (.pdf, .docx, .pptx, .xlsx, .html, .md) all go
-        #   through the unified MinerU pipeline so they produce normalized
-        #   blocks with page/section metadata.
+        # * .xlsx uses openpyxl because MinerU may return success without
+        #   emitting markdown for spreadsheet workbooks.
+        # * Other rich formats (.pdf, .docx, .pptx, .html, .md) go through
+        #   the unified MinerU pipeline so they produce normalized blocks
+        #   with page/section metadata.
         ext = os.path.splitext(filename)[1].lower()
         if ext == ".txt":
             loader = TextLoader(file_path, encoding="utf-8")
             documents = loader.load()
             chunks = self._create_chunks(documents)
             chunks_with_metadata = [{"text": chunk} for chunk in chunks]
+
+        elif ext in self.EXCEL_EXTENSIONS:
+            chunks_with_metadata = self._process_excel_workbook(file_path, filename)
 
         elif ext in self.MINERU_EXTENSIONS:
             chunks_with_metadata = await self._process_with_mineru(
@@ -668,6 +674,132 @@ class DocumentProcessingService:
         )
         split_docs = text_splitter.split_documents(documents)
         return [doc.page_content for doc in split_docs]
+
+    def _process_excel_workbook(
+        self,
+        file_path: str,
+        original_filename: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Convert an Excel workbook into text chunks without MinerU."""
+        try:
+            from openpyxl import load_workbook
+        except ImportError as exc:
+            raise RuntimeError("openpyxl is required to parse .xlsx uploads") from exc
+
+        formula_workbook = load_workbook(file_path, data_only=False, read_only=True)
+        value_workbook = load_workbook(file_path, data_only=True, read_only=True)
+
+        try:
+            chunks_with_metadata: list[dict[str, Any]] = []
+            value_sheets = {sheet.title: sheet for sheet in value_workbook.worksheets}
+
+            for sheet_index, formula_sheet in enumerate(formula_workbook.worksheets):
+                value_sheet = value_sheets.get(formula_sheet.title)
+                rows = self._extract_excel_rows(formula_sheet, value_sheet)
+                if not rows:
+                    continue
+
+                text = self._excel_rows_to_markdown(formula_sheet.title, rows)
+                chunks_with_metadata.append(
+                    {
+                        "text": text,
+                        "page_start": sheet_index,
+                        "page_end": sheet_index,
+                        "has_images": False,
+                        "image_count": 0,
+                        "has_tables": True,
+                        "table_count": 1,
+                        "sheet_name": formula_sheet.title,
+                        "source": original_filename,
+                    }
+                )
+
+            if chunks_with_metadata:
+                return chunks_with_metadata
+
+            return [
+                {
+                    "text": f"Workbook {original_filename or Path(file_path).name} contains no non-empty sheets.",
+                    "page_start": None,
+                    "page_end": None,
+                    "has_images": False,
+                    "image_count": 0,
+                    "has_tables": False,
+                    "table_count": 0,
+                    "source": original_filename,
+                }
+            ]
+        finally:
+            formula_workbook.close()
+            value_workbook.close()
+
+    def _extract_excel_rows(self, formula_sheet: Any, value_sheet: Any | None) -> list[list[str]]:
+        rows: list[list[str]] = []
+        value_rows = value_sheet.iter_rows() if value_sheet is not None else None
+
+        for formula_row in formula_sheet.iter_rows():
+            value_row = next(value_rows, []) if value_rows is not None else []
+            values: list[str] = []
+
+            for index, formula_cell in enumerate(formula_row):
+                value_cell = value_row[index] if index < len(value_row) else None
+                display_value = (
+                    value_cell.value
+                    if value_cell is not None and value_cell.value is not None
+                    else formula_cell.value
+                )
+                values.append(self._stringify_excel_cell(display_value))
+
+            while values and not values[-1]:
+                values.pop()
+
+            if values and any(value.strip() for value in values):
+                rows.append(values)
+
+        return rows
+
+    @classmethod
+    def _excel_rows_to_markdown(cls, sheet_name: str, rows: list[list[str]]) -> str:
+        column_count = max((len(row) for row in rows), default=0)
+        if column_count == 0:
+            return f"# Sheet: {sheet_name}"
+
+        padded_rows = [row + [""] * (column_count - len(row)) for row in rows]
+        header = [
+            value if value else f"Column {index + 1}"
+            for index, value in enumerate(padded_rows[0])
+        ]
+        data_rows = padded_rows[1:]
+
+        lines = [
+            f"# Sheet: {sheet_name}",
+            "",
+            "| " + " | ".join(cls._escape_markdown_table_cell(value) for value in header) + " |",
+            "| " + " | ".join("---" for _ in header) + " |",
+        ]
+        for row in data_rows:
+            lines.append(
+                "| " + " | ".join(cls._escape_markdown_table_cell(value) for value in row) + " |"
+            )
+
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _stringify_excel_cell(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, datetime):
+            return value.isoformat(sep=" ")
+        return str(value)
+
+    @staticmethod
+    def _escape_markdown_table_cell(value: str) -> str:
+        return (
+            value.replace("\\", "\\\\")
+            .replace("|", "\\|")
+            .replace("\r", " ")
+            .replace("\n", " ")
+        )
 
     def _parse_content_list_json(self, content_list_path: Path) -> list[dict[str, Any]]:
         """
