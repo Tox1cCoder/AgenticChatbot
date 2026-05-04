@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import logging
+from typing import Any
 from uuid import UUID
 
 from app.factories.conversation_factory import ConversationFactory
@@ -15,6 +19,8 @@ from app.utils.validation.conversation_validation import ConversationValidationU
 from app.utils.validation.pagination_validation import validate_pagination_params
 from app.utils.validation.user_validation import UserValidationUtils
 
+logger = logging.getLogger(__name__)
+
 
 class ConversationService(IConversationService):
     """Service layer for Conversation operations"""
@@ -24,10 +30,17 @@ class ConversationService(IConversationService):
         conversation_repository: ConversationRepository,
         user_validation_utils: UserValidationUtils,
         conversation_validation_utils: ConversationValidationUtils,
+        ai_service: Any | None = None,
+        checkpoint_manager: Any | None = None,
     ):
         self.repository = conversation_repository
         self.user_validation_utils = user_validation_utils
         self.conversation_validation_utils = conversation_validation_utils
+        # Optional dependencies (Memory Refactor 2026-04-29) — used to clear
+        # in-process memory caches and LangGraph checkpoint state when a
+        # conversation is deleted. Wired through the DI container.
+        self.ai_service = ai_service
+        self.checkpoint_manager = checkpoint_manager
 
     def _convert_to_read_schema(
         self, conversation_entity, include: list[str] = None
@@ -159,4 +172,26 @@ class ConversationService(IConversationService):
 
     def delete_conversation(self, conversation_id: UUID, owner_id: UUID) -> bool:
         self.conversation_validation_utils.validate_conversation_access(owner_id, conversation_id)
-        return self.repository.delete(conversation_id)
+        deleted = self.repository.delete(conversation_id)
+        if deleted:
+            # Drop cached prompt history so a future re-creation under the
+            # same UUID does not see stale memory.
+            if self.ai_service is not None:
+                with contextlib.suppress(Exception):
+                    self.ai_service.invalidate_history_cache(str(conversation_id))
+            # Best-effort checkpoint thread cleanup. Errors are non-fatal —
+            # the conversation row is already soft-deleted.
+            if self.checkpoint_manager is not None:
+                with contextlib.suppress(Exception):
+                    asyncio.create_task(self._delete_checkpoint_thread_async(str(conversation_id)))
+        return deleted
+
+    async def _delete_checkpoint_thread_async(self, thread_id: str) -> None:
+        try:
+            await self.checkpoint_manager.delete_thread(thread_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Checkpoint cleanup on conversation delete failed (thread=%s): %s",
+                thread_id,
+                exc,
+            )

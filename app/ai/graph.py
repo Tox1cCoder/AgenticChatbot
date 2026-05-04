@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import RemoveMessage
 from langgraph.types import Command, interrupt
 from qdrant_client import QdrantClient
 
@@ -28,6 +29,7 @@ from .agents.rag_agent import RAGAgent
 from .agents.router import Router
 from .agents.search_agent import SearchAgent
 from .hand_off_tool import MAX_DELEGATION_DEPTH
+from .history import ConversationHistoryProvider
 from .hitl_config import build_interrupt_response, requires_human_approval
 from .memory import get_memory_manager
 from .rag_tool_actions import execute_search_documents_action
@@ -43,7 +45,6 @@ from .schemas import (
     TodoStatus,
     WorkflowExecutionRequest,
 )
-from .summarization_middleware import summarize_for_state
 from .todo_actions import apply_write_todos_action
 from .token_instrumentation import (
     HistoryBudgetConfig,
@@ -81,8 +82,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         checkpointer: BaseCheckpointSaver | None = None,
         document_repository: Optional["DocumentRepository"] = None,
         runtime_model_resolver: IRuntimeModelResolver | None = None,
+        history_provider: ConversationHistoryProvider | None = None,
     ):
         self.qdrant_client = qdrant_client
+        # Canonical prompt-history source. When ``None`` the workflow falls
+        # back to the legacy ``MemoryManager``-driven path so tests that
+        # construct ``MultiAgentWorkflow.__new__`` directly keep working.
+        self.history_provider = history_provider
         self.router = Router()
         self.chat_agent = ChatAgent(runtime_model_resolver=runtime_model_resolver)
         self.rag_agent = RAGAgent(
@@ -207,35 +213,87 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     # Shared Helper Methods
     # ============================================================
 
+    async def _get_history_context(
+        self,
+        conversation_id: str | None,
+        user_id: str | None,
+        *,
+        agent_key: str = "chat",
+        current_message_id: str | None = None,
+    ):
+        """Build a full ``ConversationHistoryContext`` from the provider.
+
+        Returns ``None`` when the provider is not wired (e.g. tests that
+        construct ``MultiAgentWorkflow.__new__`` directly) or when ids are
+        missing — callers must handle this and fall back to the legacy path.
+        """
+        if not conversation_id or not user_id or self.history_provider is None:
+            return None
+        try:
+            return await self.history_provider.build_context(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                current_message_id=current_message_id,
+                agent_key=agent_key,
+            )
+        except Exception as exc:
+            logger.warning(
+                "History provider failed for %s/%s: %s",
+                conversation_id,
+                user_id,
+                exc,
+            )
+            return None
+
     async def _get_conversation_history(
         self,
         conversation_id: str | None,
         user_id: str | None,
         agent_key: str | None = None,
+        *,
+        state: GraphState | None = None,
     ) -> list:
         """
         Get conversation history with caching and budget trimming.
 
-        Uses a bounded TTLCache (auto-evicts after ``_history_cache_ttl_seconds``)
-        and a per-conversation ``asyncio.Lock`` to prevent duplicate DB lookups
-        when concurrent requests hit the same conversation.
+        When the workflow is wired with a ``ConversationHistoryProvider``
+        (production path), the provider is the single source of truth: it
+        returns DB-backed messages already excluding the current user turn
+        by ``user_message_id`` and the durable summary cursor. The summary
+        text is mirrored into ``state['history_summary']`` so existing
+        agent nodes that read that field keep working.
+
+        When the provider is absent (legacy/test path) we fall back to the
+        ``MemoryManager`` + tail-position exclusion.
 
         History is trimmed according to agent-specific settings:
         - {agent_key}_history_max_messages
         - {agent_key}_history_max_tokens
-
-        Args:
-            conversation_id: The conversation UUID
-            user_id: The user UUID
-            agent_key: Agent type key (chat, rag, search, planning) for budget lookup
         """
         if not conversation_id or not user_id:
             return []
 
-        cache_key = conversation_id
+        # Provider path — preferred.
+        if self.history_provider is not None:
+            current_message_id = None
+            if state is not None:
+                current_message_id = state.get("user_message_id")
+            context = await self._get_history_context(
+                conversation_id,
+                user_id,
+                agent_key=agent_key or "chat",
+                current_message_id=current_message_id,
+            )
+            if context is not None:
+                if state is not None and context.summary:
+                    state["history_summary"] = context.summary
+                    if context.summary_message_id:
+                        state["summary_cursor_message_id"] = context.summary_message_id
+                return list(context.messages)
 
+        # Legacy fallback (no provider wired).
+        cache_key = conversation_id
         async with self._history_locks[cache_key]:
-            # TTLCache handles expiry automatically — a simple ``in`` check suffices.
             if cache_key in self._history_cache:
                 cached_history = self._history_cache[cache_key]
                 if agent_key:
@@ -254,7 +312,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 )
                 history = conv_memory.get_recent_messages(limit=None, exclude_last=1)
 
-                # Cache the full (untrimmed) history; TTLCache auto-evicts.
                 self._history_cache[cache_key] = history
 
                 if agent_key:
@@ -271,6 +328,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     def invalidate_history_cache(self, conversation_id: str) -> None:
         """Invalidate cached history for a conversation (call when new messages added)."""
         self._history_cache.pop(conversation_id, None)
+        if self.history_provider is not None:
+            self.history_provider.invalidate(conversation_id)
 
     def _find_last_human_message_index(self, messages: list) -> int | None:
         for idx in range(len(messages) - 1, -1, -1):
@@ -314,14 +373,28 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         ai_kwargs = {"content": response.message.content}
         if response.message.tool_calls:
             ai_kwargs["tool_calls"] = response.message.tool_calls
+        else:
+            # Stamp the final assistant turn with the reserved DB id so the
+            # service writes the same id we already advertised to the graph.
+            # Intermediate tool-calling AIMessages must NOT carry this id —
+            # they are not the user-visible final reply.
+            assistant_message_id = state.get("assistant_message_id")
+            if assistant_message_id:
+                ai_kwargs["id"] = assistant_message_id
         state.setdefault("messages", []).append(AIMessage(**ai_kwargs))
 
         return state
 
     def _build_initial_state_from_request(self, request: WorkflowExecutionRequest) -> GraphState:
         tasks = list(request.planning.tasks)
+        # Stamp the current-turn HumanMessage with the persisted DB id so
+        # downstream nodes can identify it uniquely (and so checkpoint
+        # compaction can RemoveMessage it by id later).
+        human_message_kwargs: dict[str, Any] = {"content": request.message}
+        if request.user_message_id:
+            human_message_kwargs["id"] = request.user_message_id
         initial_state: GraphState = {
-            "messages": [HumanMessage(content=request.message)],
+            "messages": [HumanMessage(**human_message_kwargs)],
             "context": {},
         }
 
@@ -333,6 +406,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             initial_state["device_id"] = request.device_id
         if request.model_request is not None:
             initial_state["model_request"] = request.model_request
+        if request.user_message_id is not None:
+            initial_state["user_message_id"] = request.user_message_id
+        if request.assistant_message_id is not None:
+            initial_state["assistant_message_id"] = request.assistant_message_id
         initial_state["selected_agent"] = None
         initial_state["response"] = None
         initial_state["persona"] = request.persona
@@ -507,7 +584,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     def _build_graph(self) -> StateGraph:
         workflow = StateGraph(GraphState)
 
-        # Add summarization node first - runs ONCE at start of each request
+        # Memory refactor 2026-04-29: durable summary refresh now happens
+        # after assistant persistence, not on the request hot path.
+        # ``_summarization_node`` is kept as a no-op fallback so any in-flight
+        # checkpoints that previously routed through "summarize" still resolve.
         workflow.add_node("summarize", self._summarization_node)
         workflow.add_node("route", self._route_node)
         workflow.add_node("chat_agent", self._chat_node)
@@ -521,10 +601,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         workflow.add_node("approval", self._approval_node)
         workflow.add_node("tools", self._tool_node)
 
-        # Route: START -> summarize -> route -> agents
-        # Summarization runs ONCE before routing, not on every agent iteration
-        workflow.add_edge(START, "summarize")
-        workflow.add_edge("summarize", "route")
+        # START -> route directly. Long-term summarization no longer runs on
+        # the streaming hot path — it is refreshed after the assistant turn
+        # is persisted (see MessageService).
+        workflow.add_edge(START, "route")
 
         workflow.add_conditional_edges(
             "route",
@@ -1015,19 +1095,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         )
 
     async def _summarization_node(self, state: GraphState) -> GraphState:
-        """
-        Summarization node that runs ONCE at the start of each user request.
-        """
-        try:
-            conversation_id: str | None = state.get("conversation_id")
-            # This will check thresholds and apply summarization if needed.
-            # summarize_for_state is fail-closed: on any error it returns state unchanged.
-            state = await summarize_for_state(state, conversation_id=conversation_id)
-        except Exception as e:
-            # Defensive catch — summarize_for_state is already fail-closed but keep
-            # the node from crashing the graph on any unexpected exception.
-            logger.warning("Summarization node error (continuing anyway): %s", e)
+        """No-op compatibility node.
 
+        Long-term summary refresh now happens after assistant persistence,
+        not on the streaming hot path. This node only exists so that any
+        legacy checkpoint that previously routed through ``summarize`` does
+        not error out — it just passes the state through unchanged.
+        """
         return state
 
     async def _route_node(self, state: GraphState) -> GraphState:
@@ -1081,6 +1155,56 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             return self.document_repository.count_by_conversation(UUID(conversation_id)) > 0
         except (ValueError, Exception):
             return False
+
+    async def _compact_checkpoint_after_terminal_response(
+        self,
+        *,
+        config: dict[str, Any] | None,
+        thread_id: str | None,
+    ) -> None:
+        """Drop checkpoint messages once the request reaches a terminal state.
+
+        Checkpoints are valuable for HITL resume mid-turn, but once the graph
+        finishes (no pending ``next`` nodes) the message history in the
+        checkpoint is just stale duplicate transcript memory — the canonical
+        copy lives in PostgreSQL. Issuing ``RemoveMessage`` for every message
+        with an id reduces checkpoint size and prevents the LangGraph state
+        from drifting from DB truth across long conversations.
+
+        No-op when there is no checkpointer, no thread, or the graph is in an
+        interrupted state (snapshot.next non-empty).
+        """
+        if not self.checkpointer or not config or not thread_id:
+            return
+        try:
+            snapshot = await self.graph.aget_state(config)
+        except Exception as exc:
+            logger.warning("Checkpoint compaction aget_state failed: %s", exc)
+            return
+        if snapshot is None:
+            return
+        if getattr(snapshot, "next", None):
+            # Mid-turn (interrupt or pending tool); leave state alone.
+            return
+
+        values = getattr(snapshot, "values", None) or {}
+        messages = values.get("messages", []) if isinstance(values, dict) else []
+        removals: list[RemoveMessage] = []
+        for message in messages:
+            msg_id = getattr(message, "id", None)
+            if msg_id:
+                removals.append(RemoveMessage(id=msg_id))
+        if not removals:
+            return
+
+        try:
+            await self.graph.aupdate_state(config, {"messages": removals})
+        except Exception as exc:
+            logger.warning(
+                "Checkpoint compaction aupdate_state failed for thread=%s: %s",
+                thread_id,
+                exc,
+            )
 
     def _build_graph_config(self, thread_id: str | None = None) -> dict[str, Any] | None:
         config: dict[str, Any] = {}
@@ -1341,7 +1465,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         conversation_history = await self._get_conversation_history(
-            conversation_id, user_id, agent_key="chat"
+            conversation_id, user_id, agent_key="chat", state=state
         )
 
         attachments = self._get_state_attachments(state)
@@ -1384,7 +1508,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         conversation_history = await self._get_conversation_history(
-            conversation_id, user_id, agent_key="rag"
+            conversation_id, user_id, agent_key="rag", state=state
         )
         device_id = state.get("device_id")
 
@@ -1651,7 +1775,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         conversation_history = await self._get_conversation_history(
-            conversation_id, user_id, agent_key="search"
+            conversation_id, user_id, agent_key="search", state=state
         )
 
         current_turn_messages = self._get_current_turn_messages(messages)
@@ -1680,7 +1804,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         # NOTE: Image generator deliberately borrows the "chat" history budget.
         # If independent tuning is needed, add image_generator_history_max_* settings.
         conversation_history = await self._get_conversation_history(
-            conversation_id, user_id, agent_key="chat"
+            conversation_id, user_id, agent_key="chat", state=state
         )
 
         current_turn_messages = self._get_current_turn_messages(messages)
@@ -1708,7 +1832,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         conversation_history = await self._get_conversation_history(
-            conversation_id, user_id, agent_key="chat"
+            conversation_id, user_id, agent_key="chat", state=state
         )
 
         current_turn_messages = self._get_current_turn_messages(messages)
@@ -1742,7 +1866,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         conversation_history = await self._get_conversation_history(
-            conversation_id, user_id, agent_key="planning"
+            conversation_id, user_id, agent_key="planning", state=state
         )
 
         context = state.get("context", {})
@@ -2422,6 +2546,14 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         ):
             return agent_response
 
+        # Compact the checkpoint so old turns do not leak into long
+        # conversations on the non-streaming path. Mirrors the behaviour
+        # ``execute_request_stream`` already has after a terminal response.
+        with contextlib.suppress(Exception):
+            await self._compact_checkpoint_after_terminal_response(
+                config=config, thread_id=thread_id
+            )
+
         return agent_response
 
     async def resume_execution(self, thread_id: str, resume_value: Any) -> AgentResponse | None:
@@ -2954,6 +3086,12 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     response.metadata["total_iterations"] = total_iterations
 
                 yield {"type": "complete", "response": response}
+                # Compact the checkpoint so old turns do not leak into long
+                # conversations. Skip on interrupt/pending state.
+                with contextlib.suppress(Exception):
+                    await self._compact_checkpoint_after_terminal_response(
+                        config=config, thread_id=thread_id
+                    )
             else:
                 yield {"type": "error", "error": NO_RESPONSE_GENERATED}
         except Exception as e:
@@ -3559,6 +3697,7 @@ def create_workflow(
     checkpointer: BaseCheckpointSaver | None = None,
     document_repository: Optional["DocumentRepository"] = None,
     runtime_model_resolver: IRuntimeModelResolver | None = None,
+    history_provider: ConversationHistoryProvider | None = None,
 ) -> MultiAgentWorkflow:
     """
     Create multi-agent workflow with required shared dependencies.
@@ -3569,4 +3708,5 @@ def create_workflow(
         checkpointer=checkpointer,
         document_repository=document_repository,
         runtime_model_resolver=runtime_model_resolver,
+        history_provider=history_provider,
     )

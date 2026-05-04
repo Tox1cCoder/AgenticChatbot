@@ -158,11 +158,19 @@ def _format_messages_for_summary(messages: list[BaseMessage]) -> str:
     return "\n\n".join(formatted_parts)
 
 
-def _get_summarization_model(config: SummarizationConfig) -> ChatGoogleGenerativeAI:
-    """Create a LangChain model for summarization."""
+def _get_summarization_model(
+    config: SummarizationConfig,
+    *,
+    api_key_override: str | None = None,
+) -> ChatGoogleGenerativeAI:
+    """Create a LangChain model for summarization.
+
+    ``api_key_override`` lets per-user credentials replace the global key —
+    important for tenants that bring their own model billing.
+    """
     kwargs: dict[str, Any] = dict(
         model=config.model,
-        google_api_key=get_api_key(),
+        google_api_key=get_api_key(api_key_override=api_key_override),
         temperature=config.temperature,
     )
     if config.max_summary_tokens > 0:
@@ -189,16 +197,19 @@ async def generate_summary(
     messages_to_summarize: list[BaseMessage],
     config: SummarizationConfig | None = None,
     existing_summary: str | None = None,
+    *,
+    api_key_override: str | None = None,
 ) -> str:
     """Generate a summary of the given messages, optionally merging with an existing summary.
 
     Raises on failure — callers are responsible for catching and deciding whether to
-    skip state mutation (fail-closed behaviour).
+    skip state mutation (fail-closed behaviour). ``api_key_override`` lets per-user
+    credentials replace the global Gemini key.
     """
     if config is None:
         config = _get_config()
 
-    model = _get_summarization_model(config)
+    model = _get_summarization_model(config, api_key_override=api_key_override)
 
     formatted_messages = _format_messages_for_summary(messages_to_summarize)
 

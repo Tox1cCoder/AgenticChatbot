@@ -7,7 +7,9 @@ from qdrant_client import QdrantClient
 
 from app.ai.agents.planning_agent import PlanningAgent
 from app.ai.checkpoint import CheckpointManager
+from app.ai.conversation_summarizer import ConversationSummarizer
 from app.ai.graph import create_workflow
+from app.ai.history import ConversationHistoryProvider
 from app.ai.mcp_integration import MCPManager
 from app.ai.mcp_registry import MCPRegistry
 from app.ai.planning_runtime_adapter import PlanningRuntimeAdapter
@@ -26,6 +28,9 @@ from app.interfaces.planning_runtime_interface import IPlanningRuntimeService
 from app.interfaces.task_plan_service_interface import ITaskPlanService
 from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.repositories.conversation import ConversationRepository
+from app.repositories.conversation_memory_summary import (
+    ConversationMemorySummaryRepository,
+)
 from app.repositories.document import DocumentRepository
 from app.repositories.document_chunk import DocumentChunkRepository
 from app.repositories.document_image import DocumentImageRepository
@@ -222,6 +227,18 @@ class Container(containers.DeclarativeContainer):
         session_factory=db.provided.session,
     )
 
+    conversation_memory_summary_repository = providers.Factory(
+        ConversationMemorySummaryRepository,
+        session_factory=db.provided.session,
+    )
+
+    history_provider = providers.Singleton(
+        ConversationHistoryProvider,
+        message_repository=message_repository,
+        summary_repository=conversation_memory_summary_repository,
+        settings=providers.Object(settings),
+    )
+
     # Validation utils
     user_validation_utils = providers.Factory(
         UserValidationUtils,
@@ -259,6 +276,15 @@ class Container(containers.DeclarativeContainer):
         provider_service=provider_service,
     )
 
+    # Durable summarizer resolves Gemini credentials directly from provider
+    # settings so it never passes another provider's key to the Gemini summary
+    # model.
+    conversation_summarizer = providers.Singleton(
+        ConversationSummarizer,
+        settings=providers.Object(settings),
+        provider_service=provider_service,
+    )
+
     # Planning agent
     planning_agent = providers.Factory(
         PlanningAgent,
@@ -270,13 +296,6 @@ class Container(containers.DeclarativeContainer):
         UserService,
         user_repository=user_repository,
         user_validation_utils=user_validation_utils,
-    )
-
-    conversation_service: providers.Provider[IConversationService] = providers.Factory(
-        ConversationService,
-        conversation_repository=conversation_repository,
-        user_validation_utils=user_validation_utils,
-        conversation_validation_utils=conversation_validation_utils,
     )
 
     def _get_checkpointer():
@@ -296,6 +315,7 @@ class Container(containers.DeclarativeContainer):
             checkpointer=checkpointer,
             document_repository=container.document_repository(),
             runtime_model_resolver=container.model_config_service(),
+            history_provider=container.history_provider(),
         )
 
         return AIService(
@@ -305,6 +325,15 @@ class Container(containers.DeclarativeContainer):
         )
 
     ai_service = providers.Singleton(_create_ai_service)
+
+    conversation_service: providers.Provider[IConversationService] = providers.Factory(
+        ConversationService,
+        conversation_repository=conversation_repository,
+        user_validation_utils=user_validation_utils,
+        conversation_validation_utils=conversation_validation_utils,
+        ai_service=ai_service,
+        checkpoint_manager=checkpoint_manager,
+    )
 
     planning_runtime_service: providers.Provider[IPlanningRuntimeService] = providers.Factory(
         PlanningRuntimeAdapter,
@@ -329,6 +358,8 @@ class Container(containers.DeclarativeContainer):
         tool_approval_repository=tool_approval_repository,
         hitl_interrupt_repository=hitl_interrupt_repository,
         task_plan_service=task_plan_service,
+        summary_repository=conversation_memory_summary_repository,
+        conversation_summarizer=conversation_summarizer,
     )
 
     feedback_service: providers.Provider[IFeedbackService] = providers.Factory(

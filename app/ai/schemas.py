@@ -130,6 +130,8 @@ class WorkflowExecutionRequest(BaseModel):
     attachments: list[Any] | None = None
     model_request: dict[str, Any] | None = None
     planning: WorkflowPlanningContext = Field(default_factory=WorkflowPlanningContext)
+    user_message_id: str | None = None
+    assistant_message_id: str | None = None
 
 
 class ContinuationSignal(TypedDict, total=False):
@@ -197,6 +199,12 @@ class GraphState(TypedDict):
     history_summary: NotRequired[str | None]
     history_summary_updated_at: NotRequired[str | None]
     summary_cursor_message_id: NotRequired[str | None]
+    # Stable DB message identifiers for the current turn. ``user_message_id``
+    # is the persisted prompt; ``assistant_message_id`` is reserved before
+    # generation so the final ``AIMessage`` can carry the same ID that the
+    # service later writes to the ``messages`` table.
+    user_message_id: NotRequired[str | None]
+    assistant_message_id: NotRequired[str | None]
 
 
 class GraphStateView:

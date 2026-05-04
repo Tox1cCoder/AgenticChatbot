@@ -82,6 +82,17 @@ class WorkflowExecutionRequest(BaseModel):
     attachments: list[Any] | None = None
     model_request: dict[str, Any] | None = None
     planning: WorkflowPlanningContext = Field(default_factory=WorkflowPlanningContext)
+    # Stable database message identifiers that flow through the graph so the
+    # current user turn can be excluded by ID rather than by tail position,
+    # and the final assistant reply can be persisted with a known ID.
+    user_message_id: str | None = Field(
+        default=None,
+        description="DB id of the persisted user message that triggered this execution",
+    )
+    assistant_message_id: str | None = Field(
+        default=None,
+        description="Reserved DB id for the assistant message this execution will produce",
+    )
 
 
 class WorkflowResponseMessage(BaseModel):

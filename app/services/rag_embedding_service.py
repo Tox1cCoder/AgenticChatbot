@@ -39,6 +39,44 @@ class RAGEmbeddingService(Protocol):
 
 
 @dataclass
+class SentenceTransformerRAGEmbeddingService:
+    """Offline-only fallback adapter wrapping a local SentenceTransformer model.
+
+    Selected when ``rag_embedding_provider='sentence_transformers'``. Used for
+    development without GEMINI_API_KEY. Production runs with the Gemini
+    adapter; this class exists so the container fallback branch stays
+    importable.
+    """
+
+    model: Any
+    model_name: str
+    dimension: int
+    provider: str = field(default="sentence_transformers", init=False)
+
+    def embed_documents(
+        self,
+        texts: list[str],
+        *,
+        titles: list[str | None] | None = None,
+    ) -> list[list[float]]:
+        _ = titles
+        if not texts:
+            return []
+        vectors = self.model.encode(texts)
+        return [self._to_float_list(vector) for vector in vectors]
+
+    def embed_query(self, query: str) -> list[float]:
+        vector = self.model.encode(query)
+        return self._to_float_list(vector)
+
+    @staticmethod
+    def _to_float_list(vector: Any) -> list[float]:
+        if hasattr(vector, "tolist"):
+            vector = vector.tolist()
+        return [float(value) for value in list(vector)]
+
+
+@dataclass
 class GeminiRAGEmbeddingService:
     api_key: str
     model_name: str = "gemini-embedding-2"

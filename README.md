@@ -313,9 +313,33 @@ embedding migration" below).
 
 `MEMORY_MAX_MESSAGES`, `CHAT_HISTORY_MAX_MESSAGES` / `_TOKENS`, `RAG_HISTORY_MAX_*`, `SEARCH_HISTORY_MAX_*`, `PLANNING_HISTORY_MAX_*`.
 
-### Summarization middleware
+### Durable conversation memory (memory refactor 2026-04-29)
+
+Prompt memory is built in one place — `app.ai.history.ConversationHistoryProvider` — and combines a durable per-conversation summary stored in PostgreSQL (`conversation_memory_summaries`) with the recent unsummarized messages from the `messages` table. The summary cursor is a database `messages.id`, never a LangChain message id, so prompt history can never overlap with the summary text.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `MEMORY_CACHE_TTL_SECONDS` | `60` | TTL for the in-process prompt-history cache. |
+| `MEMORY_CACHE_MAX_CONVERSATIONS` | `256` | LRU cap before older conversations are evicted. |
+| `MEMORY_SUMMARY_MIN_UNSUMMARIZED_MESSAGES` | `60` | Refresh threshold; `0` disables. |
+| `MEMORY_SUMMARY_MIN_UNSUMMARIZED_TOKENS` | `18000` | Token threshold; `0` disables. |
+| `MEMORY_SUMMARY_KEEP_MESSAGES` | `8` | Newest messages to keep out of the summary. |
+| `MEMORY_SUMMARY_MAX_TOKENS` | `1500` | Hard cap on the generated summary text. |
+| `MEMORY_SUMMARY_TIMEOUT_SECONDS` | `30` | Fail-closed timeout for the summarizer call. |
+
+Operational behaviour:
+
+- Summaries are best-effort and fail-closed — a timeout or model error leaves the previous summary in place.
+- Prompt history is cached by `(conversation_id, user_id, current_message_id, agent_key, summary_cursor, summary_version)`; transcript writes invalidate the cache.
+- Soft-deleted messages and empty paused/interrupt assistant placeholders are excluded from prompt history.
+- Checkpoint state is **not** long-term memory. After a terminal response, the workflow issues `RemoveMessage` for every checkpoint message id; PostgreSQL is the canonical transcript.
+- AI SDK clients may post their full UI history at `POST /api/chat/{conversation_id}`; the server only consumes the latest user message and rebuilds prior memory from the database.
+
+### Summarization middleware (rolling, off the hot path)
 
 `ENABLE_SUMMARIZATION`, `SUMMARIZATION_TRIGGER_TOKENS`, `SUMMARIZATION_TRIGGER_MESSAGES`, `SUMMARIZATION_TRIGGER_FRACTION`, `SUMMARIZATION_MODEL_CONTEXT_SIZE`, `SUMMARIZATION_KEEP_MESSAGES`, `SUMMARIZATION_MODEL`, `SUMMARIZATION_MAX_SUMMARY_TOKENS`, `SUMMARIZATION_TIMEOUT_SECONDS`.
+
+After the memory refactor, summarization no longer runs on the streaming hot path. `MessageService.refresh_summary_after_turn` schedules the durable refresh via `asyncio.create_task` once the assistant message is persisted. The `_summarization_node` graph node was reduced to a no-op; `START` now connects directly to `route` so streaming yields the first user-facing token without waiting on a summary call.
 
 ### Document processing
 
@@ -439,13 +463,14 @@ streamlit run demo.py
 
 The agent workflow is a **LangGraph state machine** defined in [`app/ai/graph.py`](app/ai/graph.py). High-level steps:
 
-1. **Hydrate history** — `MemoryManager` loads past messages (with TTL cache + per-conversation locks) and applies `chat_history_max_messages` / `_tokens` budgets.
-2. **Summarisation middleware** — if token / message / fraction thresholds are exceeded, `summarize_for_state` compresses older turns and keeps the last `SUMMARIZATION_KEEP_MESSAGES` intact (fail-closed on timeout).
-3. **Router** — [`Router`](app/ai/agents/router.py) invokes Gemini with `ROUTER_SYSTEM_PROMPT` and returns one of `chat_agent` / `rag_agent` / `search_agent` / `image_generator_agent` / `planning_agent` / `canvas_agent`.
+1. **Persist current user message** — `MessageService` writes the row to PostgreSQL and reserves the assistant message id. Both ids ride into the workflow so prompt history can exclude the current turn by id (not by tail position) and the final assistant `AIMessage` carries the same id later persisted to the DB.
+2. **Hydrate prompt memory** — `ConversationHistoryProvider` (`app/ai/history.py`) returns the durable summary plus recent unsummarized DB messages after the summary cursor. Soft-deleted rows and empty paused/interrupt placeholders are filtered. Per-agent budgets (`chat_history_max_messages` / `_tokens`, …) trim the result.
+3. **Router** — [`Router`](app/ai/agents/router.py) invokes Gemini with `ROUTER_SYSTEM_PROMPT` and returns one of `chat_agent` / `rag_agent` / `search_agent` / `image_generator_agent` / `planning_agent` / `canvas_agent`. (The legacy `summarize` node is kept as a no-op; `START` connects directly to `route`.)
 4. **Agent execution** — the selected agent runs a ReAct-style loop with deferred tool binding, HITL gating, and streaming.
 5. **Tool execution** — `tool_execution.execute_tool_calls` runs each tool with per-tool timeout, retries, validation, and truncated `ToolMessage` bodies (full artifacts preserved for the UI).
 6. **Auto-continue** — on hitting iteration limits, continuation rounds run until user-configured caps (`auto_continue_max_rounds`, `auto_continue_max_total_iterations`, `auto_continue_timeout_seconds`).
 7. **Stream** — every token, reasoning chunk, tool call, artifact, and interrupt is serialized as a structured SSE event.
+8. **Persist assistant reply, refresh durable summary, compact checkpoint** — once the terminal `complete` event is yielded, the service persists the assistant message, schedules a non-blocking durable summary refresh, and the workflow issues `RemoveMessage` for the checkpoint's transcript so it does not drift from DB truth.
 
 ### Agent cheat-sheet
 

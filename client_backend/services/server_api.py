@@ -473,7 +473,13 @@ class ServerAPIClient:
         Yields:
             SSE events from the server.
         """
-        payload = {"content": content}
+        # The AI SDK route expects the canonical ``{"messages": [...]}``
+        # payload; the server picks the latest user message and relies on
+        # server-side memory for prior turns. Sending the raw ``{"content":
+        # ...}`` shape produced 422s.
+        payload: dict[str, Any] = {
+            "messages": [{"role": "user", "content": content}],
+        }
         if device_id:
             canonical_device_id = str(UUID(str(device_id)))
             if str(device_id).strip().lower() != canonical_device_id:

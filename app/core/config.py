@@ -302,6 +302,35 @@ class Settings(BaseSettings):
         default=100,
         description="Number of messages to load per batch when hydrating memory from the database (max 100)",
     )
+    # Durable conversation memory (Memory Refactor 2026-04-29)
+    memory_cache_ttl_seconds: int = Field(
+        default=60,
+        description="TTL (seconds) for the in-process prompt-history cache used by ConversationHistoryProvider",
+    )
+    memory_cache_max_conversations: int = Field(
+        default=256,
+        description="Maximum number of conversations cached by ConversationHistoryProvider before LRU eviction",
+    )
+    memory_summary_min_unsummarized_messages: int = Field(
+        default=60,
+        description="Refresh the durable summary once this many unsummarized messages exist (0 disables the message threshold)",
+    )
+    memory_summary_min_unsummarized_tokens: int = Field(
+        default=18000,
+        description="Refresh the durable summary once unsummarized history exceeds this token estimate (0 disables the token threshold)",
+    )
+    memory_summary_keep_messages: int = Field(
+        default=8,
+        description="When refreshing the durable summary, keep this many newest messages out of the summary",
+    )
+    memory_summary_max_tokens: int = Field(
+        default=1500,
+        description="Approximate maximum tokens to allow in a generated durable summary",
+    )
+    memory_summary_timeout_seconds: int = Field(
+        default=30,
+        description="Maximum seconds to wait for a durable summary refresh before giving up and leaving the previous summary in place",
+    )
     chat_history_max_messages: int = Field(
         default=24,
         description="Maximum prior messages to include when building chat prompts (0 = no limit)",

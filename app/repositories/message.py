@@ -1,8 +1,9 @@
 from uuid import UUID
 
-from sqlalchemy import asc, desc, select
+from sqlalchemy import and_, asc, desc, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
+from app.models.enums import MessageRole
 from app.models.message import Message
 from app.repositories.command_strategy import DefaultCommandStrategy
 from app.repositories.query_strategy import DefaultQueryStrategy
@@ -40,7 +41,10 @@ class MessageCRUDStrategy(
 
         # Get paginated items
         offset = (page - 1) * limit
-        statement = select(Message).where(Message.conversation_id == conversation_id)
+        statement = select(Message).where(
+            Message.conversation_id == conversation_id,
+            Message.deleted_at.is_(None),
+        )
 
         # Apply eager loading if requested
         if include_feedback:
@@ -67,9 +71,12 @@ class MessageCRUDStrategy(
         return Paginator.create(items, total, page, limit)
 
     def count_by_conversation_id(self, db: Session, conversation_id: UUID) -> int:
-        """Count messages by conversation ID"""
-        statement = select(Message).where(Message.conversation_id == conversation_id)
-        return len(list(db.execute(statement).scalars().all()))
+        """Count messages by conversation ID using SQL ``COUNT`` and excluding soft-deleted rows."""
+        statement = select(func.count(Message.id)).where(
+            Message.conversation_id == conversation_id,
+            Message.deleted_at.is_(None),
+        )
+        return int(db.execute(statement).scalar() or 0)
 
     def get_by_user_id(
         self,
@@ -94,7 +101,10 @@ class MessageCRUDStrategy(
         statement = (
             select(Message)
             .join(Message.conversation)
-            .where(Message.conversation.has(owner_id=user_id))
+            .where(
+                Message.conversation.has(owner_id=user_id),
+                Message.deleted_at.is_(None),
+            )
         )
 
         # Apply eager loading if requested
@@ -122,13 +132,149 @@ class MessageCRUDStrategy(
         return Paginator.create(items, total, page, limit)
 
     def count_by_user_id(self, db: Session, user_id: UUID) -> int:
-        """Count messages by user ID"""
+        """Count messages by conversation owner using SQL ``COUNT`` and excluding soft-deleted rows."""
         statement = (
-            select(Message)
+            select(func.count(Message.id))
             .join(Message.conversation)
-            .where(Message.conversation.has(owner_id=user_id))
+            .where(
+                Message.conversation.has(owner_id=user_id),
+                Message.deleted_at.is_(None),
+            )
         )
-        return len(list(db.execute(statement).scalars().all()))
+        return int(db.execute(statement).scalar() or 0)
+
+    def get_prompt_history(
+        self,
+        db: Session,
+        conversation_id: UUID,
+        *,
+        before_message_id: UUID | None = None,
+        after_message_id: UUID | None = None,
+        limit: int | None = 50,
+    ) -> list[Message]:
+        """Return prompt-eligible messages for a conversation in ascending order.
+
+        Always filters out soft-deleted rows. When a cursor is supplied, the
+        ``(created_at, id)`` tuple of that anchor message is used to bound the
+        result strictly before/after the cursor. The newest ``limit`` rows in
+        the window are selected (DESC + limit) and then returned ASC so prompt
+        history reads naturally from oldest to newest.
+
+        ``limit=None`` (or ``0``) disables the cap. Empty paused or interrupted
+        assistant placeholders are filtered in Python — JSONB metadata
+        predicates differ across dialects and the candidate set is small.
+        """
+
+        before_anchor = self._lookup_anchor(db, before_message_id) if before_message_id else None
+        after_anchor = self._lookup_anchor(db, after_message_id) if after_message_id else None
+
+        clauses = [
+            Message.conversation_id == conversation_id,
+            Message.deleted_at.is_(None),
+        ]
+
+        if before_anchor is not None:
+            anchor_created_at, anchor_id = before_anchor
+            clauses.append(
+                or_(
+                    Message.created_at < anchor_created_at,
+                    and_(
+                        Message.created_at == anchor_created_at,
+                        Message.id < anchor_id,
+                    ),
+                )
+            )
+
+        if after_anchor is not None:
+            anchor_created_at, anchor_id = after_anchor
+            clauses.append(
+                or_(
+                    Message.created_at > anchor_created_at,
+                    and_(
+                        Message.created_at == anchor_created_at,
+                        Message.id > anchor_id,
+                    ),
+                )
+            )
+
+        statement = (
+            select(Message).where(*clauses).order_by(Message.created_at.desc(), Message.id.desc())
+        )
+        if limit is not None and limit > 0:
+            statement = statement.limit(limit)
+
+        rows = list(db.execute(statement).scalars().all())
+        rows.reverse()
+        return [row for row in rows if not self._is_hidden_artifact(row)]
+
+    @staticmethod
+    def _lookup_anchor(db: Session, message_id: UUID) -> tuple | None:
+        """Return ``(created_at, id)`` for the given message, or ``None`` if absent."""
+        statement = select(Message).where(Message.id == message_id)
+        anchor = db.execute(statement).scalar_one_or_none()
+        if anchor is None:
+            return None
+        return anchor.created_at, anchor.id
+
+    def get_summarization_window(
+        self,
+        db: Session,
+        conversation_id: UUID,
+        *,
+        after_message_id: UUID | None = None,
+        through_message_id: UUID | None = None,
+    ) -> list[Message]:
+        """Return all summary-eligible messages between cursors (inclusive of through)."""
+        clauses = [
+            Message.conversation_id == conversation_id,
+            Message.deleted_at.is_(None),
+        ]
+
+        if after_message_id is not None:
+            anchor = self._lookup_anchor(db, after_message_id)
+            if anchor is not None:
+                anchor_created_at, anchor_id = anchor
+                clauses.append(
+                    or_(
+                        Message.created_at > anchor_created_at,
+                        and_(
+                            Message.created_at == anchor_created_at,
+                            Message.id > anchor_id,
+                        ),
+                    )
+                )
+
+        if through_message_id is not None:
+            anchor = self._lookup_anchor(db, through_message_id)
+            if anchor is not None:
+                anchor_created_at, anchor_id = anchor
+                clauses.append(
+                    or_(
+                        Message.created_at < anchor_created_at,
+                        and_(
+                            Message.created_at == anchor_created_at,
+                            Message.id <= anchor_id,
+                        ),
+                    )
+                )
+
+        statement = (
+            select(Message).where(*clauses).order_by(Message.created_at.asc(), Message.id.asc())
+        )
+        rows = list(db.execute(statement).scalars().all())
+        return [row for row in rows if not self._is_hidden_artifact(row)]
+
+    @staticmethod
+    def _is_hidden_artifact(message: Message) -> bool:
+        """Empty paused/interrupt assistant placeholders are not real transcript turns."""
+        if message.sender != MessageRole.assistant.value:
+            return False
+        if (message.content or "").strip():
+            return False
+        metadata = message.message_metadata or {}
+        if metadata.get("paused") is True:
+            return True
+        return bool(metadata.get("interrupt"))
 
     def search_by_content(
         self,
@@ -253,6 +399,46 @@ class MessageRepository:
         """Delete message by ID"""
         with self.session_factory() as session:
             return self._crud_strategy.delete(session, id)
+
+    def get_prompt_history(
+        self,
+        conversation_id: UUID,
+        *,
+        before_message_id: UUID | None = None,
+        after_message_id: UUID | None = None,
+        limit: int | None = 50,
+    ) -> list[Message]:
+        """Return prompt-eligible messages for a conversation.
+
+        Excludes soft-deleted rows and empty paused/interrupt assistant
+        placeholders. Uses ``(created_at, id)`` cursor positioning so the
+        anchor message itself is never included. The newest ``limit`` rows in
+        the window are selected; pass ``None`` or ``0`` to disable the cap.
+        """
+        with self.session_factory() as session:
+            return self._crud_strategy.get_prompt_history(
+                session,
+                conversation_id,
+                before_message_id=before_message_id,
+                after_message_id=after_message_id,
+                limit=limit,
+            )
+
+    def get_summarization_window(
+        self,
+        conversation_id: UUID,
+        *,
+        after_message_id: UUID | None = None,
+        through_message_id: UUID | None = None,
+    ) -> list[Message]:
+        """Return summary-eligible messages strictly after ``after_message_id`` and up to (inclusive) ``through_message_id``."""
+        with self.session_factory() as session:
+            return self._crud_strategy.get_summarization_window(
+                session,
+                conversation_id,
+                after_message_id=after_message_id,
+                through_message_id=through_message_id,
+            )
 
     def get_latest_by_conversation(self, conversation_id: UUID) -> Message | None:
         """Retrieve the most recent message in a conversation."""
