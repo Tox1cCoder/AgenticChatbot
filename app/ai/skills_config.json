@@ -1,5 +1,8 @@
 {
   "skills": {
+    "browser": {
+      "enabled": true
+    },
     "codex-imagen": {
       "enabled": true
     },

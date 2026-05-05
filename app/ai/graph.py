@@ -975,11 +975,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             context["tool_artifacts"] = existing_artifacts
             state["context"] = context
 
-        # Always keep the original AIMessage with ALL tool_calls intact.
-        # Rejection ToolMessages must reference tool_call_ids present in the preceding
-        # AIMessage — stripping tool_calls would orphan them and cause the LLM to
-        # ignore the rejections (leading to hallucinated answers).
-        # The tools node filters out tool_calls that already have ToolMessages.
         state["messages"] = messages[:-1] + [last_message] + rejection_messages
 
         return state
@@ -1002,14 +997,32 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     def _route_tool_output(self, state: GraphState) -> str:
         state_view = GraphStateView(state)
         iteration_count = state_view.iteration_count()
-        max_iterations = settings.react_agent_max_iterations
+        max_iterations = max(1, int(settings.react_agent_max_iterations))
+        selected_agent = state_view.selected_agent() or "end"
+
+        if selected_agent != "end" and selected_agent not in self.agents:
+            return "end"
+
+        can_route_for_final_response = (
+            selected_agent != "end" and self._last_message_is_tool_output(state)
+        )
 
         # Soft-limit: if auto-continue is enabled, trigger continuation at
         # a fraction of the budget so the outer loop can start a new round
         # before the hard LangGraph recursion limit is hit.
         if settings.auto_continue_enabled:
-            soft_limit = int(max_iterations * settings.auto_continue_soft_limit_ratio)
+            soft_limit = max(1, int(max_iterations * settings.auto_continue_soft_limit_ratio))
             if iteration_count >= soft_limit:
+                if can_route_for_final_response:
+                    self._mark_force_final_response(
+                        state,
+                        reason="soft_budget",
+                        scope="runtime",
+                        count=iteration_count,
+                        limit=soft_limit,
+                    )
+                    return selected_agent
+
                 self._set_continuation_signal(
                     state,
                     should_continue=True,
@@ -1021,6 +1034,16 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 return "end"
 
         if iteration_count >= max_iterations:
+            if can_route_for_final_response:
+                self._mark_force_final_response(
+                    state,
+                    reason="max_iterations_reached",
+                    scope="runtime",
+                    count=iteration_count,
+                    limit=max_iterations,
+                )
+                return selected_agent
+
             if settings.auto_continue_enabled and state_view.messages():
                 self._set_continuation_signal(
                     state,
@@ -1039,14 +1062,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     count=iteration_count,
                     limit=max_iterations,
                 )
-            return "end"
-
-        selected_agent = state_view.selected_agent() or "end"
-
-        if selected_agent != "end" and selected_agent not in self.agents:
-            logger.warning(
-                f"Selected agent '{selected_agent}' not found in registry, ending conversation"
-            )
             return "end"
 
         return selected_agent
@@ -1208,9 +1223,17 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
     def _build_graph_config(self, thread_id: str | None = None) -> dict[str, Any] | None:
         config: dict[str, Any] = {}
-        recursion_limit = getattr(settings, "react_agent_recursion_limit", None)
-        if recursion_limit and recursion_limit > 0:
-            config["recursion_limit"] = recursion_limit
+        max_iterations = max(1, int(getattr(settings, "react_agent_max_iterations", 1) or 1))
+        min_recursion_limit = (2 * max_iterations) + 5
+        configured_recursion_limit = getattr(settings, "react_agent_recursion_limit", None)
+        recursion_limit = (
+            int(configured_recursion_limit)
+            if configured_recursion_limit and configured_recursion_limit > 0
+            else min_recursion_limit
+        )
+        if recursion_limit < min_recursion_limit:
+            recursion_limit = min_recursion_limit
+        config["recursion_limit"] = recursion_limit
 
         if self.checkpointer and thread_id:
             config.setdefault("configurable", {})["thread_id"] = thread_id
@@ -1248,6 +1271,87 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             "limit": limit,
         }
         state["context"] = context
+
+    @staticmethod
+    def _last_message_is_tool_output(state: GraphState | dict[str, Any]) -> bool:
+        messages = GraphStateView(state).messages()
+        return bool(messages and isinstance(messages[-1], ToolMessage))
+
+    @staticmethod
+    def _mark_force_final_response(
+        state: GraphState,
+        *,
+        reason: str,
+        scope: str,
+        count: int,
+        limit: int,
+    ) -> None:
+        context = GraphStateView(state).context_copy()
+        context["force_final_response"] = True
+        context["tool_budget"] = {
+            "reason": reason,
+            "scope": scope,
+            "count": count,
+            "limit": limit,
+        }
+        state["context"] = context
+
+    @staticmethod
+    def _final_response_kwargs(state: GraphState) -> dict[str, Any]:
+        context = GraphStateView(state).context()
+        if not context.get("force_final_response"):
+            return {}
+
+        budget = context.get("tool_budget")
+        count = budget.get("count") if isinstance(budget, dict) else None
+        limit = budget.get("limit") if isinstance(budget, dict) else None
+        if isinstance(count, int) and isinstance(limit, int):
+            notice = (
+                f"Tool-use budget reached after {count}/{limit} tool iteration(s). "
+                "Use the tool results already present in this conversation and produce "
+                "the best final answer now. Do not call any more tools."
+            )
+        else:
+            notice = (
+                "Tool-use budget reached. Use the tool results already present in this "
+                "conversation and produce the best final answer now. Do not call any more tools."
+            )
+        return {"disable_tools": True, "tool_budget_notice": notice}
+
+    @staticmethod
+    def _finalize_forced_final_response(
+        state: GraphState,
+        response: AgentResponse,
+    ) -> AgentResponse:
+        context = GraphStateView(state).context_copy()
+        if not context.get("force_final_response"):
+            return response
+
+        budget = context.get("tool_budget")
+        if response.metadata is None:
+            response.metadata = {}
+        if isinstance(budget, dict):
+            response.metadata["tool_budget_exhausted"] = dict(budget)
+        else:
+            response.metadata["tool_budget_exhausted"] = True
+
+        if response.message.tool_calls:
+            logger.warning(
+                "Model returned tool calls during forced final response; dropping %d call(s)",
+                len(response.message.tool_calls),
+            )
+            response.message.tool_calls = None
+            if not coerce_response_text(response.message.content):
+                response.message.content = (
+                    "I reached the tool-use limit before I could make additional tool calls. "
+                    "Based on the tool results already gathered, I cannot complete the "
+                    "remaining lookup reliably in this turn."
+                )
+
+        context.pop("force_final_response", None)
+        context.pop("tool_budget", None)
+        state["context"] = context
+        return response
 
     @staticmethod
     def _get_continuation_signal(
@@ -1487,6 +1591,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             device_id=device_id,
             model_request=state.get("model_request"),
             history_summary=state.get("history_summary"),
+            **self._final_response_kwargs(state),
         )
 
         if has_images:
@@ -1494,6 +1599,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 response.metadata = {}
             response.metadata["has_images"] = True
 
+        response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)
 
@@ -1789,8 +1895,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             device_id=state.get("device_id"),
             model_request=state.get("model_request"),
             history_summary=state.get("history_summary"),
+            **self._final_response_kwargs(state),
         )
 
+        response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)
 
@@ -1802,7 +1910,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         # NOTE: Image generator deliberately borrows the "chat" history budget.
-        # If independent tuning is needed, add image_generator_history_max_* settings.
         conversation_history = await self._get_conversation_history(
             conversation_id, user_id, agent_key="chat", state=state
         )
@@ -1818,8 +1925,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             device_id=state.get("device_id"),
             model_request=state.get("model_request"),
             history_summary=state.get("history_summary"),
+            **self._final_response_kwargs(state),
         )
 
+        response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response, append_images=True)
         return self._finalize_agent_response(state, response)
 
@@ -1846,8 +1955,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             device_id=state.get("device_id"),
             model_request=state.get("model_request"),
             history_summary=state.get("history_summary"),
+            **self._final_response_kwargs(state),
         )
 
+        response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)
 
@@ -1914,6 +2025,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             current_task_index=current_task_index,
             planning_phase=planning_phase,
             should_describe_plan=should_generate_plan_response,
+            **self._final_response_kwargs(state),
         )
 
         # Check if agent switched to executing phase via response metadata
@@ -1928,6 +2040,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             context["final_summary_generated"] = True
             state["context"] = context
 
+        response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)
 

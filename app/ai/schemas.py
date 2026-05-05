@@ -163,6 +163,8 @@ class GraphContext(TypedDict, total=False):
     all_tasks_completed: bool
     conversation_summarized: bool
     tool_provenance: dict[str, dict[str, Any]]
+    force_final_response: bool
+    tool_budget: dict[str, Any]
 
 
 class GraphState(TypedDict):

@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import json
 import logging
 import os
@@ -52,10 +51,39 @@ class MCPManager:
         self.config: dict[str, Any] = {}
         self.client: MultiServerMCPClient | None = None
         self._tools: list[BaseTool] = []
-        self._session_contexts: dict[str, Any] = {}  # Store context managers
+        self._session_contexts: dict[str, Any] = {}
         self._server_tools: dict[str, list[BaseTool]] = {}
         self._tool_index: dict[str, list[BaseTool]] = {}
         self._tool_server_map: dict[int, str] = {}
+
+    async def _run_session_owner(
+        self,
+        *,
+        server_name: str,
+        session_context: Any,
+        ready: asyncio.Future,
+        close_requested: asyncio.Event,
+    ) -> None:
+        session = None
+        entered = False
+        try:
+            session = await session_context.__aenter__()
+            entered = True
+            if not ready.done():
+                ready.set_result(session)
+            await close_requested.wait()
+        except Exception as exc:
+            if not ready.done():
+                ready.set_exception(exc)
+            else:
+                logger.warning("MCP session owner for %s failed: %s", server_name, exc)
+        finally:
+            if entered:
+                try:
+                    await session_context.__aexit__(None, None, None)
+                    logger.debug("Closed session for server: %s", server_name)
+                except Exception as exc:
+                    logger.warning("Error closing session for %s: %s", server_name, exc)
 
     def _get_default_config_path(self) -> str:
         return str(Path(__file__).parent / "mcp_config.json")
@@ -195,19 +223,31 @@ class MCPManager:
         if server_name in self._server_tools:
             return self._server_tools[server_name]
 
+        session_info: dict[str, Any] | None = None
         try:
-            # Create and enter session context
             session_context = self.client.session(server_name)
-            session = await session_context.__aenter__()
+            loop = asyncio.get_running_loop()
+            ready: asyncio.Future = loop.create_future()
+            close_requested = asyncio.Event()
+            owner_task = asyncio.create_task(
+                self._run_session_owner(
+                    server_name=server_name,
+                    session_context=session_context,
+                    ready=ready,
+                    close_requested=close_requested,
+                )
+            )
+            session = await ready
+            session_info = {
+                "close_requested": close_requested,
+                "owner_task": owner_task,
+                "session": session,
+            }
 
             loaded_tools = list(await load_mcp_tools(session))
             cleaned_tools = [clone_mcp_tool(tool, server_name=server_name) for tool in loaded_tools]
 
-            # Store context and session for proper cleanup
-            self._session_contexts[server_name] = {
-                "context": session_context,
-                "session": session,
-            }
+            self._session_contexts[server_name] = session_info
             self._index_server_tools(server_name, cleaned_tools)
 
             logger.debug(
@@ -226,7 +266,28 @@ class MCPManager:
                 exc,
                 exc_info=True,
             )
+            if session_info is not None:
+                await self._close_session_context(server_name, session_info)
             return []
+
+    async def _close_session_context(self, server_name: str, session_info: Any) -> None:
+        """Ask the task that opened an MCP session to close it."""
+        if isinstance(session_info, dict) and "close_requested" in session_info:
+            close_requested = session_info["close_requested"]
+            owner_task = session_info["owner_task"]
+            close_requested.set()
+            try:
+                await owner_task
+            except Exception as exc:
+                logger.warning("Error closing session for %s: %s", server_name, exc)
+            return
+
+        context = session_info["context"] if isinstance(session_info, dict) else session_info
+        try:
+            await context.__aexit__(None, None, None)
+            logger.debug("Closed session for server: %s", server_name)
+        except Exception as exc:
+            logger.warning("Error closing session for %s: %s", server_name, exc)
 
     def _index_server_tools(self, server_name: str, tools: Iterable[BaseTool]) -> None:
         """Store tools for a server and update lookup indexes."""
@@ -259,14 +320,8 @@ class MCPManager:
 
     async def cleanup(self) -> None:
         """Cleanup MCP client resources and properly close all sessions"""
-        # Properly close all session contexts in this task
         for server_name, session_info in list(self._session_contexts.items()):
-            try:
-                context = session_info["context"]
-                await asyncio.shield(context.__aexit__(None, None, None))
-                logger.debug(f"Closed session for server: {server_name}")
-            except Exception as e:
-                logger.warning(f"Error closing session for {server_name}: {e}")
+            await self._close_session_context(server_name, session_info)
 
         self._session_contexts.clear()
         self._tools = []
@@ -307,12 +362,7 @@ class MCPManager:
 
         # Properly close session context if it exists
         if server_name in self._session_contexts:
-            try:
-                context = self._session_contexts[server_name]["context"]
-                await context.__aexit__(None, None, None)
-                logger.debug(f"Closed session for server: {server_name}")
-            except Exception as e:
-                logger.warning(f"Error closing session for {server_name}: {e}")
+            await self._close_session_context(server_name, self._session_contexts[server_name])
             del self._session_contexts[server_name]
 
         # Remove cached tools
@@ -353,17 +403,7 @@ class MCPManager:
 
         # Properly close session context if it exists
         if server_name in self._session_contexts:
-            try:
-                context = self._session_contexts[server_name]["context"]
-                await asyncio.shield(context.__aexit__(None, None, None))
-                logger.debug(f"Closed session for server: {server_name}")
-            except RuntimeError as e:
-                if "different task" in str(e) or "already running" in str(e):
-                    logger.warning(f"Cannot close session for {server_name} from different task")
-                else:
-                    logger.warning(f"Error closing session for {server_name}: {e}")
-            except Exception as e:
-                logger.warning(f"Error closing session for {server_name}: {e}")
+            await self._close_session_context(server_name, self._session_contexts[server_name])
             del self._session_contexts[server_name]
 
         # Remove tools from caches
@@ -448,8 +488,7 @@ class MCPManager:
         # 1. Tear down old session context
         old = self._session_contexts.pop(server_name, None)
         if old:
-            with contextlib.suppress(Exception):
-                await asyncio.shield(old["context"].__aexit__(None, None, None))
+            await self._close_session_context(server_name, old)
 
         # 2. Drop cached tools so get_server_tools re-creates everything
         removed_tools = self._server_tools.pop(server_name, [])

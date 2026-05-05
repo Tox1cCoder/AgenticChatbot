@@ -540,8 +540,12 @@ class Settings(BaseSettings):
         description="Minimum quality score (0.0-1.0) to accept response without refinement",
     )
     react_agent_recursion_limit: int = Field(
-        default=101,
-        description="LangGraph recursion limit for agent execution. Should be set to 2 * react_agent_max_iterations + 1 per LangGraph best practices",
+        default=105,
+        description=(
+            "LangGraph recursion limit for agent execution. Must leave headroom for "
+            "route/agent/tool cycles plus the final no-tools synthesis turn "
+            "(minimum used at runtime: 2 * react_agent_max_iterations + 5)."
+        ),
     )
     tool_choice_mode: str = Field(
         default="auto",
@@ -823,6 +827,24 @@ class Settings(BaseSettings):
     # ── Validators ──────────────────────────────────────────────────────
 
     @field_validator(
+        "react_agent_max_iterations",
+        "react_agent_recursion_limit",
+        "agentic_max_iterations",
+        "auto_continue_max_rounds",
+        "auto_continue_max_total_iterations",
+        "auto_continue_timeout_seconds",
+        "planning_max_iterations",
+        "planning_consecutive_errors_limit",
+        mode="before",
+    )
+    @classmethod
+    def _positive_int(cls, v: int) -> int:
+        v = int(v)
+        if v <= 0:
+            raise ValueError("Value must be positive")
+        return v
+
+    @field_validator(
         "chat_history_max_messages",
         "chat_history_max_tokens",
         "rag_history_max_messages",
@@ -840,6 +862,13 @@ class Settings(BaseSettings):
         "tool_result_max_chars",
         "summarization_max_summary_tokens",
         "summarization_timeout_seconds",
+        "mcp_tool_search_default_top_k",
+        "mcp_tool_search_max_top_k",
+        "mcp_tool_search_autoload_top_k",
+        "mcp_tool_search_inventory_default_top_k",
+        "mcp_tool_search_inventory_max_top_k",
+        "mcp_tool_search_max_pinned_tools",
+        "mcp_tool_search_max_loaded_tools_per_conversation",
         mode="before",
     )
     @classmethod
