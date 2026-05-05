@@ -114,6 +114,7 @@ async def test_execute_tool_calls_preserves_error_render_artifact():
     assert outputs[0]["content"] == "Error: permission denied"
     assert outputs[0]["render"]["type"] == "error"
     assert artifacts[0]["status"] == "error"
+    assert artifacts[0]["output"] == "Error: permission denied"
     assert artifacts[0]["render"]["type"] == "error"
     assert artifacts[0]["render"]["error"] == "permission denied"
     assert images == []
