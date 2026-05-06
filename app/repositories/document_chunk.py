@@ -155,6 +155,35 @@ class DocumentChunkRepository:
                 .all()
             )
 
+    def get_by_ids_for_scope(
+        self,
+        chunk_ids: Iterable[UUID],
+        *,
+        user_id: Any | None = None,
+        conversation_id: Any | None = None,
+    ) -> list[DocumentChunk]:
+        """Return chunks by id only when parent documents match server scope."""
+        ids = list(chunk_ids)
+        if not ids:
+            return []
+
+        with self.session_factory() as db:
+            query = (
+                db.query(DocumentChunk)
+                .options(joinedload(DocumentChunk.document))
+                .join(Document, DocumentChunk.document_id == Document.id)
+                .filter(DocumentChunk.id.in_(ids))
+            )
+            if conversation_id is not None:
+                query = query.filter(Document.conversation_id == conversation_id)
+            if user_id is not None:
+                from app.models.conversation import Conversation
+
+                query = query.join(
+                    Conversation, Document.conversation_id == Conversation.id
+                ).filter(Conversation.owner_id == user_id)
+            return query.all()
+
     def get_by_qdrant_point_ids(self, point_ids: Iterable[str]) -> list[DocumentChunk]:
         ids = [p for p in point_ids if p]
         if not ids:

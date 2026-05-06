@@ -184,7 +184,9 @@ def test_rag_search_isolates_two_users_sharing_conversation_id():
         ),
     }
     chunk_repo = MagicMock()
-    chunk_repo.get_by_ids.side_effect = lambda chunk_ids: [chunk_map[cid] for cid in chunk_ids]
+    chunk_repo.get_by_ids_for_scope.side_effect = lambda chunk_ids, **_scope: [
+        chunk_map[cid] for cid in chunk_ids
+    ]
     image_repo = MagicMock()
     image_repo.get_by_chunk_id.return_value = []
 
@@ -206,6 +208,7 @@ def test_rag_search_isolates_two_users_sharing_conversation_id():
     assert a_sources == {"alpha.pdf"}, f"User A result leaked: {a_sources}"
     assert b_sources == {"beta.pdf"}, f"User B result leaked: {b_sources}"
     assert not (a_sources & b_sources), "Cross-user leakage detected"
+    chunk_repo.get_by_ids.assert_not_called()
 
 
 def test_rag_search_does_not_return_raw_qdrant_content_when_sql_chunk_is_missing():
@@ -228,6 +231,57 @@ def test_rag_search_does_not_return_raw_qdrant_content_when_sql_chunk_is_missing
         chunk_repo_cls.return_value = chunk_repo
         results = asyncio.run(agent._search(query="q", conversation_id="conv-1", user_id="user-1"))
 
+    assert results == []
+
+
+def test_rag_search_rehydrates_chunks_with_server_scope():
+    """Qdrant payload scope is not enough; SQL hydration must re-check scope."""
+    foreign_chunk_id = uuid4()
+    foreign_document_id = uuid4()
+
+    qdrant_point = MagicMock()
+    qdrant_point.payload = {
+        "chunk_id": str(foreign_chunk_id),
+        "document_id": str(foreign_document_id),
+        "conversation_id": "victim-conv",
+        "user_id": "victim-user",
+        "source": "foreign.pdf",
+    }
+    qdrant_point.score = 0.9
+
+    qdrant = _fake_qdrant(points=[qdrant_point])
+    agent = _build_minimal_rag_agent(qdrant, _fake_embedding())
+
+    chunk_repo = MagicMock()
+    chunk_repo.get_by_ids.return_value = [
+        SimpleNamespace(
+            id=foreign_chunk_id,
+            document_id=foreign_document_id,
+            chunk_index=0,
+            content="foreign content must not be returned",
+            page_start=1,
+            page_end=1,
+            section_path=[],
+            document=SimpleNamespace(filename="foreign.pdf"),
+        )
+    ]
+    chunk_repo.get_by_ids_for_scope.return_value = []
+
+    with patch("app.ai.agents.rag_agent.DocumentChunkRepository") as chunk_repo_cls:
+        chunk_repo_cls.return_value = chunk_repo
+        results = asyncio.run(
+            agent._search(
+                query="q",
+                conversation_id="victim-conv",
+                user_id="victim-user",
+            )
+        )
+
+    chunk_repo.get_by_ids_for_scope.assert_called_once()
+    call_kwargs = chunk_repo.get_by_ids_for_scope.call_args.kwargs
+    assert call_kwargs.get("conversation_id") == "victim-conv"
+    assert call_kwargs.get("user_id") == "victim-user"
+    chunk_repo.get_by_ids.assert_not_called()
     assert results == []
 
 
@@ -268,7 +322,7 @@ def test_rag_search_hydrates_sql_chunk_content_and_images_from_lookup_payload():
     )
 
     chunk_repo = MagicMock()
-    chunk_repo.get_by_ids.return_value = [sql_chunk]
+    chunk_repo.get_by_ids_for_scope.return_value = [sql_chunk]
     image_repo = MagicMock()
     image_repo.get_by_chunk_id.return_value = [sql_image]
 
@@ -290,6 +344,7 @@ def test_rag_search_hydrates_sql_chunk_content_and_images_from_lookup_payload():
     assert results[0]["chunk_id"] == str(chunk_id)
     assert results[0]["image_ids"] == [str(image_id)]
     assert results[0]["image_captions"] == ["A red bar chart showing revenue growth."]
+    chunk_repo.get_by_ids.assert_not_called()
 
 
 def test_get_document_full_content_reads_sql_chunks_not_qdrant_payloads():

@@ -1627,12 +1627,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 if isinstance(msg, ToolMessage):
                     tool_context.append(msg.content)
 
+        rag_context = state.get("context", {}) or {}
         metadata = {
             "persona": state.get("persona"),
             "history": conversation_history,
             "original_query": original_query,
             "tool_context": tool_context,
-            "agentic_images": state.get("context", {}).get(
+            "agentic_images": rag_context.get(
                 "agentic_images", []
             ),  # Pass images for multimodal LLM
             "model_request": state.get("model_request"),
@@ -1640,6 +1641,15 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             "device_id": device_id,
             "history_summary": state.get("history_summary"),
         }
+        # When ``_should_continue_rag`` decides the budget is exhausted, it
+        # sets these flags on the context so this RAG turn becomes a no-tools
+        # synthesis pass. Forward them into the AgentMessage metadata —
+        # ``RAGAgent._process_message_agentic`` reads them.
+        if rag_context.get("rag_force_final_response"):
+            metadata["rag_force_final_response"] = True
+            notice = rag_context.get("rag_tool_budget_notice")
+            if notice:
+                metadata["rag_tool_budget_notice"] = notice
 
         agent_msg = AgentMessage(
             role=MessageRole.USER,
@@ -1851,6 +1861,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         last_message = messages[-1]
         if isinstance(last_message, AIMessage) and last_message.tool_calls:
+            context = state.get("context", {}) or {}
+            if context.get("rag_force_final_response"):
+                logger.warning(
+                    "RAG final no-tools pass still emitted tool calls; ending "
+                    "instead of executing more RAG tools."
+                )
+                return "end"
             return "rag_tools"
 
         return "end"
@@ -1858,19 +1875,41 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     def _should_continue_rag(self, state: GraphState) -> str:
         """
         Determine if RAG agentic loop should continue or end.
+
+        When the iteration budget is reached, route the model back to
+        ``rag_agent`` for one final no-tools synthesis pass so the user
+        always sees an answer rather than a truncated tool log. If we have
+        already forced that final pass once and the model still asked for
+        tools, end the graph to avoid an infinite loop.
         """
         context = state.get("context", {})
         agentic_iteration = context.get("agentic_rag_iteration", 0)
 
-        # Check iteration limit
         max_iterations = settings.agentic_max_iterations
         if agentic_iteration >= max_iterations:
-            logger.warning(
-                f"RAG agentic loop reached max iterations ({max_iterations}), forcing end"
-            )
-            return "end"
+            if context.get("rag_force_final_response"):
+                logger.warning(
+                    "RAG agentic loop already had its final no-tools pass "
+                    "(iteration=%d, max=%d); ending to avoid an infinite loop.",
+                    agentic_iteration,
+                    max_iterations,
+                )
+                return "end"
 
-        # Continue to RAG agent for more processing
+            logger.warning(
+                "RAG agentic loop reached max iterations (%d); forcing one "
+                "final no-tools synthesis pass.",
+                max_iterations,
+            )
+            context["rag_force_final_response"] = True
+            context["rag_tool_budget_notice"] = (
+                "The RAG tool budget is exhausted. Produce the final answer "
+                "from the retrieved document evidence already available. "
+                "Do not call tools."
+            )
+            state["context"] = context
+            return "rag_agent"
+
         return "rag_agent"
 
     async def _search_node(self, state: GraphState) -> GraphState:

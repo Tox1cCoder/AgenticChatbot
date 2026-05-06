@@ -69,7 +69,7 @@ async def execute_search_documents_action(
     try:
         if action == DocumentAction.SCAN_ALL.value:
             if conversation_id:
-                result = await rag_agent.scan_all_documents(conversation_id)
+                result = await rag_agent.scan_all_documents(conversation_id, user_id=user_id)
             else:
                 result = "Error: No conversation_id available for scan"
 
@@ -190,7 +190,11 @@ async def execute_search_documents_action(
         elif action == DocumentAction.VIEW_IMAGES.value:
             document_id = tool_args.get("document_id")
             if document_id:
-                images = await rag_agent.get_document_images(document_id)
+                images = await rag_agent.get_document_images(
+                    document_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                )
                 if images:
                     attached_count = merge_agentic_images(
                         context=context,

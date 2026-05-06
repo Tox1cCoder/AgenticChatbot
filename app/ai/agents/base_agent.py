@@ -960,9 +960,7 @@ class BaseAgent(ABC):
         tool_budget_notice = _.get("tool_budget_notice")
         if tool_budget_notice:
             system_prompt = (
-                f"{system_prompt}\n\n"
-                "TOOL BUDGET NOTICE:\n"
-                f"{str(tool_budget_notice).strip()}"
+                f"{system_prompt}\n\nTOOL BUDGET NOTICE:\n{str(tool_budget_notice).strip()}"
             )
 
         if has_tool_context:
