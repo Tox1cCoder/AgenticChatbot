@@ -63,6 +63,119 @@ def extract_images_from_tool_result(result_text: str) -> list[dict[str, str]]:
     return extracted
 
 
+def _resolve_offload_service():
+    """Resolve the tool result blob service from the DI container, if configured."""
+
+    if not getattr(settings, "tool_result_offload_enabled", False):
+        return None
+    try:
+        from ..core.container import Container
+
+        container = Container()
+        return container.tool_result_blob_service()
+    except Exception as exc:
+        logger.debug("Tool result offload service unavailable: %s", exc)
+        return None
+
+
+def apply_tool_output_offload(
+    *,
+    output_text: str | None,
+    tool_call_id: str | None,
+    tool_name: str | None,
+    conversation_id: str | None,
+    user_id: str | None,
+    offload_service: Any | None = None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Offload large tool outputs to durable storage.
+
+    Returns ``(public_text, blob_info)`` where ``public_text`` is the text the
+    model and artifact should now show (preview + offload notice when
+    offloaded) and ``blob_info`` carries the artifact metadata to merge.
+    """
+
+    if output_text is None:
+        return output_text, None
+    service = offload_service if offload_service is not None else _resolve_offload_service()
+    if service is None or not conversation_id or not user_id:
+        return output_text, None
+
+    threshold = getattr(service, "threshold_chars", None) or getattr(
+        settings, "tool_result_offload_threshold_chars", 0
+    )
+    if not threshold or len(output_text) <= int(threshold):
+        return output_text, None
+
+    try:
+        from uuid import UUID
+
+        offload = service.offload_if_large(
+            conversation_id=UUID(str(conversation_id)),
+            user_id=UUID(str(user_id)),
+            tool_call_id=tool_call_id,
+            tool_name=tool_name or "unknown",
+            output_text=output_text,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to offload large tool output for %s: %s",
+            tool_name,
+            exc,
+        )
+        return output_text, None
+
+    blob_id = offload.get("blob_id")
+    if not blob_id:
+        return output_text, None
+
+    return offload.get("output", output_text), {
+        "blob_id": blob_id,
+        "blob_size_bytes": offload.get("size_bytes"),
+        "output_truncated": True,
+    }
+
+
+def _apply_offload_to_outputs_and_artifacts(
+    *,
+    outputs: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+    conversation_id: str | None,
+    user_id: str | None,
+    offload_service: Any | None = None,
+) -> None:
+    """Walk paired outputs/artifacts and offload any large outputs in-place."""
+
+    if not outputs or not artifacts:
+        return
+    service = offload_service if offload_service is not None else _resolve_offload_service()
+    if service is None or not conversation_id or not user_id:
+        return
+
+    artifact_index = {
+        artifact.get("tool_call_id"): artifact
+        for artifact in artifacts
+        if artifact.get("tool_call_id")
+    }
+
+    for output in outputs:
+        tool_call_id = output.get("tool_call_id")
+        public_text, blob_info = apply_tool_output_offload(
+            output_text=output.get("content"),
+            tool_call_id=tool_call_id,
+            tool_name=output.get("name"),
+            conversation_id=conversation_id,
+            user_id=user_id,
+            offload_service=service,
+        )
+        if blob_info is None:
+            continue
+        output["content"] = public_text
+        artifact = artifact_index.get(tool_call_id)
+        if artifact is not None:
+            artifact["output"] = public_text
+            artifact.update(blob_info)
+
+
 def build_tool_artifact(
     *,
     tool_call_id: str | None,
@@ -859,5 +972,12 @@ async def execute_tool_calls(
                     render=normalized_result.render,
                 )
             )
+
+    _apply_offload_to_outputs_and_artifacts(
+        outputs=outputs,
+        artifacts=artifacts,
+        conversation_id=conversation_id,
+        user_id=user_id,
+    )
 
     return outputs, artifacts, images

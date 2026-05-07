@@ -26,6 +26,7 @@ from ...models.document import Document
 from ...models.document_chunk import DocumentChunk
 from ...repositories.document_chunk import DocumentChunkRepository
 from ...repositories.document_image import DocumentImageRepository
+from ..context_overflow import compact_tool_messages_for_retry, is_context_overflow_error
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_factory import ModelFactory
 from ..prompts import (
@@ -741,6 +742,7 @@ class RAGAgent(BaseAgent):
         ``_apply_runtime_metadata``.
         """
         current_runtime = runtime_config
+        context_overflow_retried = False
 
         while True:
             try:
@@ -757,7 +759,21 @@ class RAGAgent(BaseAgent):
                         tools,
                         tool_choice=getattr(settings, "tool_choice_mode", "auto"),
                     )
-                response = await self._ainvoke_with_retries(llm_with_tools, messages)
+                try:
+                    response = await self._ainvoke_with_retries(llm_with_tools, messages)
+                except Exception as exc:
+                    if not settings.context_overflow_retry_enabled or not is_context_overflow_error(
+                        exc
+                    ):
+                        raise
+                    compacted_messages = compact_tool_messages_for_retry(
+                        messages,
+                        max_chars=settings.context_overflow_retry_tool_preview_chars,
+                    )
+                    response = await self._ainvoke_with_retries(
+                        llm_with_tools, compacted_messages
+                    )
+                    context_overflow_retried = True
                 runtime_config = current_runtime
                 break
             except Exception as exc:
@@ -803,6 +819,8 @@ class RAGAgent(BaseAgent):
             metadata["has_images"] = True
         if disable_tools:
             metadata["disable_tools"] = True
+        if context_overflow_retried:
+            metadata["context_overflow_retry"] = True
         self._apply_runtime_metadata(metadata, runtime_config)
 
         return AgentResponse(

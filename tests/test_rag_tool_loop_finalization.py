@@ -19,7 +19,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from app.ai.agents.rag_agent import RAGAgent
 from app.ai.graph import MultiAgentWorkflow
-from app.ai.schemas import AgentMessage, MessageRole
+from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 
 
 def _make_workflow():
@@ -187,3 +187,67 @@ def test_process_message_agentic_disables_tools_when_force_final_response_flag_s
 
     assert response.metadata.get("rag_force_final_response") is True
     assert response.message.content == "final answer"
+
+
+def test_rag_document_tool_results_are_recorded_as_response_artifacts(monkeypatch):
+    workflow = _make_workflow()
+    workflow.rag_agent = object()
+    workflow.agents = {}
+
+    async def fake_execute_search_documents_action(**kwargs):
+        action = kwargs["tool_args"]["action"]
+        if action == "search_chunks":
+            return "SEARCH RESULTS:\n\n[1] report.pdf\nchunk evidence", action, {}
+        if action == "read_document":
+            return "DOCUMENT CONTENT (doc-1):\n\nfull document text", action, {}
+        raise AssertionError(f"Unexpected action: {action}")
+
+    monkeypatch.setattr(
+        "app.ai.graph.execute_search_documents_action",
+        fake_execute_search_documents_action,
+    )
+
+    state = {
+        "conversation_id": "conv-1",
+        "user_id": "user-1",
+        "context": {},
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "chunk-call",
+                        "name": "search_documents",
+                        "args": {"action": "search_chunks", "query": "revenue"},
+                    },
+                    {
+                        "id": "document-call",
+                        "name": "search_documents",
+                        "args": {"action": "read_document", "document_id": "doc-1"},
+                    },
+                ],
+            )
+        ],
+        "response": AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="final"),
+            metadata={},
+        ),
+    }
+
+    asyncio.run(workflow._rag_tools_node(state))
+
+    artifacts = state["context"].get("tool_artifacts")
+    assert artifacts and len(artifacts) == 2
+    assert artifacts[0]["tool_call_id"] == "chunk-call"
+    assert artifacts[0]["tool"] == "search_documents"
+    assert artifacts[0]["args"]["action"] == "search_chunks"
+    assert "chunk evidence" in artifacts[0]["output"]
+    assert artifacts[1]["tool_call_id"] == "document-call"
+    assert artifacts[1]["args"]["action"] == "read_document"
+    assert "full document text" in artifacts[1]["output"]
+
+    recovered = workflow._recover_terminal_response(state)
+    assert recovered is not None
+    assert recovered.tool_artifacts == artifacts

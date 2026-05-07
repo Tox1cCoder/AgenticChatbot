@@ -16,6 +16,7 @@ from app.api.messages import router as messages_router  # noqa: E402
 from app.api.model_config import router as model_config_router  # noqa: E402
 from app.api.providers import router as providers_router  # noqa: E402
 from app.api.task_plans import router as task_plans_router  # noqa: E402
+from app.api.tool_result_blobs import router as tool_result_blobs_router  # noqa: E402
 from app.api.users import router as users_router  # noqa: E402
 from app.api.widgets import router as widgets_router  # noqa: E402
 
@@ -33,5 +34,6 @@ __all__ = [
     "model_config_router",
     "providers_router",
     "task_plans_router",
+    "tool_result_blobs_router",
     "widgets_router",
 ]

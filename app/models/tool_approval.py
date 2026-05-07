@@ -17,6 +17,7 @@ class DecisionType(str, enum.Enum):
     ACCEPT = "accept"
     EDIT = "edit"
     REJECT = "reject"
+    RESPOND = "respond"
 
 
 class ToolApproval(Base):

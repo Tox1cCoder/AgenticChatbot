@@ -721,6 +721,21 @@ def apply_hitl_decisions(
                     "id": tool_call_id,
                 }
             )
+        elif decision_type == "respond":
+            response_text = ""
+            if isinstance(decision, dict):
+                args = decision.get("args") if isinstance(decision.get("args"), dict) else {}
+                response_text = str(
+                    args.get("response")
+                    or args.get("message")
+                    or decision.get("response")
+                    or decision.get("message")
+                    or ""
+                ).strip()
+            if not response_text:
+                response_text = "The human responded without additional text."
+            if tool_call_id:
+                rejected_feedback[tool_call_id] = response_text
         else:  # reject / unknown
             feedback = build_rejection_tool_message(
                 tc,

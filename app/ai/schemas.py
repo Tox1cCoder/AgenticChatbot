@@ -29,6 +29,7 @@ class InterruptDecisionType(str, Enum):
     APPROVE = "approve"
     REJECT = "reject"
     EDIT = "edit"
+    RESPOND = "respond"
 
 
 class ToolInterruptRequest(BaseModel):

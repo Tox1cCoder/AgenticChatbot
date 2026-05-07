@@ -50,11 +50,14 @@ async def execute_search_documents_action(
     context: dict[str, Any],
     max_agentic_images: int,
     user_id: str | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, dict[str, Any]]:
     """
     Execute one search_documents action.
 
-    Returns: (result, normalized_action)
+    Returns: (result, normalized_action, evidence) where ``evidence`` carries
+    structured per-action data the UI can render directly (chunks with source
+    references, document listings, image listings, etc.). Empty dict when the
+    action does not produce structured evidence.
     """
     action_raw = tool_args.get("action")
     if isinstance(action_raw, str):
@@ -65,6 +68,7 @@ async def execute_search_documents_action(
         action = str(action_raw or "").strip().lower()
 
     result = ""
+    evidence: dict[str, Any] = {}
 
     try:
         if action == DocumentAction.SCAN_ALL.value:
@@ -83,6 +87,10 @@ async def execute_search_documents_action(
                 )
                 if content:
                     result = f"DOCUMENT CONTENT ({document_id}):\n\n{content}"
+                    evidence["document"] = {
+                        "document_id": document_id,
+                        "content": content,
+                    }
                 else:
                     result = f"Document {document_id} not found or empty"
             else:
@@ -108,6 +116,7 @@ async def execute_search_documents_action(
                     except Exception:
                         attached_count = 0
 
+                    chunks: list[dict[str, Any]] = []
                     result = "SEARCH RESULTS:\n\n"
                     for i, doc in enumerate(search_results[:10], 1):
                         source = doc.get("source", "unknown")
@@ -142,14 +151,35 @@ async def execute_search_documents_action(
                         if has_tables or table_count:
                             meta_parts.append(f"Tables: {int(table_count)}")
 
-                        content = (doc.get("content") or "")[:500]
+                        content_full = doc.get("content") or ""
+                        content = content_full[:500]
                         result += (
                             f"[{i}] {source} (score: {score:.2%})\n"
                             f"  {' | '.join(meta_parts)}\n"
                             f"{content}\n\n"
                         )
 
+                        chunks.append(
+                            {
+                                "rank": i,
+                                "source": source,
+                                "score": float(score) if isinstance(score, (int, float)) else None,
+                                "document_id": doc_id,
+                                "chunk_id": doc.get("chunk_id"),
+                                "page_number": page_number,
+                                "page_start": page_start,
+                                "page_end": page_end,
+                                "image_ids": list(image_ids),
+                                "image_captions": list(image_captions),
+                                "has_tables": has_tables,
+                                "table_count": int(table_count) if table_count else 0,
+                                "content": content_full,
+                            }
+                        )
+
+                    evidence["chunks"] = chunks
                     if attached_count:
+                        evidence["images_attached"] = attached_count
                         result += f"(Attached {attached_count} image(s) from matching chunks for multimodal analysis.)\n"
                 else:
                     result = "No search results found"
@@ -176,12 +206,22 @@ async def execute_search_documents_action(
                 )
                 if documents:
                     result = "AVAILABLE DOCUMENTS:\n\n"
+                    listing: list[dict[str, Any]] = []
                     for i, doc in enumerate(documents, 1):
                         result += (
                             f"{i}. {doc['filename']} "
                             f"(ID: {doc['document_id']}, "
                             f"Chunks: {doc['chunk_count']})\n"
                         )
+                        listing.append(
+                            {
+                                "rank": i,
+                                "filename": doc.get("filename"),
+                                "document_id": doc.get("document_id"),
+                                "chunk_count": doc.get("chunk_count"),
+                            }
+                        )
+                    evidence["documents"] = listing
                 else:
                     result = "No documents found in this conversation"
             else:
@@ -221,4 +261,4 @@ async def execute_search_documents_action(
     if reason:
         logger.debug("RAG Agentic: %s - %s", action, reason)
 
-    return result, action
+    return result, action, evidence

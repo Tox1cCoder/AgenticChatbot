@@ -586,6 +586,41 @@ class Settings(BaseSettings):
         description="Suffix to append when tool result is truncated",
     )
 
+    tool_result_offload_enabled: bool = Field(
+        default=True,
+        description="Persist full large tool outputs outside model-visible ToolMessages and return a preview plus blob_id.",
+    )
+    tool_result_offload_threshold_chars: int = Field(
+        default=16000,
+        description="Character count above which full tool output is offloaded.",
+    )
+    tool_result_offload_preview_chars: int = Field(
+        default=4000,
+        description="Preview characters kept inline after a tool result is offloaded.",
+    )
+    tool_result_blob_storage_dir: str = Field(
+        default="data/tool_result_blobs",
+        description="Directory for full offloaded tool result payloads.",
+    )
+
+    context_overflow_retry_enabled: bool = Field(
+        default=True,
+        description="Retry one model call with compacted tool messages when a provider rejects the prompt for context length.",
+    )
+    context_overflow_retry_tool_preview_chars: int = Field(
+        default=4000,
+        description="Characters retained per ToolMessage during context-overflow retry.",
+    )
+
+    enable_user_memory_tools: bool = Field(
+        default=False,
+        description="Enable explicit agent-editable user memory tools.",
+    )
+    user_memory_max_prompt_items: int = Field(
+        default=20,
+        description="Maximum user memory items exposed to agents when memory tools are enabled.",
+    )
+
     # Per-Agent Tool Allowlists
     # Empty list means bind all available tools; non-empty list restricts to specified tools/servers
     chat_agent_allowed_tools: list[str] = Field(

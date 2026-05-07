@@ -26,6 +26,7 @@ from app.api import (
     model_config_router,
     providers_router,
     task_plans_router,
+    tool_result_blobs_router,
     users_router,
     widgets_router,
 )
@@ -246,6 +247,7 @@ def create_app() -> FastAPI:
     app.include_router(model_config_router)
     app.include_router(client_devices_router)
     app.include_router(device_runtime_router)
+    app.include_router(tool_result_blobs_router)
     app.include_router(widgets_router)
 
     # Initialize and register event listeners

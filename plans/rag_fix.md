@@ -730,14 +730,16 @@ Expected result:
 - `SEARCH_CHUNKS` now re-checks server-owned scope during SQL chunk hydration. Qdrant payload filtering alone is not trusted; `RAGAgent._search()` calls the new `DocumentChunkRepository.get_by_ids_for_scope()` whenever `user_id` or `conversation_id` is available.
 - Forced-final RAG responses that still contain tool calls no longer route to `rag_tools`. `_should_call_rag_tools()` now ends the graph when `rag_force_final_response=True`, preventing an extra tool execution after the no-tools final pass.
 - The final no-tools synthesis prompt no longer tells the model to use `search_documents`; the tool-use instruction is only appended during normal tool-enabled RAG passes.
+- `search_documents` tool outputs are now recorded as standard response `tool_artifacts`, so extracted chunk searches and document reads are visible through the same artifact path as other tool results.
 
 **Regression tests added:**
 - `tests/test_rag_multi_user_isolation.py::test_rag_search_rehydrates_chunks_with_server_scope`
 - `tests/test_rag_tool_loop_finalization.py::test_forced_final_assistant_tool_calls_do_not_route_to_rag_tools`
 - Extended `tests/test_rag_tool_loop_finalization.py::test_process_message_agentic_disables_tools_when_force_final_response_flag_set` to assert the final pass prompt omits the `search_documents` instruction.
+- `tests/test_rag_tool_loop_finalization.py::test_rag_document_tool_results_are_recorded_as_response_artifacts`
 
 **Verification after follow-up fixes:**
-- Focused RAG suite (`test_rag_agent`, `test_rag_multi_user_isolation`, `test_graph_tool_budget`, `test_rag_dead_code_cleanup`, `test_rag_tool_loop_finalization`) — **45 passed**.
+- Focused RAG suite (`test_rag_agent`, `test_rag_multi_user_isolation`, `test_graph_tool_budget`, `test_rag_dead_code_cleanup`, `test_rag_tool_loop_finalization`) — **46 passed**.
 - Adjacent agent-runtime suite (`test_message_history_pipeline`, `test_search_agent_time_context`, `test_tool_search_prompt_guidance`, `test_hitl_config`) — **18 passed**.
 - Production compile check (`rag_agent`, `rag_tool_actions`, `graph`, `document_chunk`, `document_image`) — **passed**.
 - Baseline-compare suite (`test_rag_agent`, `test_rag_multi_user_isolation`, `test_graph_tool_budget`, `test_client_tool_scope`, `test_client_tool_isolation`, `test_hitl_config`) — **49 passed, 2 failed**. The two failures are the documented deferred client-tool snapshot baseline failures from Task 1.1.

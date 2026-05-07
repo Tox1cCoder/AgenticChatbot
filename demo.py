@@ -23,6 +23,12 @@ from app.ai.skills_snapshot import (
     reload_repo_skills_for_demo,
 )
 from app.services.stream_events import infer_tool_state, normalize_tool_phase
+from app.ui.rag_artifacts import (
+    RAGArtifactView,
+    RAGChunkView,
+    RAGDocumentListing,
+    extract_rag_artifact_views,
+)
 from upload_support import delete_document, get_uploaded_documents, upload_document
 
 API_BASE_URL = os.environ.get("CHATBOT_API_BASE_URL", "http://127.0.0.1:8000")
@@ -5038,6 +5044,117 @@ def render_message_trace(message_metadata: dict[str, Any], expanded: bool = Fals
     )
 
 
+def _render_rag_chunk_card(view: RAGArtifactView, chunk: RAGChunkView) -> None:
+    header_bits: list[str] = [f"**[{chunk.rank}] {chunk.source}**"]
+    if chunk.score is not None:
+        header_bits.append(f"score `{chunk.score:.2%}`")
+    if chunk.page_label:
+        header_bits.append(chunk.page_label)
+    st.markdown(" — ".join(header_bits))
+
+    meta_parts: list[str] = []
+    if chunk.document_id:
+        meta_parts.append(f"document: `{chunk.document_id}`")
+    if chunk.chunk_id:
+        meta_parts.append(f"chunk: `{chunk.chunk_id}`")
+    if chunk.image_count:
+        meta_parts.append(f"images: `{chunk.image_count}`")
+    if chunk.has_tables or chunk.table_count:
+        meta_parts.append(f"tables: `{chunk.table_count}`")
+    if meta_parts:
+        st.caption(" | ".join(meta_parts))
+
+    if chunk.image_captions:
+        captions = ", ".join(chunk.image_captions[:3])
+        more = "…" if len(chunk.image_captions) > 3 else ""
+        st.caption(f"image captions: {captions}{more}")
+
+    if chunk.content:
+        st.markdown(f"> {chunk.content.strip()}")
+
+
+def _render_rag_document_listing(listing: RAGDocumentListing) -> None:
+    parts: list[str] = [f"**{listing.rank}. {listing.filename or 'unknown'}**"]
+    if listing.chunk_count is not None:
+        parts.append(f"{listing.chunk_count} chunks")
+    if listing.document_id:
+        parts.append(f"`{listing.document_id}`")
+    st.markdown(" — ".join(parts))
+
+
+def render_rag_retrieval_artifacts(message_metadata: dict[str, Any]) -> None:
+    views = extract_rag_artifact_views(message_metadata)
+    if not views:
+        return
+
+    label = "Retrieved Evidence"
+    total_chunks = sum(len(view.chunks) for view in views)
+    summary_count = total_chunks if total_chunks else len(views)
+    summary_label = "chunk" if total_chunks else "result"
+    summary_suffix = "" if summary_count == 1 else "s"
+
+    with st.expander(
+        f"{label} ({summary_count} {summary_label}{summary_suffix})", expanded=False
+    ):
+        for index, view in enumerate(views, start=1):
+            st.markdown(f"**{view.title}**")
+            detail_parts: list[str] = []
+            if view.query:
+                detail_parts.append(f"query: `{view.query}`")
+            if view.document_id:
+                detail_parts.append(f"document: `{view.document_id}`")
+            if view.status:
+                detail_parts.append(f"status: `{view.status}`")
+            if view.blob_size_bytes:
+                detail_parts.append(f"size: `{view.blob_size_bytes} bytes`")
+            if detail_parts:
+                st.caption(" | ".join(detail_parts))
+
+            if view.chunks:
+                for chunk in view.chunks:
+                    _render_rag_chunk_card(view, chunk)
+            elif view.documents:
+                for listing in view.documents:
+                    _render_rag_document_listing(listing)
+            elif view.preview:
+                st.code(view.preview, language="text")
+
+            if view.output and view.output != view.preview and not view.chunks and not view.documents:
+                with st.expander(f"Full output for {view.title}", expanded=False):
+                    st.code(view.output, language="text")
+            elif view.chunks or view.documents:
+                with st.expander(f"Raw tool output for {view.title}", expanded=False):
+                    st.code(view.output or view.preview, language="text")
+
+            if view.blob_id:
+                blob_state_key = f"rag_blob_text:{view.blob_id}"
+                cached_full = st.session_state.get(blob_state_key)
+                if cached_full:
+                    with st.expander(f"Full result for {view.title}", expanded=True):
+                        st.code(cached_full, language="text")
+                elif st.button(
+                    "Load full result",
+                    key=f"rag_blob_load:{view.tool_call_id}:{view.blob_id}",
+                ):
+                    headers = {}
+                    if st.session_state.get("auth_token"):
+                        headers["Authorization"] = f"Bearer {st.session_state.auth_token}"
+                    try:
+                        response = get_http_session().get(
+                            f"{API_BASE_URL}/tool-results/{view.blob_id}",
+                            headers=headers,
+                            timeout=REQUEST_TIMEOUT,
+                        )
+                        response.raise_for_status()
+                        st.session_state[blob_state_key] = response.text
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Failed to load full result: {exc}")
+
+            if index < len(views):
+                st.markdown("---")
+
+
 def _upsert_stream_thinking_trace(content: str) -> None:
     _ensure_stream_trace_state()
     trace_items = list(st.session_state.get("stream_trace_items") or [])
@@ -5568,6 +5685,9 @@ def render_message_bubble(
                     st.caption(str(model or provider))
 
         st.markdown(content_text)  # Native markdown with LaTeX support
+
+        if not is_user:
+            render_rag_retrieval_artifacts(message_metadata)
 
         if not is_user:
             fallback = message_metadata.get("provider_fallback")

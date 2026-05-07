@@ -1332,6 +1332,7 @@ class MessageService(IMessageService):
             InterruptDecisionType.APPROVE: DecisionType.ACCEPT,
             InterruptDecisionType.EDIT: DecisionType.EDIT,
             InterruptDecisionType.REJECT: DecisionType.REJECT,
+            InterruptDecisionType.RESPOND: DecisionType.RESPOND,
         }
         for decision in decisions:
             try:

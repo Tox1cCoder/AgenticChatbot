@@ -25,6 +25,8 @@ from ..client_runtime_tools import (
     get_active_client_runtime_session,
     get_client_runtime_tools,
 )
+from ..context_overflow import compact_tool_messages_for_retry, is_context_overflow_error
+from ..user_memory_tools import create_user_memory_tools
 from ..deferred_tool_binding import (
     build_deferred_tool_list,
     should_use_deferred_loading,
@@ -346,6 +348,20 @@ class BaseAgent(ABC):
 
         for tool in internal_tools or []:
             _add_internal(tool)
+
+        if getattr(settings, "enable_user_memory_tools", False) and user_id:
+            try:
+                from ...core.container import Container
+
+                memory_repository = Container().user_memory_repository()
+            except Exception as exc:
+                logger.debug("User memory repository unavailable: %s", exc)
+                memory_repository = None
+            if memory_repository is not None:
+                for tool in create_user_memory_tools(
+                    repository=memory_repository, user_id=str(user_id)
+                ):
+                    _add_internal(tool)
 
         internal_tools = merged_internal or None
 
@@ -771,8 +787,25 @@ class BaseAgent(ABC):
                 tools=bound_tools if bound_tools else None,
             )
 
+            context_overflow_retried = False
             try:
-                response = await self._ainvoke_with_retries(llm_with_tools, langchain_messages)
+                try:
+                    response = await self._ainvoke_with_retries(
+                        llm_with_tools, langchain_messages
+                    )
+                except Exception as exc:
+                    if not settings.context_overflow_retry_enabled or not is_context_overflow_error(
+                        exc
+                    ):
+                        raise
+                    compacted_messages = compact_tool_messages_for_retry(
+                        langchain_messages,
+                        max_chars=settings.context_overflow_retry_tool_preview_chars,
+                    )
+                    response = await self._ainvoke_with_retries(
+                        llm_with_tools, compacted_messages
+                    )
+                    context_overflow_retried = True
             except Exception:
                 if (
                     runtime_config.provider == "openai"
@@ -892,6 +925,8 @@ class BaseAgent(ABC):
                 "has_tool_calls": tool_calls is not None,
                 "token_breakdown": token_breakdown.to_dict(),
             }
+            if context_overflow_retried:
+                metadata["context_overflow_retry"] = True
             self._apply_runtime_metadata(metadata, runtime_config)
 
             if thinking:

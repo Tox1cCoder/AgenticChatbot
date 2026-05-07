@@ -53,6 +53,8 @@ from .token_instrumentation import (
 )
 from .tool_context import tool_execution_context
 from .tool_execution import (
+    apply_tool_output_offload,
+    build_tool_artifact,
     build_rejected_tool_artifacts,
     ensure_agent_tool_map,
     execute_tool_calls,
@@ -1485,6 +1487,41 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         render = render_results.get(str(tool_call_id))
         return render if isinstance(render, dict) else None
 
+    def _tool_end_events_from_node_state(
+        self,
+        *,
+        node_state: dict[str, Any],
+        last_state_values: dict[str, Any] | None,
+        emitted_tool_result_ids: set[str],
+    ):
+        messages = node_state.get("messages", [])
+        if not isinstance(messages, list):
+            messages = [messages]
+
+        for message in messages:
+            if not isinstance(message, ToolMessage):
+                continue
+
+            tool_call_id = getattr(message, "tool_call_id", None)
+            dedupe_key = str(tool_call_id or f"{getattr(message, 'name', 'unknown')}:{id(message)}")
+            if dedupe_key in emitted_tool_result_ids:
+                continue
+            emitted_tool_result_ids.add(dedupe_key)
+
+            event_payload = {
+                "type": "tool_end",
+                "name": getattr(message, "name", "unknown"),
+                "tool_call_id": tool_call_id,
+                "result": make_json_safe(message.content),
+            }
+            render_payload = self._lookup_tool_render_payload(
+                last_state_values,
+                tool_call_id,
+            ) or self._lookup_tool_render_payload(node_state, tool_call_id)
+            if render_payload:
+                event_payload["render"] = render_payload
+            yield event_payload
+
     def _apply_tool_outputs_to_state(
         self,
         state: GraphState,
@@ -1659,6 +1696,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         )
 
         response = await self.rag_agent.process_message(agent_msg, conversation_id)
+        response = self._finalize_forced_final_response(state, response)
+        self._merge_tool_artifacts(state, response)
         state["response"] = response
 
         ai_kwargs = {"content": response.message.content or ""}
@@ -1802,7 +1841,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 tool_outputs.append(entry)
                 continue
 
-            result, _ = await execute_search_documents_action(
+            result, _, evidence = await execute_search_documents_action(
                 rag_agent=self.rag_agent,
                 conversation_id=conversation_id,
                 tool_args=tool_args,
@@ -1811,11 +1850,31 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 user_id=state.get("user_id"),
             )
 
+            error = result if result.startswith("Error") else None
+            public_text, blob_info = apply_tool_output_offload(
+                output_text=result,
+                tool_call_id=tool_id,
+                tool_name=tool_name,
+                conversation_id=conversation_id,
+                user_id=user_id,
+            )
+            artifact = build_tool_artifact(
+                tool_call_id=tool_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                output_text=public_text,
+                error=error,
+            )
+            if blob_info:
+                artifact.update(blob_info)
+            if evidence:
+                artifact["rag_evidence"] = make_json_safe(evidence)
+            tool_artifacts.append(artifact)
             tool_outputs.append(
                 {
                     "tool_call_id": tool_id,
                     "name": tool_name,
-                    "content": result,
+                    "content": public_text,
                 }
             )
 
@@ -2807,6 +2866,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         accumulated_thinking = ""
         current_tool_calls = {}
         emitted_tool_call_ids = set()
+        emitted_tool_result_ids = set()
 
         suppressed_nodes: set = {"image_generator_agent"}
         suppress_tokens = selected_agent in suppressed_nodes
@@ -3091,25 +3151,12 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                                                         }
 
                                         elif isinstance(last_msg, ToolMessage):
-                                            tool_call_id = getattr(last_msg, "tool_call_id", None)
-                                            event_payload = {
-                                                "type": "tool_end",
-                                                "name": getattr(last_msg, "name", "unknown"),
-                                                "tool_call_id": tool_call_id,
-                                                "result": make_json_safe(last_msg.content),
-                                            }
-                                            render_payload = self._lookup_tool_render_payload(
-                                                last_state_values,
-                                                tool_call_id,
-                                            ) or self._lookup_tool_render_payload(
-                                                node_state
-                                                if isinstance(node_state, dict)
-                                                else None,
-                                                tool_call_id,
-                                            )
-                                            if render_payload:
-                                                event_payload["render"] = render_payload
-                                            yield event_payload
+                                            for event_payload in self._tool_end_events_from_node_state(
+                                                node_state=node_state,
+                                                last_state_values=last_state_values,
+                                                emitted_tool_result_ids=emitted_tool_result_ids,
+                                            ):
+                                                yield event_payload
                     else:
                         logger.debug(f"Unexpected stream chunk format: {type(chunk)}")
 
@@ -3282,6 +3329,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         accumulated_thinking = ""  # Track thinking content for non-RAG agents
         current_tool_calls = {}  # Track tool call chunks by index
         emitted_tool_call_ids = set()  # Track which tool calls have had tool_start emitted
+        emitted_tool_result_ids = set()
 
         # For image_generator_agent the streamed LLM tokens are the internal
         # enhanced prompt — not meant for the user.  Suppress token events and
@@ -3615,25 +3663,12 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
                                         # Handle ToolMessage (result)
                                         elif isinstance(last_msg, ToolMessage):
-                                            tool_call_id = getattr(last_msg, "tool_call_id", None)
-                                            event_payload = {
-                                                "type": "tool_end",
-                                                "name": getattr(last_msg, "name", "unknown"),
-                                                "tool_call_id": tool_call_id,
-                                                "result": make_json_safe(last_msg.content),
-                                            }
-                                            render_payload = self._lookup_tool_render_payload(
-                                                last_state_values,
-                                                tool_call_id,
-                                            ) or self._lookup_tool_render_payload(
-                                                node_state
-                                                if isinstance(node_state, dict)
-                                                else None,
-                                                tool_call_id,
-                                            )
-                                            if render_payload:
-                                                event_payload["render"] = render_payload
-                                            yield event_payload
+                                            for event_payload in self._tool_end_events_from_node_state(
+                                                node_state=node_state,
+                                                last_state_values=last_state_values,
+                                                emitted_tool_result_ids=emitted_tool_result_ids,
+                                            ):
+                                                yield event_payload
                     else:
                         # Single mode or legacy format - try to handle gracefully
                         logger.debug(f"Unexpected stream chunk format: {type(chunk)}")

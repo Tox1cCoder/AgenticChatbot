@@ -41,7 +41,9 @@ from app.repositories.message import MessageRepository
 from app.repositories.model_provider import ModelProviderRepository
 from app.repositories.task_plan import TaskPlanRepository
 from app.repositories.tool_approval import ToolApprovalRepository
+from app.repositories.tool_result_blob import ToolResultBlobRepository
 from app.repositories.user import UserRepository
+from app.repositories.user_memory import UserMemoryRepository
 from app.services.ai_service import AIService
 from app.services.auth_service import AuthService
 from app.services.conversation_service import ConversationService
@@ -60,6 +62,7 @@ from app.services.rag_embedding_service import (
     SentenceTransformerRAGEmbeddingService,
 )
 from app.services.task_plan_service import TaskPlanService
+from app.services.tool_result_blob_service import ToolResultBlobService
 from app.services.user_service import UserService
 from app.utils.validation.conversation_validation import ConversationValidationUtils
 from app.utils.validation.document_validation import DocumentValidationUtils
@@ -219,6 +222,24 @@ class Container(containers.DeclarativeContainer):
 
     tool_approval_repository = providers.Factory(
         ToolApprovalRepository,
+        session_factory=db.provided.session,
+    )
+
+    tool_result_blob_repository = providers.Factory(
+        ToolResultBlobRepository,
+        session_factory=db.provided.session,
+    )
+
+    tool_result_blob_service = providers.Singleton(
+        ToolResultBlobService,
+        repository=tool_result_blob_repository,
+        storage_root=providers.Object(settings.tool_result_blob_storage_dir),
+        threshold_chars=providers.Object(settings.tool_result_offload_threshold_chars),
+        preview_chars=providers.Object(settings.tool_result_offload_preview_chars),
+    )
+
+    user_memory_repository = providers.Factory(
+        UserMemoryRepository,
         session_factory=db.provided.session,
     )
 
