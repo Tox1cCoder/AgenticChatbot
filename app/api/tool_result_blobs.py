@@ -30,9 +30,7 @@ async def read_tool_result_blob(
 ) -> PlainTextResponse:
     record = repository.get_for_user(blob_id, current_user_id)
     if record is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Tool result not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tool result not found")
     return PlainTextResponse(
         service.read_text(record), media_type=record.content_type or "text/plain"
     )

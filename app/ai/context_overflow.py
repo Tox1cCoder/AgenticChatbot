@@ -4,7 +4,6 @@ from typing import Any
 
 from langchain_core.messages import ToolMessage
 
-
 _CONTEXT_ERROR_MARKERS = (
     "maximum context length",
     "context length exceeded",

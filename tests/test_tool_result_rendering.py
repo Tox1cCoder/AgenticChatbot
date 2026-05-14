@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from app.ai.tool_result_rendering import normalize_tool_result_for_rendering
 
 
@@ -149,6 +151,44 @@ def test_bare_text_content_block_dict_is_unwrapped_to_text():
     assert normalized.render["type"] == "text"
     assert normalized.model_content == "The answer is 42."
     assert "structured_content" not in normalized.render
+
+
+def test_dispatch_subagents_json_string_gets_subagent_render_payload():
+    raw_result = json.dumps(
+        {
+            "status": "partial",
+            "rationale": "parallel implementation work",
+            "results": [
+                {
+                    "id": "worker-1",
+                    "agent": "search_agent",
+                    "status": "completed",
+                    "elapsed_ms": 1250,
+                    "summary": "Found the relevant API docs.",
+                    "related_todo_ids": ["todo-1"],
+                },
+                {
+                    "id": "worker-2",
+                    "agent": "chat_agent",
+                    "status": "timeout",
+                    "elapsed_ms": 5000,
+                    "summary": "Worker exceeded timeout.",
+                    "related_todo_ids": ["todo-2"],
+                    "error": "timeout",
+                },
+            ],
+        }
+    )
+
+    normalized = normalize_tool_result_for_rendering(
+        raw_result,
+        tool_name="dispatch_subagents",
+    )
+
+    assert normalized.render["type"] == "subagent_dispatch"
+    assert normalized.render["title"] == "Planning subagents"
+    assert normalized.render["structured_content"]["status"] == "partial"
+    assert normalized.render["structured_content"]["results"][0]["id"] == "worker-1"
 
 
 def test_large_inline_image_data_is_redacted():

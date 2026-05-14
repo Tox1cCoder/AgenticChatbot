@@ -6,6 +6,9 @@
     "codex-imagen": {
       "enabled": true
     },
+    "find-skills": {
+      "enabled": true
+    },
     "playwright-cli": {
       "enabled": false
     },

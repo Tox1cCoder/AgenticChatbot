@@ -764,12 +764,51 @@ class Settings(BaseSettings):
 
     # Planning Agent Explicit Settings (promoted from getattr defaults)
     planning_max_iterations: int = Field(
-        default=20,
-        description="Maximum planning tool calls before pausing for user",
+        default=0,
+        description=(
+            "Maximum planning tool calls before pausing for user. "
+            "Set to 0 to disable the planning iteration budget."
+        ),
     )
     planning_consecutive_errors_limit: int = Field(
         default=3,
         description="Maximum consecutive planning tool errors before stopping",
+    )
+
+    # Planning-mode subagent dispatcher configuration
+    planning_subagents_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable the Planning-mode subagent dispatch tool. When True, the Planning "
+            "Agent receives a `dispatch_subagents` internal tool during the executing "
+            "phase that fans out independent worker tasks to other graph agents."
+        ),
+    )
+    planning_subagents_max_tasks: int = Field(
+        default=5,
+        description="Maximum independent worker tasks accepted per dispatch call.",
+    )
+    planning_subagents_max_parallel: int = Field(
+        default=3,
+        description="Maximum number of subagent workers to execute concurrently.",
+    )
+    planning_subagents_worker_timeout_seconds: int = Field(
+        default=120,
+        description="Per-worker timeout in seconds before reporting a `timeout` result.",
+    )
+    planning_subagents_max_iterations: int = Field(
+        default=10,
+        description=(
+            "Maximum tool-loop iterations per worker before aborting with a `failed` "
+            "status. Guards against runaway worker tool loops."
+        ),
+    )
+    planning_subagents_result_max_chars: int = Field(
+        default=6000,
+        description=(
+            "Maximum characters returned to the Planning Agent for any single worker "
+            "summary. Outputs longer than this are truncated with an indicator."
+        ),
     )
 
     # MCP Tool Search Configuration (Deferred Loading)
@@ -868,8 +907,12 @@ class Settings(BaseSettings):
         "auto_continue_max_rounds",
         "auto_continue_max_total_iterations",
         "auto_continue_timeout_seconds",
-        "planning_max_iterations",
         "planning_consecutive_errors_limit",
+        "planning_subagents_max_tasks",
+        "planning_subagents_max_parallel",
+        "planning_subagents_worker_timeout_seconds",
+        "planning_subagents_max_iterations",
+        "planning_subagents_result_max_chars",
         mode="before",
     )
     @classmethod
@@ -904,6 +947,7 @@ class Settings(BaseSettings):
         "mcp_tool_search_inventory_max_top_k",
         "mcp_tool_search_max_pinned_tools",
         "mcp_tool_search_max_loaded_tools_per_conversation",
+        "planning_max_iterations",
         mode="before",
     )
     @classmethod

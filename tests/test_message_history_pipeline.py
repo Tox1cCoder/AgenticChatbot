@@ -7,8 +7,10 @@ that the final ``AIMessage`` carries the reserved assistant id.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.ai.graph import MultiAgentWorkflow
@@ -154,6 +156,60 @@ def test_checkpoint_compaction_runs_after_complete_not_after_interrupt(monkeypat
         )
     )
     assert "payload" not in captured_paused, "Compaction must skip on interrupt"
+
+
+@pytest.mark.asyncio
+async def test_streaming_compacts_checkpoint_before_complete_event(monkeypatch):
+    """Streaming callers stop reading after ``complete``, so compaction must
+    happen before that event is yielded."""
+
+    from types import SimpleNamespace
+
+    workflow = _make_workflow()
+    workflow.checkpointer = object()
+
+    response = AgentResponse(
+        agent_type=AgentType.CHAT,
+        agent_id="chat_agent",
+        message=AgentMessage(role=MessageRole.ASSISTANT, content="done"),
+        metadata={},
+    )
+    final_state = {
+        "messages": [AIMessage(content="done")],
+        "selected_agent": "chat_agent",
+        "response": response,
+        "context": {},
+    }
+
+    class FakeGraph:
+        async def astream(self, *_args, **_kwargs):
+            yield ("updates", {"chat_agent": final_state})
+
+        async def aget_state(self, _config):
+            return SimpleNamespace(next=[], values=final_state)
+
+    workflow.graph = FakeGraph()
+    workflow._route_node = AsyncMock(return_value={"selected_agent": "chat_agent"})
+    workflow._get_conversation_history = AsyncMock(return_value=[])
+
+    events: list[str] = []
+
+    async def fake_compact(*, config, thread_id):
+        events.append("compact")
+
+    monkeypatch.setattr(workflow, "_compact_checkpoint_after_terminal_response", fake_compact)
+
+    request = WorkflowExecutionRequest(
+        message="hello",
+        conversation_id="conv-1",
+    )
+
+    async for event in workflow.execute_request_stream(request):
+        events.append(event["type"])
+        if event["type"] == "complete":
+            break
+
+    assert events == ["agent_selected", "compact", "complete"]
 
 
 def test_workflow_request_round_trip_through_ai_schema():

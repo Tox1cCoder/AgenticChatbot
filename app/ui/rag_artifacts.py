@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-
 _ACTION_TITLES = {
     "scan_all": "Scan All Documents",
     "list_documents": "List Documents",
@@ -86,9 +85,7 @@ def extract_rag_artifact_views(metadata: dict[str, Any] | None) -> list[RAGArtif
         args = artifact.get("args") if isinstance(artifact.get("args"), dict) else {}
         action = _string_value(args.get("action") or "search_chunks").strip() or "search_chunks"
         output = _string_value(
-            artifact.get("output")
-            if artifact.get("output") is not None
-            else artifact.get("result")
+            artifact.get("output") if artifact.get("output") is not None else artifact.get("result")
         )
         if not output.strip() and artifact.get("error"):
             output = _string_value(artifact.get("error"))
@@ -101,8 +98,12 @@ def extract_rag_artifact_views(metadata: dict[str, Any] | None) -> list[RAGArtif
         except (TypeError, ValueError):
             blob_size = None
 
-        evidence = artifact.get("rag_evidence") if isinstance(artifact.get("rag_evidence"), dict) else {}
-        chunks = tuple(_build_chunk_views(evidence.get("chunks") if isinstance(evidence, dict) else None))
+        evidence = (
+            artifact.get("rag_evidence") if isinstance(artifact.get("rag_evidence"), dict) else {}
+        )
+        chunks = tuple(
+            _build_chunk_views(evidence.get("chunks") if isinstance(evidence, dict) else None)
+        )
         documents = tuple(
             _build_document_views(evidence.get("documents") if isinstance(evidence, dict) else None)
         )
@@ -162,7 +163,9 @@ def _build_chunk_views(raw_chunks: Any) -> list[RAGChunkView]:
             chunk.get("image_captions") if isinstance(chunk.get("image_captions"), list) else []
         )
         image_captions = tuple(
-            _string_value(caption).strip() for caption in image_captions_raw if _string_value(caption).strip()
+            _string_value(caption).strip()
+            for caption in image_captions_raw
+            if _string_value(caption).strip()
         )
 
         try:

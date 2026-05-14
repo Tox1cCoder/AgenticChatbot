@@ -12,6 +12,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool
 
 from ...core.config import settings
@@ -26,7 +27,6 @@ from ..client_runtime_tools import (
     get_client_runtime_tools,
 )
 from ..context_overflow import compact_tool_messages_for_retry, is_context_overflow_error
-from ..user_memory_tools import create_user_memory_tools
 from ..deferred_tool_binding import (
     build_deferred_tool_list,
     should_use_deferred_loading,
@@ -39,6 +39,7 @@ from ..skills_tool import create_activate_skill_tool, get_available_skill_summar
 from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
 from ..tool_execution import _WIDGET_SESSION_BOUND_TOOLS, _bind_widget_session_args
 from ..tool_scope import is_client_only_scope
+from ..user_memory_tools import create_user_memory_tools
 from ..utils import (
     coerce_response_text,
     extract_openai_reasoning_summary,
@@ -159,6 +160,9 @@ class BaseAgent(ABC):
             self.gemini_client = None
             self.langchain_model = None
 
+    def _should_include_hand_off_tool(self) -> bool:
+        return True
+
     async def _init_tools(self) -> None:
         """
         Initialize or refresh tools from MCP manager.
@@ -190,9 +194,10 @@ class BaseAgent(ABC):
             # Apply per-agent tool allowlist filtering
             self.tools = self._filter_tools_by_allowlist(unique_tools)
 
-            # Add inter-agent delegation tool so every agent can hand off
+            # Add inter-agent delegation tool for agents that participate in
+            # graph-level handoff. Planning has its own supervisor primitive.
             existing_names = {t.name for t in self.tools}
-            if _hand_off_tool.name not in existing_names:
+            if self._should_include_hand_off_tool() and _hand_off_tool.name not in existing_names:
                 self.tools.append(_hand_off_tool)
                 existing_names.add(_hand_off_tool.name)
 
@@ -344,7 +349,8 @@ class BaseAgent(ABC):
         for tool in skills_tools:
             _add_internal(tool)
 
-        _add_internal(_hand_off_tool)
+        if self._should_include_hand_off_tool():
+            _add_internal(_hand_off_tool)
 
         for tool in internal_tools or []:
             _add_internal(tool)
@@ -420,6 +426,9 @@ class BaseAgent(ABC):
                         seen.add(tool.name)
             else:
                 tools = list(self.tools)
+
+        if not self._should_include_hand_off_tool():
+            tools = [tool for tool in tools if getattr(tool, "name", None) != _hand_off_tool.name]
 
         seen_names = {tool.name for tool in tools}
         for tool in remote_tools:
@@ -643,7 +652,12 @@ class BaseAgent(ABC):
         if runtime_config.provider_fallback:
             metadata["provider_fallback"] = runtime_config.provider_fallback
 
-    async def _ainvoke_with_retries(self, llm_with_tools: Any, messages: list[BaseMessage]) -> Any:
+    async def _ainvoke_with_retries(
+        self,
+        llm_with_tools: Any,
+        messages: list[BaseMessage],
+        run_config: RunnableConfig | None = None,
+    ) -> Any:
         attempts = getattr(settings, "provider_retry_attempts", 3) or 3
         delay = getattr(settings, "provider_retry_delay_seconds", 1.0) or 1.0
 
@@ -664,6 +678,8 @@ class BaseAgent(ABC):
         last_exc: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
+                if run_config is not None:
+                    return await llm_with_tools.ainvoke(messages, run_config)
                 return await llm_with_tools.ainvoke(messages)
             except Exception as exc:
                 last_exc = exc
@@ -720,6 +736,8 @@ class BaseAgent(ABC):
         history_summary: str | None = None,
         disable_tools: bool = False,
         tool_budget_notice: str | None = None,
+        internal_tools: list[BaseTool] | None = None,
+        run_config: RunnableConfig | None = None,
         **system_prompt_kwargs: Any,
     ) -> AgentResponse:
         try:
@@ -736,11 +754,13 @@ class BaseAgent(ABC):
                 llm_with_tools = self._get_llm_with_tools(
                     llm,
                     conversation_id=conversation_id,
+                    internal_tools=internal_tools,
                     user_id=user_id,
                     device_id=device_id,
                 )
                 bound_tools = self._get_tools_for_binding(
                     conversation_id=conversation_id,
+                    internal_tools=internal_tools,
                     user_id=user_id,
                     device_id=device_id,
                 )
@@ -788,10 +808,24 @@ class BaseAgent(ABC):
             )
 
             context_overflow_retried = False
+
+            async def _invoke_with_optional_config(
+                model: Any,
+                model_messages: list[BaseMessage],
+            ) -> Any:
+                if run_config is not None:
+                    return await self._ainvoke_with_retries(
+                        model,
+                        model_messages,
+                        run_config=run_config,
+                    )
+                return await self._ainvoke_with_retries(model, model_messages)
+
             try:
                 try:
-                    response = await self._ainvoke_with_retries(
-                        llm_with_tools, langchain_messages
+                    response = await _invoke_with_optional_config(
+                        llm_with_tools,
+                        langchain_messages,
                     )
                 except Exception as exc:
                     if not settings.context_overflow_retry_enabled or not is_context_overflow_error(
@@ -802,8 +836,9 @@ class BaseAgent(ABC):
                         langchain_messages,
                         max_chars=settings.context_overflow_retry_tool_preview_chars,
                     )
-                    response = await self._ainvoke_with_retries(
-                        llm_with_tools, compacted_messages
+                    response = await _invoke_with_optional_config(
+                        llm_with_tools,
+                        compacted_messages,
                     )
                     context_overflow_retried = True
             except Exception:
@@ -828,12 +863,14 @@ class BaseAgent(ABC):
                             else self._get_llm_with_tools(
                                 llm,
                                 conversation_id=conversation_id,
+                                internal_tools=internal_tools,
                                 user_id=user_id,
                                 device_id=device_id,
                             )
                         )
-                        response = await self._ainvoke_with_retries(
-                            llm_with_tools, langchain_messages
+                        response = await _invoke_with_optional_config(
+                            llm_with_tools,
+                            langchain_messages,
                         )
                     except Exception:
                         fallback_runtime = self._create_fallback_runtime_config(
@@ -857,12 +894,14 @@ class BaseAgent(ABC):
                             else self._get_llm_with_tools(
                                 llm,
                                 conversation_id=conversation_id,
+                                internal_tools=internal_tools,
                                 user_id=user_id,
                                 device_id=device_id,
                             )
                         )
-                        response = await self._ainvoke_with_retries(
-                            llm_with_tools, langchain_messages
+                        response = await _invoke_with_optional_config(
+                            llm_with_tools,
+                            langchain_messages,
                         )
                 else:
                     fallback_runtime = self._create_fallback_runtime_config(
@@ -886,11 +925,15 @@ class BaseAgent(ABC):
                         else self._get_llm_with_tools(
                             llm,
                             conversation_id=conversation_id,
+                            internal_tools=internal_tools,
                             user_id=user_id,
                             device_id=device_id,
                         )
                     )
-                    response = await self._ainvoke_with_retries(llm_with_tools, langchain_messages)
+                    response = await _invoke_with_optional_config(
+                        llm_with_tools,
+                        langchain_messages,
+                    )
 
             actual_usage = extract_actual_usage(response)
             if actual_usage.get("input_tokens") is not None:
@@ -976,8 +1019,9 @@ class BaseAgent(ABC):
         # Append shared tool-usage guidance.
         system_prompt = f"{system_prompt}{TOOL_EXPLORATION_SUFFIX}"
 
-        # Append delegation instructions (hand_off tool awareness)
-        system_prompt = f"{system_prompt}{DELEGATION_SUFFIX}"
+        # Append delegation instructions only when the tool is actually bound.
+        if self._should_include_hand_off_tool():
+            system_prompt = f"{system_prompt}{DELEGATION_SUFFIX}"
 
         # Inject rolling conversation summary as a dedicated memory block
         if history_summary:

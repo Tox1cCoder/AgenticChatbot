@@ -11,11 +11,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 from app.ai.agents import rag_agent as rag_agent_module
 from app.ai.agents.rag_agent import RAGAgent
+from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 
 
 def test_rag_agent_module_does_not_import_build_rag_prompt():
@@ -60,6 +61,49 @@ def test_graph_document_aware_chat_does_not_split_on_traditional_rag():
     assert "build_rag_prompt" not in source, (
         "graph.py must not reference build_rag_prompt after Phase 8"
     )
+
+
+def test_agentic_rag_forwards_run_config_to_model_invocation():
+    agent = object.__new__(RAGAgent)
+    agent.tools = []
+    agent._build_skills_suffix = lambda **_kwargs: ""
+    agent._init_tools = AsyncMock()
+    agent._get_tools_for_binding = MagicMock(return_value=[])
+    agent._resolve_runtime_model_config = MagicMock(
+        return_value=SimpleNamespace(
+            capabilities={"supports_vision": True},
+            fallback_config=None,
+            provider="gemini",
+            warnings=[],
+        )
+    )
+
+    captured: dict[str, object] = {}
+
+    async def fake_invoke_agentic_rag_model(**kwargs):
+        captured.update(kwargs)
+        return AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="done"),
+            metadata={},
+        )
+
+    agent._invoke_agentic_rag_model = fake_invoke_agentic_rag_model
+    run_config = {
+        "tags": ["internal", "planning_subagent"],
+        "metadata": {"internal": True, "purpose": "planning_subagent"},
+    }
+
+    message = AgentMessage(
+        role=MessageRole.USER,
+        content="search docs",
+        metadata={"run_config": run_config},
+    )
+
+    asyncio.run(agent._process_message_agentic(message, "conv-1"))
+
+    assert captured["run_config"] is run_config
 
 
 def test_search_tool_schema_does_not_carry_server_context():

@@ -53,6 +53,17 @@ class Router:
 
         content = (message.content or "").strip()
 
+        # Planning mode + existing plan: planning_agent is the supervisor; the
+        # router should never wander off to chat_agent just because the user
+        # phrased a delegation request casually. The LLM router is unreliable
+        # for this, so we short-circuit deterministically.
+        if (
+            planning_mode_enabled
+            and has_existing_plan
+            and "planning_agent" in available_agents
+        ):
+            return "planning_agent"
+
         metadata = message.metadata or {}
         persona = metadata.get("persona")
         request_user_id = metadata.get("user_id")
@@ -73,7 +84,6 @@ class Router:
         if selected_agent:
             return selected_agent
 
-        # LLM returned something unparseable — default to chat_agent
         logger.warning("Router LLM returned no recognisable agent name")
         return "chat_agent"
 

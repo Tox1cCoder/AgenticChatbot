@@ -25,9 +25,7 @@ class ToolResultBlob(Base):
     conversation_id = Column(
         UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False, index=True
     )
-    user_id = Column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
-    )
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     tool_call_id = Column(String(255), nullable=True, index=True)
     tool_name = Column(String(255), nullable=False, index=True)
 

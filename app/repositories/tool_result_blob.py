@@ -4,7 +4,6 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 from app.models.tool_result_blob import ToolResultBlob
 

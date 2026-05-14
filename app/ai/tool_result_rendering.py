@@ -42,6 +42,11 @@ def normalize_tool_result_for_rendering(
 
     if structured_content is None:
         structured_content = _infer_structured_content_from_result(safe_result, content_blocks)
+    if structured_content is None:
+        structured_content = _extract_dispatch_subagents_structured_content(
+            safe_result,
+            tool_name=tool_name,
+        )
 
     if not text:
         text = _build_model_content(
@@ -69,6 +74,8 @@ def normalize_tool_result_for_rendering(
     }
 
     title = _extract_title(safe_result, ui_meta)
+    if not title and render_type == "subagent_dispatch":
+        title = "Planning subagents"
     if title:
         render["title"] = title
     if structured_content is not None:
@@ -240,6 +247,26 @@ def _infer_structured_content_from_result(value: Any, content_blocks: list[dict[
     return None
 
 
+def _extract_dispatch_subagents_structured_content(
+    value: Any,
+    *,
+    tool_name: str,
+) -> Any:
+    if tool_name != "dispatch_subagents":
+        return None
+
+    candidate = value
+    if isinstance(value, str):
+        try:
+            candidate = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    if _looks_like_subagent_dispatch(candidate):
+        return make_json_safe(candidate)
+    return None
+
+
 def _clean_error_text(error: Any) -> str:
     error_text = str(error or "").strip()
     if error_text.lower().startswith("error:"):
@@ -306,6 +333,8 @@ def _infer_render_type(
 ) -> str:
     if error:
         return "error"
+    if tool_name == "dispatch_subagents" and _looks_like_subagent_dispatch(structured_content):
+        return "subagent_dispatch"
     if template_uri:
         return "mcp_app"
     if tool_name in _WIDGET_TOOLS:
@@ -334,6 +363,17 @@ def _looks_like_table(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
     return isinstance(value.get("columns"), list) and isinstance(value.get("rows"), list)
+
+
+def _looks_like_subagent_dispatch(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("status") not in {"completed", "partial", "failed"}:
+        return False
+    results = value.get("results")
+    if not isinstance(results, list):
+        return False
+    return all(isinstance(item, dict) for item in results)
 
 
 def _extract_title(value: Any, ui_meta: dict[str, Any]) -> str | None:

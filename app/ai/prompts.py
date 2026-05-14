@@ -266,18 +266,24 @@ Available agents:
 Routing priorities:
 1. If uploaded documents are available, prefer rag_agent unless the user's current
    intent is clearly unrelated to document analysis.
-2. Prefer planning_agent when the user is managing a task plan or working through
-   an existing plan.
-3. Prefer canvas_agent when the user wants a standalone authored browser artifact
+2. When Planning mode is active AND an existing task plan is present, route to
+   planning_agent. This is non-negotiable — planning_agent is the supervisor that
+   owns todo mutations, plan execution, and subagent dispatch. Phrases like "use
+   subagent", "dispatch", "delegate", "fan out", "run in parallel", "execute the
+   plan", or any reference to subagents MUST route to planning_agent in this state,
+   regardless of other heuristics.
+3. Prefer planning_agent when the user is managing a task plan or working through
+   an existing plan, even if no plan exists yet.
+4. Prefer canvas_agent when the user wants a standalone authored browser artifact
    or a larger interactive experience in the canvas preview.
-4. Prefer chat_agent, rag_agent, or search_agent with widget tools for bounded
+5. Prefer chat_agent, rag_agent, or search_agent with widget tools for bounded
    in-chat visual aids that clarify an answer, summarize data, collect input, or
    present choices inside the conversation.
-5. Prefer chat_agent for tool-backed work in external integrations or real-world
+6. Prefer chat_agent for tool-backed work in external integrations or real-world
    deliverables, even when the output is visual or editable.
-6. Prefer search_agent for current or externally changing information.
-7. Prefer image_generator_agent for generated images that are not code artifacts.
-8. Otherwise use chat_agent.
+7. Prefer search_agent for current or externally changing information.
+8. Prefer image_generator_agent for generated images that are not code artifacts.
+9. Otherwise use chat_agent.
 
 Canvas and LiveUI boundary:
 - canvas_agent is for standalone artifacts rendered in the canvas panel.

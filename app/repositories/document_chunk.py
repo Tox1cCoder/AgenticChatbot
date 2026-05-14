@@ -13,6 +13,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import joinedload
 
+from app.models.conversation import Conversation
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 
@@ -177,8 +178,6 @@ class DocumentChunkRepository:
             if conversation_id is not None:
                 query = query.filter(Document.conversation_id == conversation_id)
             if user_id is not None:
-                from app.models.conversation import Conversation
-
                 query = query.join(
                     Conversation, Document.conversation_id == Conversation.id
                 ).filter(Conversation.owner_id == user_id)

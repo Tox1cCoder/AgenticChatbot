@@ -91,7 +91,5 @@ def downgrade() -> None:
     op.drop_index("ix_tool_result_blobs_tool_name", table_name="tool_result_blobs")
     op.drop_index("ix_tool_result_blobs_tool_call_id", table_name="tool_result_blobs")
     op.drop_index("ix_tool_result_blobs_user_id", table_name="tool_result_blobs")
-    op.drop_index(
-        "ix_tool_result_blobs_conversation_id", table_name="tool_result_blobs"
-    )
+    op.drop_index("ix_tool_result_blobs_conversation_id", table_name="tool_result_blobs")
     op.drop_table("tool_result_blobs")

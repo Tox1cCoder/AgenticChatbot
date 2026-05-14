@@ -48,11 +48,24 @@ def test_graph_config_clamps_recursion_limit_for_final_synthesis(monkeypatch):
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     workflow.checkpointer = None
     monkeypatch.setattr(settings, "react_agent_max_iterations", 10)
+    monkeypatch.setattr(settings, "planning_max_iterations", 10)
     monkeypatch.setattr(settings, "react_agent_recursion_limit", 15)
 
     config = workflow._build_graph_config()
 
     assert config["recursion_limit"] == 25
+
+
+def test_graph_config_accounts_for_planning_iteration_budget(monkeypatch):
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    workflow.checkpointer = None
+    monkeypatch.setattr(settings, "react_agent_max_iterations", 5)
+    monkeypatch.setattr(settings, "planning_max_iterations", 20)
+    monkeypatch.setattr(settings, "react_agent_recursion_limit", 0)
+
+    config = workflow._build_graph_config()
+
+    assert config["recursion_limit"] == 45
 
 
 @pytest.mark.asyncio
@@ -116,9 +129,11 @@ class _DummyAgent(BaseAgent):
 class _FakeLLM:
     def __init__(self) -> None:
         self.messages = None
+        self.config = None
 
-    async def ainvoke(self, messages):
+    async def ainvoke(self, messages, config=None):
         self.messages = messages
+        self.config = config
         return AIMessage(content="Final answer from plain model")
 
 
@@ -169,3 +184,21 @@ async def test_base_agent_disable_tools_uses_plain_model_and_budget_notice(monke
     assert response.message.content == "Final answer from plain model"
     assert isinstance(fake_llm.messages[0], SystemMessage)
     assert "Tool-use budget reached" in fake_llm.messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_base_agent_ainvoke_with_retries_forwards_run_config():
+    agent = _DummyAgent(agent_config_key="chat")
+    fake_llm = _FakeLLM()
+    run_config = {
+        "tags": ["internal", "planning_subagent"],
+        "metadata": {"internal": True, "purpose": "planning_subagent"},
+    }
+
+    await agent._ainvoke_with_retries(
+        fake_llm,
+        [HumanMessage(content="worker prompt")],
+        run_config=run_config,
+    )
+
+    assert fake_llm.config is run_config

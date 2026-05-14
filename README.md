@@ -353,6 +353,12 @@ After the memory refactor, summarization no longer runs on the streaming hot pat
 
 `ENABLE_HUMAN_IN_THE_LOOP`, `HITL_TOOLS_REQUIRE_APPROVAL`, `HITL_APPROVAL_TIMEOUT_MINUTES`, `MAX_AUTO_PLAN_TASKS`, `EXECUTION_CALL_BUDGET`, `PLANNING_MAX_ITERATIONS`, `PLANNING_CONSECUTIVE_ERRORS_LIMIT`.
 
+### Planning-mode subagents
+
+`PLANNING_SUBAGENTS_ENABLED`, `PLANNING_SUBAGENTS_MAX_TASKS`, `PLANNING_SUBAGENTS_MAX_PARALLEL`, `PLANNING_SUBAGENTS_WORKER_TIMEOUT_SECONDS`, `PLANNING_SUBAGENTS_MAX_ITERATIONS`, `PLANNING_SUBAGENTS_RESULT_MAX_CHARS`.
+
+While Planning mode is active and the Planning Agent is in the *executing* phase, it can call the internal `dispatch_subagents` tool to fan out independent worker tasks to other graph agents (`chat_agent`, `rag_agent`, `search_agent`, `image_generator_agent`, `canvas_agent`). Workers run concurrently in the same chat turn — there is no background queue and the dispatch call blocks until every worker completes, fails, times out, or signals it needs human approval. Workers run with isolated message state, inherit scoped identifiers (`conversation_id`, `user_id`, `device_id`) and runtime model overrides, and only return concise summaries to the Planning Agent. Workers cannot mutate todos directly: the Planning Agent reads each result and reconciles the plan with `write_todos`. This is distinct from `hand_off`, which re-routes the entire turn to a single top-level agent rather than fanning out parallel research/build work.
+
 ### Client runtime bridge
 
 `ENABLE_CLIENT_RUNTIME_BRIDGE`, `CLIENT_RUNTIME_WS_TIMEOUT_SECONDS`, `CLIENT_RUNTIME_CATALOG_CACHE_TTL_SECONDS`, `CLIENT_RUNTIME_REQUIRE_CONNECTED_DEVICE_FOR_LOCAL_TOOLS`, `CLIENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS`, `CLIENT_RUNTIME_MAX_TOOL_RESULT_SIZE_BYTES`.

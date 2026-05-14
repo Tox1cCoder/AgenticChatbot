@@ -29,6 +29,10 @@ from app.ui.rag_artifacts import (
     RAGDocumentListing,
     extract_rag_artifact_views,
 )
+from app.ui.subagent_activity import (
+    build_live_subagent_activity_view,
+    build_subagent_activity_view,
+)
 from upload_support import delete_document, get_uploaded_documents, upload_document
 
 API_BASE_URL = os.environ.get("CHATBOT_API_BASE_URL", "http://127.0.0.1:8000")
@@ -594,70 +598,29 @@ APP_STYLE = """
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     }
 
-    /* Thinking/Reasoning UI Styles - Modern blue design */
+    /* Thinking/Reasoning UI Styles */
     .thinking-container {
         border-left: 3px solid #3b82f6;
-        padding: 14px 18px;
-        margin: 8px 0 16px 0;
-        background: linear-gradient(135deg, rgba(59, 130, 246, 0.06) 0%, rgba(59, 130, 246, 0.02) 100%);
-        border-radius: 0 10px 10px 0;
-        font-size: 0.9em;
+        padding: 10px 12px;
+        margin: 6px 0 12px 0;
+        background: #f8fafc;
+        border-radius: 0 8px 8px 0;
+        font-size: 0.88em;
         color: #4b5563;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-    }
-
-    .thinking-header {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-weight: 600;
-        color: #3b82f6;
-        margin-bottom: 8px;
-    }
-
-    .thinking-indicator {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-    }
-
-    .thinking-dots {
-        display: inline-flex;
-        gap: 4px;
-    }
-
-    .thinking-dot {
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background-color: #3b82f6;
-        animation: thinking-pulse 1.4s infinite ease-in-out;
-    }
-
-    .thinking-dot:nth-child(1) { animation-delay: -0.32s; }
-    .thinking-dot:nth-child(2) { animation-delay: -0.16s; }
-    .thinking-dot:nth-child(3) { animation-delay: 0s; }
-
-    @keyframes thinking-pulse {
-        0%, 80%, 100% {
-            transform: scale(0.6);
-            opacity: 0.4;
-        }
-        40% {
-            transform: scale(1);
-            opacity: 1;
-        }
+        border-top: 1px solid #dbeafe;
+        border-right: 1px solid #dbeafe;
+        border-bottom: 1px solid #dbeafe;
     }
 
     .thinking-content {
-        line-height: 1.65;
+        line-height: 1.55;
         white-space: pre-wrap;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         color: #374151;
     }
 
     .thinking-content-rendered {
-        line-height: 1.65;
+        line-height: 1.55;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         color: #374151;
         white-space: normal;
@@ -700,11 +663,9 @@ APP_STYLE = """
     .trace-tool-card {
         margin: 0.8rem 0 1rem 0;
         padding: 0.85rem 0.95rem;
-        border: 1px solid #dbeafe;
-        border-radius: 14px;
-        background:
-            radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 42%),
-            linear-gradient(180deg, rgba(248, 250, 252, 0.95), rgba(239, 246, 255, 0.9));
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        background: #ffffff;
     }
 
     .trace-tool-header {
@@ -764,6 +725,73 @@ APP_STYLE = """
         border-color: rgba(148, 163, 184, 0.28);
     }
 
+    .subagent-activity-shell {
+        margin: 0.7rem 0 0.85rem 0;
+        padding: 0.8rem 0.95rem;
+        border: 1px solid #cbd5e1;
+        border-left: 4px solid #2563eb;
+        border-radius: 8px;
+        background: #f8fafc;
+    }
+
+    .subagent-activity-live {
+        border-color: #bfdbfe;
+        border-left-color: #2563eb;
+        background: #eff6ff;
+    }
+
+    .subagent-activity-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+    }
+
+    .subagent-activity-title {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.38rem;
+        color: #0f172a;
+        font-size: 0.92rem;
+        font-weight: 700;
+    }
+
+    .subagent-activity-meta {
+        color: #475569;
+        font-size: 0.78rem;
+        font-weight: 600;
+    }
+
+    .subagent-worker-row {
+        margin: 0.45rem 0;
+        padding: 0.68rem 0.78rem;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        background: #ffffff;
+    }
+
+    .subagent-worker-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.65rem;
+        flex-wrap: wrap;
+        margin-bottom: 0.35rem;
+    }
+
+    .subagent-worker-name {
+        color: #0f172a;
+        font-size: 0.86rem;
+        font-weight: 700;
+    }
+
+    .subagent-worker-summary {
+        color: #334155;
+        font-size: 0.85rem;
+        line-height: 1.45;
+    }
+
     .trace-preview-label {
         margin: 0.8rem 0 0.35rem 0;
         color: #64748b;
@@ -775,9 +803,9 @@ APP_STYLE = """
 
     .trace-preview {
         padding: 0.7rem 0.8rem;
-        border: 1px solid #dbeafe;
-        border-radius: 10px;
-        background: rgba(239, 246, 255, 0.9);
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        background: #f8fafc;
     }
 
     .trace-preview pre {
@@ -1269,6 +1297,7 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "stream_trace_items": list,
     "stream_tool_index": dict,
     "stream_trace_expanded": lambda: False,
+    "stream_subagent_activity": lambda: None,
     # Provider/model UI state
     "model_config_options_cache": dict,
     "model_config_options_last_fetch": lambda: None,
@@ -1619,6 +1648,7 @@ def _clear_inflight_state() -> None:
     st.session_state.stream_trace_items = []
     st.session_state.stream_tool_index = {}
     st.session_state.stream_trace_expanded = False
+    st.session_state.stream_subagent_activity = None
 
 
 def _handle_stop_rerun(conversation_id: str) -> None:
@@ -2622,6 +2652,73 @@ def _render_mcp_app_tool_result(render: dict[str, Any]) -> bool:
     return True
 
 
+def _render_subagent_dispatch_tool_result(render: dict[str, Any]) -> bool:
+    structured = _get_render_structured_content(render)
+    if not isinstance(structured, dict):
+        return False
+
+    results = structured.get("results")
+    if not isinstance(results, list):
+        return False
+
+    status = str(structured.get("status") or "unknown").strip().lower()
+    rationale = structured.get("rationale")
+    completed = sum(
+        1
+        for item in results
+        if isinstance(item, dict) and str(item.get("status") or "").lower() == "completed"
+    )
+    st.caption(f"Dispatch status: {status} | {completed}/{len(results)} workers completed")
+    if isinstance(rationale, str) and rationale.strip():
+        st.caption(rationale.strip())
+
+    for index, item in enumerate(results, start=1):
+        if not isinstance(item, dict):
+            continue
+
+        worker_id = str(item.get("id") or f"worker-{index}")
+        agent_name = str(item.get("agent") or "unknown_agent")
+        worker_status = str(item.get("status") or "unknown").strip().lower()
+        elapsed_ms = item.get("elapsed_ms")
+        elapsed = ""
+        if isinstance(elapsed_ms, (int, float)) and elapsed_ms >= 0:
+            elapsed = f" | {float(elapsed_ms) / 1000:.2f}s"
+
+        if worker_status == "completed":
+            icon = ":material/check_circle:"
+        elif worker_status in {"failed", "timeout"}:
+            icon = ":material/error:"
+        elif worker_status == "requires_approval":
+            icon = ":material/pending_actions:"
+        else:
+            icon = ":material/help:"
+
+        with st.expander(
+            f"{icon} {worker_id} - {agent_name} - {worker_status}{elapsed}",
+            expanded=worker_status != "completed",
+        ):
+            related = item.get("related_todo_ids")
+            if isinstance(related, list) and related:
+                st.caption("Related todos: " + ", ".join(str(value) for value in related))
+
+            summary = item.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                st.markdown(summary.strip())
+            else:
+                st.caption("Worker returned no summary.")
+
+            error = item.get("error")
+            if isinstance(error, str) and error.strip():
+                st.error(error.strip())
+
+            artifacts = item.get("artifacts")
+            if isinstance(artifacts, list) and artifacts:
+                with st.expander("Worker artifacts", expanded=False):
+                    render_tool_result_payload(artifacts, use_expander=False)
+
+    return True
+
+
 def render_tool_render_payload(render: Any, fallback_output: Any = None) -> bool:
     if not isinstance(render, dict):
         return False
@@ -2636,7 +2733,9 @@ def render_tool_render_payload(render: Any, fallback_output: Any = None) -> bool
         st.error(str(error or "Tool execution failed."))
         return True
 
-    if render_type == "mcp_app":
+    if render_type == "subagent_dispatch":
+        rendered = _render_subagent_dispatch_tool_result(render)
+    elif render_type == "mcp_app":
         rendered = _render_mcp_app_tool_result(render)
     elif render_type == "table":
         rendered = _render_table_tool_result(render)
@@ -4673,6 +4772,7 @@ def _ensure_stream_trace_state() -> None:
     st.session_state.setdefault("stream_trace_items", [])
     st.session_state.setdefault("stream_tool_index", {})
     st.session_state.setdefault("stream_trace_expanded", False)
+    st.session_state.setdefault("stream_subagent_activity", None)
 
 
 def _reset_stream_trace_state(expanded: bool = True) -> None:
@@ -4680,6 +4780,7 @@ def _reset_stream_trace_state(expanded: bool = True) -> None:
     st.session_state.stream_trace_items = []
     st.session_state.stream_tool_index = {}
     st.session_state.stream_trace_expanded = expanded
+    st.session_state.stream_subagent_activity = None
 
 
 def _rebuild_stream_tool_index(trace_items: list[dict[str, Any]]) -> dict[str, int]:
@@ -4837,20 +4938,7 @@ def _render_trace_text_block(
     if not isinstance(content, str) or not content.strip():
         return
 
-    header_html = ""
     if live:
-        header_html = """
-        <div class="thinking-header">
-            <span class="thinking-indicator">
-                Thinking
-                <span class="thinking-dots">
-                    <span class="thinking-dot"></span>
-                    <span class="thinking-dot"></span>
-                    <span class="thinking-dot"></span>
-                </span>
-            </span>
-        </div>
-        """
         rendered_content = re.sub(
             r"\*\*(.*?)\*\*",
             r"<strong>\1</strong>",
@@ -4862,15 +4950,58 @@ def _render_trace_text_block(
         body_html = (
             f'<div class="thinking-content-rendered">{sanitize_message_content(content)}</div>'
         )
+        st.markdown(
+            f'<div class="thinking-container">{header_html}{body_html}</div>',
+            unsafe_allow_html=True,
+        )
+        return
     else:
         body_html = (
             f'<div class="thinking-content-rendered">{sanitize_message_content(content)}</div>'
         )
 
     st.markdown(
-        f'<div class="thinking-container">{header_html}{body_html}</div>',
+        f'<div class="thinking-container">{body_html}</div>',
         unsafe_allow_html=True,
     )
+
+
+def _trace_panel_title(
+    *,
+    has_thinking: bool,
+    has_reasoning: bool,
+    has_tools: bool,
+) -> str:
+    if has_tools:
+        return "Execution Trace"
+    if has_thinking and has_reasoning:
+        return "Thought Process"
+    if has_reasoning:
+        return "Reasoning Summary"
+    return "Thinking"
+
+
+def _should_show_thinking_section_title(
+    *,
+    has_tools: bool,
+    has_thinking: bool,
+    has_reasoning: bool,
+) -> bool:
+    return has_tools and (has_thinking or has_reasoning)
+
+
+def _trace_text_label(
+    *,
+    section: str,
+    has_tools: bool,
+    has_thinking: bool,
+    has_reasoning: bool,
+) -> str | None:
+    if section == "reasoning":
+        return "Reasoning Summary" if has_tools or has_thinking else None
+    if section == "thinking":
+        return "Thinking Summary" if has_tools and has_reasoning else None
+    return None
 
 
 def _build_tool_trace_items_from_artifacts(
@@ -4882,6 +5013,12 @@ def _build_tool_trace_items_from_artifacts(
     trace_items: list[dict[str, Any]] = []
     for index, artifact in enumerate(tool_artifacts, start=1):
         if not isinstance(artifact, dict):
+            continue
+
+        tool_name = artifact.get("tool", "unknown_tool")
+        render = artifact.get("render")
+        render_type = render.get("type") if isinstance(render, dict) else None
+        if tool_name == "dispatch_subagents" or render_type == "subagent_dispatch":
             continue
 
         raw_status = str(artifact.get("status") or "").strip().lower()
@@ -4907,12 +5044,12 @@ def _build_tool_trace_items_from_artifacts(
             {
                 "kind": "tool",
                 "tool_call_id": artifact.get("tool_call_id") or f"artifact_{index}",
-                "name": artifact.get("tool", "unknown_tool"),
+                "name": tool_name,
                 "phase": "end" if state != "running" else "start",
                 "state": state,
                 "args": artifact.get("args"),
                 "result": artifact.get("output"),
-                "render": artifact.get("render"),
+                "render": render,
                 "error": artifact.get("error"),
                 "hint": artifact.get("hint"),
                 "duration_ms": duration_ms,
@@ -4996,29 +5133,58 @@ def render_trace_panel(
     live: bool = False,
 ) -> None:
     normalized_tools = [item for item in tool_items or [] if isinstance(item, dict)]
+    has_thinking = isinstance(thinking_content, str) and bool(thinking_content.strip())
+    has_reasoning = isinstance(reasoning_summary, str) and bool(reasoning_summary.strip())
+    has_tools = bool(normalized_tools)
     if not any(
         [
-            isinstance(thinking_content, str) and thinking_content.strip(),
-            isinstance(reasoning_summary, str) and reasoning_summary.strip(),
-            normalized_tools,
+            has_thinking,
+            has_reasoning,
+            has_tools,
         ]
     ):
         return
 
-    with st.expander("Thought Process", expanded=expanded):
-        if (
-            isinstance(reasoning_summary, str)
-            and reasoning_summary.strip()
-            or (isinstance(thinking_content, str) and thinking_content.strip())
-        ):
-            st.markdown('<div class="trace-section-title">Thinking</div>', unsafe_allow_html=True)
-            if isinstance(reasoning_summary, str) and reasoning_summary.strip():
-                _render_trace_text_block(reasoning_summary, label="Reasoning Summary")
-            if isinstance(thinking_content, str) and thinking_content.strip():
-                thinking_label = None if live else "Thinking Summary"
+    with st.expander(
+        _trace_panel_title(
+            has_thinking=has_thinking,
+            has_reasoning=has_reasoning,
+            has_tools=has_tools,
+        ),
+        expanded=expanded,
+    ):
+        if has_reasoning or has_thinking:
+            if _should_show_thinking_section_title(
+                has_tools=has_tools,
+                has_thinking=has_thinking,
+                has_reasoning=has_reasoning,
+            ):
+                st.markdown(
+                    '<div class="trace-section-title">Thinking</div>',
+                    unsafe_allow_html=True,
+                )
+
+            if has_reasoning:
+                _render_trace_text_block(
+                    reasoning_summary,
+                    label=_trace_text_label(
+                        section="reasoning",
+                        has_tools=has_tools,
+                        has_thinking=has_thinking,
+                        has_reasoning=has_reasoning,
+                    ),
+                )
+            if has_thinking:
                 _render_trace_text_block(
                     thinking_content,
-                    label=thinking_label,
+                    label=None
+                    if live
+                    else _trace_text_label(
+                        section="thinking",
+                        has_tools=has_tools,
+                        has_thinking=has_thinking,
+                        has_reasoning=has_reasoning,
+                    ),
                     live=live,
                 )
 
@@ -5042,6 +5208,146 @@ def render_message_trace(message_metadata: dict[str, Any], expanded: bool = Fals
         expanded=expanded,
         live=False,
     )
+
+
+def _format_subagent_duration(value: Any) -> str:
+    if not isinstance(value, (int, float)) or value < 0:
+        return ""
+    return f"{float(value) / 1000:.2f}s"
+
+
+def _render_subagent_activity_view(view: dict[str, Any] | None, *, live: bool = False) -> None:
+    if not view:
+        return
+
+    total = int(view.get("total") or 0)
+    completed = int(view.get("completed") or 0)
+    blocked = int(view.get("failed") or 0)
+    running = int(view.get("running") or 0)
+    status = str(view.get("status") or "unknown").strip().lower()
+    badge_label, icon_name, badge_class = _trace_status_meta(
+        "completed" if status == "completed" else "error" if blocked else "unknown"
+    )
+    if status == "running":
+        badge_label = "Running"
+        icon_name = "hourglass_top"
+        badge_class = "running"
+    elif status == "partial":
+        badge_label = "Partial"
+        icon_name = "pending"
+        badge_class = "running"
+    elif status == "failed":
+        badge_label = "Blocked"
+        icon_name = "error"
+        badge_class = "error"
+    elif status == "completed":
+        badge_label = "Completed"
+        icon_name = "check_circle"
+        badge_class = "completed"
+
+    meta_parts = [f"{completed}/{total} workers completed"]
+    if running:
+        meta_parts.append(f"{running} running")
+    if blocked:
+        meta_parts.append(f"{blocked} need attention")
+    shell_class = (
+        "subagent-activity-shell subagent-activity-live" if live else "subagent-activity-shell"
+    )
+
+    st.markdown(
+        f"""
+        <div class="{shell_class}">
+            <div class="subagent-activity-head">
+                <div class="subagent-activity-title">
+                    <span class="material-symbols-outlined" aria-hidden="true">hub</span>
+                    Subagent Activity
+                </div>
+                <span class="trace-status-pill trace-status-{badge_class}">
+                    <span class="material-symbols-outlined" aria-hidden="true">{icon_name}</span>
+                    {html.escape(badge_label)}
+                </span>
+            </div>
+            <div class="subagent-activity-meta">
+                {html.escape(" | ".join(meta_parts))}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    rationales = [value for value in view.get("rationales", []) if isinstance(value, str)]
+    for rationale in rationales[:2]:
+        st.caption(rationale)
+
+    with st.expander("Worker details", expanded=(live and status == "running") or blocked > 0):
+        for index, item in enumerate(view.get("results") or [], start=1):
+            if not isinstance(item, dict):
+                continue
+
+            worker_status = str(item.get("status") or "unknown").strip().lower()
+            worker_badge, worker_icon, worker_class = _trace_status_meta(
+                "completed"
+                if worker_status == "completed"
+                else "error"
+                if worker_status in {"failed", "timeout"}
+                else "running"
+                if worker_status in {"running", "queued", "requires_approval"}
+                else "unknown"
+            )
+            if worker_status == "timeout":
+                worker_badge = "Timeout"
+            elif worker_status == "requires_approval":
+                worker_badge = "Needs Approval"
+                worker_icon = "pending_actions"
+            elif worker_status == "running":
+                worker_badge = "Running"
+                worker_icon = "hourglass_top"
+            elif worker_status == "queued":
+                worker_badge = "Queued"
+                worker_icon = "pending"
+
+            worker_id = html.escape(str(item.get("id") or f"worker-{index}"))
+            agent_name = html.escape(str(item.get("agent") or "unknown_agent"))
+            duration = _format_subagent_duration(item.get("elapsed_ms"))
+            duration_text = f" | {html.escape(duration)}" if duration else ""
+            summary = str(item.get("summary") or "").strip()
+
+            st.markdown(
+                f"""
+                <div class="subagent-worker-row">
+                    <div class="subagent-worker-top">
+                        <div class="subagent-worker-name">
+                            {worker_id} &middot; {agent_name}{duration_text}
+                        </div>
+                        <span class="trace-status-pill trace-status-{worker_class}">
+                            <span class="material-symbols-outlined" aria-hidden="true">{worker_icon}</span>
+                            {html.escape(worker_badge)}
+                        </span>
+                    </div>
+                    <div class="subagent-worker-summary">
+                        {sanitize_message_content(summary) if summary else "No summary returned."}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            related = item.get("related_todo_ids")
+            if isinstance(related, list) and related:
+                st.caption("Related todos: " + ", ".join(str(value) for value in related))
+
+            error = item.get("error")
+            if isinstance(error, str) and error.strip():
+                st.error(error.strip())
+
+            artifacts = item.get("artifacts")
+            if isinstance(artifacts, list) and artifacts:
+                with st.expander(f"Worker artifacts for {worker_id}", expanded=False):
+                    render_tool_result_payload(artifacts, use_expander=False)
+
+
+def render_subagent_activity(message_metadata: dict[str, Any]) -> None:
+    _render_subagent_activity_view(build_subagent_activity_view(message_metadata), live=False)
 
 
 def _render_rag_chunk_card(view: RAGArtifactView, chunk: RAGChunkView) -> None:
@@ -5093,9 +5399,7 @@ def render_rag_retrieval_artifacts(message_metadata: dict[str, Any]) -> None:
     summary_label = "chunk" if total_chunks else "result"
     summary_suffix = "" if summary_count == 1 else "s"
 
-    with st.expander(
-        f"{label} ({summary_count} {summary_label}{summary_suffix})", expanded=False
-    ):
+    with st.expander(f"{label} ({summary_count} {summary_label}{summary_suffix})", expanded=False):
         for index, view in enumerate(views, start=1):
             st.markdown(f"**{view.title}**")
             detail_parts: list[str] = []
@@ -5119,7 +5423,12 @@ def render_rag_retrieval_artifacts(message_metadata: dict[str, Any]) -> None:
             elif view.preview:
                 st.code(view.preview, language="text")
 
-            if view.output and view.output != view.preview and not view.chunks and not view.documents:
+            if (
+                view.output
+                and view.output != view.preview
+                and not view.chunks
+                and not view.documents
+            ):
                 with st.expander(f"Full output for {view.title}", expanded=False):
                     st.code(view.output, language="text")
             elif view.chunks or view.documents:
@@ -5173,6 +5482,31 @@ def _upsert_stream_thinking_trace(content: str) -> None:
     st.session_state.stream_tool_index = _rebuild_stream_tool_index(trace_items)
 
 
+def _upsert_stream_subagent_activity(stream_event: dict[str, Any]) -> bool:
+    previous = st.session_state.get("stream_subagent_activity")
+    view = build_live_subagent_activity_view(stream_event, previous=previous)
+    if view is previous:
+        return False
+
+    st.session_state.stream_subagent_activity = view
+    return bool(view)
+
+
+def _has_live_trace_panel_content() -> bool:
+    return bool(
+        st.session_state.get("stream_trace_items")
+        or st.session_state.get("stream_subagent_activity")
+    )
+
+
+def _format_stream_tool_status_label(tool_event: dict[str, Any]) -> str:
+    tool_name = str(tool_event.get("name") or "unknown")
+    phase = str(tool_event.get("phase") or tool_event.get("status") or "running")
+    if tool_name == "dispatch_subagents":
+        return "Subagents: dispatching..." if phase == "start" else "Subagents: results received"
+    return f"Tool: {tool_name} ({phase})"
+
+
 def _resolve_stream_tool_trace_id(tool_event: dict[str, Any]) -> str:
     explicit_id = tool_event.get("tool_call_id")
     if explicit_id:
@@ -5194,6 +5528,9 @@ def _resolve_stream_tool_trace_id(tool_event: dict[str, Any]) -> str:
 
 def _upsert_stream_tool_trace(tool_event: dict[str, Any]) -> None:
     _ensure_stream_trace_state()
+    if _upsert_stream_subagent_activity(tool_event):
+        return
+
     trace_items = list(st.session_state.get("stream_trace_items") or [])
     tool_index = dict(st.session_state.get("stream_tool_index") or {})
 
@@ -5278,12 +5615,16 @@ def render_live_trace_panel(trace_placeholder: Any) -> None:
         None,
     )
     tool_items = [item for item in trace_items if item.get("kind") == "tool"]
+    subagent_view = st.session_state.get("stream_subagent_activity")
 
-    if thinking_item is None and not tool_items:
+    if thinking_item is None and not tool_items and not subagent_view:
         trace_placeholder.empty()
         return
 
     with trace_placeholder.container():
+        if isinstance(subagent_view, dict):
+            _render_subagent_activity_view(subagent_view, live=True)
+
         render_trace_panel(
             thinking_content=thinking_item.get("content") if thinking_item else None,
             tool_items=tool_items,
@@ -5687,6 +6028,7 @@ def render_message_bubble(
         st.markdown(content_text)  # Native markdown with LaTeX support
 
         if not is_user:
+            render_subagent_activity(message_metadata)
             render_rag_retrieval_artifacts(message_metadata)
 
         if not is_user:
@@ -6841,24 +7183,28 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 _upsert_stream_thinking_trace(accumulated_thinking)
                 st.session_state.stream_trace_expanded = True
                 render_live_trace_panel(trace_placeholder)
-                status.update(label="Thinking...", state="running")
+                status.update(label="Working...", state="running")
                 continue
 
             if event_type == "tool":
                 _upsert_stream_tool_trace(event)
                 render_live_trace_panel(trace_placeholder)
-                tool_name = event.get("name", "unknown")
-                tool_phase = event.get("phase") or event.get("status") or "unknown"
                 status.update(
-                    label=f"Tool: {tool_name} ({tool_phase})",
+                    label=_format_stream_tool_status_label(event),
                     state="running",
                 )
+                continue
+
+            if event_type == "node_complete":
+                if _upsert_stream_subagent_activity(event):
+                    render_live_trace_panel(trace_placeholder)
+                    status.update(label="Subagents: dispatching...", state="running")
                 continue
 
             if event_type == "token":
                 content = event.get("content", "")
                 accumulated_content += content
-                if st.session_state.get("stream_trace_items"):
+                if _has_live_trace_panel_content():
                     st.session_state.stream_trace_expanded = False
                     render_live_trace_panel(trace_placeholder)
                 response_placeholder.markdown(accumulated_content)
@@ -7387,13 +7733,13 @@ def render_chat_view():
                             _upsert_stream_thinking_trace(accumulated_thinking)
                             st.session_state.stream_trace_expanded = True
                             render_live_trace_panel(trace_placeholder)
-                            status.update(label="Thinking...", state="running")
+                            status.update(label="Working...", state="running")
 
                         elif event_type == "token":
                             content = event.get("content", "")
                             accumulated_content += content  # Append each token chunk
                             st.session_state.stream_partial_text = accumulated_content
-                            if st.session_state.get("stream_trace_items"):
+                            if _has_live_trace_panel_content():
                                 st.session_state.stream_trace_expanded = False
                                 render_live_trace_panel(trace_placeholder)
                             # Display with native markdown for LaTeX support
@@ -7402,12 +7748,15 @@ def render_chat_view():
                         elif event_type == "tool":
                             _upsert_stream_tool_trace(event)
                             render_live_trace_panel(trace_placeholder)
-                            tool_name = event.get("name", "unknown")
-                            tool_status = event.get("phase") or event.get("status") or "running"
                             status.update(
-                                label=f"Tool: {tool_name} ({tool_status})",
+                                label=_format_stream_tool_status_label(event),
                                 state="running",
                             )
+
+                        elif event_type == "node_complete":
+                            if _upsert_stream_subagent_activity(event):
+                                render_live_trace_panel(trace_placeholder)
+                                status.update(label="Subagents: dispatching...", state="running")
 
                         elif event_type == "interrupt":
                             # Workflow paused for human approval

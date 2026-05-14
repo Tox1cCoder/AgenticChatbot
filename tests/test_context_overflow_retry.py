@@ -1,5 +1,6 @@
-from app.ai.context_overflow import is_context_overflow_error, compact_tool_messages_for_retry
 from langchain_core.messages import ToolMessage
+
+from app.ai.context_overflow import compact_tool_messages_for_retry, is_context_overflow_error
 
 
 def test_detects_common_context_limit_errors():

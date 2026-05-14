@@ -51,3 +51,19 @@ def test_windows_localhost_redis_urls_are_normalized(monkeypatch):
     assert settings.redis_url == "redis://:sample-chatbot-dev@127.0.0.1:6379/0"
     assert settings.celery_broker_url == "redis://:sample-chatbot-dev@127.0.0.1:6379/0"
     assert settings.celery_result_backend == "redis://:sample-chatbot-dev@127.0.0.1:6379/1"
+
+
+def test_planning_max_iterations_defaults_to_disabled():
+    settings = Settings(secret_key="test-secret", environment="development")
+
+    assert settings.planning_max_iterations == 0
+
+
+def test_planning_max_iterations_accepts_zero_to_disable_budget():
+    settings = Settings(
+        secret_key="test-secret",
+        environment="development",
+        planning_max_iterations=0,
+    )
+
+    assert settings.planning_max_iterations == 0

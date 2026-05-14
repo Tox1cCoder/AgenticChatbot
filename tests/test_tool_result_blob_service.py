@@ -44,10 +44,14 @@ def test_offload_if_large_writes_full_output_and_returns_preview(tmp_path):
         output_text="abcdefghijklmnopqrstuvwxyz",
     )
 
-    assert result["output"] == "abcdefghij\n\n[Output offloaded: use blob_id to read the full result.]"
+    assert (
+        result["output"] == "abcdefghij\n\n[Output offloaded: use blob_id to read the full result.]"
+    )
     assert result["blob_id"]
     assert result["size_bytes"] == 26
     assert repo.created[0]["conversation_id"] == conversation_id
     assert repo.created[0]["user_id"] == user_id
     assert repo.created[0]["tool_call_id"] == "call-1"
-    assert (tmp_path / repo.created[0]["storage_path"]).read_text(encoding="utf-8") == "abcdefghijklmnopqrstuvwxyz"
+    assert (tmp_path / repo.created[0]["storage_path"]).read_text(
+        encoding="utf-8"
+    ) == "abcdefghijklmnopqrstuvwxyz"

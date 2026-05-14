@@ -56,6 +56,45 @@ if TYPE_CHECKING:
     from app.interfaces.task_plan_service_interface import ITaskPlanService
 
 
+def _merge_stream_tool_artifacts_into_response(
+    response: WorkflowResponse | None,
+    stream_tool_artifacts: list[dict[str, Any]] | None,
+) -> None:
+    """Preserve structured streaming tool artifacts on the final response."""
+    if response is None or not stream_tool_artifacts:
+        return
+
+    existing = list(response.tool_artifacts or [])
+    existing_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for artifact in existing:
+        if not isinstance(artifact, dict):
+            continue
+        key = (str(artifact.get("tool_call_id") or ""), str(artifact.get("tool") or ""))
+        existing_by_key[key] = artifact
+
+    for artifact in stream_tool_artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        key = (str(artifact.get("tool_call_id") or ""), str(artifact.get("tool") or ""))
+        existing_artifact = existing_by_key.get(key)
+        if existing_artifact is not None:
+            for field in ("args", "output", "error", "status", "render"):
+                if artifact.get(field) not in (None, "", [], {}) and existing_artifact.get(
+                    field
+                ) in (
+                    None,
+                    "",
+                    [],
+                    {},
+                ):
+                    existing_artifact[field] = artifact[field]
+            continue
+        existing.append(artifact)
+        existing_by_key[key] = artifact
+
+    response.tool_artifacts = existing or None
+
+
 class MessageService(IMessageService):
     def __init__(
         self,
@@ -826,6 +865,7 @@ class MessageService(IMessageService):
             bot_response = None
             bot_message_persisted = False
             stream_tool_artifacts: list[dict[str, Any]] = []
+            stream_tool_args_by_id: dict[str, Any] = {}
 
             try:
                 async for event in self.ai_service.execute_request_stream(workflow_request):
@@ -858,16 +898,22 @@ class MessageService(IMessageService):
 
                     elif event_type == "tool":
                         inflight.touch()
+                        tool_call_id = event.get("tool_call_id")
+                        if event.get("phase") == "start" and tool_call_id is not None:
+                            stream_tool_args_by_id[str(tool_call_id)] = event.get("args")
                         # Accumulate artifacts from completed tool calls so we
                         # can derive live_widgets on interrupt messages.
                         if event.get("phase") == "end" and event.get("name"):
                             from app.ai.tool_execution import build_tool_artifact
 
+                            tool_args = event.get("args")
+                            if tool_args is None and tool_call_id is not None:
+                                tool_args = stream_tool_args_by_id.get(str(tool_call_id))
                             stream_tool_artifacts.append(
                                 build_tool_artifact(
-                                    tool_call_id=event.get("tool_call_id"),
+                                    tool_call_id=tool_call_id,
                                     tool_name=event.get("name", "unknown"),
-                                    tool_args=event.get("args"),
+                                    tool_args=tool_args,
                                     output_text=(
                                         str(event["result"])
                                         if event.get("result") is not None
@@ -876,6 +922,7 @@ class MessageService(IMessageService):
                                     error=None
                                     if event.get("state") != "error"
                                     else str(event.get("result", "")),
+                                    render=event.get("render"),
                                 )
                             )
                         yield dict(event)
@@ -969,6 +1016,8 @@ class MessageService(IMessageService):
                         inflight.resolve(None)
                     registry.remove(user_message_id)
                     return
+
+                _merge_stream_tool_artifacts_into_response(bot_response, stream_tool_artifacts)
 
                 bot_message = await self._persist_completed_workflow_response(
                     conversation_id=message_create_data.conversation_id,
@@ -1431,6 +1480,7 @@ class MessageService(IMessageService):
         partial_text = ""
         bot_message_persisted = False
         resume_tool_artifacts: list[dict[str, Any]] = []
+        resume_tool_args_by_id: dict[str, Any] = {}
 
         try:
             async for event in self.ai_service.resume_interrupted_execution_stream(
@@ -1451,14 +1501,20 @@ class MessageService(IMessageService):
                     yield {"type": "thinking", "content": event.get("content", "")}
 
                 elif event_type == "tool":
+                    tool_call_id = event.get("tool_call_id")
+                    if event.get("phase") == "start" and tool_call_id is not None:
+                        resume_tool_args_by_id[str(tool_call_id)] = event.get("args")
                     if event.get("phase") == "end" and event.get("name"):
                         from app.ai.tool_execution import build_tool_artifact
 
+                        tool_args = event.get("args")
+                        if tool_args is None and tool_call_id is not None:
+                            tool_args = resume_tool_args_by_id.get(str(tool_call_id))
                         resume_tool_artifacts.append(
                             build_tool_artifact(
-                                tool_call_id=event.get("tool_call_id"),
+                                tool_call_id=tool_call_id,
                                 tool_name=event.get("name", "unknown"),
-                                tool_args=event.get("args"),
+                                tool_args=tool_args,
                                 output_text=(
                                     str(event["result"])
                                     if event.get("result") is not None
@@ -1467,6 +1523,7 @@ class MessageService(IMessageService):
                                 error=None
                                 if event.get("state") != "error"
                                 else str(event.get("result", "")),
+                                render=event.get("render"),
                             )
                         )
                     yield dict(event)
@@ -1530,6 +1587,10 @@ class MessageService(IMessageService):
 
                 elif event_type == "complete":
                     bot_response = event.get("response")
+                    _merge_stream_tool_artifacts_into_response(
+                        bot_response,
+                        resume_tool_artifacts,
+                    )
 
                     self._clear_redis_interrupt(conversation_id, interrupt_id)
                     if self.hitl_interrupt_repository and interrupt_id:

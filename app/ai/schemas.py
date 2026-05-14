@@ -166,6 +166,10 @@ class GraphContext(TypedDict, total=False):
     tool_provenance: dict[str, dict[str, Any]]
     force_final_response: bool
     tool_budget: dict[str, Any]
+    # Planning-mode subagent execution artifacts (debug/UI visibility only;
+    # the model still reads dispatch results via the ToolMessage payload).
+    subagent_dispatches: list[dict[str, Any]]
+    subagent_results: list[dict[str, Any]]
 
 
 class GraphState(TypedDict):

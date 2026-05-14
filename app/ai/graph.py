@@ -9,6 +9,7 @@ from uuid import UUID
 
 from cachetools import TTLCache
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
@@ -54,8 +55,8 @@ from .token_instrumentation import (
 from .tool_context import tool_execution_context
 from .tool_execution import (
     apply_tool_output_offload,
-    build_tool_artifact,
     build_rejected_tool_artifacts,
+    build_tool_artifact,
     ensure_agent_tool_map,
     execute_tool_calls,
 )
@@ -339,16 +340,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 return idx
         return None
 
-    def _has_tool_context(self, messages: list, last_human_idx: int | None) -> bool:
-        if last_human_idx is None:
-            return False
-
-        return any(
-            isinstance(m, (AIMessage, ToolMessage))
-            and (isinstance(m, ToolMessage) or (hasattr(m, "tool_calls") and m.tool_calls))
-            for m in messages[last_human_idx + 1 :]
-        )
-
     def _merge_tool_artifacts(
         self, state: GraphState, response: AgentResponse, append_images: bool = False
     ) -> None:
@@ -372,17 +363,25 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     def _finalize_agent_response(self, state: GraphState, response: AgentResponse) -> GraphState:
         state["response"] = response
 
-        ai_kwargs = {"content": response.message.content}
+        ai_kwargs: dict[str, Any] = {"content": response.message.content}
+        assistant_message_id = state.get("assistant_message_id")
         if response.message.tool_calls:
             ai_kwargs["tool_calls"] = response.message.tool_calls
-        else:
-            # Stamp the final assistant turn with the reserved DB id so the
-            # service writes the same id we already advertised to the graph.
-            # Intermediate tool-calling AIMessages must NOT carry this id —
-            # they are not the user-visible final reply.
-            assistant_message_id = state.get("assistant_message_id")
+            # Stamp intermediate tool-calling AIMessages with a deterministic,
+            # derived id so checkpoint compaction can remove them on terminal
+            # response. Without an id they survive across turns and pollute
+            # state["messages"] / LangSmith traces.
             if assistant_message_id:
-                ai_kwargs["id"] = assistant_message_id
+                intermediate_idx = sum(
+                    1
+                    for m in state.get("messages", [])
+                    if isinstance(m, AIMessage)
+                    and getattr(m, "id", "")
+                    and str(m.id).startswith(f"{assistant_message_id}-tool-")
+                )
+                ai_kwargs["id"] = f"{assistant_message_id}-tool-{intermediate_idx}"
+        elif assistant_message_id:
+            ai_kwargs["id"] = assistant_message_id
         state.setdefault("messages", []).append(AIMessage(**ai_kwargs))
 
         return state
@@ -1181,12 +1180,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     ) -> None:
         """Drop checkpoint messages once the request reaches a terminal state.
 
-        Checkpoints are valuable for HITL resume mid-turn, but once the graph
-        finishes (no pending ``next`` nodes) the message history in the
-        checkpoint is just stale duplicate transcript memory — the canonical
-        copy lives in PostgreSQL. Issuing ``RemoveMessage`` for every message
-        with an id reduces checkpoint size and prevents the LangGraph state
-        from drifting from DB truth across long conversations.
+        DB is the canonical conversation transcript. Once the graph finishes
+        (snapshot.next empty), the checkpoint's message history is stale
+        duplicate memory — and intermediate tool-calling AIMessages /
+        ToolMessages without ids would otherwise persist forever, leaking
+        previous-turn tool calls into the next stream and into LangSmith
+        traces. We now stamp ALL graph-produced messages with derived ids,
+        so a single RemoveMessage sweep clears them.
 
         No-op when there is no checkpointer, no thread, or the graph is in an
         interrupted state (snapshot.next non-empty).
@@ -1198,19 +1198,16 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         except Exception as exc:
             logger.warning("Checkpoint compaction aget_state failed: %s", exc)
             return
-        if snapshot is None:
-            return
-        if getattr(snapshot, "next", None):
-            # Mid-turn (interrupt or pending tool); leave state alone.
+        if snapshot is None or getattr(snapshot, "next", None):
             return
 
         values = getattr(snapshot, "values", None) or {}
         messages = values.get("messages", []) if isinstance(values, dict) else []
-        removals: list[RemoveMessage] = []
-        for message in messages:
-            msg_id = getattr(message, "id", None)
-            if msg_id:
-                removals.append(RemoveMessage(id=msg_id))
+        removals = [
+            RemoveMessage(id=msg.id)
+            for msg in messages
+            if getattr(msg, "id", None)
+        ]
         if not removals:
             return
 
@@ -1225,7 +1222,11 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
     def _build_graph_config(self, thread_id: str | None = None) -> dict[str, Any] | None:
         config: dict[str, Any] = {}
-        max_iterations = max(1, int(getattr(settings, "react_agent_max_iterations", 1) or 1))
+        react_iterations = max(1, int(getattr(settings, "react_agent_max_iterations", 1) or 1))
+        planning_iterations = max(
+            1, int(getattr(settings, "planning_max_iterations", react_iterations) or 1)
+        )
+        max_iterations = max(react_iterations, planning_iterations)
         min_recursion_limit = (2 * max_iterations) + 5
         configured_recursion_limit = getattr(settings, "react_agent_recursion_limit", None)
         recursion_limit = (
@@ -1413,6 +1414,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         context = state_view.context()
         if context.get("all_tasks_completed"):
             response.metadata["all_tasks_completed"] = True
+        for key in ("subagent_dispatches", "subagent_results"):
+            value = context.get(key)
+            if isinstance(value, list) and value:
+                response.metadata[key] = make_json_safe(value)
 
         pause_reason, planning_budget_reached = cls._get_planning_pause_details(state_values)
         if planning_budget_reached:
@@ -1498,7 +1503,16 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         if not isinstance(messages, list):
             messages = [messages]
 
-        for message in messages:
+        messages_to_emit = messages
+        if messages and isinstance(messages[-1], ToolMessage):
+            first_trailing_index = len(messages) - 1
+            while first_trailing_index > 0 and isinstance(
+                messages[first_trailing_index - 1], ToolMessage
+            ):
+                first_trailing_index -= 1
+            messages_to_emit = messages[first_trailing_index:]
+
+        for message in messages_to_emit:
             if not isinstance(message, ToolMessage):
                 continue
 
@@ -1539,6 +1553,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             "\n\n[Output truncated - full result available in tool artifacts]",
         )
 
+        assistant_message_id = state.get("assistant_message_id")
         for output in tool_outputs:
             content = output["content"]
             if truncate_outputs and max_chars > 0:
@@ -1555,13 +1570,19 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                         len(content),
                     )
 
-            state.setdefault("messages", []).append(
-                ToolMessage(
-                    content=content,
-                    tool_call_id=output["tool_call_id"],
-                    name=output["name"],
+            tool_kwargs: dict[str, Any] = {
+                "content": content,
+                "tool_call_id": output["tool_call_id"],
+                "name": output["name"],
+            }
+            # Stamp ToolMessages with a derived id so terminal-turn compaction
+            # can remove them. tool_call_id alone is unique within a turn but
+            # langchain BaseMessage id is what RemoveMessage targets.
+            if assistant_message_id and output.get("tool_call_id"):
+                tool_kwargs["id"] = (
+                    f"{assistant_message_id}-toolmsg-{output['tool_call_id']}"
                 )
-            )
+            state.setdefault("messages", []).append(ToolMessage(**tool_kwargs))
 
         state["iteration_count"] = (state.get("iteration_count") or 0) + 1
 
@@ -2060,6 +2081,304 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)
 
+    async def _run_agent_in_isolated_context(
+        self,
+        *,
+        agent_name: str,
+        task_prompt: str,
+        parent_state: GraphState,
+        related_todo_ids: list[str] | None = None,
+    ) -> AgentResponse:
+        """Run a single graph-agent against an isolated child state.
+
+        Worker intermediate messages stay local to the child state — they
+        are NOT appended to the parent ``messages`` list. The worker
+        inherits the parent's scoped identifiers (``conversation_id``,
+        ``user_id``, ``device_id``), persona, and model overrides so
+        MCP/client tools and per-user model routing keep working.
+        """
+        if agent_name == "planning_agent":
+            raise ValueError(
+                "planning_agent is not a valid subagent target — recursive planning is forbidden."
+            )
+
+        agent = self.agents.get(agent_name)
+        if agent is None:
+            raise ValueError(f"Unknown subagent target: {agent_name}")
+
+        conversation_id = parent_state.get("conversation_id")
+        user_id = parent_state.get("user_id")
+        device_id = parent_state.get("device_id")
+        persona = parent_state.get("persona")
+        model_request = parent_state.get("model_request")
+        worker_history_summary: str | None = None
+        agent_key = getattr(agent, "agent_config_key", None) or agent_name
+        run_config = RunnableConfig(
+            tags=["internal", "planning_subagent", f"subagent:{agent_name}"],
+            metadata={
+                "internal": True,
+                "purpose": "planning_subagent",
+                "subagent": True,
+                "subagent_agent": agent_name,
+            },
+        )
+
+        worker_message = HumanMessage(content=task_prompt)
+
+        # RAG worker: drive the same search_documents loop used by the graph,
+        # but keep all intermediate context local to this worker.
+        if agent_name == "rag_agent":
+            max_iterations = max(
+                1, int(getattr(settings, "planning_subagents_max_iterations", 10))
+            )
+            max_agentic_images = getattr(settings, "agentic_rag_max_images", 6)
+            rag_context = dict(parent_state.get("context") or {})
+            tool_context: list[str] = []
+            accumulated_artifacts: list[dict[str, Any]] = []
+            last_response: AgentResponse | None = None
+            rag_tool_map: dict[str, Any] | None = None
+
+            for _ in range(max_iterations):
+                agent_msg = AgentMessage(
+                    role=MessageRole.USER,
+                    content=task_prompt,
+                    metadata={
+                        "persona": persona,
+                        "history": [],
+                        "original_query": task_prompt,
+                        "tool_context": list(tool_context),
+                        "agentic_images": list(rag_context.get("agentic_images") or []),
+                        "model_request": model_request,
+                        "user_id": user_id,
+                        "device_id": device_id,
+                        "history_summary": worker_history_summary,
+                        "run_config": run_config,
+                    },
+                )
+                response = await agent.process_message(agent_msg, conversation_id)
+                last_response = response
+
+                if response.error:
+                    if accumulated_artifacts:
+                        response.tool_artifacts = accumulated_artifacts
+                    return response
+
+                tool_calls = response.message.tool_calls or []
+                if not tool_calls:
+                    if accumulated_artifacts:
+                        existing_artifacts = list(response.tool_artifacts or [])
+                        for artifact in accumulated_artifacts:
+                            if artifact not in existing_artifacts:
+                                existing_artifacts.append(artifact)
+                        response.tool_artifacts = existing_artifacts
+                    return response
+
+                normalized_calls = [normalize_tool_call(tc) for tc in tool_calls]
+                tool_call_names = [tc.get("name") or "" for tc in normalized_calls]
+                if requires_human_approval(tool_call_names):
+                    if response.metadata is None:
+                        response.metadata = {}
+                    response.metadata["requires_approval"] = True
+                    response.metadata["pause_reason"] = "awaiting_approval"
+                    if accumulated_artifacts:
+                        response.tool_artifacts = accumulated_artifacts
+                    return response
+
+                for tool_call_data in normalized_calls:
+                    tool_name = tool_call_data.get("name")
+                    tool_id = tool_call_data.get("id")
+                    tool_args = tool_call_data.get("args", {})
+
+                    if tool_name == "search_documents":
+                        result, _, evidence = await execute_search_documents_action(
+                            rag_agent=self.rag_agent,
+                            conversation_id=conversation_id,
+                            tool_args=tool_args,
+                            context=rag_context,
+                            max_agentic_images=max_agentic_images,
+                            user_id=user_id,
+                        )
+                        error = result if result.startswith("Error") else None
+                        public_text, blob_info = apply_tool_output_offload(
+                            output_text=result,
+                            tool_call_id=tool_id,
+                            tool_name=tool_name,
+                            conversation_id=conversation_id,
+                            user_id=user_id,
+                        )
+                        artifact = build_tool_artifact(
+                            tool_call_id=tool_id,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                            output_text=public_text,
+                            error=error,
+                        )
+                        if blob_info:
+                            artifact.update(blob_info)
+                        if evidence:
+                            artifact["rag_evidence"] = make_json_safe(evidence)
+                        accumulated_artifacts.append(artifact)
+                        tool_context.append(public_text or "")
+                        continue
+
+                    if rag_tool_map is None:
+                        rag_tool_map = await ensure_agent_tool_map(
+                            agent,
+                            conversation_id=conversation_id,
+                            user_id=user_id,
+                            device_id=device_id,
+                        )
+                    with tool_execution_context(conversation_id, user_id, agent_key, device_id):
+                        outputs, artifacts, _images = await execute_tool_calls(
+                            tool_calls=[tool_call_data],
+                            tool_map=rag_tool_map,
+                            capture_images=False,
+                            device_id=device_id,
+                            agent=agent,
+                            conversation_id=conversation_id,
+                            user_id=user_id,
+                        )
+                    accumulated_artifacts.extend(artifacts)
+                    for output in outputs:
+                        tool_context.append(output.get("content", ""))
+
+            if last_response is None:  # pragma: no cover - defensive
+                return AgentResponse(
+                    agent_type=agent.agent_type,
+                    agent_id=agent.agent_id,
+                    message=AgentMessage(role=MessageRole.ASSISTANT, content=""),
+                    metadata={"error": "subagent_iteration_limit"},
+                    error="subagent_iteration_limit",
+                )
+
+            if last_response.metadata is None:
+                last_response.metadata = {}
+            last_response.metadata["error"] = "subagent_iteration_limit"
+            last_response.error = "subagent_iteration_limit"
+            if accumulated_artifacts:
+                last_response.tool_artifacts = accumulated_artifacts
+            return last_response
+
+        # Generic agent worker: tool-loop until final response or limits hit.
+        max_iterations = max(1, int(getattr(settings, "planning_subagents_max_iterations", 10)))
+
+        worker_messages: list[Any] = [worker_message]
+        last_response: AgentResponse | None = None
+        tool_map: dict[str, Any] | None = None
+
+        for _ in range(max_iterations):
+            response = await agent.invoke_model_with_history(
+                messages=list(worker_messages),
+                conversation_history=[],
+                persona=persona,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                device_id=device_id,
+                model_request=model_request,
+                history_summary=worker_history_summary,
+                run_config=run_config,
+            )
+            last_response = response
+
+            if response.error:
+                return response
+
+            tool_calls = response.message.tool_calls or []
+            if not tool_calls:
+                return response
+
+            tool_call_names = [normalize_tool_call(tc).get("name") or "" for tc in tool_calls]
+            if requires_human_approval(tool_call_names):
+                if response.metadata is None:
+                    response.metadata = {}
+                response.metadata["requires_approval"] = True
+                response.metadata["pause_reason"] = "awaiting_approval"
+                return response
+
+            ai_kwargs: dict[str, Any] = {"content": response.message.content or ""}
+            if tool_calls:
+                ai_kwargs["tool_calls"] = tool_calls
+            worker_messages.append(AIMessage(**ai_kwargs))
+
+            if tool_map is None:
+                tool_map = await ensure_agent_tool_map(
+                    agent,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    device_id=device_id,
+                )
+            with tool_execution_context(conversation_id, user_id, agent_key, device_id):
+                outputs, artifacts, _images = await execute_tool_calls(
+                    tool_calls=tool_calls,
+                    tool_map=tool_map,
+                    capture_images=False,
+                    device_id=device_id,
+                    agent=agent,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                )
+
+            for output in outputs:
+                worker_messages.append(
+                    ToolMessage(
+                        content=output.get("content", ""),
+                        tool_call_id=output.get("tool_call_id"),
+                        name=output.get("name") or "tool",
+                    )
+                )
+
+            existing_artifacts = list(response.tool_artifacts or [])
+            existing_artifacts.extend(artifacts)
+            response.tool_artifacts = existing_artifacts
+
+        # Iteration cap reached without a final answer.
+        if last_response is None:  # pragma: no cover - defensive
+            return AgentResponse(
+                agent_type=agent.agent_type,
+                agent_id=agent.agent_id,
+                message=AgentMessage(role=MessageRole.ASSISTANT, content=""),
+                metadata={"error": "subagent_iteration_limit"},
+                error="subagent_iteration_limit",
+            )
+
+        if last_response.metadata is None:
+            last_response.metadata = {}
+        last_response.metadata["error"] = "subagent_iteration_limit"
+        last_response.error = "subagent_iteration_limit"
+        return last_response
+
+    def _build_planning_internal_tools(
+        self,
+        state: GraphState,
+        *,
+        executable: bool = False,
+    ) -> list[Any]:
+        """Return Planning-supervisor-only internal tools for this turn.
+
+        ``dispatch_subagents`` is bound whenever the feature flag is on and
+        Planning mode is active. ``planning_phase`` and plan presence are NOT
+        binding gates — they are prompt-level guidance. Hiding the tool prevents
+        the user from testing subagents on a fresh planning conversation.
+        """
+        if not getattr(settings, "planning_subagents_enabled", False):
+            return []
+        if not state.get("planning_mode_enabled"):
+            return []
+
+        from .planning_subagents import (
+            PlanningSubagentDispatcher,
+            create_dispatch_subagents_tool,
+        )
+
+        dispatcher = (
+            PlanningSubagentDispatcher(workflow=self, settings=settings) if executable else None
+        )
+        dispatch_tool = create_dispatch_subagents_tool(
+            dispatcher=dispatcher,
+            parent_state_provider=(lambda: state) if executable else None,
+        )
+        return [dispatch_tool]
+
     async def _planning_node(self, state: GraphState) -> GraphState:
         """
         Planning agent node with tool-calling ReAct pattern.
@@ -2109,6 +2428,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         # Get only current turn messages for the model
         current_turn_messages = self._get_current_turn_messages(messages)
 
+        # Build the Planning-mode subagent dispatch tool (only when allowed).
+        internal_tools = self._build_planning_internal_tools(state)
+
         # Call the planning agent with history
         response = await self.planning_agent.invoke_model_with_history(
             messages=current_turn_messages,
@@ -2123,6 +2445,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             current_task_index=current_task_index,
             planning_phase=planning_phase,
             should_describe_plan=should_generate_plan_response,
+            internal_tools=internal_tools or None,
             **self._final_response_kwargs(state),
         )
 
@@ -2163,17 +2486,28 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
 
-        tool_map = await ensure_agent_tool_map(
-            self.planning_agent,
-            conversation_id=conversation_id,
-            user_id=user_id,
-            device_id=state.get("device_id"),
-        )
-
-        # Separate write_todos calls from external/MCP tool calls
+        # Separate write_todos calls from external/MCP tool calls.
         normalized_calls = [normalize_tool_call(tc) for tc in last_message.tool_calls]
         external_tool_calls = [tc for tc in normalized_calls if tc.get("name") != "write_todos"]
         write_todos_calls = [tc for tc in normalized_calls if tc.get("name") == "write_todos"]
+
+        tool_map: dict[str, Any] = {}
+        if external_tool_calls:
+            tool_map = await ensure_agent_tool_map(
+                self.planning_agent,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                device_id=state.get("device_id"),
+            )
+
+        # Make Planning-supervisor-only tools (e.g. dispatch_subagents)
+        # callable from this turn. They are not part of the agent's MCP/server
+        # tool registry, so ensure_agent_tool_map doesn't surface them.
+        if any(tc.get("name") == "dispatch_subagents" for tc in external_tool_calls):
+            for tool in self._build_planning_internal_tools(state, executable=True):
+                tool_name = getattr(tool, "name", None)
+                if tool_name and tool_name not in tool_map:
+                    tool_map[tool_name] = tool
 
         tool_names_all = [tc.get("name") for tc in normalized_calls]
         logger.debug(f"[Planning Tools Node] Executing tools: {tool_names_all}")
@@ -2344,13 +2678,78 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
     def _should_continue_planning(self, state: GraphState) -> str:
         planning_call_count = state.get("planning_call_count", 0)
-        max_iterations = settings.planning_max_iterations
+        max_iterations = int(getattr(settings, "planning_max_iterations", 0) or 0)
+        planning_budget_enabled = max_iterations > 0
+        context = GraphStateView(state).context_copy()
+        planning_phase = state.get("planning_phase", "planning")
+        last_message_is_tool_output = self._last_message_is_tool_output(state)
+
+        # If plan state was just mutated, always give the Planning Agent one
+        # response pass so the user does not get an empty tool-calling message.
+        if context.get("plan_just_modified"):
+            context["plan_just_modified"] = False
+            context["generate_plan_response"] = True
+            state["context"] = context
+            if planning_budget_enabled and planning_call_count >= max_iterations:
+                context["pause_reason"] = "max_iterations_reached"
+                state["context"] = context
+                self._mark_force_final_response(
+                    state,
+                    reason="max_iterations_reached",
+                    scope="planning",
+                    count=planning_call_count,
+                    limit=max_iterations,
+                )
+            logger.debug(
+                "[Should Continue Planning] Decision: planning_agent (plan_just_modified=True)"
+            )
+            return "planning_agent"
+
+        # Hard budget: if the latest thing is a tool result, route back once
+        # with tools disabled for a final synthesis instead of ending on the
+        # empty intermediate tool-calling response.
+        if planning_budget_enabled and planning_call_count >= max_iterations:
+            context["pause_reason"] = "max_iterations_reached"
+            state["context"] = context
+            if last_message_is_tool_output:
+                self._mark_force_final_response(
+                    state,
+                    reason="max_iterations_reached",
+                    scope="planning",
+                    count=planning_call_count,
+                    limit=max_iterations,
+                )
+                logger.warning(
+                    "Planning budget reached after tool output: %d >= %d; "
+                    "routing to final synthesis",
+                    planning_call_count,
+                    max_iterations,
+                )
+                return "planning_agent"
+
+            self._set_continuation_signal(
+                state,
+                should_continue=settings.auto_continue_enabled,
+                reason="max_iterations_reached",
+                scope="planning",
+                count=planning_call_count,
+                limit=max_iterations,
+            )
+            logger.warning(f"Planning budget exceeded: {planning_call_count} >= {max_iterations}")
+            return "end"
 
         # Soft-limit: if auto-continue is enabled, trigger continuation at
         # a fraction of the planning budget.
-        if settings.auto_continue_enabled:
-            soft_limit = int(max_iterations * settings.auto_continue_soft_limit_ratio)
+        if planning_budget_enabled and settings.auto_continue_enabled:
+            soft_limit = max(1, int(max_iterations * settings.auto_continue_soft_limit_ratio))
             if planning_call_count >= soft_limit:
+                if last_message_is_tool_output:
+                    logger.debug(
+                        "[Should Continue Planning] Decision: planning_agent "
+                        "(soft budget reached after tool output; reconcile before pausing)"
+                    )
+                    return "planning_agent"
+
                 self._set_continuation_signal(
                     state,
                     should_continue=True,
@@ -2366,24 +2765,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 )
                 return "end"
 
-        # Check iteration budget (hard limit)
-        if planning_call_count >= max_iterations:
-            context = GraphStateView(state).context_copy()
-            context["pause_reason"] = "max_iterations_reached"
-            state["context"] = context
-            self._set_continuation_signal(
-                state,
-                should_continue=settings.auto_continue_enabled,
-                reason="max_iterations_reached",
-                scope="planning",
-                count=planning_call_count,
-                limit=max_iterations,
-            )
-            logger.warning(f"Planning budget exceeded: {planning_call_count} >= {max_iterations}")
-            return "end"
-
         # Circuit breaker: check consecutive errors
-        context = GraphStateView(state).context_copy()
         consecutive_errors = context.get("consecutive_errors", 0)
         max_consecutive_errors = settings.planning_consecutive_errors_limit
 
@@ -2402,19 +2784,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 f"Planning circuit breaker triggered: {consecutive_errors} consecutive errors"
             )
             return "end"
-
-        context = GraphStateView(state).context_copy()
-        planning_phase = state.get("planning_phase", "planning")
-
-        # If plan was just created/modified, return to agent for confirmation response
-        if context.get("plan_just_modified"):
-            context["plan_just_modified"] = False
-            context["generate_plan_response"] = True
-            state["context"] = context
-            logger.debug(
-                "[Should Continue Planning] Decision: planning_agent (plan_just_modified=True)"
-            )
-            return "planning_agent"
 
         # In planning phase, always give the agent a chance to respond after tools
         if planning_phase == "planning":
@@ -2528,19 +2897,22 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         fallback_text = coerce_response_text(fallback_content)
 
         if response:
-            if (
-                fallback_text
-                and response.message
-                and not coerce_response_text(getattr(response.message, "content", None))
-            ):
-                response.message.content = fallback_text
-            return self._attach_context_outputs(state, response)
+            response_message = getattr(response, "message", None)
+            if getattr(response_message, "tool_calls", None):
+                response = None
+            else:
+                response_content = coerce_response_text(getattr(response_message, "content", None))
+                if fallback_text and response.message and not response_content:
+                    response.message.content = fallback_text
+                return self._attach_context_outputs(state, response)
 
         content = fallback_text
         if not content:
             messages = state.get("messages", [])
             for message in reversed(messages):
                 if not isinstance(message, AIMessage):
+                    continue
+                if getattr(message, "tool_calls", None):
                     continue
                 content = coerce_response_text(getattr(message, "content", None))
                 if content:
@@ -2766,22 +3138,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             )
 
         return agent_response
-
-    async def resume_execution(self, thread_id: str, resume_value: Any) -> AgentResponse | None:
-        if not self.checkpointer:
-            raise RuntimeError("Checkpointing must be enabled for resume_execution")
-
-        config = self._build_graph_config(thread_id)
-        result = await self.graph.ainvoke(Command(resume=resume_value), config=config)
-        response = self._recover_terminal_response(result)
-        if response:
-            return response
-
-        final_snapshot = await self.graph.aget_state(config)
-        final_state = (
-            final_snapshot.values if final_snapshot and hasattr(final_snapshot, "values") else None
-        )
-        return self._recover_terminal_response(final_state)
 
     async def resume(
         self,
@@ -3151,7 +3507,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                                                         }
 
                                         elif isinstance(last_msg, ToolMessage):
-                                            for event_payload in self._tool_end_events_from_node_state(
+                                            for (
+                                                event_payload
+                                            ) in self._tool_end_events_from_node_state(
                                                 node_state=node_state,
                                                 last_state_values=last_state_values,
                                                 emitted_tool_result_ids=emitted_tool_result_ids,
@@ -3284,13 +3642,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     response.metadata["continuation_rounds"] = round_num
                     response.metadata["total_iterations"] = total_iterations
 
-                yield {"type": "complete", "response": response}
                 # Compact the checkpoint so old turns do not leak into long
                 # conversations. Skip on interrupt/pending state.
                 with contextlib.suppress(Exception):
                     await self._compact_checkpoint_after_terminal_response(
                         config=config, thread_id=thread_id
                     )
+                yield {"type": "complete", "response": response}
             else:
                 yield {"type": "error", "error": NO_RESPONSE_GENERATED}
         except Exception as e:
@@ -3663,7 +4021,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
                                         # Handle ToolMessage (result)
                                         elif isinstance(last_msg, ToolMessage):
-                                            for event_payload in self._tool_end_events_from_node_state(
+                                            for (
+                                                event_payload
+                                            ) in self._tool_end_events_from_node_state(
                                                 node_state=node_state,
                                                 last_state_values=last_state_values,
                                                 emitted_tool_result_ids=emitted_tool_result_ids,
@@ -3806,6 +4166,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                         response.metadata["continuation_rounds"] = round_num
                         response.metadata["total_iterations"] = total_iterations
 
+                    with contextlib.suppress(Exception):
+                        await self._compact_checkpoint_after_terminal_response(
+                            config=config, thread_id=thread_id
+                        )
                     yield {"type": "complete", "response": response}
                 else:
                     yield {"type": "error", "error": NO_RESPONSE_GENERATED}

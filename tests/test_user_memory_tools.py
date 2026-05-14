@@ -17,7 +17,11 @@ class FakeMemoryRepository:
 
     def delete_for_user(self, memory_id, user_id):
         before = len(self.rows)
-        self.rows = [row for row in self.rows if not (str(row["id"]) == str(memory_id) and row["user_id"] == user_id)]
+        self.rows = [
+            row
+            for row in self.rows
+            if not (str(row["id"]) == str(memory_id) and row["user_id"] == user_id)
+        ]
         return len(self.rows) < before
 
 

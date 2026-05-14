@@ -49,6 +49,9 @@ class PlanningAgent(BaseAgent):
     def agent_id(self) -> str:
         return "planning_agent"
 
+    def _should_include_hand_off_tool(self) -> bool:
+        return False
+
     def _get_base_system_prompt(self) -> str:
         return PLANNING_EXECUTION_PROMPT
 
@@ -144,21 +147,56 @@ class PlanningAgent(BaseAgent):
 
                 When the user explicitly asks to start/execute/implement:
                 - Begin execution by calling start_todo for the next task
+
+                ## Subagent dispatch (planning phase)
+                When `dispatch_subagents` is available and the user explicitly asks
+                to delegate, fan out, run subagents, parallelize, or test the
+                subagent feature, CALL `dispatch_subagents` directly with concrete
+                worker tasks. Do not narrate ("I'll have the search agent…") —
+                emit the tool call. Use it without changing todos when the user is
+                explicitly testing. Otherwise, plan creation/editing uses
+                `write_todos` only.
                 """
             ).strip()
         else:
             phase_prompt = dedent(
                 """
                 # CURRENT PHASE: EXECUTING
-                Work through tasks autonomously:
-                1) Find the next pending task
-                2) Call start_todo
-                3) Do the work
-                4) Call complete_todo
-                5) Continue to the next task
 
-                Stop only when all tasks are completed (then summarize), you need user clarification,
-                or an unresolvable error occurs.
+                ## Decision order on every turn
+                1. If the user explicitly asked to delegate, dispatch, fan out,
+                   parallelize, or run subagents — CALL `dispatch_subagents` now
+                   with concrete worker tasks. Do not narrate it.
+                2. If the next pending todo can be split into 2+ INDEPENDENT
+                   sub-tasks (research X while building Y; check A while drafting
+                   B), prefer `dispatch_subagents` over doing them yourself
+                   serially.
+                3. Otherwise, work the next pending todo directly: start_todo →
+                   do the work → complete_todo → continue.
+
+                ## `dispatch_subagents` rules
+                - Targets: chat_agent, rag_agent, search_agent,
+                  image_generator_agent, canvas_agent. `planning_agent` is
+                  forbidden.
+                - Tasks in one call MUST be independent. Serial work stays
+                  sequential.
+                - Stay within the per-call task budget; oversized batches are
+                  rejected.
+                - Workers CANNOT mutate todos. After the call returns, read each
+                  `summary` and call `write_todos` (complete or update) for
+                  related todos. If a result is `failed`, `timeout`, or
+                  `requires_approval`, leave the todo pending and explain the
+                  blocker in your reply.
+                - You are the only actor allowed to call `write_todos`.
+
+                ## Anti-narration rule
+                Never describe a delegation in prose without emitting the tool
+                call. Either dispatch (tool call) or do the work yourself (tool
+                call to write_todos). Pure prose like "I'll hand this to the
+                search agent" is a bug.
+
+                Stop only when all tasks are completed (then summarize), you
+                need user clarification, or an unresolvable error occurs.
                 """
             ).strip()
 

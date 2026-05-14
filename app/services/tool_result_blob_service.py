@@ -68,8 +68,6 @@ class ToolResultBlobService:
         }
 
     def read_text(self, record: Any) -> str:
-        storage_path = (
-            record["storage_path"] if isinstance(record, dict) else record.storage_path
-        )
+        storage_path = record["storage_path"] if isinstance(record, dict) else record.storage_path
         absolute_path = self.storage_root / storage_path
         return absolute_path.read_text(encoding="utf-8")

@@ -732,6 +732,7 @@ class RAGAgent(BaseAgent):
         runtime_config: ResolvedRuntimeModelConfig,
         has_images: bool = False,
         agentic_images_count: int = 0,
+        run_config: dict[str, Any] | None = None,
     ) -> AgentResponse:
         """Single agentic RAG model invocation.
 
@@ -743,6 +744,16 @@ class RAGAgent(BaseAgent):
         """
         current_runtime = runtime_config
         context_overflow_retried = False
+
+        async def _invoke_with_optional_config(
+            model: Any,
+            model_messages: list[Any],
+        ) -> Any:
+            if run_config is not None:
+                return await self._ainvoke_with_retries(
+                    model, model_messages, run_config=run_config
+                )
+            return await self._ainvoke_with_retries(model, model_messages)
 
         while True:
             try:
@@ -760,7 +771,7 @@ class RAGAgent(BaseAgent):
                         tool_choice=getattr(settings, "tool_choice_mode", "auto"),
                     )
                 try:
-                    response = await self._ainvoke_with_retries(llm_with_tools, messages)
+                    response = await _invoke_with_optional_config(llm_with_tools, messages)
                 except Exception as exc:
                     if not settings.context_overflow_retry_enabled or not is_context_overflow_error(
                         exc
@@ -770,8 +781,9 @@ class RAGAgent(BaseAgent):
                         messages,
                         max_chars=settings.context_overflow_retry_tool_preview_chars,
                     )
-                    response = await self._ainvoke_with_retries(
-                        llm_with_tools, compacted_messages
+                    response = await _invoke_with_optional_config(
+                        llm_with_tools,
+                        compacted_messages,
                     )
                     context_overflow_retried = True
                 runtime_config = current_runtime
@@ -852,6 +864,7 @@ class RAGAgent(BaseAgent):
         request_user_id = message.metadata.get("user_id")
         request_device_id = message.metadata.get("device_id")
         history_summary = message.metadata.get("history_summary")
+        run_config = message.metadata.get("run_config")
 
         # Final-synthesis flags forwarded by the graph when the tool budget
         # is exhausted. Honoured by skipping tool binding and appending a
@@ -985,6 +998,7 @@ class RAGAgent(BaseAgent):
                 runtime_config=runtime_config,
                 has_images=bool(agentic_images),
                 agentic_images_count=len(agentic_images) if agentic_images else 0,
+                run_config=run_config,
             )
             if rag_force_final_response:
                 response.metadata["rag_force_final_response"] = True
