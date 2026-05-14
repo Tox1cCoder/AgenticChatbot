@@ -693,6 +693,13 @@ class Settings(BaseSettings):
         default="A sample chatbot application with FastAPI and PostgreSQL",
         description="Application description",
     )
+    runtime_time_context_timezone: str = Field(
+        default="UTC",
+        description=(
+            "IANA timezone used for server-generated runtime time context in model prompts. "
+            "UTC is always included as the canonical timestamp."
+        ),
+    )
 
     # Human-in-the-Loop Configuration
     enable_human_in_the_loop: bool = Field(

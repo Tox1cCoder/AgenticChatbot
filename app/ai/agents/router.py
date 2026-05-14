@@ -9,6 +9,7 @@ from ..prompts import ROUTER_SYSTEM_PROMPT
 from ..schemas import AgentMessage
 from ..skills_tool import get_available_skill_summaries
 from ..text_normalization import tokenize_text
+from ..time_context import build_runtime_time_context_block
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,7 @@ class Router:
             prompt_parts.append("CONTEXT: This conversation has an existing task plan.\n")
 
         prompt_parts.append(f"Available agents for this request: {', '.join(available_agents)}")
+        prompt_parts.append(build_runtime_time_context_block().strip())
         prompt_parts.append(ROUTER_SYSTEM_PROMPT)
 
         active_skills = get_available_skill_summaries(user_id=user_id, device_id=device_id)

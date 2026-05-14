@@ -687,13 +687,6 @@ class BaseAgent(ABC):
                 if attempt >= attempts:
                     break
                 sleep_for = delay * (2 ** (attempt - 1))
-                logger.warning(
-                    "%s: provider call failed (attempt %s/%s): %s",
-                    self.agent_id,
-                    attempt,
-                    attempts,
-                    exc,
-                )
                 if sleep_for:
                     await asyncio.sleep(sleep_for)
 
