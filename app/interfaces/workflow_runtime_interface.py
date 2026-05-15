@@ -38,6 +38,11 @@ class IWorkflowRuntime(ABC):
         pass
 
     @abstractmethod
+    async def compact_checkpoint_after_terminal_response(self, thread_id: str | None) -> None:
+        """Clear transient checkpoint transcript after durable response persistence."""
+        pass
+
+    @abstractmethod
     def invalidate_history_cache(self, conversation_id: str) -> None:
         """Drop any cached history tied to the given conversation."""
         pass

@@ -49,9 +49,6 @@ class PlanningAgent(BaseAgent):
     def agent_id(self) -> str:
         return "planning_agent"
 
-    def _should_include_hand_off_tool(self) -> bool:
-        return False
-
     def _get_base_system_prompt(self) -> str:
         return PLANNING_EXECUTION_PROMPT
 
@@ -62,6 +59,7 @@ class PlanningAgent(BaseAgent):
         internal_tools: list[BaseTool] | None = None,
         user_id: str | None = None,
         device_id: str | None = None,
+        include_hand_off: bool | None = None,
     ) -> Any:
         """
         Override to ensure write_todos is always included as an internal tool.
@@ -69,21 +67,13 @@ class PlanningAgent(BaseAgent):
         This guarantees write_todos is available even in deferred tool loading mode,
         where only tool_search + pinned tools + loaded tools would normally be bound.
         """
-        write_todos_tool = create_write_todos_tool()
-        combined_internal = [write_todos_tool]
-
-        if internal_tools:
-            # Add any additional internal tools, avoiding duplicates
-            for tool in internal_tools:
-                if tool.name != write_todos_tool.name:
-                    combined_internal.append(tool)
-
         return super()._get_llm_with_tools(
             model=model,
             conversation_id=conversation_id,
-            internal_tools=combined_internal,
+            internal_tools=self._combine_with_write_todos(internal_tools),
             user_id=user_id,
             device_id=device_id,
+            include_hand_off=include_hand_off,
         )
 
     def _get_tools_for_binding(
@@ -93,25 +83,33 @@ class PlanningAgent(BaseAgent):
         user_id: str | None = None,
         device_id: str | None = None,
         tool_scope: str | None = None,
+        include_hand_off: bool | None = None,
     ) -> list[BaseTool]:
         """
         Ensure write_todos is always present in both binding and execution maps.
         """
-        write_todos_tool = create_write_todos_tool()
-        combined_internal = [write_todos_tool]
-
-        if internal_tools:
-            for tool in internal_tools:
-                if tool.name != write_todos_tool.name:
-                    combined_internal.append(tool)
-
         return super()._get_tools_for_binding(
             conversation_id=conversation_id,
-            internal_tools=combined_internal,
+            internal_tools=self._combine_with_write_todos(internal_tools),
             user_id=user_id,
             device_id=device_id,
             tool_scope=tool_scope,
+            include_hand_off=include_hand_off,
         )
+
+    @staticmethod
+    def _combine_with_write_todos(
+        internal_tools: list[BaseTool] | None,
+    ) -> list[BaseTool]:
+        """Merge optional internal tools with the mandatory write_todos tool."""
+        write_todos_tool = create_write_todos_tool()
+        combined: list[BaseTool] = [write_todos_tool]
+        if not internal_tools:
+            return combined
+        for tool in internal_tools:
+            if tool.name != write_todos_tool.name:
+                combined.append(tool)
+        return combined
 
     async def _init_tools(self):
         # Initialize MCP tools from parent.
@@ -148,14 +146,19 @@ class PlanningAgent(BaseAgent):
                 When the user explicitly asks to start/execute/implement:
                 - Begin execution by calling start_todo for the next task
 
-                ## Subagent dispatch (planning phase)
-                When `dispatch_subagents` is available and the user explicitly asks
-                to delegate, fan out, run subagents, parallelize, or test the
-                subagent feature, CALL `dispatch_subagents` directly with concrete
-                worker tasks. Do not narrate ("I'll have the search agent…") —
-                emit the tool call. Use it without changing todos when the user is
-                explicitly testing. Otherwise, plan creation/editing uses
-                `write_todos` only.
+                ## Delegation tools (planning phase)
+                Two delegation primitives exist; do NOT confuse them.
+                - `dispatch_subagents` — fan out *independent* worker tasks in
+                  parallel and wait for results. When the user explicitly
+                  asks to delegate, fan out, parallelize, run subagents, or
+                  test the subagent feature, CALL `dispatch_subagents`
+                  directly with concrete worker tasks. Do not narrate it.
+                - `hand_off` — transfer the *entire* conversation to a more
+                  suitable top-level agent (e.g. the user asks a follow-up
+                  that's outside planning, like "actually just answer this
+                  question normally"). After hand_off the next agent owns the
+                  reply; the planning loop ends for this turn.
+                Otherwise, plan creation/editing uses `write_todos` only.
                 """
             ).strip()
         else:
@@ -164,15 +167,21 @@ class PlanningAgent(BaseAgent):
                 # CURRENT PHASE: EXECUTING
 
                 ## Decision order on every turn
-                1. If the user explicitly asked to delegate, dispatch, fan out,
-                   parallelize, or run subagents — CALL `dispatch_subagents` now
-                   with concrete worker tasks. Do not narrate it.
-                2. If the next pending todo can be split into 2+ INDEPENDENT
-                   sub-tasks (research X while building Y; check A while drafting
-                   B), prefer `dispatch_subagents` over doing them yourself
-                   serially.
-                3. Otherwise, work the next pending todo directly: start_todo →
-                   do the work → complete_todo → continue.
+                1. If the user has clearly switched topic away from this plan
+                   (asks an off-plan question, wants normal chat, wants
+                   document search, etc.) — CALL `hand_off` to the right
+                   top-level agent with a one-line reason. Do not keep working
+                   the plan against the user's intent.
+                2. If the user explicitly asked to delegate, dispatch, fan
+                   out, parallelize, or run subagents — CALL
+                   `dispatch_subagents` now with concrete worker tasks. Do not
+                   narrate it.
+                3. If the next pending todo can be split into 2+ INDEPENDENT
+                   sub-tasks (research X while building Y; check A while
+                   drafting B), prefer `dispatch_subagents` over doing them
+                   yourself serially.
+                4. Otherwise, work the next pending todo directly: start_todo
+                   → do the work → complete_todo → continue.
 
                 ## `dispatch_subagents` rules
                 - Targets: chat_agent, rag_agent, search_agent,
@@ -180,19 +189,26 @@ class PlanningAgent(BaseAgent):
                   forbidden.
                 - Tasks in one call MUST be independent. Serial work stays
                   sequential.
-                - Stay within the per-call task budget; oversized batches are
-                  rejected.
-                - Workers CANNOT mutate todos. After the call returns, read each
-                  `summary` and call `write_todos` (complete or update) for
-                  related todos. If a result is `failed`, `timeout`, or
+                - Keep dispatch calls focused: include only the independent
+                  worker tasks needed for the current step.
+                - Workers CANNOT mutate todos. After the call returns, read
+                  each `summary` and call `write_todos` (complete or update)
+                  for related todos. If a result is `failed`, `timeout`, or
                   `requires_approval`, leave the todo pending and explain the
                   blocker in your reply.
                 - You are the only actor allowed to call `write_todos`.
 
+                ## `hand_off` rules
+                - Use ONLY when the conversation should leave planning
+                  entirely. Do not use to do parallel research — that is
+                  `dispatch_subagents`.
+                - The receiving agent takes over the user-facing reply; the
+                  planning loop will not run again this turn.
+
                 ## Anti-narration rule
-                Never describe a delegation in prose without emitting the tool
-                call. Either dispatch (tool call) or do the work yourself (tool
-                call to write_todos). Pure prose like "I'll hand this to the
+                Never describe a delegation in prose without emitting the
+                tool call. Either dispatch, hand off, or do the work yourself
+                via `write_todos`. Pure prose like "I'll hand this to the
                 search agent" is a bug.
 
                 Stop only when all tasks are completed (then summarize), you

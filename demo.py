@@ -1304,8 +1304,6 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "model_config_options_error": lambda: None,
     "model_config_options_needs_form_sync": lambda: False,
     # Planning mode state
-    "planning_status": lambda: None,
-    "task_plans_list": list,
     "planning_generate_input": str,
     "planning_manual_input": str,
     "api_cache_version": lambda: 0,
@@ -7252,6 +7250,88 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
         st.rerun()
 
 
+_PLAN_NEXT_TASK_PREVIEW_CHARS = 50
+
+_PLAN_TASK_STATUS_RENDERING: dict[str, tuple[str, str]] = {
+    "completed": (":material/check_circle:", "completed"),
+    "in_progress": (":material/refresh:", "in_progress"),
+    "skipped": (":material/skip_next:", "skipped"),
+    "pending": (":material/pending:", "pending"),
+}
+
+
+def _render_plan_progress_widget(
+    conversation_id: str,
+    *,
+    current_conv: dict[str, Any] | None,
+) -> None:
+    """Render the inline plan progress widget for the given conversation.
+
+    The widget is driven by the canonical ``planning-status`` payload rather
+    than the locally cached ``planningModeEnabled`` flag, so plans that get
+    created mid-conversation appear immediately on the next render even when
+    the conversations list cache is stale.
+    """
+    status = get_planning_status(conversation_id)
+    if not status or status.get("totalTasks", 0) <= 0:
+        return
+
+    if isinstance(current_conv, dict) and not current_conv.get("planningModeEnabled"):
+        # Best-effort cache sync so other widgets (sidebar badges, manage modal)
+        # see the flag without an extra fetch.
+        current_conv["planningModeEnabled"] = True
+
+    progress_pct = status.get("progressPercentage", 0)
+    next_task = status.get("nextTask")
+    completed = status.get("completedTasks", 0)
+    total = status.get("totalTasks", 0)
+
+    with st.container():
+        col_progress, col_action = st.columns([4, 1])
+        with col_progress:
+            st.progress(progress_pct / 100.0)
+            if next_task:
+                next_desc = next_task.get("description", "N/A")
+                truncated = (
+                    f"{next_desc[:_PLAN_NEXT_TASK_PREVIEW_CHARS]}..."
+                    if len(next_desc) > _PLAN_NEXT_TASK_PREVIEW_CHARS
+                    else next_desc
+                )
+                st.success(
+                    f":material/checklist: **{completed}/{total}** tasks complete | "
+                    f"**Current:** {truncated}"
+                )
+            else:
+                st.success(f":material/check_circle: **All {total} tasks completed!**")
+        with col_action:
+            if st.button(
+                ":material/checklist: View All",
+                key=f"goto_planning_from_chat_{conversation_id}",
+                help="View full task list",
+            ):
+                st.session_state.active_view = "planning"
+                st.rerun()
+
+        tasks = get_task_plans(conversation_id, include_completed=True)
+        if not tasks:
+            return
+        with st.expander(":material/list_alt: Task Progress", expanded=False):
+            for task in tasks:
+                task_status = str(task.get("status") or "pending")
+                task_desc = task.get("description", "No description")
+                icon, label = _PLAN_TASK_STATUS_RENDERING.get(
+                    task_status, _PLAN_TASK_STATUS_RENDERING["pending"]
+                )
+                if label == "completed":
+                    st.markdown(f"{icon} ~~{task_desc}~~")
+                elif label == "in_progress":
+                    st.markdown(f"{icon} **{task_desc}** (current)")
+                elif label == "skipped":
+                    st.markdown(f"{icon} ~~{task_desc}~~ (skipped)")
+                else:
+                    st.markdown(f"{icon} {task_desc}")
+
+
 def render_chat_view():
     """Main chat interface"""
     conversation_id = st.session_state.get("current_conversation_id")
@@ -7401,76 +7481,34 @@ def render_chat_view():
         None,
     )
 
-    if current_conv:
-        st.markdown(f"# {current_conv['title']}")
-        active_persona = current_conv.get("personaPrompt")
-        if active_persona:
-            st.info(f"**Instructions active:** {persona_preview(active_persona, 100)}")
-
-        # Show planning mode status in chat view
-        planning_mode = current_conv.get("planningModeEnabled", False)
-        if planning_mode:
-            status = get_planning_status(conversation_id)
-            if status:
-                progress_pct = status.get("progressPercentage", 0)
-                next_task = status.get("nextTask")
-                completed = status.get("completedTasks", 0)
-                total = status.get("totalTasks", 0)
-
-                with st.container():
-                    # Progress bar and summary
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.progress(progress_pct / 100.0)
-                        if next_task:
-                            st.success(
-                                f":material/checklist: **{completed}/{total}** tasks complete | "
-                                f"**Current:** {next_task.get('description', 'N/A')[:50]}..."
-                                if len(next_task.get("description", "")) > 50
-                                else f":material/checklist: **{completed}/{total}** tasks complete | "
-                                f"**Current:** {next_task.get('description', 'N/A')}"
-                            )
-                        else:
-                            st.success(f":material/check_circle: **All {total} tasks completed!**")
-                    with col2:
-                        if st.button(
-                            ":material/checklist: View All",
-                            key="goto_planning_from_chat",
-                            help="View Full Task List",
-                        ):
-                            st.session_state.active_view = "planning"
-                            st.rerun()
-
-                    # Show task list in expander
-                    tasks = get_task_plans(conversation_id, include_completed=True)
-                    if tasks:
-                        task_list = tasks.get("data", []) if isinstance(tasks, dict) else tasks
-                        if task_list:
-                            with st.expander(":material/list_alt: Task Progress", expanded=False):
-                                for task in task_list:
-                                    task_status = task.get("status", "pending")
-                                    task_desc = task.get("description", "No description")
-
-                                    if task_status == "completed":
-                                        st.markdown(f":material/check_circle: ~~{task_desc}~~")
-                                    elif task_status == "in_progress":
-                                        st.markdown(f":material/refresh: **{task_desc}** (current)")
-                                    elif task_status == "skipped":
-                                        st.markdown(
-                                            f":material/skip_next: ~~{task_desc}~~ (skipped)"
-                                        )
-                                    else:
-                                        st.markdown(f":material/pending: {task_desc}")
-
-    elif conversation_id == "pending_new":
+    if conversation_id == "pending_new":
         st.markdown("# New Chat")
         queued_persona = st.session_state.get("pending_persona_prompt", "")
         if queued_persona:
             st.info(f"**Instructions queued:** {persona_preview(queued_persona, 100)}")
+    elif current_conv:
+        st.markdown(f"# {current_conv['title']}")
+        active_persona = current_conv.get("personaPrompt")
+        if active_persona:
+            st.info(f"**Instructions active:** {persona_preview(active_persona, 100)}")
+    elif conversation_id:
+        # The conversation exists server-side but hasn't landed in our local
+        # ``conversations_list`` yet (deep link, manage-modal open, stale cache).
+        # Show a minimal header so the plan widget and messages still render —
+        # the title syncs on the next list refresh.
+        st.markdown("# Conversation")
     else:
         st.markdown("# Welcome!")
         st.info("Select a conversation from the sidebar or create a new chat to get started.")
         return
+
+    # Render the plan progress widget for any persisted conversation (including
+    # plans created mid-conversation). It is decoupled from ``current_conv``
+    # because the server-side status is authoritative — relying on
+    # ``planningModeEnabled`` in the local cache would hide plans created in
+    # this turn before the conversation list is refreshed.
+    if conversation_id and conversation_id != "pending_new":
+        _render_plan_progress_widget(conversation_id, current_conv=current_conv)
 
     # Load more button
     if (

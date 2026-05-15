@@ -54,6 +54,11 @@ class AIService:
     def invalidate_history_cache(self, conversation_id: str) -> None:
         self.workflow.invalidate_history_cache(conversation_id)
 
+    async def compact_checkpoint_after_terminal_response(self, thread_id: str | None) -> None:
+        if not self.checkpointer or not thread_id:
+            return
+        await self.workflow.compact_checkpoint_after_terminal_response(str(thread_id))
+
     def _build_error_response(self, message: str = ERROR_NO_RESPONSE) -> WorkflowResponse:
         return WorkflowResponse(
             agent_type="chat",

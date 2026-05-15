@@ -668,13 +668,17 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             },
         )
 
+        # planning_tools fans out either back into the planning loop, ends the
+        # turn, or — when the Planning Agent invoked hand_off — routes to the
+        # delegated top-level agent. Wiring every agent here is necessary so
+        # LangGraph accepts ``selected_agent`` as a valid return from
+        # ``_should_continue_planning``.
+        planning_tools_routing = {agent_name: agent_name for agent_name in self.agents}
+        planning_tools_routing["end"] = END
         workflow.add_conditional_edges(
             "planning_tools",
             self._should_continue_planning,
-            {
-                "planning_agent": "planning_agent",
-                "end": END,
-            },
+            planning_tools_routing,
         )
 
         workflow.add_edge("approval", "tools")
@@ -1220,6 +1224,16 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 exc,
             )
 
+    async def compact_checkpoint_after_terminal_response(self, thread_id: str | None) -> None:
+        """Public service-layer hook for post-persistence checkpoint cleanup."""
+        if not thread_id:
+            return
+        config = self._build_graph_config(thread_id)
+        await self._compact_checkpoint_after_terminal_response(
+            config=config,
+            thread_id=thread_id,
+        )
+
     def _build_graph_config(self, thread_id: str | None = None) -> dict[str, Any] | None:
         config: dict[str, Any] = {}
         react_iterations = max(1, int(getattr(settings, "react_agent_max_iterations", 1) or 1))
@@ -1418,6 +1432,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             value = context.get(key)
             if isinstance(value, list) and value:
                 response.metadata[key] = make_json_safe(value)
+        worker_artifacts = context.get("subagent_worker_artifacts")
+        if isinstance(worker_artifacts, dict) and worker_artifacts:
+            response.metadata["subagent_worker_artifacts"] = make_json_safe(worker_artifacts)
 
         pause_reason, planning_budget_reached = cls._get_planning_pause_details(state_values)
         if planning_budget_reached:
@@ -1443,6 +1460,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         conversation_id = state_view.conversation_id()
         user_id = state_view.user_id()
         device_id = state_view.device_id()
+        agent_key = (
+            getattr(agent, "agent_config_key", None)
+            or getattr(agent, "agent_id", None)
+            or "unknown"
+        )
+
+        self._hydrate_deferred_tool_snapshot_from_state(state, agent=agent)
 
         if tool_map is None:
             tool_map = await ensure_agent_tool_map(
@@ -1454,19 +1478,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         if not tool_map:
             return [], [], []
 
-        agent_key = (
-            getattr(agent, "agent_config_key", None)
-            or getattr(agent, "agent_id", None)
-            or "unknown"
-        )
-
         with tool_execution_context(
             conversation_id,
             user_id,
             agent_key,
             device_id,
         ):
-            return await execute_tool_calls(
+            outputs, artifacts, images = await execute_tool_calls(
                 tool_calls=tool_calls,
                 tool_map=tool_map,
                 capture_images=capture_images,
@@ -1475,6 +1493,106 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 conversation_id=conversation_id,
                 user_id=user_id,
             )
+        self._persist_deferred_tool_snapshot_to_state(state, agent=agent)
+        return outputs, artifacts, images
+
+    def _active_client_session_id(
+        self,
+        *,
+        user_id: str | None,
+        device_id: str | None,
+    ) -> str | None:
+        if not user_id or not device_id:
+            return None
+        try:
+            from .client_runtime_tools import get_active_client_runtime_session
+
+            session = get_active_client_runtime_session(user_id=user_id, device_id=device_id)
+        except Exception:
+            return None
+        return session.session_id if session is not None else None
+
+    def _persist_deferred_tool_snapshot_to_state(
+        self,
+        state: GraphState,
+        *,
+        agent: Any,
+    ) -> None:
+        state_view = GraphStateView(state)
+        conversation_id = state_view.conversation_id()
+        if not conversation_id:
+            return
+
+        agent_key = (
+            getattr(agent, "agent_config_key", None)
+            or getattr(agent, "agent_id", None)
+            or "unknown"
+        )
+        user_id = state_view.user_id()
+        device_id = state_view.device_id()
+        session_id = self._active_client_session_id(user_id=user_id, device_id=device_id)
+
+        try:
+            from .deferred_tool_state import get_deferred_tool_state
+
+            snapshot = get_deferred_tool_state().snapshot(
+                conversation_id=conversation_id,
+                agent_key=agent_key,
+                device_id=device_id,
+                session_id=session_id,
+            )
+        except Exception as exc:
+            logger.debug("Failed to persist deferred tool snapshot: %s", exc)
+            return
+
+        if not snapshot.get("server_tools") and not snapshot.get("client_tools"):
+            return
+
+        context = state_view.context_copy()
+        context["deferred_tool_snapshot"] = make_json_safe(snapshot)
+        state["context"] = context
+
+    def _hydrate_deferred_tool_snapshot_from_state(
+        self,
+        state: GraphState,
+        *,
+        agent: Any,
+    ) -> bool:
+        state_view = GraphStateView(state)
+        context = state_view.context()
+        snapshot = context.get("deferred_tool_snapshot")
+        if not isinstance(snapshot, dict):
+            return False
+
+        conversation_id = state_view.conversation_id()
+        if not conversation_id:
+            return False
+
+        agent_key = (
+            getattr(agent, "agent_config_key", None)
+            or getattr(agent, "agent_id", None)
+            or "unknown"
+        )
+        user_id = state_view.user_id()
+        device_id = state_view.device_id()
+        session_id = self._active_client_session_id(user_id=user_id, device_id=device_id)
+
+        try:
+            from .deferred_tool_state import get_deferred_tool_state
+
+            restored = get_deferred_tool_state().restore(
+                conversation_id=conversation_id,
+                agent_key=agent_key,
+                snapshot=snapshot,
+                device_id=device_id,
+                session_id=session_id,
+                user_id=user_id,
+            )
+        except Exception as exc:
+            logger.debug("Failed to hydrate deferred tool snapshot: %s", exc)
+            return False
+
+        return bool(restored.get("server_tools") or restored.get("client_tools"))
 
     @staticmethod
     def _lookup_tool_render_payload(
@@ -2128,9 +2246,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         # RAG worker: drive the same search_documents loop used by the graph,
         # but keep all intermediate context local to this worker.
         if agent_name == "rag_agent":
-            max_iterations = max(
-                1, int(getattr(settings, "planning_subagents_max_iterations", 10))
-            )
             max_agentic_images = getattr(settings, "agentic_rag_max_images", 6)
             rag_context = dict(parent_state.get("context") or {})
             tool_context: list[str] = []
@@ -2138,7 +2253,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             last_response: AgentResponse | None = None
             rag_tool_map: dict[str, Any] | None = None
 
-            for _ in range(max_iterations):
+            while True:
                 agent_msg = AgentMessage(
                     role=MessageRole.USER,
                     content=task_prompt,
@@ -2242,31 +2357,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     for output in outputs:
                         tool_context.append(output.get("content", ""))
 
-            if last_response is None:  # pragma: no cover - defensive
-                return AgentResponse(
-                    agent_type=agent.agent_type,
-                    agent_id=agent.agent_id,
-                    message=AgentMessage(role=MessageRole.ASSISTANT, content=""),
-                    metadata={"error": "subagent_iteration_limit"},
-                    error="subagent_iteration_limit",
-                )
-
-            if last_response.metadata is None:
-                last_response.metadata = {}
-            last_response.metadata["error"] = "subagent_iteration_limit"
-            last_response.error = "subagent_iteration_limit"
-            if accumulated_artifacts:
-                last_response.tool_artifacts = accumulated_artifacts
-            return last_response
-
-        # Generic agent worker: tool-loop until final response or limits hit.
-        max_iterations = max(1, int(getattr(settings, "planning_subagents_max_iterations", 10)))
+        # Generic agent worker: tool-loop until final response, approval, or error.
 
         worker_messages: list[Any] = [worker_message]
-        last_response: AgentResponse | None = None
         tool_map: dict[str, Any] | None = None
+        accumulated_worker_artifacts: list[dict[str, Any]] = []
 
-        for _ in range(max_iterations):
+        while True:
             response = await agent.invoke_model_with_history(
                 messages=list(worker_messages),
                 conversation_history=[],
@@ -2277,14 +2374,21 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 model_request=model_request,
                 history_summary=worker_history_summary,
                 run_config=run_config,
+                # Workers run isolated; graph-level hand_off cannot apply here, so
+                # bind it off to keep the worker from wasting tokens on no-op
+                # delegation calls.
+                include_hand_off=False,
             )
-            last_response = response
 
             if response.error:
                 return response
 
             tool_calls = response.message.tool_calls or []
             if not tool_calls:
+                if accumulated_worker_artifacts:
+                    existing = list(response.tool_artifacts or [])
+                    existing.extend(accumulated_worker_artifacts)
+                    response.tool_artifacts = existing
                 return response
 
             tool_call_names = [normalize_tool_call(tc).get("name") or "" for tc in tool_calls]
@@ -2293,6 +2397,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     response.metadata = {}
                 response.metadata["requires_approval"] = True
                 response.metadata["pause_reason"] = "awaiting_approval"
+                if accumulated_worker_artifacts:
+                    existing = list(response.tool_artifacts or [])
+                    existing.extend(accumulated_worker_artifacts)
+                    response.tool_artifacts = existing
                 return response
 
             ai_kwargs: dict[str, Any] = {"content": response.message.content or ""}
@@ -2327,25 +2435,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     )
                 )
 
-            existing_artifacts = list(response.tool_artifacts or [])
-            existing_artifacts.extend(artifacts)
-            response.tool_artifacts = existing_artifacts
-
-        # Iteration cap reached without a final answer.
-        if last_response is None:  # pragma: no cover - defensive
-            return AgentResponse(
-                agent_type=agent.agent_type,
-                agent_id=agent.agent_id,
-                message=AgentMessage(role=MessageRole.ASSISTANT, content=""),
-                metadata={"error": "subagent_iteration_limit"},
-                error="subagent_iteration_limit",
-            )
-
-        if last_response.metadata is None:
-            last_response.metadata = {}
-        last_response.metadata["error"] = "subagent_iteration_limit"
-        last_response.error = "subagent_iteration_limit"
-        return last_response
+            accumulated_worker_artifacts.extend(artifacts)
+            response.tool_artifacts = list(accumulated_worker_artifacts)
 
     def _build_planning_internal_tools(
         self,
@@ -2591,6 +2682,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 artifact.get("status") == "error" for artifact in external_artifacts
             )
 
+            # If the Planning Agent invoked hand_off, switch the selected agent so
+            # the conditional edge from planning_tools can route to the target.
+            self._apply_hand_off_if_present(state, external_outputs)
+
         # Execute write_todos calls (always permitted — internal state mutations)
         for tool_call_data in write_todos_calls:
             tool_name = tool_call_data.get("name")
@@ -2653,11 +2748,26 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             mirror_to_response=True,
         )
 
-        # Update consecutive_errors counter for circuit breaker
+        # Update consecutive_errors counter for circuit breaker. Increments
+        # below the warn-threshold are routine retries and stay at INFO so the
+        # WARNING level remains a useful "near the breaker" signal regardless
+        # of how aggressively ``planning_consecutive_errors_limit`` is tuned.
         context = GraphStateView(state).context_copy()
         if had_error:
             context["consecutive_errors"] = context.get("consecutive_errors", 0) + 1
-            logger.warning(f"Planning consecutive errors: {context['consecutive_errors']}")
+            current = context["consecutive_errors"]
+            error_limit = settings.planning_consecutive_errors_limit
+            # Require at least 2 errors before warning (a single transient
+            # failure should never warn) AND warn only at the step before the
+            # breaker fires. The breaker itself logs its own WARNING when it
+            # actually trips, so we don't duplicate that here.
+            warn_threshold = max(2, error_limit - 1)
+            if current >= warn_threshold and current < error_limit:
+                logger.warning(
+                    "Planning consecutive errors: %d/%d", current, error_limit
+                )
+            else:
+                logger.info("Planning consecutive errors: %d/%d", current, error_limit)
         else:
             # Reset on successful iteration
             context["consecutive_errors"] = 0
@@ -2677,6 +2787,20 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         return "planning_tools"
 
     def _should_continue_planning(self, state: GraphState) -> str:
+        # hand_off applied during this planning_tools turn re-routes the
+        # conversation to a different top-level agent. Honor the new
+        # selected_agent so the planning loop yields to the target node.
+        delegated_agent = state.get("selected_agent")
+        if (
+            isinstance(delegated_agent, str)
+            and delegated_agent != "planning_agent"
+            and delegated_agent in self.agents
+        ):
+            logger.info(
+                "Planning hand_off detected: routing planning_tools → %s", delegated_agent
+            )
+            return delegated_agent
+
         planning_call_count = state.get("planning_call_count", 0)
         max_iterations = int(getattr(settings, "planning_max_iterations", 0) or 0)
         planning_budget_enabled = max_iterations > 0
@@ -3128,14 +3252,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             and "interrupt" in agent_response.metadata
         ):
             return agent_response
-
-        # Compact the checkpoint so old turns do not leak into long
-        # conversations on the non-streaming path. Mirrors the behaviour
-        # ``execute_request_stream`` already has after a terminal response.
-        with contextlib.suppress(Exception):
-            await self._compact_checkpoint_after_terminal_response(
-                config=config, thread_id=thread_id
-            )
 
         return agent_response
 
@@ -3642,12 +3758,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     response.metadata["continuation_rounds"] = round_num
                     response.metadata["total_iterations"] = total_iterations
 
-                # Compact the checkpoint so old turns do not leak into long
-                # conversations. Skip on interrupt/pending state.
-                with contextlib.suppress(Exception):
-                    await self._compact_checkpoint_after_terminal_response(
-                        config=config, thread_id=thread_id
-                    )
                 yield {"type": "complete", "response": response}
             else:
                 yield {"type": "error", "error": NO_RESPONSE_GENERATED}
@@ -4166,10 +4276,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                         response.metadata["continuation_rounds"] = round_num
                         response.metadata["total_iterations"] = total_iterations
 
-                    with contextlib.suppress(Exception):
-                        await self._compact_checkpoint_after_terminal_response(
-                            config=config, thread_id=thread_id
-                        )
                     yield {"type": "complete", "response": response}
                 else:
                     yield {"type": "error", "error": NO_RESPONSE_GENERATED}

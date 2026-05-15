@@ -38,10 +38,16 @@ def _build_checkpoint_serializer() -> JsonPlusSerializer:
     except (TypeError, ValueError):
         serializer_params = {}
 
-    if "allowed_msgpack_modules" in serializer_params:
+    msgpack_supported_in_constructor = "allowed_msgpack_modules" in serializer_params
+    if msgpack_supported_in_constructor:
         serializer_kwargs["allowed_msgpack_modules"] = _CHECKPOINT_ALLOWED_MSGPACK_MODULES
 
-    return JsonPlusSerializer(**serializer_kwargs)
+    serializer = JsonPlusSerializer(**serializer_kwargs)
+    if not msgpack_supported_in_constructor:
+        with_msgpack_allowlist = getattr(serializer, "with_msgpack_allowlist", None)
+        if callable(with_msgpack_allowlist):
+            serializer = with_msgpack_allowlist(_CHECKPOINT_ALLOWED_MSGPACK_MODULES)
+    return serializer
 
 
 class CheckpointManager:

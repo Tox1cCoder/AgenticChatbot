@@ -332,7 +332,7 @@ Operational behaviour:
 - Summaries are best-effort and fail-closed — a timeout or model error leaves the previous summary in place.
 - Prompt history is cached by `(conversation_id, user_id, current_message_id, agent_key, summary_cursor, summary_version)`; transcript writes invalidate the cache.
 - Soft-deleted messages and empty paused/interrupt assistant placeholders are excluded from prompt history.
-- Checkpoint state is **not** long-term memory. After a terminal response, the workflow issues `RemoveMessage` for every checkpoint message id; PostgreSQL is the canonical transcript.
+- Checkpoint state is **not** long-term memory. After the terminal assistant response is persisted, the service issues `RemoveMessage` for every checkpoint message id; PostgreSQL is the canonical transcript.
 - AI SDK clients may post their full UI history at `POST /api/chat/{conversation_id}`; the server only consumes the latest user message and rebuilds prior memory from the database.
 
 ### Summarization middleware (rolling, off the hot path)
@@ -355,9 +355,9 @@ After the memory refactor, summarization no longer runs on the streaming hot pat
 
 ### Planning-mode subagents
 
-`PLANNING_SUBAGENTS_ENABLED`, `PLANNING_SUBAGENTS_MAX_TASKS`, `PLANNING_SUBAGENTS_MAX_PARALLEL`, `PLANNING_SUBAGENTS_WORKER_TIMEOUT_SECONDS`, `PLANNING_SUBAGENTS_MAX_ITERATIONS`, `PLANNING_SUBAGENTS_RESULT_MAX_CHARS`.
+`PLANNING_SUBAGENTS_ENABLED`.
 
-While Planning mode is active and the Planning Agent is in the *executing* phase, it can call the internal `dispatch_subagents` tool to fan out independent worker tasks to other graph agents (`chat_agent`, `rag_agent`, `search_agent`, `image_generator_agent`, `canvas_agent`). Workers run concurrently in the same chat turn — there is no background queue and the dispatch call blocks until every worker completes, fails, times out, or signals it needs human approval. Workers run with isolated message state, inherit scoped identifiers (`conversation_id`, `user_id`, `device_id`) and runtime model overrides, and only return concise summaries to the Planning Agent. Workers cannot mutate todos directly: the Planning Agent reads each result and reconciles the plan with `write_todos`. This is distinct from `hand_off`, which re-routes the entire turn to a single top-level agent rather than fanning out parallel research/build work.
+While Planning mode is active, the Planning Agent can call the internal `dispatch_subagents` tool to fan out independent worker tasks to other graph agents (`chat_agent`, `rag_agent`, `search_agent`, `image_generator_agent`, `canvas_agent`). Workers run concurrently in the same chat turn — there is no background queue and the dispatch call blocks until every worker completes, fails, or signals it needs human approval. Workers run with isolated message state, inherit scoped identifiers (`conversation_id`, `user_id`, `device_id`) and runtime model overrides, and return summaries to the Planning Agent using the same generic tool-result size controls as other tools. Workers cannot mutate todos directly: the Planning Agent reads each result and reconciles the plan with `write_todos`. This is distinct from `hand_off`, which re-routes the entire turn to a single top-level agent rather than fanning out parallel research/build work.
 
 ### Client runtime bridge
 
@@ -476,7 +476,7 @@ The agent workflow is a **LangGraph state machine** defined in [`app/ai/graph.py
 5. **Tool execution** — `tool_execution.execute_tool_calls` runs each tool with per-tool timeout, retries, validation, and truncated `ToolMessage` bodies (full artifacts preserved for the UI).
 6. **Auto-continue** — on hitting iteration limits, continuation rounds run until user-configured caps (`auto_continue_max_rounds`, `auto_continue_max_total_iterations`, `auto_continue_timeout_seconds`).
 7. **Stream** — every token, reasoning chunk, tool call, artifact, and interrupt is serialized as a structured SSE event.
-8. **Persist assistant reply, refresh durable summary, compact checkpoint** — once the terminal `complete` event is yielded, the service persists the assistant message, schedules a non-blocking durable summary refresh, and the workflow issues `RemoveMessage` for the checkpoint's transcript so it does not drift from DB truth.
+8. **Persist assistant reply, refresh durable summary, compact checkpoint** — once the terminal `complete` event is received, the service persists the assistant message, schedules a non-blocking durable summary refresh, then compacts the checkpoint transcript with `RemoveMessage` so it does not drift from DB truth.
 
 ### Agent cheat-sheet
 

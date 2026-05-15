@@ -223,6 +223,33 @@ def build_subagent_activity_view(message_metadata: dict[str, Any] | None) -> dic
             if normalized:
                 results.append(normalized)
 
+    worker_artifacts_map = message_metadata.get("subagent_worker_artifacts")
+    if isinstance(worker_artifacts_map, dict) and worker_artifacts_map and results:
+        for result in results:
+            worker_id = str(result.get("id") or "")
+            if not worker_id:
+                continue
+            artifacts = worker_artifacts_map.get(worker_id)
+            if isinstance(artifacts, list) and artifacts:
+                # Don't clobber inline artifacts (e.g. legacy payloads); merge new
+                # ones so the UI shows every observed worker tool invocation.
+                existing = _as_list(result.get("artifacts"))
+                seen_ids = {
+                    art.get("tool_call_id")
+                    for art in existing
+                    if isinstance(art, dict) and art.get("tool_call_id")
+                }
+                for artifact in artifacts:
+                    if not isinstance(artifact, dict):
+                        continue
+                    tc_id = artifact.get("tool_call_id")
+                    if tc_id and tc_id in seen_ids:
+                        continue
+                    existing.append(artifact)
+                    if tc_id:
+                        seen_ids.add(tc_id)
+                result["artifacts"] = existing
+
     return _build_activity_view(
         results=results,
         rationales=rationales,

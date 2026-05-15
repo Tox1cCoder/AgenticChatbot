@@ -67,3 +67,14 @@ def test_planning_max_iterations_accepts_zero_to_disable_budget():
     )
 
     assert settings.planning_max_iterations == 0
+
+
+def test_subagent_specific_limit_settings_are_not_exposed():
+    settings = Settings(secret_key="test-secret", environment="development")
+
+    assert settings.planning_subagents_enabled is True
+    assert not hasattr(settings, "planning_subagents_max_tasks")
+    assert not hasattr(settings, "planning_subagents_max_parallel")
+    assert not hasattr(settings, "planning_subagents_worker_timeout_seconds")
+    assert not hasattr(settings, "planning_subagents_max_iterations")
+    assert not hasattr(settings, "planning_subagents_result_max_chars")

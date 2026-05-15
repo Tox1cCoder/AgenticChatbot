@@ -4,7 +4,7 @@ Branch: current working tree | Date: 2026-05-08 | Spec: this document | Input: u
 
 ## Summary
 
-Add a Planning-mode-only subagent feature that lets the `planning_agent` delegate independent execution work to isolated worker agents, run those workers in parallel inside the same chat turn, wait for their results, and then continue as the supervisor that reconciles the plan. The implementation should follow LangChain's subagent pattern: a supervisor invokes subagents through a tool, subagents run with isolated context, and only concise outputs return to the supervisor.
+Add a Planning-mode-only subagent feature that lets the `planning_agent` delegate independent work to isolated worker agents, run those workers in parallel inside the same chat turn, wait for their results, and then continue as the supervisor that reconciles the plan. The implementation should follow LangChain's subagent pattern: a supervisor invokes subagents through a tool, subagents run with isolated context, and only model-safe outputs return to the supervisor.
 
 The feature should not replace the current top-level router or `hand_off` flow. The current orchestrator remains responsible for selecting the top-level agent. Subagents become an internal Planning execution primitive, available only when Planning mode is active and the plan lifecycle is in execution.
 
@@ -24,7 +24,7 @@ Project Type: Python web service with LangGraph-based agent orchestration.
 
 Performance Goals:
 
-- Dispatch up to a bounded number of independent subagent tasks concurrently.
+- Dispatch independent subagent tasks concurrently in the current chat turn.
 - Preserve deterministic result ordering.
 - Avoid background work and avoid returning before subagent work finishes.
 - Avoid broad prompt or full-tool-schema bloat in the Planning Agent.
@@ -33,7 +33,7 @@ Constraints:
 
 - Subagents work only in the active chat turn.
 - Subagents are available only to `planning_agent`.
-- Subagents are available only when `planning_mode_enabled` is true and `planning_phase == "executing"`.
+- Subagents are available only when `planning_mode_enabled` is true. Prompt policy controls whether a planning-phase turn should use dispatch or only update the plan.
 - The Planning Agent remains the only actor allowed to mutate `todos` through `write_todos`.
 - The implementation must not make generic `execute_tool_calls()` parallel by default because ordered tool calls such as `tool_search` followed by a newly loaded tool depend on sequential execution and tool-map refresh.
 
@@ -41,8 +41,7 @@ Scale/Scope:
 
 - Initial static worker registry: `chat_agent`, `rag_agent`, `search_agent`, `image_generator_agent`, and `canvas_agent`.
 - Explicitly exclude `planning_agent` as a subagent target to prevent recursive planning supervisors.
-- Default maximum workers: 3 concurrent workers per dispatch call.
-- Default maximum tasks per dispatch call: 5.
+- No subagent-specific task-count, worker-timeout, worker-iteration, or parallelism config caps. Existing provider/tool timeouts, request cancellation, HITL gating, and generic tool-result size controls remain the production safety boundary.
 
 ## Constitution Check
 
@@ -70,10 +69,10 @@ Security and Safety Gate:
 
 - Pass: no background jobs and no cross-conversation execution.
 - Pass: carry `conversation_id`, `user_id`, and `device_id` through existing scoped tool binding.
-- Pass: bounded worker count, timeout, result-size truncation, and explicit failure reporting.
+- Pass: request-scoped worker execution, underlying timeout/error normalization, generic tool-result sizing, and explicit failure reporting.
 - Pass: no subagent direct user interaction; all output returns through the Planning Agent.
 
-Re-check after design: still pass. The feature adds a bounded supervisor tool rather than another orchestrator, so it does not conflict with the existing multi-agent graph.
+Re-check after design: still pass. The feature adds a request-scoped supervisor tool rather than another orchestrator, so it does not conflict with the existing multi-agent graph.
 
 ## Current Architecture Findings
 
@@ -138,7 +137,7 @@ Rationale:
 
 - Current deferred tool loading depends on ordered execution when `tool_search` appears before a later newly loaded tool.
 - Some tools mutate scoped state or rely on shared session ordering.
-- A special-purpose dispatcher can enforce safe worker isolation, bounded concurrency, and deterministic aggregation.
+- A special-purpose dispatcher can enforce safe worker isolation and deterministic aggregation without changing generic tool execution semantics.
 
 ### Decision 5: Planning Agent Owns Todo Mutations
 
@@ -154,11 +153,11 @@ Rationale:
 
 FR-001: The subagent dispatch tool must be unavailable when Planning mode is inactive.
 
-FR-002: The subagent dispatch tool must be unavailable during Planning Agent planning/editing phase.
+FR-002: During Planning Agent planning/editing phase, the dispatch tool may be bound for explicit user delegation/testing, but the prompt must prefer `write_todos` for normal plan creation/editing.
 
 FR-003: The subagent dispatch tool must be available during Planning Agent execution phase.
 
-FR-004: The dispatch tool must accept a bounded list of independent worker tasks.
+FR-004: The dispatch tool must accept a non-empty list of independent worker tasks.
 
 FR-005: Each worker task must choose one existing graph agent target from an enum: `chat_agent`, `rag_agent`, `search_agent`, `image_generator_agent`, or `canvas_agent`.
 
@@ -170,13 +169,13 @@ FR-008: Worker tasks must inherit the parent `conversation_id`, `user_id`, `devi
 
 FR-009: Worker tasks must inherit each target agent's existing model config, tool allowlist, MCP tools, client runtime tools, deferred tool search behavior, and fallback provider behavior.
 
-FR-010: Multiple worker tasks in one dispatch must run concurrently up to a configurable limit.
+FR-010: Multiple worker tasks in one dispatch must run concurrently and preserve ordered aggregation.
 
 FR-011: Worker results must be returned in the same order as the input task list.
 
 FR-012: A failed worker must produce a structured failed result without cancelling successful sibling workers, unless the entire dispatch is cancelled by timeout or process shutdown.
 
-FR-013: A timed-out worker must produce a structured timeout result.
+FR-013: If an underlying worker operation raises a timeout, the dispatcher must produce a structured timeout result. The dispatcher must not impose a subagent-specific timeout wrapper.
 
 FR-014: If a worker attempts an operation that requires human approval, the first production version should stop that worker and return `requires_approval` in the dispatch result. The Planning Agent should explain that the user must approve or run that operation directly in the main Planning turn. Native nested interrupts can be added later.
 
@@ -184,7 +183,7 @@ FR-015: The Planning Agent must decide todo updates after reading subagent resul
 
 FR-016: Dispatch output must include enough metadata for debugging and todo reconciliation: worker id, agent target, status, elapsed milliseconds, output summary, related todo ids, and error message when present. Worker tool artifacts/images must not be embedded in dispatch results.
 
-FR-017: Dispatch output sent back to the model must be size-bounded and deterministic.
+FR-017: Dispatch output sent back to the model must use the same generic tool-result size controls as the rest of the graph and remain deterministic.
 
 FR-018: The top-level `dispatch_subagents` tool artifact/render should be attached to response metadata/tool artifacts for UI/debug visibility when practical.
 
@@ -296,7 +295,7 @@ Fields:
 
 Validation:
 
-- `tasks` length must be between 1 and `settings.planning_subagents_max_tasks`.
+- `tasks` length must be at least 1.
 - Duplicate task ids are rejected.
 
 ### `PlanningSubagentResult`
@@ -313,7 +312,7 @@ Fields:
 
 Serialization rule:
 
-- Model-facing JSON and `GraphContext["subagent_results"]` must omit worker `artifacts` and `images`. Large worker tool payloads are not useful for supervisor reconciliation and can bloat LLM input and persisted message metadata.
+- Model-facing JSON and `GraphContext["subagent_results"]` must omit worker `artifacts` and `images`. Large worker tool payloads are not useful for supervisor reconciliation and can bloat LLM input and persisted message metadata. Summary text uses the existing generic tool-result size control rather than subagent-specific config.
 
 ### `DispatchSubagentsResult`
 
@@ -339,11 +338,11 @@ Responsibilities:
 
 - Validate dispatch input.
 - Build isolated worker state.
-- Run workers concurrently with `asyncio.gather` and a semaphore.
-- Apply per-worker timeout.
+- Run workers concurrently with `asyncio.gather`.
+- Do not apply a subagent-specific per-worker timeout.
 - Preserve input order in output.
 - Normalize worker output into `PlanningSubagentResult`.
-- Truncate model-facing summaries to a configured size.
+- Keep model-facing summaries within the generic tool-result size budget.
 
 Constructor dependencies:
 
@@ -403,7 +402,7 @@ Responsibilities:
 - Reuse existing agent invocation and tool execution paths where possible.
 - Prevent worker state from appending to parent `messages`.
 - Carry scoped identifiers and runtime settings from parent state.
-- Stop on final response, max worker iterations, timeout, or approval-required operation.
+- Stop on final response, worker error, request cancellation, or approval-required operation.
 
 Suggested signature:
 
@@ -484,11 +483,7 @@ Planning phase prompt:
 
 - `app/core/config.py`
   - Add `planning_subagents_enabled: bool = True`.
-  - Add `planning_subagents_max_tasks: int = 5`.
-  - Add `planning_subagents_max_parallel: int = 3`.
-  - Add `planning_subagents_worker_timeout_seconds: int = 120`.
-  - Add `planning_subagents_max_iterations: int = 10`.
-  - Add `planning_subagents_result_max_chars: int = 6000`.
+  - Do not add subagent-specific task-count, parallelism, timeout, worker-iteration, or result-size config caps.
 
 - `app/ai/schemas.py`
   - Extend `GraphContext` with optional compact `subagent_results` and `subagent_dispatches` for activity UI.
@@ -544,11 +539,12 @@ rtk pytest tests/test_planning_subagents.py tests/test_graph_planning_subagents.
 
 Expected: new tests fail because the module/tool/helper do not exist yet.
 
-### Phase 1: Config and Schemas — DONE 2026-05-08
+### Phase 1: Config and Schemas — UPDATED 2026-05-15
 
-- [x] Added Planning subagent settings to `app/core/config.py` (`planning_subagents_enabled`, `planning_subagents_max_tasks`, `planning_subagents_max_parallel`, `planning_subagents_worker_timeout_seconds`, `planning_subagents_max_iterations`, `planning_subagents_result_max_chars`) plus positive-int validators.
+- [x] Added Planning subagent feature flag to `app/core/config.py` (`planning_subagents_enabled`).
+- [x] Removed subagent-specific config caps (`planning_subagents_max_tasks`, `planning_subagents_max_parallel`, `planning_subagents_worker_timeout_seconds`, `planning_subagents_max_iterations`, `planning_subagents_result_max_chars`) to avoid artificial worker failures such as `subagent_iteration_limit`.
 - [x] Created `app/ai/planning_subagents.py` with `PlanningSubagentName`, `PlanningSubagentTask`, `DispatchSubagentsInput`, `PlanningSubagentResult`, `DispatchSubagentsResult`.
-- [x] Implemented validation for task count (against runtime `settings.planning_subagents_max_tasks`), duplicate ids, blank ids, blank tasks, JSON-serializable `context` field.
+- [x] Implemented validation for non-empty task lists, duplicate ids, blank ids, blank tasks, JSON-serializable `context` field.
 - [x] Added `DispatchSubagentsResult.from_results(...)` aggregating to `completed` / `partial` / `failed`.
 - [x] Extended `GraphContext` with optional `subagent_dispatches` and `subagent_results` for UI/debug visibility.
 - [x] Verified `tests/test_planning_subagents.py` passes 18/18 schema and dispatcher tests.
@@ -560,46 +556,46 @@ rtk pytest tests/test_planning_subagents.py -q
 
 Expected: schema tests pass; dispatcher tests still fail until later phases.
 
-### Phase 2: Internal Tool Binding — DONE 2026-05-08
+### Phase 2: Internal Tool Binding — UPDATED 2026-05-15
 
 - [x] Added optional `internal_tools` parameter to `BaseAgent.invoke_model_with_history`. Threaded through the primary model binding plus all three fallback retry branches (OpenAI reasoning fallback, OpenAI provider fallback, generic provider fallback).
-- [x] Added `_build_planning_internal_tools(state)` helper on `MultiAgentWorkflow` that returns the dispatch tool list iff all gates pass: `settings.planning_subagents_enabled`, `state["planning_mode_enabled"] is True`, `state["planning_phase"] == "executing"`.
+- [x] Added `_build_planning_internal_tools(state)` helper on `MultiAgentWorkflow` that returns the dispatch tool list iff all gates pass: `settings.planning_subagents_enabled`, `state["planning_mode_enabled"] is True`.
 - [x] `_planning_node` calls the helper and forwards `internal_tools=...` to `planning_agent.invoke_model_with_history`.
-- [x] Added tests proving the tool is **not** bound in planning phase, **not** bound when Planning mode is inactive, **not** bound when the feature is disabled, and **bound** in executing phase.
+- [x] Added tests proving the tool is bound while Planning mode is active, not bound when Planning mode is inactive, and not bound when the feature is disabled.
 
 Design decision: the dispatcher is built per-turn using `lambda: state` as the parent-state provider. This keeps `MultiAgentWorkflow.__init__` unchanged and avoids storing per-conversation dispatcher instances.
 
-### Phase 3: Dispatcher Runtime — DONE 2026-05-08
+### Phase 3: Dispatcher Runtime — UPDATED 2026-05-15
 
-- [x] `PlanningSubagentDispatcher.dispatch(...)` runs workers under an `asyncio.Semaphore(planning_subagents_max_parallel)` plus `asyncio.gather(...)`.
-- [x] Each worker is wrapped in `asyncio.wait_for(...)` for per-worker timeout.
+- [x] `PlanningSubagentDispatcher.dispatch(...)` runs workers with `asyncio.gather(...)`.
+- [x] Removed subagent-specific `asyncio.wait_for(...)`; underlying provider/tool timeout errors are still normalized if they occur.
 - [x] Result ordering preserved automatically because `gather` returns in input order and we feed it tasks in iteration order.
 - [x] Worker exceptions converted to `PlanningSubagentResult(status="failed", error=str(exc))`.
-- [x] `asyncio.TimeoutError` converted to `PlanningSubagentResult(status="timeout", error="timeout")`.
-- [x] Model-facing `summary` truncated via `_truncate_summary` to `planning_subagents_result_max_chars` with a `…[truncated]` notice.
+- [x] Underlying `asyncio.TimeoutError` converted to `PlanningSubagentResult(status="timeout", error="timeout")`.
+- [x] Model-facing `summary` uses the existing generic `tool_result_max_chars` budget with a `…[truncated]` notice.
 - [x] Concurrency, ordering, failure-isolation, and timeout tests added in `tests/test_planning_subagents.py` and pass.
 
-Design decision: worker timeout defaults are read from settings at dispatch time so live config edits take effect without re-instantiating the dispatcher; constructor accepts `default_timeout_seconds` only for tests.
+Design decision: subagents should not fail from subagent-only task, timeout, parallelism, or iteration caps. Operational protection comes from request cancellation, provider/tool timeouts, HITL gating, generic tool-result size controls, and the Planning Agent prompt, not from a second set of subagent-specific budget knobs.
 
-### Phase 4: Isolated Existing-Agent Runner — DONE 2026-05-08
+### Phase 4: Isolated Existing-Agent Runner — UPDATED 2026-05-15
 
 - [x] Added `MultiAgentWorkflow._run_agent_in_isolated_context(...)` to `app/ai/graph.py`.
 - [x] Worker prompt is wrapped in a single `HumanMessage`. Worker keeps an isolated `worker_messages` list — the parent `GraphState["messages"]` is never appended to.
 - [x] Worker calls inherit `conversation_id`, `user_id`, `device_id`, `persona`, and `model_request`.
-- [x] For non-RAG worker agents, the runner runs a bounded tool loop:
+- [x] For non-RAG worker agents, the runner runs an isolated tool loop:
   1. `agent.invoke_model_with_history(...)` against the local message list
   2. If there are tool calls, execute them via `execute_tool_calls(...)` under `tool_execution_context(...)` (sequential, NOT parallel — per Decision 4)
   3. Append `ToolMessage`s into the worker's local list and loop
-  4. Stop on no-more-tool-calls (final answer), HITL approval requirement, or `planning_subagents_max_iterations` cap (returns with `error="subagent_iteration_limit"`)
+  4. Stop on no-more-tool-calls (final answer), worker error, request cancellation, or HITL approval requirement
 - [x] For `rag_agent`, the runner builds an `AgentMessage` and calls `process_message(...)` so the existing agentic-RAG `search_documents` loop is reused unchanged.
 - [x] `requires_approval` is signalled by setting `metadata["requires_approval"] = True` on the response so the dispatcher can map it to the `requires_approval` worker status.
 - [x] `planning_agent` rejected as a worker target with `ValueError`.
-- [x] Tests `test_run_agent_in_isolated_context_*` cover parent-message isolation, identifier inheritance, and the planning-agent rejection.
+- [x] Tests `test_run_agent_in_isolated_context_*` cover parent-message isolation, identifier inheritance, worker loop continuation beyond the legacy subagent iteration cap, and the planning-agent rejection.
 
 Design decisions:
 - The runner does **not** rebuild a full child `GraphState` for non-RAG agents. The agent invocation path only needs `messages` plus the scoped identifiers, so we pass them as keyword args directly. This keeps the runner simple and avoids touching the `GraphState` typed-dict surface.
 - Conversation history and rolling `history_summary` are intentionally omitted from workers. Workers receive their context through the task prompt and structured task `context`; re-reading chat memory defeats isolation and adds repeated tokens.
-- RAG workers run a local agentic loop that calls `process_message`, executes `search_documents` results, feeds tool output back through `tool_context`, and stops on final answer, HITL requirement, or the subagent iteration cap.
+- RAG workers run a local agentic loop that calls `process_message`, executes `search_documents` results, feeds tool output back through `tool_context`, and stops on final answer, HITL requirement, worker error, or request cancellation.
 
 ### Phase 5: Planning Prompt and Todo Reconciliation — DONE 2026-05-08
 
@@ -619,7 +615,7 @@ Design decision: rather than introducing a separate `subagent_node`, we let the 
 
 ### Phase 7: Documentation and Manual Validation — DONE 2026-05-08
 
-- [x] Added `### Planning-mode subagents` section to `README.md` defining the feature, contrasting it with `hand_off`, calling out same-chat synchronous behavior, and listing the new env vars (`PLANNING_SUBAGENTS_ENABLED`, `PLANNING_SUBAGENTS_MAX_TASKS`, `PLANNING_SUBAGENTS_MAX_PARALLEL`, `PLANNING_SUBAGENTS_WORKER_TIMEOUT_SECONDS`, `PLANNING_SUBAGENTS_MAX_ITERATIONS`, `PLANNING_SUBAGENTS_RESULT_MAX_CHARS`).
+- [x] Added `### Planning-mode subagents` section to `README.md` defining the feature, contrasting it with `hand_off`, calling out same-chat synchronous behavior, and listing the remaining env var (`PLANNING_SUBAGENTS_ENABLED`).
 - [x] Manual validation scenario remains a runtime/UX exercise; covered by integration tests in `tests/test_graph_planning_subagents.py` for the supervised paths.
 - [x] Focused test suite run:
   - `pytest tests/test_planning_subagents.py tests/test_graph_planning_subagents.py` → **30/30 passed**.
@@ -651,16 +647,44 @@ rtk pytest tests/test_router.py tests/test_rag_agent.py tests/test_rag_tool_loop
   - `rtk pytest tests/test_tool_execution_recovery.py tests/test_graph_tool_budget.py tests/test_router.py tests/test_client_tool_scope.py tests/test_rag_agent.py tests/test_rag_tool_loop_finalization.py tests/test_tool_execution_rendering.py -q` -> **57/57 passed**.
   - `rtk pytest tests/test_demo_subagent_activity.py tests/test_message_service_subagent_streaming.py -q` -> **10/10 passed**.
 
+### Phase 9: Remove Subagent-Specific Caps — UPDATED 2026-05-15
+
+- [x] Root cause: workers that needed more than `planning_subagents_max_iterations` model/tool rounds were converted to `error="subagent_iteration_limit"` even when they were still making valid progress.
+- [x] Removed subagent-specific limit settings from `app/core/config.py`; `PLANNING_SUBAGENTS_ENABLED` is the only subagent-specific env flag.
+- [x] Removed `planning_subagents_max_tasks` validation from `DispatchSubagentsInput`.
+- [x] Removed subagent-specific per-worker `asyncio.wait_for(...)` from the dispatcher. Underlying provider/tool `asyncio.TimeoutError` is still normalized to a `timeout` worker result.
+- [x] Removed subagent-specific worker iteration caps from generic and RAG isolated worker loops.
+- [x] Kept model-facing summary sizing on the existing generic `tool_result_max_chars` setting so dispatch output follows the same context-budget safety rule as other tool results.
+- [x] Updated the Planning prompt to keep dispatch calls focused instead of referring to an oversized-batch rejection rule.
+- [x] Updated README and this plan to reflect Planning-mode availability and the removal of subagent-specific config caps.
+- [x] Verification:
+
+```powershell
+rtk pytest tests/test_planning_subagents.py tests/test_graph_planning_subagents.py tests/test_config_redis.py -q
+```
+
+Result: **62/62 passed**.
+
+Additional adjacent verification:
+
+```powershell
+rtk pytest tests/test_message_service_subagent_streaming.py tests/test_demo_subagent_activity.py tests/test_tool_result_rendering.py tests/test_tool_execution_recovery.py tests/test_graph_tool_budget.py -q
+```
+
+Result: **29/29 passed**.
+
 ## Acceptance Criteria
 
 - [ ] In a non-Planning conversation, `dispatch_subagents` is unavailable.
-- [ ] In Planning mode but planning/editing phase, `dispatch_subagents` is unavailable.
-- [ ] In Planning execution phase, `dispatch_subagents` is available to `planning_agent`.
+- [ ] In Planning mode, `dispatch_subagents` is available to `planning_agent` when the feature flag is enabled.
+- [ ] The Planning prompt uses `dispatch_subagents` for explicit delegation/testing and independent work, while normal plan creation/editing stays on `write_todos`.
 - [ ] `dispatch_subagents` rejects `planning_agent`.
 - [ ] Two independent fake worker tasks execute concurrently under the dispatcher.
 - [ ] Dispatch results are ordered the same as input tasks.
 - [ ] One worker failure does not erase successful sibling results.
-- [ ] Worker timeout is reported as `timeout`.
+- [ ] Underlying worker timeout errors are reported as `timeout`, without a subagent-specific timeout wrapper.
+- [ ] Worker loops do not fail with `subagent_iteration_limit`.
+- [ ] Dispatch input has no subagent-specific maximum task-count validation.
 - [ ] Parent graph messages do not include worker intermediate messages.
 - [ ] Worker calls carry user/device/conversation context for scoped tool access.
 - [ ] Worker calls do not receive the parent's rolling `history_summary`.
@@ -688,11 +712,11 @@ Mitigation: preserve existing scoping by `conversation_id`, `agent_key`, `device
 
 Risk: subagent output bloats the Planning Agent context.
 
-Mitigation: truncate summaries and omit nested worker artifacts/images from both the model-facing dispatch JSON and persisted `subagent_results` metadata. Keep only the top-level `dispatch_subagents` artifact/render payload for UI activity.
+Mitigation: use the existing generic tool-result size control for model-facing summaries and omit nested worker artifacts/images from both the model-facing dispatch JSON and persisted `subagent_results` metadata. Keep only the top-level `dispatch_subagents` artifact/render payload for UI activity.
 
 Risk: Planning Agent over-dispatches trivial work.
 
-Mitigation: prompt guard plus configurable max tasks/parallel workers.
+Mitigation: prompt guard, explicit independent-work criteria, and supervisor-only todo reconciliation.
 
 ## Future Extensions
 

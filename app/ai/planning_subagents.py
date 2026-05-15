@@ -2,14 +2,13 @@
 
 This module implements the supervisor-side primitive that lets the Planning
 Agent fan out *independent* worker tasks to existing graph agents inside
-the same chat turn. Workers run concurrently with a bounded semaphore,
-each in an isolated execution context, and only structured summaries are
-returned to the Planning Agent through the ``dispatch_subagents`` tool.
+the same chat turn. Workers run concurrently, each in an isolated execution
+context, and only structured summaries are returned to the Planning Agent
+through the ``dispatch_subagents`` tool.
 
 The dispatcher is **NOT** a generic parallel tool runner: it is a
-purpose-built supervisor that enforces ordered output, per-worker
-timeout, and result-size truncation. Generic ``execute_tool_calls()``
-behavior must remain sequential.
+purpose-built supervisor that enforces ordered output and keeps generic
+``execute_tool_calls()`` behavior sequential.
 """
 
 from __future__ import annotations
@@ -107,14 +106,8 @@ class DispatchSubagentsInput(BaseModel):
 
     @model_validator(mode="after")
     def _validate_task_count_and_uniqueness(self) -> DispatchSubagentsInput:
-        max_tasks = int(getattr(global_settings, "planning_subagents_max_tasks", 5))
         if not self.tasks:
             raise ValueError("dispatch_subagents requires at least one task.")
-        if len(self.tasks) > max_tasks:
-            raise ValueError(
-                f"dispatch_subagents accepts at most {max_tasks} tasks per call; "
-                f"received {len(self.tasks)}."
-            )
         seen: set[str] = set()
         for task in self.tasks:
             if task.id in seen:
@@ -244,29 +237,19 @@ def _is_requires_approval_response(response: AgentResponse) -> bool:
 
 
 class PlanningSubagentDispatcher:
-    """Run Planning-supervised worker tasks concurrently with bounded fan-out."""
+    """Run Planning-supervised worker tasks concurrently."""
 
     def __init__(
         self,
         *,
         workflow: _IsolatedAgentRunner,
         settings: Any | None = None,
-        default_timeout_seconds: float | None = None,
     ) -> None:
         self._workflow = workflow
         self._settings = settings or global_settings
-        self._default_timeout = default_timeout_seconds
-
-    def _max_parallel(self) -> int:
-        return max(1, int(getattr(self._settings, "planning_subagents_max_parallel", 3)))
 
     def _result_max_chars(self) -> int:
-        return int(getattr(self._settings, "planning_subagents_result_max_chars", 6000))
-
-    def _timeout_seconds(self) -> float:
-        if self._default_timeout is not None:
-            return float(self._default_timeout)
-        return float(getattr(self._settings, "planning_subagents_worker_timeout_seconds", 120))
+        return int(getattr(self._settings, "tool_result_max_chars", 0) or 0)
 
     async def dispatch(
         self,
@@ -275,14 +258,7 @@ class PlanningSubagentDispatcher:
         parent_state: dict[str, Any],
     ) -> DispatchSubagentsResult:
         """Run all worker tasks concurrently and return ordered results."""
-        semaphore = asyncio.Semaphore(self._max_parallel())
-        timeout = self._timeout_seconds()
-
-        async def _bounded(task: PlanningSubagentTask) -> PlanningSubagentResult:
-            async with semaphore:
-                return await self.run_one(task, parent_state=parent_state, timeout=timeout)
-
-        coros = [_bounded(task) for task in request.tasks]
+        coros = [self.run_one(task, parent_state=parent_state) for task in request.tasks]
         results = await asyncio.gather(*coros, return_exceptions=False)
         return DispatchSubagentsResult.from_results(list(results), rationale=request.rationale)
 
@@ -291,17 +267,16 @@ class PlanningSubagentDispatcher:
         task: PlanningSubagentTask,
         *,
         parent_state: dict[str, Any],
-        timeout: float | None = None,
     ) -> PlanningSubagentResult:
         """Run a single worker, converting exceptions/timeouts into structured results."""
         wall_start = time.perf_counter()
-        timeout = timeout if timeout is not None else self._timeout_seconds()
         max_chars = self._result_max_chars()
 
         def _result(
             status: Literal["completed", "failed", "timeout", "requires_approval"],
             summary: str,
             error: str | None = None,
+            artifacts: list[dict[str, Any]] | None = None,
         ) -> PlanningSubagentResult:
             return PlanningSubagentResult(
                 id=task.id,
@@ -311,23 +286,21 @@ class PlanningSubagentDispatcher:
                 summary=_truncate_summary(summary, max_chars),
                 related_todo_ids=list(task.related_todo_ids),
                 error=error,
+                artifacts=list(artifacts or []),
             )
 
         prompt = _build_task_prompt(task)
         try:
-            response = await asyncio.wait_for(
-                self._workflow._run_agent_in_isolated_context(
-                    agent_name=task.agent.value,
-                    task_prompt=prompt,
-                    parent_state=parent_state,
-                    related_todo_ids=list(task.related_todo_ids),
-                ),
-                timeout=timeout,
+            response = await self._workflow._run_agent_in_isolated_context(
+                agent_name=task.agent.value,
+                task_prompt=prompt,
+                parent_state=parent_state,
+                related_todo_ids=list(task.related_todo_ids),
             )
         except asyncio.TimeoutError:
             return _result(
                 "timeout",
-                f"Worker {task.id} ({task.agent.value}) exceeded {timeout:.1f}s timeout.",
+                f"Worker {task.id} ({task.agent.value}) timed out in an underlying operation.",
                 error="timeout",
             )
         except Exception as exc:  # pragma: no cover - sanity net
@@ -338,11 +311,14 @@ class PlanningSubagentDispatcher:
                 error=str(exc),
             )
 
+        worker_artifacts = list(response.tool_artifacts or [])
+
         if response.error:
             return _result(
                 "failed",
                 response.message.content or response.error or "(no output)",
                 error=response.error,
+                artifacts=worker_artifacts,
             )
 
         if _is_requires_approval_response(response):
@@ -351,9 +327,10 @@ class PlanningSubagentDispatcher:
                 response.message.content
                 or "Worker stopped awaiting human approval; supervisor must handle directly.",
                 error="requires_approval",
+                artifacts=worker_artifacts,
             )
 
-        return _result("completed", response.message.content or "")
+        return _result("completed", response.message.content or "", artifacts=worker_artifacts)
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +401,33 @@ def create_dispatch_subagents_tool(
             for entry in result.results:
                 results_log.append(_compact_result_payload(entry))
             context["subagent_results"] = results_log
+
+            # Surface worker tool artifacts in the UI activity panel without
+            # bloating the model context: the model JSON above stays compact,
+            # but a dedicated metadata bucket carries the full per-worker
+            # artifact lists so the Streamlit renderer can expand them.
+            worker_artifacts_log = dict(context.get("subagent_worker_artifacts") or {})
+            for entry in result.results:
+                if not entry.artifacts:
+                    continue
+                existing = list(worker_artifacts_log.get(entry.id) or [])
+                seen_ids = {
+                    art.get("tool_call_id")
+                    for art in existing
+                    if isinstance(art, dict) and art.get("tool_call_id")
+                }
+                for artifact in entry.artifacts:
+                    if not isinstance(artifact, dict):
+                        continue
+                    tc_id = artifact.get("tool_call_id")
+                    if tc_id and tc_id in seen_ids:
+                        continue
+                    existing.append(artifact)
+                    if tc_id:
+                        seen_ids.add(tc_id)
+                worker_artifacts_log[entry.id] = existing
+            if worker_artifacts_log:
+                context["subagent_worker_artifacts"] = worker_artifacts_log
         except Exception:  # pragma: no cover - defensive logging path
             logger.debug("Failed to stash subagent dispatch summary on parent state.")
 

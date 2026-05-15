@@ -16,6 +16,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from threading import Lock
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -274,7 +275,14 @@ class ConversationToolSet:
         return len(to_remove)
 
     def list_tools(self) -> list[ToolReference]:
-        return [tool.to_reference() for tool in self.loaded.values()]
+        return [
+            ToolReference(
+                tool_name=tool.tool_name,
+                server_name=tool.server_name,
+                call_name=call_name if call_name != tool.tool_name else None,
+            )
+            for call_name, tool in self.loaded.items()
+        ]
 
     def list_all_tool_names(self) -> list[str]:
         return list(self.loaded.keys())
@@ -572,6 +580,138 @@ class DeferredToolState:
                     scope.cleanup_expired(ttl)
                     names.extend(name for name in scope.loaded)
             return names
+
+    def snapshot(
+        self,
+        conversation_id: str | None,
+        agent_key: str | None,
+        device_id: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, list[dict[str, object]]]:
+        """Serialize loaded deferred tools for checkpoint persistence."""
+        server_key = self._get_key(conversation_id, agent_key)
+        generation = get_mcp_tools_generation()
+        ttl = settings.mcp_tool_search_loaded_tools_ttl_minutes
+
+        with self._lock:
+            server_tools: list[dict[str, object]] = []
+            tool_set = self._conversation_tools.get(server_key)
+            if tool_set:
+                tool_set.cleanup_expired(ttl, generation)
+                for call_name, tool in tool_set.loaded.items():
+                    server_tools.append(
+                        {
+                            "tool_name": tool.tool_name,
+                            "server_name": tool.server_name,
+                            "call_name": call_name,
+                            "generation": tool.generation,
+                        }
+                    )
+
+            if device_id and not session_id:
+                session_id = self._resolve_active_session_id(device_id)
+
+            conv_id = conversation_id or ""
+            agent = agent_key or "default"
+            client_tools: list[dict[str, object]] = []
+            for key, scope in list(self._client_tool_scopes.items()):
+                if key[0] != conv_id or key[1] != agent:
+                    continue
+                if device_id and key[2] != str(device_id):
+                    continue
+                if session_id and key[3] != str(session_id):
+                    continue
+                scope.cleanup_expired(ttl)
+                for tool in scope.list_tools():
+                    client_tools.append(
+                        {
+                            "tool_name": tool.tool_name,
+                            "server_name": tool.server_name,
+                            "device_id": tool.device_id,
+                            "session_id": key[3],
+                            "catalog_version": tool.catalog_version,
+                            "tool_instance_id": tool.tool_instance_id,
+                        }
+                    )
+
+        return {"server_tools": server_tools, "client_tools": client_tools}
+
+    def restore(
+        self,
+        conversation_id: str | None,
+        agent_key: str | None,
+        snapshot: dict[str, object] | None,
+        device_id: str | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, int]:
+        """Restore a deferred-tool snapshot into the active in-memory state."""
+        if not isinstance(snapshot, dict):
+            return {"server_tools": 0, "client_tools": 0}
+
+        server_refs: list[ToolReference] = []
+        for entry in snapshot.get("server_tools") or []:
+            if not isinstance(entry, dict):
+                continue
+            tool_name = str(entry.get("tool_name") or "").strip()
+            server_name = str(entry.get("server_name") or "").strip()
+            call_name_value = entry.get("call_name")
+            call_name = str(call_name_value).strip() if call_name_value else None
+            if tool_name and server_name:
+                server_refs.append(
+                    ToolReference(
+                        tool_name=tool_name,
+                        server_name=server_name,
+                        call_name=call_name,
+                    )
+                )
+
+        restored_server = self.autoload(
+            conversation_id=conversation_id,
+            agent_key=agent_key,
+            references=server_refs,
+        )
+
+        client_refs: list[object] = []
+        for entry in snapshot.get("client_tools") or []:
+            if not isinstance(entry, dict):
+                continue
+            tool_name = str(entry.get("tool_name") or "").strip()
+            server_name = str(entry.get("server_name") or "").strip()
+            entry_device_id = str(entry.get("device_id") or device_id or "").strip()
+            entry_session_id = str(entry.get("session_id") or session_id or "").strip()
+            if not tool_name or not server_name or not entry_device_id:
+                continue
+            client_refs.append(
+                SimpleNamespace(
+                    tool_name=tool_name,
+                    server_name=server_name,
+                    device_id=entry_device_id,
+                    session_id=entry_session_id or None,
+                    catalog_version=int(entry.get("catalog_version") or 0),
+                    tool_instance_id=str(entry.get("tool_instance_id") or ""),
+                )
+            )
+
+        restore_device_id = device_id
+        restore_session_id = session_id
+        if client_refs:
+            first_ref = client_refs[0]
+            restore_device_id = restore_device_id or getattr(first_ref, "device_id", None)
+            restore_session_id = restore_session_id or getattr(first_ref, "session_id", None)
+
+        restored_client = self.autoload_client_tools(
+            conversation_id=conversation_id,
+            agent_key=agent_key,
+            references=client_refs,
+            device_id=restore_device_id,
+            session_id=restore_session_id,
+            user_id=user_id,
+        )
+        return {
+            "server_tools": len(restored_server),
+            "client_tools": len(restored_client),
+        }
 
     def is_loaded(
         self,

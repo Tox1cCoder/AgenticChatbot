@@ -787,34 +787,9 @@ class Settings(BaseSettings):
         default=True,
         description=(
             "Enable the Planning-mode subagent dispatch tool. When True, the Planning "
-            "Agent receives a `dispatch_subagents` internal tool during the executing "
-            "phase that fans out independent worker tasks to other graph agents."
-        ),
-    )
-    planning_subagents_max_tasks: int = Field(
-        default=5,
-        description="Maximum independent worker tasks accepted per dispatch call.",
-    )
-    planning_subagents_max_parallel: int = Field(
-        default=3,
-        description="Maximum number of subagent workers to execute concurrently.",
-    )
-    planning_subagents_worker_timeout_seconds: int = Field(
-        default=120,
-        description="Per-worker timeout in seconds before reporting a `timeout` result.",
-    )
-    planning_subagents_max_iterations: int = Field(
-        default=10,
-        description=(
-            "Maximum tool-loop iterations per worker before aborting with a `failed` "
-            "status. Guards against runaway worker tool loops."
-        ),
-    )
-    planning_subagents_result_max_chars: int = Field(
-        default=6000,
-        description=(
-            "Maximum characters returned to the Planning Agent for any single worker "
-            "summary. Outputs longer than this are truncated with an indicator."
+            "Agent can receive a `dispatch_subagents` internal tool while Planning "
+            "mode is active so it can fan out independent worker tasks to other graph "
+            "agents. Prompt policy controls when the tool should be used."
         ),
     )
 
@@ -915,11 +890,6 @@ class Settings(BaseSettings):
         "auto_continue_max_total_iterations",
         "auto_continue_timeout_seconds",
         "planning_consecutive_errors_limit",
-        "planning_subagents_max_tasks",
-        "planning_subagents_max_parallel",
-        "planning_subagents_worker_timeout_seconds",
-        "planning_subagents_max_iterations",
-        "planning_subagents_result_max_chars",
         mode="before",
     )
     @classmethod

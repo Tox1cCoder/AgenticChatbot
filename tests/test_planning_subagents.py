@@ -86,8 +86,7 @@ def test_dispatch_input_rejects_empty_tasks_list():
         DispatchSubagentsInput.model_validate({"tasks": []})
 
 
-def test_dispatch_input_rejects_too_many_tasks(monkeypatch):
-    monkeypatch.setattr(settings, "planning_subagents_max_tasks", 2)
+def test_dispatch_input_accepts_more_than_legacy_task_limit():
     payload = {
         "tasks": [
             _valid_task("worker-1"),
@@ -95,8 +94,9 @@ def test_dispatch_input_rejects_too_many_tasks(monkeypatch):
             _valid_task("worker-3"),
         ]
     }
-    with pytest.raises(ValidationError):
-        DispatchSubagentsInput.model_validate(payload)
+    parsed = DispatchSubagentsInput.model_validate(payload)
+
+    assert [task.id for task in parsed.tasks] == ["worker-1", "worker-2", "worker-3"]
 
 
 def test_dispatch_input_rejects_duplicate_task_ids():
@@ -251,10 +251,7 @@ def _ok_response(content: str) -> AgentResponse:
 
 @pytest.mark.asyncio
 async def test_dispatcher_runs_workers_concurrently(monkeypatch):
-    monkeypatch.setattr(settings, "planning_subagents_max_parallel", 5)
-    monkeypatch.setattr(settings, "planning_subagents_worker_timeout_seconds", 5)
-    monkeypatch.setattr(settings, "planning_subagents_max_iterations", 5)
-    monkeypatch.setattr(settings, "planning_subagents_result_max_chars", 6000)
+    monkeypatch.setattr(settings, "tool_result_max_chars", 6000)
 
     sleep_seconds = 0.3
 
@@ -292,9 +289,7 @@ async def test_dispatcher_runs_workers_concurrently(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_dispatcher_preserves_input_order_despite_finish_order(monkeypatch):
-    monkeypatch.setattr(settings, "planning_subagents_max_parallel", 5)
-    monkeypatch.setattr(settings, "planning_subagents_worker_timeout_seconds", 5)
-    monkeypatch.setattr(settings, "planning_subagents_result_max_chars", 6000)
+    monkeypatch.setattr(settings, "tool_result_max_chars", 6000)
 
     delays = {"w1": 0.3, "w2": 0.05, "w3": 0.15}
 
@@ -339,9 +334,7 @@ def _strip_id(prompt: str) -> str:
 
 @pytest.mark.asyncio
 async def test_dispatcher_failure_does_not_cancel_siblings(monkeypatch):
-    monkeypatch.setattr(settings, "planning_subagents_max_parallel", 5)
-    monkeypatch.setattr(settings, "planning_subagents_worker_timeout_seconds", 5)
-    monkeypatch.setattr(settings, "planning_subagents_result_max_chars", 6000)
+    monkeypatch.setattr(settings, "tool_result_max_chars", 6000)
 
     async def runner(**kwargs):
         if kwargs["agent_name"] == "search_agent":
@@ -381,20 +374,16 @@ async def test_dispatcher_failure_does_not_cancel_siblings(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_timeout_reported_as_structured_result(monkeypatch):
-    monkeypatch.setattr(settings, "planning_subagents_max_parallel", 5)
-    monkeypatch.setattr(settings, "planning_subagents_worker_timeout_seconds", 1)
-    monkeypatch.setattr(settings, "planning_subagents_result_max_chars", 6000)
+async def test_dispatcher_does_not_apply_subagent_specific_timeout(monkeypatch):
+    monkeypatch.setattr(settings, "tool_result_max_chars", 6000)
 
     async def runner(**kwargs):
         if kwargs["agent_name"] == "rag_agent":
-            await asyncio.sleep(5)
+            await asyncio.sleep(0.05)
         return _ok_response("ok")
 
     workflow = _StubWorkflow(runner)
-    dispatcher = PlanningSubagentDispatcher(
-        workflow=workflow, settings=settings, default_timeout_seconds=0.2
-    )
+    dispatcher = PlanningSubagentDispatcher(workflow=workflow, settings=settings)
 
     request = DispatchSubagentsInput(
         tasks=[
@@ -414,14 +403,12 @@ async def test_dispatcher_timeout_reported_as_structured_result(monkeypatch):
     result = await dispatcher.dispatch(request, parent_state={})
     statuses = {r.id: r.status for r in result.results}
     assert statuses["w-fast"] == "completed"
-    assert statuses["w-slow"] == "timeout"
+    assert statuses["w-slow"] == "completed"
 
 
 @pytest.mark.asyncio
 async def test_dispatcher_truncates_summary_to_configured_size(monkeypatch):
-    monkeypatch.setattr(settings, "planning_subagents_max_parallel", 5)
-    monkeypatch.setattr(settings, "planning_subagents_worker_timeout_seconds", 5)
-    monkeypatch.setattr(settings, "planning_subagents_result_max_chars", 100)
+    monkeypatch.setattr(settings, "tool_result_max_chars", 100)
 
     async def runner(**kwargs):
         return _ok_response("x" * 10_000)
@@ -444,10 +431,16 @@ async def test_dispatcher_truncates_summary_to_configured_size(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_does_not_embed_worker_artifacts_in_results(monkeypatch):
-    monkeypatch.setattr(settings, "planning_subagents_max_parallel", 5)
-    monkeypatch.setattr(settings, "planning_subagents_worker_timeout_seconds", 5)
-    monkeypatch.setattr(settings, "planning_subagents_result_max_chars", 6000)
+async def test_dispatcher_keeps_worker_artifacts_for_ui_but_not_in_model_json(monkeypatch):
+    """Worker artifacts must reach the UI without bloating the model context.
+
+    The dispatcher captures every worker's tool_artifacts on the
+    ``PlanningSubagentResult`` so the Streamlit UI can expand them per worker.
+    The model-facing JSON (and the ``subagent_results`` context entries built
+    from ``_compact_result_payload``) must still omit those nested artifacts to
+    keep supervisor prompts compact.
+    """
+    monkeypatch.setattr(settings, "tool_result_max_chars", 6000)
 
     huge_artifact = {
         "tool_call_id": "worker-tool-1",
@@ -466,21 +459,34 @@ async def test_dispatcher_does_not_embed_worker_artifacts_in_results(monkeypatch
 
     workflow = _StubWorkflow(runner)
     dispatcher = PlanningSubagentDispatcher(workflow=workflow, settings=settings)
-    request = DispatchSubagentsInput(
-        tasks=[
-            PlanningSubagentTask(
-                id="w1",
-                agent=PlanningSubagentName.CHAT_AGENT,
-                task="this is a long enough task description",
-            )
-        ]
+    parent_state: dict[str, Any] = {}
+    tool = create_dispatch_subagents_tool(
+        dispatcher=dispatcher,
+        parent_state_provider=lambda: parent_state,
     )
 
-    result = await dispatcher.dispatch(request, parent_state={})
+    payload = {
+        "tasks": [
+            _valid_task("w1", "chat_agent"),
+        ]
+    }
 
-    assert result.results[0].summary == "worker summary"
-    assert result.results[0].artifacts == []
-    assert result.results[0].images == []
+    model_json = await tool.ainvoke(payload)
+    parsed = json.loads(model_json)
+
+    # Model context: compact, no artifacts/images leaked.
+    assert parsed["results"][0]["summary"] == "worker summary"
+    assert "artifacts" not in parsed["results"][0]
+    assert "images" not in parsed["results"][0]
+
+    # subagent_results in context is built from the same compact payload.
+    assert parent_state["context"]["subagent_results"][0].get("artifacts") in (None, [])
+
+    # subagent_worker_artifacts in context carries the full artifact list so
+    # the UI activity panel can render them under each worker.
+    worker_artifacts = parent_state["context"]["subagent_worker_artifacts"]
+    assert "w1" in worker_artifacts
+    assert worker_artifacts["w1"][0]["tool_call_id"] == "worker-tool-1"
 
 
 # ---------------------------------------------------------------------------
@@ -490,9 +496,7 @@ async def test_dispatcher_does_not_embed_worker_artifacts_in_results(monkeypatch
 
 @pytest.mark.asyncio
 async def test_dispatch_subagents_tool_returns_valid_json_string(monkeypatch):
-    monkeypatch.setattr(settings, "planning_subagents_max_parallel", 5)
-    monkeypatch.setattr(settings, "planning_subagents_worker_timeout_seconds", 5)
-    monkeypatch.setattr(settings, "planning_subagents_result_max_chars", 6000)
+    monkeypatch.setattr(settings, "tool_result_max_chars", 6000)
 
     async def runner(**kwargs):
         return _ok_response("done")
@@ -528,9 +532,7 @@ async def test_dispatch_subagents_tool_returns_valid_json_string(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_dispatch_subagents_tool_stashes_compact_results_without_artifacts(monkeypatch):
-    monkeypatch.setattr(settings, "planning_subagents_max_parallel", 5)
-    monkeypatch.setattr(settings, "planning_subagents_worker_timeout_seconds", 5)
-    monkeypatch.setattr(settings, "planning_subagents_result_max_chars", 6000)
+    monkeypatch.setattr(settings, "tool_result_max_chars", 6000)
 
     async def runner(**kwargs):
         response = _ok_response("done")
@@ -607,7 +609,13 @@ def test_planning_prompt_executing_phase_mentions_dispatch_subagents():
     assert "write_todos" in prompt
 
 
-def test_planning_prompt_does_not_advertise_hand_off():
+def test_planning_prompt_advertises_hand_off_with_clear_disambiguation():
+    """Planning agent now owns BOTH dispatch_subagents and hand_off.
+
+    The executing-phase prompt must mention both and clearly distinguish
+    parallel fan-out (``dispatch_subagents``) from full-conversation
+    delegation (``hand_off``), so the supervisor picks the right primitive.
+    """
     agent = _make_planning_agent_for_prompt()
     prompt = agent._build_system_prompt(
         persona=None,
@@ -616,11 +624,15 @@ def test_planning_prompt_does_not_advertise_hand_off():
         current_task_index=0,
         planning_phase="executing",
     )
-    assert "hand_off" not in prompt
-    assert "INTER-AGENT DELEGATION" not in prompt
+    assert "dispatch_subagents" in prompt
+    assert "hand_off" in prompt
 
 
-def test_planning_agent_binding_excludes_hand_off(monkeypatch):
+def test_planning_agent_binding_includes_hand_off(monkeypatch):
+    """The Planning Agent is now wired into graph-level delegation, so the
+    ``hand_off`` tool must appear in its bound toolset alongside the always-on
+    ``write_todos`` internal tool.
+    """
     from app.ai.agents.planning_agent import PlanningAgent
 
     monkeypatch.setattr(
@@ -638,6 +650,36 @@ def test_planning_agent_binding_excludes_hand_off(monkeypatch):
     agent.tools = []
 
     tools = agent._get_tools_for_binding(conversation_id="conversation-1")
+    tool_names = [tool.name for tool in tools]
+
+    assert "write_todos" in tool_names
+    assert "hand_off" in tool_names
+
+
+def test_planning_agent_binding_can_opt_out_of_hand_off(monkeypatch):
+    """Subagent workers pass ``include_hand_off=False`` so graph-level
+    delegation does not leak into isolated worker tool maps.
+    """
+    from app.ai.agents.planning_agent import PlanningAgent
+
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.should_use_deferred_loading",
+        lambda _agent_key: True,
+    )
+    monkeypatch.setattr(
+        "app.ai.agents.base_agent.get_available_skill_summaries",
+        lambda **kwargs: [],
+    )
+
+    agent = PlanningAgent.__new__(PlanningAgent)
+    agent.agent_config_key = "planning"
+    agent.mcp_manager = None
+    agent.tools = []
+
+    tools = agent._get_tools_for_binding(
+        conversation_id="conversation-1",
+        include_hand_off=False,
+    )
     tool_names = [tool.name for tool in tools]
 
     assert "write_todos" in tool_names

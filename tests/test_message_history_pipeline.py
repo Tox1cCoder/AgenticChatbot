@@ -159,9 +159,9 @@ def test_checkpoint_compaction_runs_after_complete_not_after_interrupt(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_streaming_compacts_checkpoint_before_complete_event(monkeypatch):
-    """Streaming callers stop reading after ``complete``, so compaction must
-    happen before that event is yielded."""
+async def test_streaming_workflow_does_not_compact_before_complete_event(monkeypatch):
+    """Checkpoint compaction must not happen inside the workflow before the
+    service has durably persisted the terminal assistant message."""
 
     from types import SimpleNamespace
 
@@ -209,7 +209,79 @@ async def test_streaming_compacts_checkpoint_before_complete_event(monkeypatch):
         if event["type"] == "complete":
             break
 
-    assert events == ["agent_selected", "compact", "complete"]
+    assert events == ["agent_selected", "complete"]
+
+
+@pytest.mark.asyncio
+async def test_message_service_compacts_checkpoint_after_persist(monkeypatch):
+    """Once the service has persisted the assistant row, it can safely clear
+    LangGraph's transient checkpoint transcript."""
+
+    from types import SimpleNamespace
+
+    from app.schemas.workflow import (
+        WorkflowExecutionRequest as ServiceWorkflowExecutionRequest,
+    )
+    from app.schemas.workflow import (
+        WorkflowPlanningContext,
+        WorkflowResponse,
+        WorkflowResponseMessage,
+    )
+    from app.services.message_service import MessageService
+
+    service = MessageService.__new__(MessageService)
+    events: list[tuple[str, str | None]] = []
+    conversation_id = uuid4()
+    assistant_message_id = uuid4()
+
+    class FakeAIService:
+        async def compact_checkpoint_after_terminal_response(self, thread_id):
+            events.append(("compact", str(thread_id) if thread_id is not None else None))
+
+    service.ai_service = FakeAIService()
+    service.task_plan_service = None
+    service._sync_response_plan_state = lambda **_kwargs: False
+    service._generate_and_add_suggestions = AsyncMock()
+    service._schedule_summary_refresh = lambda **kwargs: events.append(
+        ("summary", str(kwargs["through_message_id"]))
+    )
+
+    def fake_create_bot_response_message(**kwargs):
+        events.append(("persist", str(kwargs.get("message_id"))))
+        return SimpleNamespace(id=kwargs.get("message_id"))
+
+    service._create_bot_response_message = fake_create_bot_response_message
+
+    workflow_request = ServiceWorkflowExecutionRequest(
+        message="hello",
+        conversation_id=str(conversation_id),
+        user_id=str(uuid4()),
+        thread_id=None,
+        planning=WorkflowPlanningContext(),
+    )
+    bot_response = WorkflowResponse(
+        message=WorkflowResponseMessage(content="done"),
+        metadata={},
+    )
+
+    await service._persist_completed_workflow_response(
+        conversation_id=conversation_id,
+        user_id=uuid4(),
+        bot_response=bot_response,
+        sanitized_persona=None,
+        workflow_request=workflow_request,
+        message_id=assistant_message_id,
+    )
+    await service._compact_checkpoint_after_persist(
+        workflow_request=workflow_request,
+        conversation_id=conversation_id,
+    )
+
+    assert events == [
+        ("persist", str(assistant_message_id)),
+        ("summary", str(assistant_message_id)),
+        ("compact", str(conversation_id)),
+    ]
 
 
 def test_workflow_request_round_trip_through_ai_schema():

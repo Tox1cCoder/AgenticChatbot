@@ -36,6 +36,7 @@ from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..prompts import DELEGATION_SUFFIX, TOOL_CONTEXT_SUFFIX, TOOL_EXPLORATION_SUFFIX
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..skills_tool import create_activate_skill_tool, get_available_skill_summaries
+from ..time_context import build_runtime_time_context_block
 from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
 from ..tool_execution import _WIDGET_SESSION_BOUND_TOOLS, _bind_widget_session_args
 from ..tool_scope import is_client_only_scope
@@ -316,6 +317,7 @@ class BaseAgent(ABC):
         user_id: str | None = None,
         device_id: str | None = None,
         tool_scope: str | None = None,
+        include_hand_off: bool | None = None,
     ) -> list[BaseTool]:
         """
         Get the tools to bind to the model for this invocation.
@@ -349,7 +351,10 @@ class BaseAgent(ABC):
         for tool in skills_tools:
             _add_internal(tool)
 
-        if self._should_include_hand_off_tool():
+        hand_off_enabled = (
+            self._should_include_hand_off_tool() if include_hand_off is None else include_hand_off
+        )
+        if hand_off_enabled:
             _add_internal(_hand_off_tool)
 
         for tool in internal_tools or []:
@@ -427,7 +432,7 @@ class BaseAgent(ABC):
             else:
                 tools = list(self.tools)
 
-        if not self._should_include_hand_off_tool():
+        if not hand_off_enabled:
             tools = [tool for tool in tools if getattr(tool, "name", None) != _hand_off_tool.name]
 
         seen_names = {tool.name for tool in tools}
@@ -459,6 +464,7 @@ class BaseAgent(ABC):
         internal_tools: list[BaseTool] | None = None,
         user_id: str | None = None,
         device_id: str | None = None,
+        include_hand_off: bool | None = None,
     ) -> Any:
         """
         Bind tools to the model for invocation.
@@ -467,6 +473,11 @@ class BaseAgent(ABC):
             model: Optional model override
             conversation_id: Conversation ID for deferred tool lookup
             internal_tools: Non-MCP internal tools to include
+            include_hand_off: Override the agent's default hand_off inclusion. ``None``
+                falls back to ``_should_include_hand_off_tool()``. Subagent
+                workers pass ``False`` to keep ``hand_off`` off the worker
+                toolset because graph-level delegation does not apply in an
+                isolated execution context.
 
         Returns:
             Model with tools bound
@@ -479,6 +490,7 @@ class BaseAgent(ABC):
             internal_tools=internal_tools,
             user_id=user_id,
             device_id=device_id,
+            include_hand_off=include_hand_off,
         )
 
         if not tools or llm is None:
@@ -731,6 +743,7 @@ class BaseAgent(ABC):
         tool_budget_notice: str | None = None,
         internal_tools: list[BaseTool] | None = None,
         run_config: RunnableConfig | None = None,
+        include_hand_off: bool | None = None,
         **system_prompt_kwargs: Any,
     ) -> AgentResponse:
         try:
@@ -750,12 +763,14 @@ class BaseAgent(ABC):
                     internal_tools=internal_tools,
                     user_id=user_id,
                     device_id=device_id,
+                    include_hand_off=include_hand_off,
                 )
                 bound_tools = self._get_tools_for_binding(
                     conversation_id=conversation_id,
                     internal_tools=internal_tools,
                     user_id=user_id,
                     device_id=device_id,
+                    include_hand_off=include_hand_off,
                 )
             has_tool_context = any(
                 isinstance(msg, ToolMessage)
@@ -766,6 +781,7 @@ class BaseAgent(ABC):
 
             if tool_budget_notice:
                 system_prompt_kwargs["tool_budget_notice"] = tool_budget_notice
+            system_prompt_kwargs["include_hand_off"] = include_hand_off
 
             system_prompt = self._build_system_prompt(
                 persona,
@@ -859,6 +875,7 @@ class BaseAgent(ABC):
                                 internal_tools=internal_tools,
                                 user_id=user_id,
                                 device_id=device_id,
+                                include_hand_off=include_hand_off,
                             )
                         )
                         response = await _invoke_with_optional_config(
@@ -890,6 +907,7 @@ class BaseAgent(ABC):
                                 internal_tools=internal_tools,
                                 user_id=user_id,
                                 device_id=device_id,
+                                include_hand_off=include_hand_off,
                             )
                         )
                         response = await _invoke_with_optional_config(
@@ -1009,11 +1027,19 @@ class BaseAgent(ABC):
         if skills_suffix:
             system_prompt = f"{system_prompt}{skills_suffix}"
 
+        system_prompt = f"{system_prompt}{build_runtime_time_context_block()}"
+
         # Append shared tool-usage guidance.
         system_prompt = f"{system_prompt}{TOOL_EXPLORATION_SUFFIX}"
 
         # Append delegation instructions only when the tool is actually bound.
-        if self._should_include_hand_off_tool():
+        include_hand_off = _.get("include_hand_off")
+        hand_off_prompt_enabled = (
+            self._should_include_hand_off_tool()
+            if include_hand_off is None
+            else bool(include_hand_off)
+        )
+        if hand_off_prompt_enabled:
             system_prompt = f"{system_prompt}{DELEGATION_SUFFIX}"
 
         # Inject rolling conversation summary as a dedicated memory block
@@ -1092,8 +1118,8 @@ class BaseAgent(ABC):
         base = self._get_base_system_prompt()
         suffix = self._build_skills_suffix(user_id=user_id, device_id=device_id)
         if suffix:
-            return f"{base}{suffix}"
-        return base
+            base = f"{base}{suffix}"
+        return f"{base}{build_runtime_time_context_block()}"
 
     def _build_error_response(
         self, message: str, conversation_id: str | None, error: str | None = None

@@ -28,6 +28,8 @@ from app.services.stream_events import normalize_tool_phase
 
 router = APIRouter(tags=["ai-sdk"])
 
+_AI_SDK_HEARTBEAT_INTERVAL_SECONDS = 15.0
+
 
 class AISDKChatRequest(BaseModel):
     """
@@ -786,6 +788,13 @@ class NodeCompleteEventHandler(EventHandler):
         )
 
 
+class HeartbeatEventHandler(EventHandler):
+    """Keeps long-running SSE streams alive while upstream work is quiet."""
+
+    async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
+        yield _sse({"type": "heartbeat"})
+
+
 class EventHandlerFactory:
     """Factory for creating event handlers."""
 
@@ -800,6 +809,7 @@ class EventHandlerFactory:
         "complete": CompleteEventHandler(),
         "continuation_start": ContinuationEventHandler(),
         "node_complete": NodeCompleteEventHandler(),
+        "heartbeat": HeartbeatEventHandler(),
     }
 
     @classmethod
@@ -812,6 +822,38 @@ def _build_ui_message_stream_response(
     event_source_factory: Callable[[], AsyncGenerator[dict[str, Any], None]],
     state: StreamState,
 ) -> StreamingResponse:
+    async def events_with_heartbeats() -> AsyncGenerator[dict[str, Any], None]:
+        source = event_source_factory()
+        pending_next: asyncio.Task | None = None
+        try:
+            while True:
+                if pending_next is None:
+                    pending_next = asyncio.create_task(anext(source))
+
+                done, _ = await asyncio.wait(
+                    {pending_next},
+                    timeout=_AI_SDK_HEARTBEAT_INTERVAL_SECONDS,
+                )
+                if not done:
+                    yield {"type": "heartbeat"}
+                    continue
+
+                try:
+                    event = pending_next.result()
+                except StopAsyncIteration:
+                    break
+                pending_next = None
+                yield event
+        finally:
+            if pending_next is not None and not pending_next.done():
+                pending_next.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pending_next
+            aclose = getattr(source, "aclose", None)
+            if callable(aclose):
+                with contextlib.suppress(Exception):
+                    await aclose()
+
     async def event_generator():
         try:
             yield _sse({"type": "start", "messageId": state.message_id})
@@ -819,7 +861,7 @@ def _build_ui_message_stream_response(
             yield _sse({"type": "text-start", "id": state.text_id})
             state.text_started = True
 
-            async for event in event_source_factory():
+            async for event in events_with_heartbeats():
                 event_type = event.get("type")
                 handler = EventHandlerFactory.get_handler(event_type)
 

@@ -390,6 +390,23 @@ class MessageService(IMessageService):
             self.ai_service.invalidate_history_cache(str(conversation_id))
         return MessageRead.model_validate(bot_message)
 
+    async def _compact_checkpoint_after_persist(
+        self,
+        *,
+        conversation_id: UUID | None = None,
+        workflow_request: WorkflowExecutionRequest | None = None,
+        thread_id: str | None = None,
+    ) -> None:
+        resolved_thread_id = (
+            thread_id
+            or (workflow_request.thread_id if workflow_request is not None else None)
+            or (str(conversation_id) if conversation_id is not None else None)
+        )
+        if not resolved_thread_id:
+            return
+        with contextlib.suppress(Exception):
+            await self.ai_service.compact_checkpoint_after_terminal_response(resolved_thread_id)
+
     @staticmethod
     def _coerce_plan_lifecycle(
         raw_lifecycle: str | PlanLifecycle | None,
@@ -775,6 +792,10 @@ class MessageService(IMessageService):
                 workflow_request=workflow_request,
                 message_id=assistant_message_id,
             )
+            await self._compact_checkpoint_after_persist(
+                conversation_id=message_create_data.conversation_id,
+                workflow_request=workflow_request,
+            )
 
         return MessageRead.model_validate(created_message)
 
@@ -1030,6 +1051,10 @@ class MessageService(IMessageService):
                     suggestion_source_message=message_create_data.content,
                 )
                 bot_message_persisted = True
+                await self._compact_checkpoint_after_persist(
+                    conversation_id=message_create_data.conversation_id,
+                    workflow_request=workflow_request,
+                )
 
                 # Resolve the inflight future with the final message
                 inflight.resolve(bot_message.model_dump(mode="json"))
@@ -1617,6 +1642,7 @@ class MessageService(IMessageService):
                         message_id=bot_message_id,
                     )
                     bot_message_persisted = True
+                    await self._compact_checkpoint_after_persist(thread_id=thread_id)
 
                     yield {
                         "type": "complete",
@@ -1883,6 +1909,11 @@ class MessageService(IMessageService):
                 user_id=user_id,
                 through_message_id=bot_message_id,
             )
+
+        await self._compact_checkpoint_after_persist(
+            conversation_id=conversation_id,
+            thread_id=str(conversation_id),
+        )
 
         return bot_message
 

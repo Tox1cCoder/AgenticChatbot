@@ -23,6 +23,31 @@ from typing import Any
 
 from .text_normalization import tokenize_text
 
+_QUERY_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "in",
+    "is",
+    "it",
+    "not",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "with",
+}
+
 
 def score_tool(
     *,
@@ -74,7 +99,10 @@ def build_query_tokens(query: str) -> tuple[str, set[str]]:
         (query_lower, query_tokens_set)
     """
     query_lower = query.lower().strip()
-    query_tokens = set(tokenize_text(query))
+    raw_tokens = set(tokenize_text(query))
+    query_tokens = {token for token in raw_tokens if token not in _QUERY_STOPWORDS}
+    if not query_tokens:
+        query_tokens = raw_tokens
     return query_lower, query_tokens
 
 

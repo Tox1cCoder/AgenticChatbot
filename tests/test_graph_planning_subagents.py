@@ -2,7 +2,7 @@
 
 Covers:
 - The Planning Agent only receives ``dispatch_subagents`` when Planning
-  mode is active and the planning phase is ``executing``.
+  mode is active and the feature flag is enabled.
 - ``MultiAgentWorkflow._run_agent_in_isolated_context`` builds a child
   state that does NOT inherit the parent's chat ``messages`` and that
   carries scoped identifiers (``conversation_id``, ``user_id``,
@@ -116,7 +116,9 @@ async def test_planning_node_binds_dispatch_in_planning_and_executing_when_plan_
 
 
 @pytest.mark.asyncio
-async def test_planning_node_does_not_bind_dispatch_when_planning_mode_disabled(monkeypatch):
+async def test_planning_node_does_not_bind_dispatch_when_planning_mode_disabled_in_planning_phase(
+    monkeypatch,
+):
     """The only binding gates are planning_subagents_enabled + planning_mode_enabled."""
     monkeypatch.setattr(settings, "planning_subagents_enabled", True)
 
@@ -766,6 +768,142 @@ async def test_run_agent_in_isolated_context_drives_rag_search_loop(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_run_agent_in_isolated_context_has_no_subagent_iteration_cap(monkeypatch):
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+
+    call_count = 0
+
+    async def fake_invoke(messages, conversation_history, persona, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            return AgentResponse(
+                agent_type=AgentType.SEARCH,
+                agent_id="search_agent",
+                message=AgentMessage(
+                    role=MessageRole.ASSISTANT,
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": f"tool-{call_count}",
+                            "name": "lookup",
+                            "args": {"step": call_count},
+                        }
+                    ],
+                ),
+                metadata={},
+            )
+        return AgentResponse(
+            agent_type=AgentType.SEARCH,
+            agent_id="search_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="final answer"),
+            metadata={},
+        )
+
+    agent = SimpleNamespace(
+        invoke_model_with_history=fake_invoke,
+        agent_config_key="search",
+        agent_id="search_agent",
+    )
+    workflow.search_agent = agent
+    workflow.agents = {"search_agent": agent}
+
+    async def fake_ensure_map(*args, **kwargs):
+        async def lookup(args):
+            return f"step {args['step']} complete"
+
+        return {"lookup": SimpleNamespace(name="lookup", ainvoke=lookup)}
+
+    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", fake_ensure_map)
+
+    response = await workflow._run_agent_in_isolated_context(
+        agent_name="search_agent",
+        task_prompt="perform a multi-step lookup",
+        parent_state={
+            "conversation_id": "conv-1",
+            "user_id": "user-1",
+            "device_id": "device-1",
+            "context": {},
+            "messages": [],
+        },
+    )
+
+    assert response.error is None
+    assert response.message.content == "final answer"
+    assert call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_run_agent_in_isolated_context_rag_has_no_subagent_iteration_cap(monkeypatch):
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+
+    call_count = 0
+
+    async def fake_process_message(message, conversation_id):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            return AgentResponse(
+                agent_type=AgentType.RAG,
+                agent_id="rag_agent",
+                message=AgentMessage(
+                    role=MessageRole.ASSISTANT,
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": f"rag-tool-{call_count}",
+                            "name": "search_documents",
+                            "args": {"action": "scan_all"},
+                        }
+                    ],
+                ),
+                metadata={},
+            )
+        return AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="final answer"),
+            metadata={},
+        )
+
+    rag_agent = SimpleNamespace(
+        process_message=fake_process_message,
+        agent_config_key="rag",
+        agent_id="rag_agent",
+    )
+    workflow.rag_agent = rag_agent
+    workflow.agents = {"rag_agent": rag_agent}
+
+    async def fake_execute_search_documents_action(**kwargs):
+        return "SEARCH RESULT", "scan_all", {"documents": [{"document_id": "doc-1"}]}
+
+    monkeypatch.setattr(
+        "app.ai.graph.execute_search_documents_action",
+        fake_execute_search_documents_action,
+    )
+    monkeypatch.setattr(
+        "app.ai.graph.apply_tool_output_offload",
+        lambda **kwargs: (kwargs["output_text"], None),
+    )
+
+    response = await workflow._run_agent_in_isolated_context(
+        agent_name="rag_agent",
+        task_prompt="perform a multi-step document search",
+        parent_state={
+            "conversation_id": "conv-rag",
+            "user_id": "user-1",
+            "device_id": "device-1",
+            "context": {},
+            "messages": [],
+        },
+    )
+
+    assert response.error is None
+    assert response.message.content == "final answer"
+    assert call_count == 3
+
+
+@pytest.mark.asyncio
 async def test_run_agent_in_isolated_context_rejects_planning_agent(monkeypatch):
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     workflow.agents = {"planning_agent": object(), "chat_agent": object()}
@@ -792,8 +930,6 @@ async def test_planning_tools_node_executes_dispatch_subagents(monkeypatch):
 
 
     monkeypatch.setattr(settings, "planning_subagents_enabled", True)
-    monkeypatch.setattr(settings, "planning_subagents_max_parallel", 5)
-    monkeypatch.setattr(settings, "planning_subagents_worker_timeout_seconds", 5)
 
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     workflow.planning_agent = SimpleNamespace(
@@ -1056,3 +1192,318 @@ async def test_execute_tool_calls_remains_sequential_for_dependent_tools(monkeyp
 
     assert state["calls"] == ["first_tool", "dependent_tool"]
     assert [o["tool_call_id"] for o in outputs] == ["t1", "t2"]
+
+
+# ---------------------------------------------------------------------------
+# Planning hand_off integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_planning_tools_node_applies_hand_off_to_target_agent(monkeypatch):
+    """When the Planning Agent calls ``hand_off``, planning_tools must swap
+    ``selected_agent`` so the conditional edge routes to the target.
+    """
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    workflow.planning_agent = SimpleNamespace(
+        tools=[],
+        agent_config_key="planning",
+        agent_id="planning_agent",
+    )
+
+    async def fake_ensure_map(*args, **kwargs):
+        return {
+            "hand_off": SimpleNamespace(
+                name="hand_off",
+                ainvoke=AsyncMock(
+                    return_value='{"hand_off": "chat_agent", "reason": "off-plan"}'
+                ),
+            )
+        }
+
+    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", fake_ensure_map)
+
+    state: dict[str, Any] = {
+        "selected_agent": "planning_agent",
+        "messages": [
+            HumanMessage(content="actually, just answer this normally"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "tc-1",
+                        "name": "hand_off",
+                        "args": {"target_agent": "chat_agent", "reason": "off-plan"},
+                    }
+                ],
+            ),
+        ],
+        "todos": [],
+        "current_task_index": 0,
+        "planning_call_count": 0,
+        "planning_mode_enabled": True,
+        "planning_phase": "executing",
+        "conversation_id": "conv-1",
+        "user_id": "user-1",
+        "device_id": "device-1",
+        "context": {},
+    }
+
+    workflow.agents = {"planning_agent": object(), "chat_agent": object()}
+
+    result_state = await workflow._planning_tools_node(state)
+
+    assert result_state["selected_agent"] == "chat_agent"
+
+
+def test_should_continue_planning_routes_to_delegated_agent():
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    workflow.agents = {"planning_agent": object(), "chat_agent": object()}
+
+    state: dict[str, Any] = {
+        "selected_agent": "chat_agent",
+        "planning_call_count": 1,
+        "planning_mode_enabled": True,
+        "planning_phase": "executing",
+        "todos": [],
+        "messages": [
+            HumanMessage(content="off-plan question"),
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "tc-1", "name": "hand_off", "args": {}}],
+            ),
+            ToolMessage(
+                content='{"hand_off": "chat_agent"}',
+                tool_call_id="tc-1",
+                name="hand_off",
+            ),
+        ],
+        "context": {},
+    }
+
+    assert workflow._should_continue_planning(state) == "chat_agent"
+
+
+@pytest.mark.asyncio
+async def test_planning_tools_node_handles_hand_off_alongside_dispatch(monkeypatch):
+    """When the Planning Agent emits BOTH ``dispatch_subagents`` and
+    ``hand_off`` in the same response, the dispatch must still run and produce
+    a ToolMessage, AND the hand_off must reroute ``selected_agent`` so the
+    conditional edge transfers control out of the planning loop.
+    """
+    monkeypatch.setattr(settings, "planning_subagents_enabled", True)
+
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    workflow.planning_agent = SimpleNamespace(
+        tools=[], agent_config_key="planning", agent_id="planning_agent"
+    )
+    workflow.agents = {
+        "planning_agent": object(),
+        "chat_agent": object(),
+        "search_agent": object(),
+    }
+
+    async def fake_ensure_map(*args, **kwargs):
+        return {
+            "hand_off": SimpleNamespace(
+                name="hand_off",
+                ainvoke=AsyncMock(
+                    return_value='{"hand_off": "chat_agent", "reason": "off-plan"}'
+                ),
+            )
+        }
+
+    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", fake_ensure_map)
+
+    dispatched: list[str] = []
+
+    async def fake_runner(**kwargs):
+        dispatched.append(kwargs["agent_name"])
+        return _ok("worker done")
+
+    workflow._run_agent_in_isolated_context = fake_runner  # type: ignore[assignment]
+
+    state: dict[str, Any] = {
+        "selected_agent": "planning_agent",
+        "messages": [
+            HumanMessage(content="research X and then hand me back to chat"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "tc-disp",
+                        "name": "dispatch_subagents",
+                        "args": {
+                            "tasks": [
+                                {
+                                    "id": "w1",
+                                    "agent": "search_agent",
+                                    "task": "look up X",
+                                },
+                            ],
+                            "rationale": "single-shot research before handoff",
+                        },
+                    },
+                    {
+                        "id": "tc-handoff",
+                        "name": "hand_off",
+                        "args": {
+                            "target_agent": "chat_agent",
+                            "reason": "off-plan",
+                        },
+                    },
+                ],
+            ),
+        ],
+        "todos": [],
+        "current_task_index": 0,
+        "planning_call_count": 0,
+        "planning_mode_enabled": True,
+        "planning_phase": "executing",
+        "conversation_id": "conv-1",
+        "user_id": "user-1",
+        "device_id": "device-1",
+        "context": {},
+    }
+
+    result_state = await workflow._planning_tools_node(state)
+
+    # Dispatch must have executed.
+    assert dispatched == ["search_agent"]
+
+    # Both tool calls produced ToolMessages so the model history stays valid.
+    tool_messages = [m for m in result_state["messages"] if isinstance(m, ToolMessage)]
+    tool_names = sorted(tm.name or "" for tm in tool_messages)
+    assert tool_names == ["dispatch_subagents", "hand_off"]
+
+    # hand_off rerouted selected_agent away from planning so the conditional
+    # edge transfers control to chat_agent.
+    assert result_state["selected_agent"] == "chat_agent"
+
+    # _should_continue_planning honors the new selected_agent.
+    assert workflow._should_continue_planning(result_state) == "chat_agent"
+
+    # Dispatch summary metadata is preserved on context even when followed by
+    # hand_off — the UI activity panel needs it to render the worker results.
+    ctx = result_state["context"]
+    assert ctx.get("subagent_dispatches"), "expected subagent_dispatches summary"
+    assert ctx.get("subagent_results"), "expected subagent_results log"
+
+
+@pytest.mark.asyncio
+async def test_planning_consecutive_errors_only_warns_near_threshold(caplog, monkeypatch):
+    """First error increment is INFO; only the final step that arms the circuit
+    breaker should escalate to WARNING.
+    """
+    import logging
+
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+
+    async def fake_ensure_map(*args, **kwargs):
+        async def _raise(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        return {"flaky_tool": SimpleNamespace(name="flaky_tool", ainvoke=_raise)}
+
+    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", fake_ensure_map)
+    monkeypatch.setattr(settings, "planning_consecutive_errors_limit", 3)
+
+    workflow.planning_agent = SimpleNamespace(
+        tools=[], agent_config_key="planning", agent_id="planning_agent"
+    )
+    workflow.agents = {"planning_agent": object()}
+
+    def _make_state() -> dict[str, Any]:
+        return {
+            "selected_agent": "planning_agent",
+            "messages": [
+                HumanMessage(content="try again"),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"id": "tc-1", "name": "flaky_tool", "args": {}}],
+                ),
+            ],
+            "todos": [],
+            "current_task_index": 0,
+            "planning_call_count": 0,
+            "planning_mode_enabled": True,
+            "planning_phase": "executing",
+            "context": {},
+        }
+
+    # First error: under threshold-1 → INFO.
+    with caplog.at_level(logging.INFO, logger="app.ai.graph"):
+        await workflow._planning_tools_node(_make_state())
+    first_msgs = [r for r in caplog.records if "consecutive errors" in r.getMessage()]
+    assert first_msgs and first_msgs[-1].levelno == logging.INFO
+    caplog.clear()
+
+    # Second error (now 1 step before limit=3): should escalate to WARNING.
+    state = _make_state()
+    state["context"]["consecutive_errors"] = 1
+    with caplog.at_level(logging.INFO, logger="app.ai.graph"):
+        await workflow._planning_tools_node(state)
+    near_limit_msgs = [r for r in caplog.records if "consecutive errors" in r.getMessage()]
+    assert near_limit_msgs and near_limit_msgs[-1].levelno == logging.WARNING
+
+    # Third error reaches the breaker; the increment itself should not warn
+    # because ``_should_continue_planning`` owns the "breaker fired" WARNING.
+    caplog.clear()
+    state = _make_state()
+    state["context"]["consecutive_errors"] = 2
+    with caplog.at_level(logging.INFO, logger="app.ai.graph"):
+        await workflow._planning_tools_node(state)
+    breaker_msgs = [r for r in caplog.records if "consecutive errors" in r.getMessage()]
+    assert breaker_msgs and breaker_msgs[-1].levelno == logging.INFO
+
+
+@pytest.mark.asyncio
+async def test_planning_consecutive_errors_small_limit_does_not_warn_on_first(
+    caplog, monkeypatch
+):
+    """A small ``planning_consecutive_errors_limit`` must still log the first
+    error as INFO. Earlier logic flagged the first error as WARNING when the
+    limit was 2, which was noise — the circuit breaker hasn't tripped yet.
+    """
+    import logging
+
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+
+    async def fake_ensure_map(*args, **kwargs):
+        async def _raise(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        return {"flaky_tool": SimpleNamespace(name="flaky_tool", ainvoke=_raise)}
+
+    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", fake_ensure_map)
+    monkeypatch.setattr(settings, "planning_consecutive_errors_limit", 2)
+
+    workflow.planning_agent = SimpleNamespace(
+        tools=[], agent_config_key="planning", agent_id="planning_agent"
+    )
+    workflow.agents = {"planning_agent": object()}
+
+    state: dict[str, Any] = {
+        "selected_agent": "planning_agent",
+        "messages": [
+            HumanMessage(content="try again"),
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "tc-1", "name": "flaky_tool", "args": {}}],
+            ),
+        ],
+        "todos": [],
+        "current_task_index": 0,
+        "planning_call_count": 0,
+        "planning_mode_enabled": True,
+        "planning_phase": "executing",
+        "context": {},
+    }
+
+    with caplog.at_level(logging.INFO, logger="app.ai.graph"):
+        await workflow._planning_tools_node(state)
+    msgs = [r for r in caplog.records if "consecutive errors" in r.getMessage()]
+    assert msgs, "expected a consecutive-errors log line"
+    assert msgs[-1].levelno == logging.INFO, (
+        "first error must not warn even on small limits"
+    )
