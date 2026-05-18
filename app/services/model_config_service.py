@@ -27,6 +27,18 @@ from app.repositories.agent_model_config import AgentModelConfigRepository
 from app.services.provider_service import ProviderService
 
 SUPPORTED_AGENT_KEYS = ("chat", "rag", "search", "planning")
+# Runtime-only agent keys are accepted by ``resolve_runtime_config`` for
+# request-scoped overrides (Planning subagent model assignment). They are
+# intentionally NOT added to the persisted ``agent_model_configs`` rows so
+# the saved settings UI surface stays focused on the four primary agents.
+SUPPORTED_RUNTIME_AGENT_KEYS = (
+    "chat",
+    "rag",
+    "search",
+    "planning",
+    "canvas",
+    "image_generator",
+)
 SUPPORTED_PROVIDERS = ("gemini", "openai")
 
 logger = logging.getLogger(__name__)
@@ -37,6 +49,23 @@ def _normalize_agent_key(value: Any) -> str | None:
         return None
     key = value.strip().lower()
     return key if key in SUPPORTED_AGENT_KEYS else None
+
+
+def _normalize_runtime_agent_key(value: Any) -> str | None:
+    """Like ``_normalize_agent_key`` but also accepts runtime-only keys."""
+    if not isinstance(value, str):
+        return None
+    key = value.strip().lower()
+    return key if key in SUPPORTED_RUNTIME_AGENT_KEYS else None
+
+
+def _normalize_reasoning_effort(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip().lower()
+    if cleaned in {"none", "minimal", "low", "medium", "high", "xhigh"}:
+        return cleaned
+    return None
 
 
 def _normalize_provider(value: Any) -> str:
@@ -468,7 +497,7 @@ class ModelConfigService(IRuntimeModelResolver):
         agent_key: str,
         request_override: Mapping[str, Any] | None = None,
     ) -> ResolvedRuntimeModelConfig:
-        normalized_agent_key = _normalize_agent_key(agent_key)
+        normalized_agent_key = _normalize_runtime_agent_key(agent_key)
         if not normalized_agent_key:
             raise ValueError(f"Unsupported agent_key for runtime resolution: {agent_key}")
 
@@ -476,6 +505,10 @@ class ModelConfigService(IRuntimeModelResolver):
             AGENT_CONFIG.get(normalized_agent_key, {}).get("temperature", 1.0)
         )
         default_model = str(AGENT_CONFIG.get(normalized_agent_key, {}).get("model") or "").strip()
+
+        reasoning_effort = _normalize_reasoning_effort(
+            request_override.get("reasoning_effort") if request_override else None
+        )
 
         if user_id is None:
             logger.warning(
@@ -492,6 +525,7 @@ class ModelConfigService(IRuntimeModelResolver):
                 source="default",
                 warnings=["User context is missing; using default Gemini runtime configuration."],
                 capabilities=self._build_capabilities("gemini", default_model, {}),
+                reasoning_effort=reasoning_effort,
             )
 
         provider_snapshots = self._get_provider_snapshots(user_id)
@@ -664,6 +698,7 @@ class ModelConfigService(IRuntimeModelResolver):
             capabilities=capabilities,
             provider_fallback=provider_fallback,
             fallback_config=fallback_config,
+            reasoning_effort=reasoning_effort,
         )
 
     def get_effective_model_config(self, user_id: UUID) -> dict[str, dict[str, Any]]:

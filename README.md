@@ -359,6 +359,21 @@ After the memory refactor, summarization no longer runs on the streaming hot pat
 
 While Planning mode is active, the Planning Agent can call the internal `dispatch_subagents` tool to fan out independent worker tasks to other graph agents (`chat_agent`, `rag_agent`, `search_agent`, `image_generator_agent`, `canvas_agent`). Workers run concurrently in the same chat turn — there is no background queue and the dispatch call blocks until every worker completes, fails, or signals it needs human approval. Workers run with isolated message state, inherit scoped identifiers (`conversation_id`, `user_id`, `device_id`) and runtime model overrides, and return summaries to the Planning Agent using the same generic tool-result size controls as other tools. Workers cannot mutate todos directly: the Planning Agent reads each result and reconciles the plan with `write_todos`. This is distinct from `hand_off`, which re-routes the entire turn to a single top-level agent rather than fanning out parallel research/build work.
 
+**Per-task model override.** Each entry in `dispatch_subagents.tasks[]` accepts an optional `model_override` so the Planning Agent can assign a concrete model to one worker without affecting parent or sibling routing. The override carries `provider`, `model`, optional `temperature`, `allow_custom_model`, and a provider-agnostic `reasoning_effort` (`none`/`minimal`/`low`/`medium`/`high`/`xhigh`) that is normalized to OpenAI `reasoning.effort` or a Gemini 3 `thinking_level` for the worker call only. The override is request-scoped — it is never persisted to `agent_model_configs`.
+
+```json
+{
+  "id": "w1",
+  "agent": "search_agent",
+  "task": "Research the migration risk.",
+  "model_override": {
+    "provider": "openai",
+    "model": "gpt-5.4",
+    "reasoning_effort": "high"
+  }
+}
+```
+
 ### Client runtime bridge
 
 `ENABLE_CLIENT_RUNTIME_BRIDGE`, `CLIENT_RUNTIME_WS_TIMEOUT_SECONDS`, `CLIENT_RUNTIME_CATALOG_CACHE_TTL_SECONDS`, `CLIENT_RUNTIME_REQUIRE_CONNECTED_DEVICE_FOR_LOCAL_TOOLS`, `CLIENT_RUNTIME_HEARTBEAT_INTERVAL_SECONDS`, `CLIENT_RUNTIME_MAX_TOOL_RESULT_SIZE_BYTES`.

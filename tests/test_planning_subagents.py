@@ -27,6 +27,8 @@ from app.ai.planning_subagents import (
     PlanningSubagentName,
     PlanningSubagentResult,
     PlanningSubagentTask,
+    SubagentModelOverride,
+    build_worker_model_request,
     create_dispatch_subagents_tool,
 )
 from app.ai.schemas import (
@@ -143,6 +145,70 @@ def test_planning_subagent_task_context_must_be_serializable():
         )
 
 
+def test_planning_subagent_task_coerces_string_context_to_dict():
+    """The Planning Agent sometimes passes a raw text blob (crawled page,
+    document excerpt) as ``context``. Accept it by wrapping in
+    ``{"text": value}`` instead of failing the whole dispatch call.
+    """
+    task = PlanningSubagentTask.model_validate(
+        {
+            "id": "w1",
+            "agent": "chat_agent",
+            "task": "Summarize the article below",
+            "context": "Here is the crawled data ...\n\nLine 2\nLine 3",
+        }
+    )
+    assert isinstance(task.context, dict)
+    assert task.context["text"] == "Here is the crawled data ...\n\nLine 2\nLine 3"
+
+
+def test_planning_subagent_task_coerces_list_context_to_dict():
+    """List context (e.g. a JSON array of references) should be wrapped under
+    ``items`` so the worker still receives the structured data.
+    """
+    task = PlanningSubagentTask.model_validate(
+        {
+            "id": "w1",
+            "agent": "search_agent",
+            "task": "Cross-check the citations",
+            "context": [{"url": "https://example.com"}, {"url": "https://example.org"}],
+        }
+    )
+    assert isinstance(task.context, dict)
+    assert task.context["items"] == [
+        {"url": "https://example.com"},
+        {"url": "https://example.org"},
+    ]
+
+
+def test_planning_subagent_task_treats_none_context_as_empty_dict():
+    task = PlanningSubagentTask.model_validate(
+        {
+            "id": "w1",
+            "agent": "chat_agent",
+            "task": "Run a self-contained task with no extra context",
+            "context": None,
+        }
+    )
+    assert task.context == {}
+
+
+def test_planning_subagent_task_rejects_obviously_bad_context_type():
+    """Coercion is permissive but not infinite — a primitive that isn't text,
+    list, or dict (e.g. a raw int) must still surface as a validation error so
+    callers don't silently lose data.
+    """
+    with pytest.raises(ValidationError):
+        PlanningSubagentTask.model_validate(
+            {
+                "id": "w1",
+                "agent": "chat_agent",
+                "task": "do something concrete enough",
+                "context": 42,
+            }
+        )
+
+
 # ---------------------------------------------------------------------------
 # Aggregate status logic
 # ---------------------------------------------------------------------------
@@ -231,12 +297,14 @@ class _StubWorkflow:
         task_prompt: str,
         parent_state: dict[str, Any],
         related_todo_ids: list[str] | None = None,
+        model_override: Any = None,
     ) -> AgentResponse:
         return await self._runner(
             agent_name=agent_name,
             task_prompt=task_prompt,
             parent_state=parent_state,
             related_todo_ids=related_todo_ids,
+            model_override=model_override,
         )
 
 
@@ -731,3 +799,378 @@ def test_planning_prompt_says_supervisor_must_reconcile_with_write_todos():
     lowered = prompt.lower()
     assert "supervisor" in lowered or "only actor allowed to call" in lowered
     assert "write_todos" in prompt
+
+
+def test_planning_prompt_clarifies_context_shape():
+    """Supervisor was dumping raw text into ``context`` and tripping a Pydantic
+    dict-type error. The prompt must call out the expected JSON-object shape.
+    """
+    agent = _make_planning_agent_for_prompt()
+    prompt = agent._build_system_prompt(
+        persona=None,
+        has_tool_context=False,
+        todos=[],
+        current_task_index=0,
+        planning_phase="executing",
+    )
+    lowered = prompt.lower()
+    assert "context" in lowered
+    # Either explicit instruction to use a JSON object or naming the wrapper
+    # keys the validator coerces into.
+    assert "json object" in lowered or '{"text"' in prompt or '{"items"' in prompt
+
+
+def test_planning_prompt_lists_official_subagent_model_ids():
+    """The supervisor was hallucinating ``gpt-5.5-medium`` (model+effort smush)
+    and ``gemini-3-flash`` (missing ``-preview``). The executing-phase prompt
+    must list the exact official model ids and the separate reasoning_effort
+    values so the model picks valid combinations.
+    """
+    agent = _make_planning_agent_for_prompt()
+    prompt = agent._build_system_prompt(
+        persona=None,
+        has_tool_context=False,
+        todos=[],
+        current_task_index=0,
+        planning_phase="executing",
+    )
+
+    # OpenAI catalog
+    assert "gpt-5.5" in prompt
+    assert "gpt-5.4" in prompt
+    assert "gpt-5.4-mini" in prompt
+
+    # Gemini catalog — full ``-preview`` suffix is required.
+    assert "gemini-3.1-pro-preview" in prompt
+    assert "gemini-3-flash-preview" in prompt
+
+    # reasoning_effort values must be enumerated separately so the model
+    # doesn't paste them onto the model id.
+    for effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
+        assert effort in prompt
+
+    # The exact failure modes must be explicitly called out (as "wrong"
+    # examples). Showing both the right and wrong shapes is what stops the
+    # supervisor from re-hallucinating them.
+    lowered = prompt.lower()
+    assert "wrong" in lowered or "invalid" in lowered or "never" in lowered
+    # Concrete guard text: reasoning_effort is its own field, NOT a model suffix.
+    assert "reasoning_effort" in prompt
+    assert "separate field" in lowered or "never append" in lowered or "do not append" in lowered
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 — Per-subagent model assignment
+# ---------------------------------------------------------------------------
+
+
+def test_subagent_model_override_accepts_openai_with_reasoning_effort():
+    override = SubagentModelOverride.model_validate(
+        {"provider": "openai", "model": "gpt-5.4", "reasoning_effort": "high"}
+    )
+    assert override.provider == "openai"
+    assert override.model == "gpt-5.4"
+    assert override.reasoning_effort == "high"
+    assert override.allow_custom_model is True
+
+
+def test_subagent_model_override_accepts_gemini_models():
+    override = SubagentModelOverride.model_validate(
+        {"provider": "gemini", "model": "gemini-3.1-pro-preview", "reasoning_effort": "low"}
+    )
+    assert override.provider == "gemini"
+    assert override.model == "gemini-3.1-pro-preview"
+    assert override.reasoning_effort == "low"
+
+
+def test_subagent_model_override_accepts_all_reasoning_effort_levels():
+    for level in ("none", "minimal", "low", "medium", "high", "xhigh"):
+        override = SubagentModelOverride.model_validate(
+            {"model": "gpt-5.4", "reasoning_effort": level}
+        )
+        assert override.reasoning_effort == level
+
+
+def test_subagent_model_override_rejects_blank_model():
+    with pytest.raises(ValidationError):
+        SubagentModelOverride.model_validate({"model": "  "})
+
+
+def test_subagent_model_override_rejects_unknown_provider():
+    with pytest.raises(ValidationError):
+        SubagentModelOverride.model_validate({"provider": "anthropic", "model": "claude-3"})
+
+
+def test_subagent_model_override_rejects_invalid_temperature():
+    with pytest.raises(ValidationError):
+        SubagentModelOverride.model_validate({"model": "gpt-5.4", "temperature": "hot"})
+
+
+def test_subagent_model_override_rejects_invalid_reasoning_effort():
+    with pytest.raises(ValidationError):
+        SubagentModelOverride.model_validate({"model": "gpt-5.4", "reasoning_effort": "extreme"})
+
+
+def test_subagent_task_accepts_model_override():
+    task = PlanningSubagentTask.model_validate(
+        {
+            "id": "w1",
+            "agent": "search_agent",
+            "task": "Research migration risk in depth",
+            "model_override": {
+                "provider": "openai",
+                "model": "gpt-5.4",
+                "reasoning_effort": "high",
+            },
+        }
+    )
+    assert task.model_override is not None
+    assert task.model_override.model == "gpt-5.4"
+    assert task.model_override.reasoning_effort == "high"
+
+
+def test_subagent_task_without_model_override_still_validates():
+    task = PlanningSubagentTask.model_validate(
+        {
+            "id": "w1",
+            "agent": "search_agent",
+            "task": "Research migration risk in depth",
+        }
+    )
+    assert task.model_override is None
+
+
+def test_dispatch_input_round_trips_model_override():
+    payload = {
+        "tasks": [
+            {
+                "id": "w1",
+                "agent": "search_agent",
+                "task": "Research migration risk in depth",
+                "model_override": {
+                    "provider": "gemini",
+                    "model": "gemini-3-flash-preview",
+                    "reasoning_effort": "minimal",
+                    "temperature": 0.5,
+                },
+            }
+        ]
+    }
+    parsed = DispatchSubagentsInput.model_validate(payload)
+    assert parsed.tasks[0].model_override is not None
+    assert parsed.tasks[0].model_override.provider == "gemini"
+    assert parsed.tasks[0].model_override.temperature == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 — build_worker_model_request
+# ---------------------------------------------------------------------------
+
+
+def test_build_worker_model_request_returns_none_when_no_override_and_no_parent():
+    assert build_worker_model_request(
+        parent_model_request=None,
+        agent_key="search",
+        override=None,
+    ) is None
+
+
+def test_build_worker_model_request_returns_copy_of_parent_when_no_override():
+    parent = {"chat": {"model": "x"}, "all": {"temperature": 0.5}}
+    result = build_worker_model_request(
+        parent_model_request=parent,
+        agent_key="search",
+        override=None,
+    )
+    assert result == parent
+    assert result is not parent
+    # Mutating result must not mutate parent.
+    result["chat"]["model"] = "MUTATED"
+    assert parent["chat"]["model"] == "x"
+
+
+def test_build_worker_model_request_overlays_only_target_agent_key():
+    parent = {
+        "chat": {"model": "gemini-3-flash-preview"},
+        "all": {"temperature": 0.7},
+    }
+    override = SubagentModelOverride.model_validate(
+        {"provider": "openai", "model": "gpt-5.4", "reasoning_effort": "high"}
+    )
+    result = build_worker_model_request(
+        parent_model_request=parent,
+        agent_key="search",
+        override=override,
+    )
+    assert result is not None
+    # parent siblings preserved
+    assert result["chat"] == {"model": "gemini-3-flash-preview"}
+    assert result["all"] == {"temperature": 0.7}
+    # target overlaid
+    assert result["search"]["provider"] == "openai"
+    assert result["search"]["model"] == "gpt-5.4"
+    assert result["search"]["reasoning_effort"] == "high"
+    # parent itself untouched
+    assert "search" not in parent
+
+
+def test_build_worker_model_request_does_not_mutate_parent_input():
+    parent = {"chat": {"model": "x"}}
+    override = SubagentModelOverride.model_validate(
+        {"provider": "openai", "model": "gpt-5.4"}
+    )
+    build_worker_model_request(
+        parent_model_request=parent,
+        agent_key="search",
+        override=override,
+    )
+    assert parent == {"chat": {"model": "x"}}
+
+
+def test_build_worker_model_request_infers_provider_for_openai_gpt_models():
+    override = SubagentModelOverride.model_validate({"model": "gpt-5.4"})
+    result = build_worker_model_request(
+        parent_model_request=None,
+        agent_key="search",
+        override=override,
+    )
+    assert result is not None
+    assert result["search"]["provider"] == "openai"
+
+
+def test_build_worker_model_request_infers_provider_for_openai_o_models():
+    override = SubagentModelOverride.model_validate({"model": "o3-mini"})
+    result = build_worker_model_request(
+        parent_model_request=None,
+        agent_key="search",
+        override=override,
+    )
+    assert result is not None
+    assert result["search"]["provider"] == "openai"
+
+
+def test_build_worker_model_request_infers_provider_for_gemini_models():
+    override = SubagentModelOverride.model_validate({"model": "gemini-3.1-pro-preview"})
+    result = build_worker_model_request(
+        parent_model_request=None,
+        agent_key="search",
+        override=override,
+    )
+    assert result is not None
+    assert result["search"]["provider"] == "gemini"
+
+
+def test_build_worker_model_request_infers_provider_for_gemini_flash_preview():
+    override = SubagentModelOverride.model_validate({"model": "gemini-3-flash-preview"})
+    result = build_worker_model_request(
+        parent_model_request=None,
+        agent_key="search",
+        override=override,
+    )
+    assert result is not None
+    assert result["search"]["provider"] == "gemini"
+
+
+def test_build_worker_model_request_preserves_explicit_provider():
+    """If the override carries an explicit provider, do not re-infer."""
+    override = SubagentModelOverride.model_validate(
+        {"provider": "openai", "model": "custom-private-name"}
+    )
+    result = build_worker_model_request(
+        parent_model_request=None,
+        agent_key="search",
+        override=override,
+    )
+    assert result is not None
+    assert result["search"]["provider"] == "openai"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_stashes_per_task_model_summaries(monkeypatch):
+    """The compact dispatch summary on parent context should include per-task
+    model information so the response/UI can show which model each worker used.
+    """
+    monkeypatch.setattr(settings, "tool_result_max_chars", 6000)
+
+    async def runner(**kwargs):
+        response = _ok_response(f"done {kwargs['agent_name']}")
+        response.metadata = {
+            "provider": "openai",
+            "model": "gpt-5.4",
+            "config_source": "request",
+            "reasoning_effort": "high",
+        }
+        return response
+
+    workflow = _StubWorkflow(runner)
+    dispatcher = PlanningSubagentDispatcher(workflow=workflow, settings=settings)
+    parent_state: dict[str, Any] = {}
+
+    tool = create_dispatch_subagents_tool(
+        dispatcher=dispatcher,
+        parent_state_provider=lambda: parent_state,
+    )
+
+    payload = {
+        "tasks": [
+            {
+                "id": "w1",
+                "agent": "search_agent",
+                "task": "research migration risk in depth",
+                "model_override": {
+                    "provider": "openai",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "high",
+                },
+            }
+        ],
+        "rationale": "explicit assignment",
+    }
+
+    result_json = await tool.ainvoke(payload)
+    parsed = json.loads(result_json)
+
+    # Model-facing JSON for the supervisor must include requested/resolved.
+    entry = parsed["results"][0]
+    assert entry["requested_model"]["model"] == "gpt-5.4"
+    assert entry["resolved_model"]["model"] == "gpt-5.4"
+
+    # The compact dispatch-level summary stashed on the parent context for UI
+    # rendering must include per-task requested model info too.
+    dispatches = parent_state["context"]["subagent_dispatches"]
+    assert len(dispatches) == 1
+    assert "models" in dispatches[0]
+    # Per-task model summary keyed by task id.
+    assert dispatches[0]["models"]["w1"]["requested"]["model"] == "gpt-5.4"
+    assert dispatches[0]["models"]["w1"]["resolved"]["model"] == "gpt-5.4"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_dispatches_summary_omits_models_when_no_override(monkeypatch):
+    """When no override is set and the worker has no resolved metadata, the
+    dispatch summary should not include a stray empty ``models`` block.
+    """
+    monkeypatch.setattr(settings, "tool_result_max_chars", 6000)
+
+    async def runner(**kwargs):
+        # No model metadata; default-path worker.
+        return _ok_response("done")
+
+    workflow = _StubWorkflow(runner)
+    dispatcher = PlanningSubagentDispatcher(workflow=workflow, settings=settings)
+    parent_state: dict[str, Any] = {}
+
+    tool = create_dispatch_subagents_tool(
+        dispatcher=dispatcher,
+        parent_state_provider=lambda: parent_state,
+    )
+
+    await tool.ainvoke(
+        {
+            "tasks": [{"id": "w1", "agent": "chat_agent", "task": "outline files to touch"}],
+            "rationale": "default routing",
+        }
+    )
+
+    dispatches = parent_state["context"]["subagent_dispatches"]
+    assert "models" not in dispatches[0]

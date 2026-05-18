@@ -73,6 +73,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..repositories.document import DocumentRepository
+    from .planning_subagents import SubagentModelOverride
 
 _apply_decisions = apply_hitl_decisions
 
@@ -2206,6 +2207,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         task_prompt: str,
         parent_state: GraphState,
         related_todo_ids: list[str] | None = None,
+        model_override: "SubagentModelOverride | None" = None,
     ) -> AgentResponse:
         """Run a single graph-agent against an isolated child state.
 
@@ -2214,7 +2216,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         inherits the parent's scoped identifiers (``conversation_id``,
         ``user_id``, ``device_id``), persona, and model overrides so
         MCP/client tools and per-user model routing keep working.
+
+        ``model_override`` (Phase 10) overlays a task-local model assignment
+        onto the worker's ``model_request`` without mutating parent or
+        sibling worker routing.
         """
+        from .planning_subagents import build_worker_model_request
+
         if agent_name == "planning_agent":
             raise ValueError(
                 "planning_agent is not a valid subagent target — recursive planning is forbidden."
@@ -2228,9 +2236,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         user_id = parent_state.get("user_id")
         device_id = parent_state.get("device_id")
         persona = parent_state.get("persona")
-        model_request = parent_state.get("model_request")
-        worker_history_summary: str | None = None
         agent_key = getattr(agent, "agent_config_key", None) or agent_name
+        model_request = build_worker_model_request(
+            parent_model_request=parent_state.get("model_request"),
+            agent_key=agent_key,
+            override=model_override,
+        )
+        worker_history_summary: str | None = None
         run_config = RunnableConfig(
             tags=["internal", "planning_subagent", f"subagent:{agent_name}"],
             metadata={

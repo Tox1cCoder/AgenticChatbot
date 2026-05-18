@@ -27,3 +27,4 @@ class ResolvedRuntimeModelConfig:
     capabilities: dict[str, bool] = field(default_factory=dict)
     provider_fallback: dict[str, Any] | None = None
     fallback_config: RuntimeFallbackConfig | None = None
+    reasoning_effort: str | None = None

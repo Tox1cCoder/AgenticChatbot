@@ -792,6 +792,30 @@ APP_STYLE = """
         line-height: 1.45;
     }
 
+    .subagent-worker-model {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        margin: 0.3rem 0 0 0;
+        padding: 0.15rem 0.5rem;
+        border-radius: 999px;
+        background: #eef2ff;
+        color: #3730a3;
+        font-size: 0.72rem;
+        font-weight: 600;
+        font-family: ui-monospace, "JetBrains Mono", "SFMono-Regular", monospace;
+    }
+
+    .subagent-worker-model-effort {
+        color: #4338ca;
+        font-weight: 700;
+    }
+
+    .subagent-worker-model-override {
+        background: #fef3c7;
+        color: #92400e;
+    }
+
     .trace-preview-label {
         margin: 0.8rem 0 0.35rem 0;
         color: #64748b;
@@ -5214,6 +5238,53 @@ def _format_subagent_duration(value: Any) -> str:
     return f"{float(value) / 1000:.2f}s"
 
 
+def _format_subagent_model_badge(item: dict[str, Any]) -> str | None:
+    """Build a compact HTML badge for the model that answered (or will answer)
+    a single worker. Prefers ``resolved_model`` (post-run truth); falls back to
+    ``requested_model`` (set when the supervisor explicitly assigned a model).
+    """
+    resolved = item.get("resolved_model") if isinstance(item, dict) else None
+    requested = item.get("requested_model") if isinstance(item, dict) else None
+    source = resolved if isinstance(resolved, dict) else requested
+    if not isinstance(source, dict):
+        return None
+
+    provider = str(source.get("provider") or "").strip()
+    model_name = str(source.get("model") or "").strip()
+    if not provider and not model_name:
+        return None
+
+    label_parts: list[str] = []
+    if model_name:
+        label_parts.append(html.escape(model_name))
+    if provider and provider != model_name:
+        label_parts.append(f"&middot; {html.escape(provider)}")
+
+    effort = str(source.get("reasoning_effort") or "").strip()
+    if effort:
+        label_parts.append(
+            f"<span class=\"subagent-worker-model-effort\">{html.escape(effort)}</span>"
+        )
+
+    # Highlight when the supervisor explicitly assigned a model (override path)
+    # vs. inherited the default. ``requested_model`` is only set when the
+    # supervisor passed ``model_override`` for that task.
+    extra_class = " subagent-worker-model-override" if isinstance(requested, dict) else ""
+
+    title_parts = [f"Model: {model_name or provider}"]
+    if isinstance(requested, dict):
+        title_parts.append("(explicit override)")
+    if effort:
+        title_parts.append(f"reasoning: {effort}")
+    title = html.escape(" ".join(title_parts))
+
+    return (
+        f'<div class="subagent-worker-model{extra_class}" title="{title}">'
+        f'<span class="material-symbols-outlined" aria-hidden="true" style="font-size:0.85rem;">'
+        f'memory</span>{" ".join(label_parts)}</div>'
+    )
+
+
 def _render_subagent_activity_view(view: dict[str, Any] | None, *, live: bool = False) -> None:
     if not view:
         return
@@ -5309,6 +5380,7 @@ def _render_subagent_activity_view(view: dict[str, Any] | None, *, live: bool = 
             duration = _format_subagent_duration(item.get("elapsed_ms"))
             duration_text = f" | {html.escape(duration)}" if duration else ""
             summary = str(item.get("summary") or "").strip()
+            model_badge_html = _format_subagent_model_badge(item) or ""
 
             st.markdown(
                 f"""
@@ -5322,6 +5394,7 @@ def _render_subagent_activity_view(view: dict[str, Any] | None, *, live: bool = 
                             {html.escape(worker_badge)}
                         </span>
                     </div>
+                    {model_badge_html}
                     <div class="subagent-worker-summary">
                         {sanitize_message_content(summary) if summary else "No summary returned."}
                     </div>

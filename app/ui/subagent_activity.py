@@ -39,6 +39,22 @@ def _extract_structured_dispatch_payload(artifact: dict[str, Any]) -> dict[str, 
     return None
 
 
+def _normalize_model_info(entry: Any) -> dict[str, Any] | None:
+    """Pick the subset of model fields the UI cares about.
+
+    Strips API keys, runtime config objects, and any keys other than
+    ``provider``/``model``/``config_source``/``reasoning_effort``/``temperature``.
+    """
+    if not isinstance(entry, dict):
+        return None
+    snapshot: dict[str, Any] = {}
+    for key in ("provider", "model", "config_source", "reasoning_effort", "temperature"):
+        value = entry.get(key)
+        if value not in (None, ""):
+            snapshot[key] = value
+    return snapshot or None
+
+
 def _normalize_result(entry: Any) -> dict[str, Any] | None:
     if not isinstance(entry, dict):
         return None
@@ -72,6 +88,14 @@ def _normalize_result(entry: Any) -> dict[str, Any] | None:
     if isinstance(artifacts, list) and artifacts:
         normalized["artifacts"] = artifacts
 
+    requested_model = _normalize_model_info(entry.get("requested_model"))
+    if requested_model:
+        normalized["requested_model"] = requested_model
+
+    resolved_model = _normalize_model_info(entry.get("resolved_model"))
+    if resolved_model:
+        normalized["resolved_model"] = resolved_model
+
     return normalized
 
 
@@ -98,7 +122,7 @@ def _normalize_pending_task(entry: Any, index: int) -> dict[str, Any] | None:
         "Waiting for worker result.",
     )
 
-    return {
+    pending: dict[str, Any] = {
         "id": worker_id or f"worker-{index}",
         "agent": agent,
         "status": "running",
@@ -109,6 +133,15 @@ def _normalize_pending_task(entry: Any, index: int) -> dict[str, Any] | None:
             if str(todo_id).strip()
         ],
     }
+
+    # Surface the requested model now so the user sees which model the
+    # supervisor assigned to each running worker before results arrive. The
+    # resolved model only appears once the worker returns.
+    requested_model = _normalize_model_info(entry.get("model_override"))
+    if requested_model:
+        pending["requested_model"] = requested_model
+
+    return pending
 
 
 def _dedupe_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -247,3 +247,103 @@ def test_build_live_subagent_activity_view_keeps_previous_when_start_args_are_in
     )
 
     assert view is previous
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 follow-up: subagent activity surfaces requested/resolved model
+# ---------------------------------------------------------------------------
+
+
+def test_build_subagent_activity_view_surfaces_requested_and_resolved_model():
+    metadata = {
+        "subagent_results": [
+            {
+                "id": "w1",
+                "agent": "search_agent",
+                "status": "completed",
+                "elapsed_ms": 1200,
+                "summary": "Found current docs.",
+                "requested_model": {
+                    "provider": "openai",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "high",
+                },
+                "resolved_model": {
+                    "provider": "openai",
+                    "model": "gpt-5.4",
+                    "config_source": "request",
+                    "reasoning_effort": "high",
+                },
+            }
+        ]
+    }
+
+    view = build_subagent_activity_view(metadata)
+
+    assert view is not None
+    result = view["results"][0]
+    assert result["requested_model"]["model"] == "gpt-5.4"
+    assert result["requested_model"]["reasoning_effort"] == "high"
+    assert result["resolved_model"]["model"] == "gpt-5.4"
+    assert result["resolved_model"]["config_source"] == "request"
+
+
+def test_build_subagent_activity_view_keeps_resolved_model_without_override():
+    """If only resolved_model is present (no explicit override), it should still
+    surface so the UI can show which model actually answered.
+    """
+    metadata = {
+        "subagent_results": [
+            {
+                "id": "w1",
+                "agent": "chat_agent",
+                "status": "completed",
+                "elapsed_ms": 800,
+                "summary": "ok",
+                "resolved_model": {
+                    "provider": "gemini",
+                    "model": "gemini-3-flash-preview",
+                    "config_source": "default",
+                },
+            }
+        ]
+    }
+
+    view = build_subagent_activity_view(metadata)
+
+    assert view is not None
+    result = view["results"][0]
+    assert "requested_model" not in result
+    assert result["resolved_model"]["model"] == "gemini-3-flash-preview"
+
+
+def test_build_live_subagent_activity_view_surfaces_requested_model_for_pending_workers():
+    """Live activity should show the requested model for pending workers so the
+    user sees which model the supervisor assigned before results arrive.
+    """
+    event = {
+        "type": "tool",
+        "name": "dispatch_subagents",
+        "phase": "start",
+        "args": {
+            "tasks": [
+                {
+                    "id": "worker-a",
+                    "agent": "search_agent",
+                    "task": "Check the current docs.",
+                    "model_override": {
+                        "provider": "openai",
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "high",
+                    },
+                }
+            ]
+        },
+    }
+
+    view = build_live_subagent_activity_view(event)
+
+    assert view is not None
+    result = view["results"][0]
+    assert result["requested_model"]["model"] == "gpt-5.4"
+    assert result["requested_model"]["reasoning_effort"] == "high"

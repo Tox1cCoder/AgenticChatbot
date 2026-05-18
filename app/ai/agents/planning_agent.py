@@ -198,6 +198,55 @@ class PlanningAgent(BaseAgent):
                   blocker in your reply.
                 - You are the only actor allowed to call `write_todos`.
 
+                ### Task fields — required shapes
+                - `task`: a string. Put the worker instructions here.
+                - `context`: optional, MUST be a JSON object (dict). For
+                  arbitrary text like a crawled page or a document excerpt,
+                  wrap it: `{"text": "...long blob..."}`. For a list of
+                  references/citations: `{"items": [...]}`. Never pass a raw
+                  string or array as `context` — the call will be rejected.
+                - `related_todo_ids`: optional list of todo id strings.
+
+                ## Subagent model choice (optional `model_override`)
+                - If the user names a model, pass it in `model_override`.
+                - Otherwise use the worker's default model for normal tasks.
+                - Use faster/lower-cost models for simple extraction,
+                  formatting, search summaries, and high-volume parallel
+                  checks.
+                - Use frontier/high-reasoning models only for hard coding,
+                  architecture, debugging, ambiguous synthesis, or tasks
+                  where a cheap retry would cost more time than one strong
+                  call.
+
+                ### Allowed `model_override.model` values (use these EXACT ids)
+                OpenAI (`provider: "openai"`):
+                - `gpt-5.5` — frontier coding/professional reasoning.
+                - `gpt-5.4` — frontier, lower cost than 5.5.
+                - `gpt-5.4-mini` — fast mini model for subagents / high-volume
+                  parallel checks.
+
+                Gemini (`provider: "gemini"`):
+                - `gemini-3.1-pro-preview` — complex agentic / vibe-coding
+                  (Pro supports `low`/`high` reasoning_effort only).
+                - `gemini-3-flash-preview` — lower-cost frontier; supports
+                  `minimal`/`low`/`medium`/`high` reasoning_effort.
+
+                ### `reasoning_effort` is a SEPARATE field
+                Allowed values: `none`, `minimal`, `low`, `medium`, `high`,
+                `xhigh`. Pass it as its own key — `reasoning_effort` is a
+                separate field. NEVER append it to the `model` id.
+
+                Correct:
+                ```json
+                {"provider": "openai", "model": "gpt-5.5",
+                 "reasoning_effort": "medium"}
+                ```
+                Wrong (these are invalid model ids and the worker will
+                fail with `model_not_found`):
+                - `"model": "gpt-5.5-medium"`
+                - `"model": "gemini-3-flash"` (missing `-preview`)
+                - `"model": "gpt-5"` or `"model": "gemini"` (not a real id)
+
                 ## `hand_off` rules
                 - Use ONLY when the conversation should leave planning
                   entirely. Do not use to do parallel research — that is

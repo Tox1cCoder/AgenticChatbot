@@ -1,1 +1,0 @@
-Distributed client backend integration test.

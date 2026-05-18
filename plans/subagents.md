@@ -673,6 +673,211 @@ rtk pytest tests/test_message_service_subagent_streaming.py tests/test_demo_suba
 
 Result: **29/29 passed**.
 
+### Phase 10: Per-Subagent Model Assignment — DONE 2026-05-18
+
+**Goal:** Let the Planning Agent assign a concrete model to an individual subagent task when the user asks for one, and otherwise choose a sensible fast/default/frontier model based on task complexity.
+
+**Architecture:** Add an optional model override to each `dispatch_subagents.tasks[]` entry. The dispatcher converts that task-local override into a worker-local `model_request` for the target agent key, then `_run_agent_in_isolated_context(...)` passes that merged request into the existing model resolver. Parent turn model settings remain unchanged unless no task override exists, preserving current behavior for all existing dispatch calls.
+
+**Research notes from official docs:**
+
+- OpenAI documents `gpt-5.5` as the current frontier model for complex coding/professional work, with `reasoning.effort` values `none`, `low`, `medium`, `high`, and `xhigh`.
+- OpenAI documents `gpt-5.4` as a more affordable frontier model, and `gpt-5.4-mini` as a strong mini model for coding, computer use, and subagents.
+- Google documents Gemini 3.1 Pro as the complex agentic/vibe-coding model, Gemini 3 Flash as a lower-cost frontier option, and Gemini 3 thinking levels as `low`/`high` for Pro and `minimal`/`low`/`medium`/`high` for Flash.
+
+#### Functional Requirements
+
+FR-019: `dispatch_subagents` must accept an optional per-task `model_override`.
+
+FR-020: If the user explicitly names a provider/model for a subagent task, the Planning Agent must be able to pass that exact model id through to the worker.
+
+FR-021: If no task-level model override exists, workers must keep the current inheritance behavior: parent `model_request` first, then persisted/default agent config.
+
+FR-022: Task-level overrides must affect only that worker invocation. They must not mutate parent `GraphState["model_request"]` or sibling worker requests.
+
+FR-023: Task-level overrides must support `provider`, `model`, `temperature`, `allow_custom_model`, and provider-agnostic `reasoning_effort`.
+
+FR-024: `reasoning_effort` must support `none`, `minimal`, `low`, `medium`, `high`, and `xhigh` at schema level. Provider/model compatibility is normalized when obvious and otherwise allowed to fail as a normal worker error.
+
+FR-025: OpenAI worker overrides must pass explicit `reasoning_effort` through as OpenAI `reasoning.effort` instead of silently using the global default.
+
+FR-026: Gemini 3 worker overrides must map `reasoning_effort` to Gemini `thinking_level`: `high`/`xhigh` map to `high`; `low` maps to `low`; `none`/`minimal` map to `minimal` for Flash models and `low` for Pro models; `medium` maps to `medium` for Flash models and `high` for Pro models. Non-Gemini-3 models keep the existing global thinking configuration in this phase.
+
+FR-027: Dispatch results and subagent metadata should include compact requested/resolved model information for debugging, without embedding provider API keys or large runtime config objects.
+
+FR-028: The Planning Agent prompt must contain a short model-selection guide:
+
+```text
+Subagent model choice:
+- If the user names a model, pass it in `model_override`.
+- Otherwise use the worker's default model for normal tasks.
+- Use faster/lower-cost models for simple extraction, formatting, search summaries, and high-volume parallel checks.
+- Use frontier/high-reasoning models only for hard coding, architecture, debugging, ambiguous synthesis, or tasks where a cheap retry would cost more time than one strong call.
+```
+
+#### Data Model Changes
+
+Modify `app/ai/planning_subagents.py`:
+
+- Add `SubagentModelOverride`:
+
+```python
+class SubagentModelOverride(BaseModel):
+    provider: Literal["gemini", "openai"] | None = None
+    model: str
+    temperature: float | None = None
+    allow_custom_model: bool = True
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None = None
+```
+
+- Add `model_override: SubagentModelOverride | None = None` to `PlanningSubagentTask`.
+- Add compact model fields to `PlanningSubagentResult`:
+
+```python
+requested_model: dict[str, Any] | None = None
+resolved_model: dict[str, Any] | None = None
+```
+
+- Keep `model_override` out of `_build_task_prompt(...)`. Model routing is server-owned metadata, not worker prompt text.
+
+Modify `app/core/runtime_modeling.py`:
+
+```python
+reasoning_effort: str | None = None
+```
+
+Add this optional field to `ResolvedRuntimeModelConfig`.
+
+#### Runtime Contract
+
+Add a helper in `app/ai/planning_subagents.py`:
+
+```python
+def build_worker_model_request(
+    *,
+    parent_model_request: dict[str, Any] | None,
+    agent_key: str,
+    override: SubagentModelOverride | None,
+) -> dict[str, Any] | None:
+    request = copy.deepcopy(parent_model_request) if parent_model_request else {}
+    if override is None:
+        return request or None
+
+    override_payload = override.model_dump(exclude_none=True)
+    if not override_payload.get("provider"):
+        inferred_provider = infer_provider_from_model_id(override.model)
+        if inferred_provider:
+            override_payload["provider"] = inferred_provider
+
+    request[agent_key] = override_payload
+    return request
+```
+
+Behavior:
+
+- Return a deep copy of `parent_model_request` when `override is None`.
+- Return a deep copy plus `request[agent_key] = override_payload` when an override exists.
+- Preserve `all` and other sibling-agent entries.
+- Never mutate `parent_model_request`.
+- Infer provider only when omitted and obvious: `gpt-*` / `o*` -> `openai`, `gemini-*` -> `gemini`.
+
+Modify `MultiAgentWorkflow._run_agent_in_isolated_context(...)` in `app/ai/graph.py`:
+
+- Add `model_override: SubagentModelOverride | None = None`.
+- Compute `worker_model_request = build_worker_model_request(...)`.
+- Pass `worker_model_request` instead of parent `model_request` to generic and RAG worker model calls.
+
+Modify `PlanningSubagentDispatcher.run_one(...)`:
+
+- Pass `task.model_override` into `_run_agent_in_isolated_context(...)`.
+- Populate `requested_model` from the task override.
+- Populate `resolved_model` from `AgentResponse.metadata["provider"]`, `["model"]`, `["config_source"]`, and `["reasoning_effort"]` when present.
+
+Modify `app/ai/agents/base_agent.py`:
+
+- Include `canvas` in `_MODEL_REQUEST_SUPPORTED_AGENT_KEYS`.
+- Include `image_generator` in `_MODEL_REQUEST_SUPPORTED_AGENT_KEYS` for the prompt-engineering LLM only; the native image generation model still comes from `settings.image_generator_model`.
+- Thread `reasoning_effort` from `ResolvedRuntimeModelConfig` into `_create_langchain_model_from_runtime(...)`.
+- For OpenAI, if `reasoning_effort` is set, pass `reasoning={"effort": normalized_effort}`.
+- For Gemini, pass a `thinking_level_override` into `create_langchain_model(...)`.
+- Include `reasoning_effort` in `_apply_runtime_metadata(...)` when set.
+
+Modify `app/services/model_config_service.py`:
+
+- Accept request-only `reasoning_effort` in `resolve_runtime_config(...)`; do not persist it in `agent_model_configs`.
+- Keep persisted `SUPPORTED_AGENT_KEYS = ("chat", "rag", "search", "planning")`.
+- Add `SUPPORTED_RUNTIME_AGENT_KEYS = ("chat", "rag", "search", "planning", "canvas", "image_generator")` for request-only runtime resolution.
+- Use `SUPPORTED_RUNTIME_AGENT_KEYS` only inside `resolve_runtime_config(...)`; do not add `canvas` or `image_generator` to saved model-config options in this phase.
+
+Modify `app/ai/agent_config.py`:
+
+- Add optional `thinking_level_override` to `create_langchain_model(...)`.
+- Use the override instead of `settings.thinking_level` for Gemini 3 models.
+- Do not set both Gemini `thinking_level` and legacy `thinking_budget` for the same request.
+
+Modify `app/ai/agents/planning_agent.py`:
+
+- Add the short model-selection guide from FR-028 near the existing `dispatch_subagents` guidance.
+- Keep this as a short bullet block; do not add a long model catalog to the prompt.
+
+#### Implementation Tasks
+
+- [x] **Task 10.1: Schema contract tests** — added 9 new schema tests in `tests/test_planning_subagents.py` covering: `SubagentModelOverride` accepts OpenAI+`reasoning_effort`; accepts Gemini models; accepts every `reasoning_effort` level; rejects blank model, unknown provider, invalid temperature, invalid `reasoning_effort`; `PlanningSubagentTask` accepts and round-trips `model_override`; legacy payloads (no override) still validate.
+
+- [x] **Task 10.2: Worker model-request merge tests** — added 9 tests covering: `None` parent + `None` override returns `None`; returned dict is a deep copy (no parent mutation under any path); only the target `agent_key` is overlaid; sibling and `all` entries preserved; provider inference for `gpt-5.4`, `o3-mini`, `gemini-3.1-pro-preview`, `gemini-3-flash-preview`; explicit provider on the override is not re-inferred away.
+
+- [x] **Task 10.3: Runtime dispatch tests** — added 4 graph-level tests in `tests/test_graph_planning_subagents.py`:
+  - Generic worker overlay: search_agent subagent with `model_override={"provider": "openai", "model": "gpt-5.4", "reasoning_effort": "high"}` receives `model_request[search]` populated and `model_request[chat]` from parent preserved.
+  - RAG worker overlay: same override reaches `AgentMessage.metadata["model_request"][rag]`.
+  - Sibling isolation: two workers in one dispatch each carry their own override key without cross-contamination.
+  - Parent isolation: `parent_state["model_request"]` is untouched after dispatch (no `search` key written into it).
+  - Dispatch result metadata: `PlanningSubagentResult.requested_model` mirrors the override payload, `resolved_model` mirrors `AgentResponse.metadata` (provider/model/config_source/reasoning_effort) with no API keys.
+
+- [x] **Task 10.4: Runtime model config tests** — created `tests/test_runtime_model_overrides.py` (12 tests):
+  - OpenAI explicit `reasoning_effort="high"` lands in `ModelFactory.create_model(reasoning={"effort": "high"})`.
+  - OpenAI default behavior unchanged when no explicit effort (still `reasoning={"summary": "auto"}` for gpt-4o-class models).
+  - Gemini `reasoning_effort="low"` → `thinking_level_override="low"`.
+  - Gemini `reasoning_effort="xhigh"` → `"high"`.
+  - Gemini Flash `reasoning_effort="none"` → `"minimal"`.
+  - Gemini Pro `reasoning_effort="medium"` → `"high"` (Pro only supports `low`/`high`).
+  - `ResolvedRuntimeModelConfig.reasoning_effort` field exists.
+  - `_apply_runtime_metadata` includes/omits `reasoning_effort` based on whether it was set.
+  - `_MODEL_REQUEST_SUPPORTED_AGENT_KEYS` now includes `canvas` and `image_generator`.
+  - `ModelConfigService` exports `SUPPORTED_AGENT_KEYS` (persistable, 4 entries) and `SUPPORTED_RUNTIME_AGENT_KEYS` (runtime-only, superset of 6 entries).
+
+- [x] **Task 10.5: Implementation** — code changes:
+  - `app/ai/planning_subagents.py`: added `SubagentModelOverride` schema (`provider`, `model`, `temperature`, `allow_custom_model`, `reasoning_effort`), `PlanningSubagentTask.model_override`, `PlanningSubagentResult.requested_model` / `resolved_model`, helpers `build_worker_model_request(...)`, `_summarize_requested_model(...)`, `_summarize_resolved_model(...)`, and threaded the override into `run_one`/`_IsolatedAgentRunner` protocol.
+  - `app/ai/graph.py`: `_run_agent_in_isolated_context(... model_override=None)` calls `build_worker_model_request(parent_model_request=..., agent_key=agent_key, override=model_override)` and uses the merged request for both the generic worker tool loop and the RAG `process_message` metadata. Forward reference + TYPE_CHECKING import keeps the runtime cycle-free.
+  - `app/core/runtime_modeling.py`: added `reasoning_effort: str | None = None` to `ResolvedRuntimeModelConfig`.
+  - `app/services/model_config_service.py`: added `SUPPORTED_RUNTIME_AGENT_KEYS`, `_normalize_runtime_agent_key`, and `_normalize_reasoning_effort`; `resolve_runtime_config(...)` accepts canvas/image_generator runtime keys and threads `reasoning_effort` into the returned `ResolvedRuntimeModelConfig` without persisting it.
+  - `app/ai/agents/base_agent.py`: `_MODEL_REQUEST_SUPPORTED_AGENT_KEYS` now includes `canvas` and `image_generator`; added `_normalize_reasoning_effort`, `_gemini_thinking_level_from_effort`, `_openai_effort_from_reasoning_effort`; `_create_langchain_model_from_runtime(...)` passes `thinking_level_override` for Gemini and `reasoning={"effort": ...}` for OpenAI when an explicit effort is set, otherwise preserves the original default summary behavior; `_apply_runtime_metadata` mirrors `reasoning_effort` onto response metadata.
+  - `app/ai/agent_config.py`: `create_langchain_model(... thinking_level_override=None)` uses the override instead of `settings.thinking_level` for Gemini 3 models. Only one of `thinking_budget` / `thinking_level` is set per call.
+  - `app/ai/agents/planning_agent.py`: appended a concise "Subagent model choice (optional `model_override`)" block to the executing-phase prompt; planning-phase prompt left unchanged.
+
+- [x] **Task 10.6: Documentation** — added `model_override` paragraph + JSON example to the README's "Planning-mode subagents" section. Calls out that the override carries `provider`, `model`, `temperature`, `allow_custom_model`, and `reasoning_effort`, that it is request-scoped, and that it is never persisted to `agent_model_configs`.
+
+- [x] **Task 10.7: Verification** — all targeted suites green:
+  - `rtk pytest tests/test_planning_subagents.py tests/test_graph_planning_subagents.py tests/test_graph_tool_budget.py tests/test_runtime_model_overrides.py -q` → **97/97 passed**.
+  - `rtk pytest tests/test_rag_agent.py tests/test_rag_tool_loop_finalization.py tests/test_tool_execution_recovery.py tests/test_config_redis.py -q` → **40/40 passed**.
+  - `rtk pytest tests/test_message_service_subagent_streaming.py tests/test_demo_subagent_activity.py tests/test_tool_result_rendering.py tests/test_router.py tests/test_client_tool_scope.py -q` → **33/33 passed**.
+  - `rtk pytest tests/test_retrieval_model_selection.py -q` → **7/7 passed**.
+
+Design decisions:
+
+- **Forward reference for `SubagentModelOverride` in graph.py.** Importing it eagerly would create a circular import (`graph.py` → `planning_subagents.py` → `graph._run_agent_in_isolated_context`). Used a `TYPE_CHECKING` import + string annotation + a deferred `from .planning_subagents import build_worker_model_request` inside the runner instead. This keeps `MultiAgentWorkflow.__init__` untouched and matches the existing per-turn dispatcher construction pattern.
+- **Separate `SUPPORTED_RUNTIME_AGENT_KEYS`.** The persisted `agent_model_configs` schema stays on `chat`/`rag`/`search`/`planning`. Canvas and image_generator are runtime-only because surfacing them in the saved-settings UI would imply a permanent per-user choice for capabilities that are dispatched on-demand and that today still default to fixed graph-level models. Adding them to the persisted set would also require validators, fallback candidates, and UI work that is out of scope for Phase 10.
+- **`reasoning_effort` normalized server-side, not in the prompt.** Per-provider reasoning controls are not portable, so the override field is provider-agnostic. Server code maps it to OpenAI `reasoning.effort` and Gemini 3 `thinking_level`. Gemini Pro collapses `none`/`minimal`/`low` → `low` and everything else → `high`; Gemini Flash widens `xhigh` → `high` and `none` → `minimal` so existing Flash callers do not break.
+- **`resolved_model` is metadata, not API key carrier.** `_summarize_resolved_model` only pulls `provider`/`model`/`config_source`/`reasoning_effort` from `AgentResponse.metadata`. API keys, warnings, and runtime fallback config never reach `PlanningSubagentResult` and so cannot leak through the model-facing JSON or persisted response metadata.
+- **No subagent caps revived.** The plan's earlier Phase 9 removed subagent-specific limits. Phase 10 preserves that — `model_override` is purely additive metadata on the task; the model still flows through the same provider/timeout/HITL infrastructure as other runtime model selections.
+
+#### Acceptance Criteria Additions
+
+- [x] A Planning Agent `dispatch_subagents` call can assign `gpt-5.4` or `gpt-5.5` with `reasoning_effort="high"` to one worker without changing sibling workers. (`test_dispatcher_isolates_sibling_worker_overrides`, `test_run_agent_in_isolated_context_applies_generic_worker_model_override`.)
+- [x] A Planning Agent `dispatch_subagents` call can assign `gemini-3.1-pro-preview` or `gemini-3-flash-preview` to one worker. (`test_subagent_model_override_accepts_gemini_models`, `test_run_agent_in_isolated_context_applies_rag_worker_model_override`.)
+- [x] If no `model_override` is provided, current inherited model behavior is unchanged. (`test_subagent_task_without_model_override_still_validates`, `test_build_worker_model_request_returns_copy_of_parent_when_no_override`, `test_openai_default_reasoning_summary_unchanged_when_no_explicit_effort`.)
+- [x] Dispatch result metadata shows the requested and resolved model/provider without exposing API keys. (`test_dispatch_result_includes_requested_and_resolved_model`.)
+- [x] The Planning prompt contains only concise model-selection guidance, not a long model catalog. (See the executing-phase prompt block in `app/ai/agents/planning_agent.py`; six bullet lines, no model catalog dump.)
+
 ## Acceptance Criteria
 
 - [ ] In a non-Planning conversation, `dispatch_subagents` is unavailable.
@@ -693,6 +898,9 @@ Result: **29/29 passed**.
 - [ ] Worker tool maps are reused across iterations so `tool_search` refreshes remain available to follow-up tool calls.
 - [ ] RAG workers execute their local `search_documents` loop before returning a final answer.
 - [ ] The Planning Agent remains the only actor that calls `write_todos`.
+- [x] A subagent worker can receive a task-local model override without mutating parent or sibling model routing.
+- [x] OpenAI subagent overrides can carry `reasoning_effort` for models such as `gpt-5.4` and `gpt-5.5`.
+- [x] Gemini subagent overrides can carry a normalized thinking level for Gemini 3 models.
 - [ ] Existing `hand_off` tests still pass.
 - [ ] Existing deferred-tool-search same-batch behavior still passes.
 
@@ -718,6 +926,14 @@ Risk: Planning Agent over-dispatches trivial work.
 
 Mitigation: prompt guard, explicit independent-work criteria, and supervisor-only todo reconciliation.
 
+Risk: Planning Agent overuses expensive frontier models for simple workers.
+
+Mitigation: keep prompt guidance short and explicit: default to existing worker config, use fast/lower-cost models for simple parallel work, and reserve frontier/high-reasoning calls for complex work or explicit user requests.
+
+Risk: Provider-specific reasoning controls are not perfectly portable.
+
+Mitigation: use one model-facing field (`reasoning_effort`) and normalize only well-known cases. For unsupported combinations, let the worker fail normally with a structured worker error instead of adding hidden fallbacks.
+
 ## Future Extensions
 
 - Dynamic `list_subagents` discovery if the agent registry grows beyond the static graph agents.
@@ -725,6 +941,7 @@ Mitigation: prompt guard, explicit independent-work criteria, and supervisor-onl
 - Persisted subagent run summaries for audit/debugging.
 - UI display for subagent worker progress and results.
 - Per-agent worker capability descriptions stored alongside agent registry configuration.
+- User-configurable model tiers such as `fast`, `balanced`, and `deep` if concrete per-task overrides become too verbose.
 
 ## Open Questions Resolved
 
@@ -734,9 +951,17 @@ Mitigation: prompt guard, explicit independent-work criteria, and supervisor-onl
 - Worker memory: workers inherit scoped ids and model/persona settings, but not parent chat history or rolling `history_summary`.
 - Dispatch visibility: subagent activity is compact metadata plus the top-level dispatch tool render, not nested worker artifacts.
 - Parallelism: only inside `dispatch_subagents`, not generic tool execution.
+- Subagent model assignment: support explicit task-local concrete overrides first; keep automatic tiering as prompt guidance, not a new persisted tier registry.
 
 ## References
 
 - LangChain subagents documentation: https://docs.langchain.com/oss/python/langchain/multi-agent/subagents
 - GitHub Spec Kit plan template: https://github.com/github/spec-kit/blob/main/templates/plan-template.md
 - GitHub Spec Kit SDD overview: https://github.com/github/spec-kit/blob/main/spec-driven.md
+- OpenAI model catalog: https://developers.openai.com/api/docs/models
+- OpenAI GPT-5.5 model docs: https://developers.openai.com/api/docs/models/gpt-5.5
+- OpenAI GPT-5.4 model docs: https://developers.openai.com/api/docs/models/gpt-5.4
+- OpenAI all models catalog: https://developers.openai.com/api/docs/models/all
+- Google Gemini models: https://ai.google.dev/gemini-api/docs/models
+- Google Gemini 3 developer guide: https://ai.google.dev/gemini-api/docs/gemini-3
+- Google Gemini thinking guide: https://ai.google.dev/gemini-api/docs/thinking

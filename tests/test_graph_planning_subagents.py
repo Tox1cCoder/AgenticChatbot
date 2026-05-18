@@ -1507,3 +1507,258 @@ async def test_planning_consecutive_errors_small_limit_does_not_warn_on_first(
     assert msgs[-1].levelno == logging.INFO, (
         "first error must not warn even on small limits"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 — Per-subagent model assignment
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_agent_in_isolated_context_applies_generic_worker_model_override(
+    monkeypatch,
+):
+    """A search_agent worker with an OpenAI override must receive a worker-local
+    model_request override on the agent's invoke_model_with_history call.
+    """
+    from app.ai.planning_subagents import SubagentModelOverride
+
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+
+    captured: dict[str, Any] = {}
+
+    async def fake_invoke(messages, conversation_history, persona, **kwargs):
+        captured.update(kwargs)
+        return _ok("worker done")
+
+    agent = SimpleNamespace(
+        invoke_model_with_history=fake_invoke,
+        agent_config_key="search",
+        agent_id="search_agent",
+    )
+    workflow.search_agent = agent
+    workflow.agents = {"search_agent": agent}
+
+    override = SubagentModelOverride.model_validate(
+        {"provider": "openai", "model": "gpt-5.4", "reasoning_effort": "high"}
+    )
+
+    parent_state: dict[str, Any] = {
+        "conversation_id": "conv-1",
+        "user_id": "user-1",
+        "device_id": "device-1",
+        "model_request": {"chat": {"provider": "gemini", "model": "x"}},
+        "context": {},
+        "messages": [],
+    }
+
+    response = await workflow._run_agent_in_isolated_context(
+        agent_name="search_agent",
+        task_prompt="research API migration constraints",
+        parent_state=parent_state,
+        model_override=override,
+    )
+
+    worker_request = captured["model_request"]
+    assert worker_request is not None
+    # Parent siblings preserved
+    assert worker_request["chat"] == {"provider": "gemini", "model": "x"}
+    # Search key overlaid by the override
+    assert worker_request["search"]["provider"] == "openai"
+    assert worker_request["search"]["model"] == "gpt-5.4"
+    assert worker_request["search"]["reasoning_effort"] == "high"
+    assert worker_request["search"]["allow_custom_model"] is True
+    # Parent state model_request itself must NOT be mutated.
+    assert "search" not in parent_state["model_request"]
+    assert response.message.content == "worker done"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_in_isolated_context_applies_rag_worker_model_override(
+    monkeypatch,
+):
+    """RAG subagents go through process_message; the worker model_request must
+    reach AgentMessage.metadata["model_request"] for the RAG path too.
+    """
+    from app.ai.planning_subagents import SubagentModelOverride
+
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+
+    captured: list[dict[str, Any]] = []
+
+    async def fake_process_message(message, conversation_id):
+        captured.append(dict(message.metadata))
+        return AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="final"),
+            metadata={},
+        )
+
+    rag_agent = SimpleNamespace(
+        process_message=fake_process_message,
+        agent_config_key="rag",
+        agent_id="rag_agent",
+    )
+    workflow.rag_agent = rag_agent
+    workflow.agents = {"rag_agent": rag_agent}
+
+    override = SubagentModelOverride.model_validate(
+        {"provider": "gemini", "model": "gemini-3.1-pro-preview", "reasoning_effort": "high"}
+    )
+
+    parent_state: dict[str, Any] = {
+        "conversation_id": "conv-rag",
+        "user_id": "user-1",
+        "device_id": "device-1",
+        "model_request": None,
+        "context": {},
+        "messages": [],
+    }
+
+    await workflow._run_agent_in_isolated_context(
+        agent_name="rag_agent",
+        task_prompt="search documents for facts",
+        parent_state=parent_state,
+        model_override=override,
+    )
+
+    assert captured, "expected at least one process_message invocation"
+    request = captured[0].get("model_request")
+    assert isinstance(request, dict)
+    assert request["rag"]["provider"] == "gemini"
+    assert request["rag"]["model"] == "gemini-3.1-pro-preview"
+    assert request["rag"]["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_isolates_sibling_worker_overrides(monkeypatch):
+    """Two sibling workers with different overrides must each receive their
+    own worker model_request without leaking into one another or the parent.
+    """
+    from app.ai.planning_subagents import (
+        DispatchSubagentsInput,
+        PlanningSubagentDispatcher,
+        PlanningSubagentName,
+        PlanningSubagentTask,
+        SubagentModelOverride,
+    )
+
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+
+    seen_per_agent: dict[str, list[dict[str, Any]]] = {}
+
+    async def fake_runner(*, agent_name, task_prompt, parent_state, related_todo_ids=None, model_override=None):
+        from app.ai.planning_subagents import build_worker_model_request
+
+        worker_request = build_worker_model_request(
+            parent_model_request=parent_state.get("model_request"),
+            agent_key=agent_name.replace("_agent", ""),
+            override=model_override,
+        )
+        seen_per_agent.setdefault(agent_name, []).append(worker_request or {})
+        return _ok(f"done {agent_name}")
+
+    workflow._run_agent_in_isolated_context = fake_runner  # type: ignore[assignment]
+
+    dispatcher = SimpleNamespace()
+    dispatcher = __import__(
+        "app.ai.planning_subagents", fromlist=["PlanningSubagentDispatcher"]
+    ).PlanningSubagentDispatcher(workflow=workflow, settings=settings)
+
+    parent_state: dict[str, Any] = {
+        "conversation_id": "conv-1",
+        "user_id": "user-1",
+        "device_id": "device-1",
+        "model_request": {"chat": {"provider": "gemini", "model": "parent-x"}},
+        "context": {},
+    }
+
+    request = DispatchSubagentsInput(
+        tasks=[
+            PlanningSubagentTask(
+                id="w1",
+                agent=PlanningSubagentName.SEARCH_AGENT,
+                task="search the docs in depth",
+                model_override=SubagentModelOverride.model_validate(
+                    {"provider": "openai", "model": "gpt-5.4"}
+                ),
+            ),
+            PlanningSubagentTask(
+                id="w2",
+                agent=PlanningSubagentName.CHAT_AGENT,
+                task="outline the file map in depth",
+                model_override=SubagentModelOverride.model_validate(
+                    {"provider": "gemini", "model": "gemini-3-flash-preview"}
+                ),
+            ),
+        ]
+    )
+
+    await dispatcher.dispatch(request, parent_state=parent_state)
+
+    # Parent state untouched
+    assert parent_state["model_request"] == {"chat": {"provider": "gemini", "model": "parent-x"}}
+
+    search_request = seen_per_agent["search_agent"][0]
+    chat_request = seen_per_agent["chat_agent"][0]
+
+    # Each worker request carries its own override on the right key.
+    assert search_request["search"]["model"] == "gpt-5.4"
+    assert "search" not in chat_request
+    assert chat_request["chat"]["model"] == "gemini-3-flash-preview"
+    # And neither worker observed the other worker's override.
+    assert "chat" not in search_request or search_request["chat"]["model"] != "gemini-3-flash-preview"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_result_includes_requested_and_resolved_model(monkeypatch):
+    from app.ai.planning_subagents import (
+        DispatchSubagentsInput,
+        PlanningSubagentDispatcher,
+        PlanningSubagentName,
+        PlanningSubagentTask,
+        SubagentModelOverride,
+    )
+
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+
+    async def fake_runner(*, agent_name, task_prompt, parent_state, related_todo_ids=None, model_override=None):
+        return AgentResponse(
+            agent_type=AgentType.SEARCH,
+            agent_id="search_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="ok"),
+            metadata={
+                "provider": "openai",
+                "model": "gpt-5.4",
+                "config_source": "request",
+                "reasoning_effort": "high",
+            },
+        )
+
+    workflow._run_agent_in_isolated_context = fake_runner  # type: ignore[assignment]
+
+    dispatcher = PlanningSubagentDispatcher(workflow=workflow, settings=settings)
+    request = DispatchSubagentsInput(
+        tasks=[
+            PlanningSubagentTask(
+                id="w1",
+                agent=PlanningSubagentName.SEARCH_AGENT,
+                task="research migration risk in depth",
+                model_override=SubagentModelOverride.model_validate(
+                    {"provider": "openai", "model": "gpt-5.4", "reasoning_effort": "high"}
+                ),
+            )
+        ]
+    )
+
+    result = await dispatcher.dispatch(request, parent_state={})
+    entry = result.results[0]
+    assert entry.requested_model is not None
+    assert entry.requested_model["model"] == "gpt-5.4"
+    assert entry.requested_model["reasoning_effort"] == "high"
+    assert entry.resolved_model is not None
+    assert entry.resolved_model["model"] == "gpt-5.4"
+    assert entry.resolved_model["reasoning_effort"] == "high"
+    # Sanitized: no API keys ever surfaced.
+    assert "api_key" not in entry.resolved_model

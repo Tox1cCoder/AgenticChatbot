@@ -151,6 +151,7 @@ def create_langchain_model(
     temperature_override: float | None = None,
     include_thinking: bool = True,
     api_key_override: str | None = None,
+    thinking_level_override: str | None = None,
 ) -> ChatGoogleGenerativeAI:
     """
     Create a ChatGoogleGenerativeAI instance with proper configuration.
@@ -160,6 +161,9 @@ def create_langchain_model(
         model_override: Optional model name to override the config
         temperature_override: Optional temperature to override the config
         include_thinking: Whether to include thinking configuration (default True)
+        thinking_level_override: Optional Gemini 3 ``thinking_level`` to use
+            instead of ``settings.thinking_level`` for this single invocation.
+            Used by Planning subagents that carry a per-task ``reasoning_effort``.
 
     Returns:
         ChatGoogleGenerativeAI: Configured LangChain model
@@ -189,12 +193,16 @@ def create_langchain_model(
         if settings.include_thoughts_in_response:
             model_kwargs["include_thoughts"] = True
 
-        # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3
+        # Use thinking_budget for Gemini 2.5, thinking_level for Gemini 3.
+        # NOTE: only ONE of the two is set so a per-request override cannot
+        # accidentally enable both settings together.
         if "2.5" in model_name or "flash-latest" in model_name.lower():
             thinking_budget = settings.thinking_budget
             if thinking_budget == -1:
                 thinking_budget = 8192
             model_kwargs["thinking_budget"] = thinking_budget
         else:
-            model_kwargs["thinking_level"] = settings.thinking_level
+            model_kwargs["thinking_level"] = (
+                thinking_level_override or settings.thinking_level
+            )
     return ChatGoogleGenerativeAI(**model_kwargs)

@@ -1,0 +1,99 @@
+{
+  "query": "site:reddit.com/r/cyberpunkgame \"hot take\" \"Cyberpunk\" \"r/cyberpunkgame\"",
+  "answer": null,
+  "images": [
+    {
+      "url": "https://preview.redd.it/hot-take-malina-mobile-is-the-best-vehicle-of-the-game-v0-qkc84g57stec1.jpeg?width=1080&crop=smart&auto=webp&s=7c8316777c8d84dadcfc4c72bace1762f3c6660f",
+      "description": "A person with dramatic makeup and styled hair is sitting on a futuristic, cyberpunk-inspired motorcycle with neon accents and bold branding, parked on an urban sidewalk."
+    },
+    {
+      "url": "https://preview.redd.it/inside-gamings-hot-take-v0-ya9gcfmi4zsb1.png?width=1080&crop=smart&auto=webp&s=a6fbf1271150fae0172dc70b95396e9f2970115f",
+      "description": "A person with long dark hair and a beard, wearing a cyberpunk outfit with a robotic arm, is making an obscene gesture with both hands against a vibrant, neon-lit city background."
+    },
+    {
+      "url": "https://preview.redd.it/hot-take-johnny-is-an-irredeemable-monster-v0-s5484t6qqu3d1.jpeg?auto=webp&s=aed4e6acf8466c03936f24315bcd7bb2c1f9b6dc",
+      "description": "A man with sunglasses and a cybernetic arm stands confidently in front of a futuristic, neon-lit display, suggesting a cyberpunk setting."
+    },
+    {
+      "url": "https://preview.redd.it/i-take-cyber-pictures-of-the-beautiful-cyber-people-i-meet-v0-owzrshh20vqb1.jpg?width=3840&format=pjpg&auto=webp&s=d88a62a2d4434d9142995130f50b257bcc5cec65",
+      "description": "A cyberpunk character with a cybernetic arm and neon-colored hair leans on a table lined with guns in a vibrant, futuristic nightclub with holographic displays and other individuals engaging in various activities."
+    },
+    {
+      "url": "https://preview.redd.it/hot-take-johnnys-alt-appearance-fucking-sucks-v0-i64lu10fuuya1.jpg?width=828&format=pjpg&auto=webp&s=60c318f0701877d093a334b1f9f2b105b75baf87",
+      "description": "A cyberpunk character with a robotic arm and tattoos stands confidently in a bar-like setting with neon lighting, dressed in a leather jacket and dark pants."
+    }
+  ],
+  "results": [
+    {
+      "index": 1,
+      "title": "What is your hottest take or unpopular opinion about Cyberpunk 2077? : r/cyberpunkgame",
+      "url": "https://www.reddit.com/r/cyberpunkgame/comments/yu6wm8/what_is_your_hottest_take_or_unpopular_opinion/",
+      "content": "Personally, I'm don't really feel emotionally invested in Jackie as a character. He's alright, but you just don't get enough time with him in all of the life paths for me to really grow attached.\n\nShare\n\nNew to Reddit? \nCreate your account and connect with a world of communities.\n\nContinue with Google Continue with Google. Opens in new tab\n\n Continue with Email \n\n Continue with Phone Number \n\nBy continuing, you agree to ourUser Agreementand acknowledge that you understand thePrivacy Policy. \n\n# Related Answers Section\n\n Related Answers \n\nBest character builds for stealth gameplay\n\nMost impactful choices in Cyberpunk 2077\n\nTop mods to enhance Cyberpunk 2077 experience\n\nFavorite weapons for combat in the game\n\nBest vehicles for cruising Night City\n\n Public [...] # What is your hottest take or unpopular opinion about Cyberpunk 2077? : r/cyberpunkgame\nSkip to main contentWhat is your hottest take or unpopular opinion about Cyberpunk 2077? : r/cyberpunkgame\n\nOpen menu Open navigation[]( to Reddit Home\n\nr/cyberpunkgame\n\nSign UpSign up for RedditLog InLog in to Reddit\n\nExpand user menu Open settings menu\n\nImage 1 Go to cyberpunkgame\n\nr/cyberpunkgame\u20224y ago\n\nPractical_Addition_3\n\n# What is your hottest take or unpopular opinion about Cyberpunk 2077?\n\nDiscussion\n\nI think given that most of us are here in this subreddit it's safe to say that we love the game, but what is something you may not like that most people do, or something you do like that others don't. [...] Best vehicles for cruising Night City\n\n Public \n\nAnyone can view, post, and comment to this community\n\n0 0\n\n## Top Posts\n\n   Reddit reReddit: Top posts of November 13, 2022   \n   Reddit reReddit: Top posts of November 2022   \n   Reddit reReddit: Top posts of 2022   \n\nReddit RulesPrivacy PolicyUser AgreementYour Privacy ChoicesAccessibilityReddit, Inc. \u00a9 2026. All rights reserved.\n\nExpand Navigation Collapse Navigation\n\n   &nbsp; \n   &nbsp; \n   &nbsp; \n\n  \n\n  \n\n   RESOURCES \n\n   About Reddit\n   Advertise\n   Developer Platform\n   Reddit Pro BETA\n   Help\n   Blog\n   Careers\n   Press\n\n  \n\n   Best of Reddit\n\n  \n\n   Reddit Rules\n   Privacy Policy\n   User Agreement\n   Your Privacy Choices\n   Accessibility\n\nReddit, Inc. \u00a9 2026. All rights reserved.\n\nImage 2",
+      "score": 0.8156003
+    },
+    {
+      "index": 2,
+      "title": "What are your Cyberpunk 2077 hot takes?? : r/cyberpunkgame",
+      "url": "https://www.reddit.com/r/cyberpunkgame/comments/1gb1ssy/what_are_your_cyberpunk_2077_hot_takes/",
+      "content": "Panam is the best romance, but slightly overrated I kinda find Kerry and V's romance option a little weird Street kid is canon,",
+      "score": 0.81097376
+    },
+    {
+      "index": 3,
+      "title": "People who say Cyberpunk isn't political and punk enough or that cyberpunk doesn't say anything insightful paid very superficial attention to the game and it shows. : r/cyberpunkgame",
+      "url": "https://www.reddit.com/r/cyberpunkgame/comments/1c6m3af/people_who_say_cyberpunk_isnt_political_and_punk/",
+      "content": "Now, the take the game demonizes people who want to create change to \"level the playing field\" sounds like a decent take if you have the attention span of a five year old. In every step of the way, corporations are shown as terrible entities that fuck up everything with no benefit to the overall society. They have terrible working conditions, terrible impact on the environment, they kill people without remorse just to gain a week of extra time and much much worse. In fact there is not a single scene or a quest that involves corporations that showed them in a positive light. And the game never criticizes Johnny for fighting against corpos or being passionate towards hating them. It is a roleplaying game so you obviously have some sort of a choice on whether you agree with johnny or not but [...] There is also the take that Cyberpunk is not punk. Now I do not know how any serious person thinks this. There was a video about how Cyberpunk's story is bad or whatever where the guy says that the game isn't punk because everyone dresses in a weird way. I mean way to miss the fucking point but there is the argument that because the game portrays Johnny Silverhand, the most punk guy in the game, in a negative light sometimes means that the game is just fence sitting and at worst thinks corporations are a necessary good. Another thing they say is that the game is way too pessimistic and thinks that there is never any possible good outcome in this world. [...] Discussion\n\nI don't think it is controversial to say that one of the most praised aspect of Cyberpunk is the story. I think it is CDPR's best work yet, especially when it comes to characters but also themes. Because one of the most baffling takes about Cyberpunk that I see is that the writing is \"bad\" because the game doesn't engage with the political aspect of Cyberpunk genre too much. This post is mostly inspired by u/LokaCola's criticism of the narrative. I am just using his posts to talk about some common arguments I see against the writing in this game. Nothing personal.",
+      "score": 0.7892503
+    },
+    {
+      "index": 4,
+      "title": "Give me your most heinous Cyberpunk 2077 hot takes : r/cyberpunkgame",
+      "url": "https://www.reddit.com/r/cyberpunkgame/comments/1c8lquc/give_me_your_most_heinous_cyberpunk_2077_hot_takes/",
+      "content": "# Give me your most heinous Cyberpunk 2077 hot takes : r/cyberpunkgame\nSkip to main contentGive me your most heinous Cyberpunk 2077 hot takes : r/cyberpunkgame\n\nOpen menu Open navigation[]( to Reddit Home\n\nr/cyberpunkgame\n\nGet App Get the Reddit app Log InLog in to Reddit\n\nExpand user menu Open settings menu\n\nImage 1 Go to cyberpunkgame\n\nr/cyberpunkgame\u20222y ago\n\nobi_wan_sosig\n\n# Give me your most heinous Cyberpunk 2077 hot takes\n\nMeta\n\nImage 2: r/cyberpunkgame - Give me your most heinous Cyberpunk 2077 hot takesImage 3: r/cyberpunkgame - Give me your most heinous Cyberpunk 2077 hot takes\n\nImage 4: r/cyberpunkgame - Give me your most heinous Cyberpunk 2077 hot takes\n\n link to source of the OG meme\n\n Share \n\nNew to Reddit? \nCreate your account and connect with a world of communities. [...] Continue with Google Continue with Google. Opens in new tab\n\n Continue with Email \n\n Continue With Phone Number \n\nBy continuing, you agree to ourUser Agreementand acknowledge that you understand thePrivacy Policy. \n\n# Related Answers Section\n\n Related Answers \n\nBest character builds for stealth gameplay\n\nMost impactful choices in Cyberpunk 2077\n\nHidden locations in Night City to explore\n\nTop mods to enhance Cyberpunk 2077 experience\n\nFavorite weapons and their unique features\n\n Public \n\nAnyone can view, post, and comment to this community\n\n0 0\n\n## Top Posts\n\n  \n\n   Reddit reReddit: Top posts of April 20, 2024   \n   Reddit reReddit: Top posts of April 2024   \n   Reddit reReddit: Top posts of 2024 [...] Reddit RulesPrivacy PolicyUser AgreementYour Privacy ChoicesAccessibilityReddit, Inc. \u00a9 2026. All rights reserved.\n\nExpand Navigation Collapse Navigation\n\n   &nbsp; \n   &nbsp; \n   &nbsp; \n\n  \n\n  \n\n   RESOURCES \n\n   About Reddit\n   Advertise\n   Developer Platform\n   Reddit Pro BETA\n   Help\n   Blog\n   Careers\n   Press\n\n  \n\n   Best of Reddit\n\n  \n\n   Reddit Rules\n   Privacy Policy\n   User Agreement\n   Your Privacy Choices\n   Accessibility\n\nReddit, Inc. \u00a9 2026. All rights reserved.\n\nImage 5",
+      "score": 0.78846955
+    },
+    {
+      "index": 5,
+      "title": "What are some popular/ unpopular hot takes about Cyberpunk 2077 or Edgerunners? : r/cyberpunkgame",
+      "url": "https://www.reddit.com/r/cyberpunkgame/comments/18q04ip/what_are_some_popular_unpopular_hot_takes_about/",
+      "content": "Image 4: r/cyberpunkgame - What are some popular/ unpopular hot takes about Cyberpunk 2077 or Edgerunners?\n\nShare\n\nNew to Reddit? \nCreate your account and connect with a world of communities.\n\n Continue with Email \n\n Continue with Phone Number \n\nBy continuing, you agree to ourUser Agreementand acknowledge that you understand thePrivacy Policy. \n\n# Related Answers Section\n\n Related Answers \n\nBest community opinions on Cyberpunk 2077\n\nHot takes about Edgerunners\n\nBest character builds for Cyberpunk 2077\n\nMost impactful choices in Cyberpunk 2077\n\nHidden secrets in Night City\n\n Public \n\nAnyone can view, post, and comment to this community\n\n0 0\n\n## Top Posts [...] # What are some popular/ unpopular hot takes about Cyberpunk 2077 or Edgerunners? : r/cyberpunkgame\nSkip to main contentWhat are some popular/ unpopular hot takes about Cyberpunk 2077 or Edgerunners? : r/cyberpunkgame\n\nOpen menu Open navigation[]( to Reddit Home\n\nr/cyberpunkgame\n\nSign UpSign up for RedditLog InLog in to Reddit\n\nExpand user menu Open settings menu\n\nImage 1 Go to cyberpunkgame\n\nr/cyberpunkgame\u20222y ago\n\nSpirited-Detail-5318\n\n# What are some popular/ unpopular hot takes about Cyberpunk 2077 or Edgerunners?\n\nDiscussion\n\nImage 2: r/cyberpunkgame - What are some popular/ unpopular hot takes about Cyberpunk 2077 or Edgerunners?Image 3: r/cyberpunkgame - What are some popular/ unpopular hot takes about Cyberpunk 2077 or Edgerunners? [...] 0 0\n\n## Top Posts\n\n   Reddit reReddit: Top posts of December 24, 2023   \n   Reddit reReddit: Top posts of December 2023   \n   Reddit reReddit: Top posts of 2023   \n\nReddit RulesPrivacy PolicyUser AgreementYour Privacy ChoicesAccessibilityReddit, Inc. \u00a9 2026. All rights reserved.\n\nExpand Navigation Collapse Navigation\n\n   &nbsp; \n   &nbsp; \n   &nbsp; \n\n  \n\n  \n\n   RESOURCES \n\n   About Reddit\n   Advertise\n   Developer Platform\n   Reddit Pro BETA\n   Help\n   Blog\n   Careers\n   Press\n\n  \n\n   Best of Reddit\n\n  \n\n   Reddit Rules\n   Privacy Policy\n   User Agreement\n   Your Privacy Choices\n   Accessibility\n\nReddit, Inc. \u00a9 2026. All rights reserved.\n\nImage 5",
+      "score": 0.73322314
+    },
+    {
+      "index": 6,
+      "title": "r/cyberpunkgame - Reddit",
+      "url": "https://www.reddit.com/r/cyberpunkgame/",
+      "content": "r/cyberpunkgame: Cyberpunk 2077 is a role-playing video game developed by CD Projekt RED and published by CD Projekt S.A. This subreddit has",
+      "score": 0.67063034
+    },
+    {
+      "index": 7,
+      "title": "Who do YOU hate the most in all of Cyberpunk? : r/cyberpunkgame",
+      "url": "https://www.reddit.com/r/cyberpunkgame/comments/1sr8nqz/who_do_you_hate_the_most_in_all_of_cyberpunk/",
+      "content": "# Who do YOU hate the most in all of Cyberpunk? : r/cyberpunkgame\nSkip to main contentWho do YOU hate the most in all of Cyberpunk? : r/cyberpunkgame\n\nOpen menu Open navigation[]( to Reddit Home\n\nr/cyberpunkgame\n\nSign UpSign up for RedditLog InLog in to Reddit\n\nExpand user menu Open settings menu\n\nImage 1 Go to cyberpunkgame\n\nr/cyberpunkgame\u202227d ago\n\nCocoa-Knife-Chara\n\nImage 2: Profile Badge for the Achievement Top 1% PosterTop 1% Poster\n\n# Who do YOU hate the most in all of Cyberpunk?\n\nDiscussion [...] Discussion\n\n   Image 3: r/cyberpunkgame - Who do YOU hate the most in all of Cyberpunk?Image 4: r/cyberpunkgame - Who do YOU hate the most in all of Cyberpunk?\n   Image 5: r/cyberpunkgame - Who do YOU hate the most in all of Cyberpunk?Image 6: r/cyberpunkgame - Who do YOU hate the most in all of Cyberpunk?\n   Image 7: r/cyberpunkgame - Who do YOU hate the most in all of Cyberpunk?Image 8: r/cyberpunkgame - Who do YOU hate the most in all of Cyberpunk?\n   Image 9: r/cyberpunkgame - Who do YOU hate the most in all of Cyberpunk?Image 10: r/cyberpunkgame - Who do YOU hate the most in all of Cyberpunk?\n   Image 11Image 12: r/cyberpunkgame - Who do YOU hate the most in all of Cyberpunk?\n\nInclusive to Edgerunners btw\n\nShare [...] &nbsp; \n   &nbsp; \n   &nbsp; \n\n  \n\n  \n\n   RESOURCES \n\n   About Reddit\n   Advertise\n   Developer Platform\n   Reddit Pro BETA\n   Help\n   Blog\n   Careers\n   Press\n\n  \n\n   Best of Reddit\n\n  \n\n   Reddit Rules\n   Privacy Policy\n   User Agreement\n   Your Privacy Choices\n   Accessibility\n\nReddit, Inc. \u00a9 2026. All rights reserved.\n\nImage 13",
+      "score": 0.32540315
+    },
+    {
+      "index": 8,
+      "title": "Tell me your unpopular opinions of Cyberpunk. I'll start - Reddit",
+      "url": "https://www.reddit.com/r/cyberpunkgame/comments/1l9b03i/tell_me_your_unpopular_opinions_of_cyberpunk_ill/",
+      "content": "The game doesn't give you enough time to truly connect with Jackie. I find myself connecting more with Fixers like Mr. Hands and Regina because",
+      "score": 0.25466695
+    },
+    {
+      "index": 9,
+      "title": "Seeing Cyberpunk 2077 with Overwhelming Positive reviews is just ...",
+      "url": "https://www.reddit.com/r/cyberpunkgame/comments/1ry0vi2/seeing_cyberpunk_2077_with_overwhelming_positive/",
+      "content": "I had 200+ hours on the PS4 and 800+ more on PC and seeing the love it got now after the bad reception it had, It just makes me so happy.",
+      "score": 0.07038701
+    },
+    {
+      "index": 10,
+      "title": "What is your most unhinged/unpopular opinion on Cyberpunk 2077?",
+      "url": "https://www.reddit.com/r/cyberpunkgame/comments/1ny79jb/what_is_your_most_unhingedunpopular_opinion_on/",
+      "content": "I think limiting the romance options made the game feel very limited in itself. Still, I really enjoyed the mods that broke that limitation. But",
+      "score": 0.069700025
+    }
+  ],
+  "total_results": 10
+}
