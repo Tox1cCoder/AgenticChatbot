@@ -457,6 +457,18 @@ Handles:
 - `app.workers.document_processor` — ingest → parse → caption images → chunk → persist SQL chunks → embed → upsert Qdrant lookup points
 - `app.workers.cleanup_tasks` — expired tokens, orphaned files, stale device sessions
 
+Parallelism is config-driven (see [`.env.example`](.env.example)):
+
+| Setting | Default | Notes |
+|---|---|---|
+| `CELERY_WORKER_POOL` | `auto` | `auto` resolves to `threads` on Windows and `prefork` on Linux. `solo` is a single-task debug pool — do not use for batch uploads. |
+| `CELERY_WORKER_CONCURRENCY` | `2` | Number of tasks running in parallel. Increase for more upload throughput; lower if model/embedding providers rate-limit. |
+| `CELERY_WORKER_PREFETCH_MULTIPLIER` | `1` | Keep at 1 unless you understand Celery prefetch semantics. |
+| `CELERY_WORKER_MAX_TASKS_PER_CHILD` | `10` | Recycles worker process every N tasks to bound memory growth. |
+| `CELERY_WORKER_TIME_LIMIT` / `CELERY_WORKER_SOFT_TIME_LIMIT` | `300` / `240` | Per-task wall-clock limits (seconds). |
+
+On startup the worker prints a banner: `Starting Celery worker: pool=threads concurrency=2 prefetch=1`. If the banner shows `pool=solo` while you are expecting parallel processing, override `CELERY_WORKER_POOL` to `threads` (Windows) or `prefork` (Linux).
+
 ### Local client backend
 
 ```bash
@@ -520,7 +532,7 @@ When `MCP_TOOL_SEARCH_ENABLED=true`, only the lightweight [`tool_search`](app/ai
 
 ## Document Pipeline & RAG
 
-1. **Upload** — `POST /documents/upload` (multipart) stages the file under `TEMP_STORAGE_PATH`, creates a `Document` row, and enqueues a Celery task.
+1. **Upload** — `POST /documents/uploads` (multipart, plural) accepts one or more files in a single request. Each file is staged under `TEMP_STORAGE_PATH`, a `Document` row is created, and a Celery task is enqueued per file. Duplicate filenames in the same conversation are rejected per-file (case-insensitive) without blocking siblings. The single-file `POST /documents/upload` route remains as a thin compatibility wrapper around the batch path.
 2. **Parse** — MinerU handles rich document formats (`.pdf`, `.docx`, `.pptx`, `.html`, `.md`) through the server pipeline. Excel workbooks (`.xlsx`) are parsed server-side with `openpyxl` into markdown tables, and plain `.txt` files are loaded directly. Parser output may include markdown, structured content blocks, tables, formulas, page spans, and extracted image files.
 3. **Caption images before indexing** — extracted page images are copied to `DOCUMENT_IMAGES_STORAGE_PATH`; when a Gemini key is available, the image captioning model describes each image. Captions are appended to the matching chunk text before embedding so questions about image-only content can be retrieved semantically.
 4. **Chunk** — `DocumentChunkBuilder` creates token-aware chunks from normalized blocks using `RAG_CHUNK_TARGET_TOKENS`, `RAG_CHUNK_OVERLAP_TOKENS`, and `RAG_CHUNK_MAX_TOKENS`. Tables stay atomic when possible, large tables split on row groups, page spans are preserved, and tiny orphan text merges with neighbors.
@@ -796,12 +808,36 @@ The server mounts 15 routers; the client backend mirrors most of them and proxie
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/documents/upload` | Multipart upload + enqueue |
+| `POST` | `/documents/uploads` | Canonical batch multipart upload + enqueue (one task per file) |
+| `POST` | `/documents/upload` | Legacy single-file wrapper around `/documents/uploads` |
 | `GET` | `/documents/task/{task_id}` | Celery task status |
 | `GET` | `/documents/{id}` | Document details |
 | `GET` | `/documents/conversation/{conversation_id}` | Documents for a conversation |
 | `PUT` | `/documents/{id}` | Update metadata |
 | `DELETE` | `/documents/{id}` | Delete + Qdrant purge |
+
+Batch upload semantics:
+
+- Send one or more `files` fields plus a `conversation_id` form field.
+- Files are processed independently: an invalid or duplicate file is rejected per-file without preventing siblings from being staged.
+- Duplicate filename detection is per-conversation and case-insensitive (the server stores a normalized `filename_key` with a unique constraint on `(conversation_id, filename_key)`).
+- Status codes: `201` (all accepted), `207` (mixed accepted/rejected), `409` (all rejected as duplicates), `400` (all rejected for validation reasons or empty batch).
+- Response shape mirrors input order:
+
+```json
+{
+  "data": {
+    "conversation_id": "...",
+    "total_count": 3,
+    "accepted_count": 2,
+    "rejected_count": 1,
+    "files": [
+      {"filename": "alpha.pdf", "status": "accepted", "document": {...}, "processing": {"task_id": "..."}},
+      {"filename": "alpha.pdf", "status": "rejected", "error_code": "DUPLICATE_FILENAME", "message": "..."}
+    ]
+  }
+}
+```
 
 ### Task Plans ([`/task-plans` + `/conversations/{id}/task-plans`](app/api/task_plans.py))
 
@@ -988,6 +1024,8 @@ Wheels can be built with `python -m build`.
 | Provider key decryption fails | `MODEL_ENCRYPTION_KEY` changed. Re-create provider records or restore the prior key. |
 | Windows + async + `localhost` Redis | The config normaliser rewrites `localhost` → `127.0.0.1` automatically on `win32`. |
 | Document uploads stuck in `processing` | Celery worker not running: `python -m app.workers.start_worker`. Check `/health/celery`. |
+| Multiple uploads process one at a time | Check the worker startup banner. On Windows, pool must be `threads` (or another parallel pool); `solo` is single-task debug mode. Set `CELERY_WORKER_POOL=threads` or leave at `auto`. |
+| Batch upload returns 207 | Mixed accepted/rejected response. Inspect `data.files` for per-file status and `error_code` (e.g. `DUPLICATE_FILENAME`). Do not treat 207 as a hard failure. |
 | Reranker download slow | First run fetches the HF model. Pin `RERANKER_MODEL` or disable with `ENABLE_RERANKING=false`. |
 | Client-device tool calls fail | Device offline or `CLIENT_RUNTIME_REQUIRE_CONNECTED_DEVICE_FOR_LOCAL_TOOLS=true`. Inspect `GET /device-runtime/connected-devices`. |
 

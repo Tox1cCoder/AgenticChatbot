@@ -70,4 +70,8 @@ scripts/
 .streamlit/
 .vscode/
 .claude
+.codex_logs
+.conda
+.pytest_cache
+.ruff_cache
 skills

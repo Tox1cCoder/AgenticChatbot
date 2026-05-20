@@ -31,3 +31,18 @@ class FileValidationError(CustomHTTPException):
             detail=detail,
             error_code=error_code,
         )
+
+
+class DuplicateDocumentFilenameError(CustomHTTPException):
+    """Raised when a document filename already exists in the same conversation."""
+
+    def __init__(
+        self,
+        detail: str = "A document with this filename already exists in this conversation.",
+        error_code: str = "DUPLICATE_FILENAME",
+    ):
+        super().__init__(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail,
+            error_code=error_code,
+        )

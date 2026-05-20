@@ -3,7 +3,8 @@ Document-related Pydantic schemas for API requests and responses.
 """
 
 from datetime import datetime
-from enum import IntEnum
+from enum import Enum, IntEnum
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -29,6 +30,7 @@ class DocumentCreate(DocumentBase):
     """Schema for creating a new document"""
 
     conversation_id: UUID
+    filename_key: str
 
 
 class DocumentUpdate(BaseModel):
@@ -57,3 +59,31 @@ class DocumentListResponse(BaseModel):
     page: int
     page_size: int
     total_pages: int
+
+
+class DocumentUploadFileStatus(str, Enum):
+    """Per-file outcome in a batch upload response."""
+
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
+class DocumentUploadFileResult(BaseModel):
+    """One per-file result inside a batch upload response."""
+
+    filename: str
+    status: DocumentUploadFileStatus
+    document: DocumentResponse | None = None
+    processing: dict[str, Any] | None = None
+    error_code: str | None = None
+    message: str | None = None
+
+
+class DocumentBatchUploadResponse(BaseModel):
+    """Ordered, per-file batch upload response."""
+
+    conversation_id: UUID
+    total_count: int
+    accepted_count: int
+    rejected_count: int
+    files: list[DocumentUploadFileResult]

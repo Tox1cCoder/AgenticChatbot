@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -10,11 +10,20 @@ from app.models.base import Base
 
 class Document(Base):
     __tablename__ = "documents"
-    __table_args__ = (Index("idx_document_processing_task_id", "processing_task_id"),)
+    __table_args__ = (
+        Index("idx_document_processing_task_id", "processing_task_id"),
+        UniqueConstraint(
+            "conversation_id",
+            "filename_key",
+            name="uq_documents_conversation_filename_key",
+        ),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id = Column(UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False)
     filename = Column(String(255), nullable=False)
+    # Normalized, casefolded filename used to detect same-conversation duplicates.
+    filename_key = Column(String(255), nullable=False)
     file_type = Column(String(100), nullable=False)
     status = Column(Integer, nullable=False, default=1)  # 1=processing, 2=ready, 3=failed
     upload_time = Column(

@@ -1,8 +1,12 @@
 import logging
+import unicodedata
 from uuid import UUID
 
 from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
-from app.core.exceptions.validation import FileValidationError
+from app.core.exceptions.validation import (
+    DuplicateDocumentFilenameError,
+    FileValidationError,
+)
 from app.interfaces.document_service_interface import IDocumentService
 from app.repositories.document import DocumentRepository
 from app.schemas.document import (
@@ -17,6 +21,20 @@ from app.services.document_processing_service import DocumentProcessingService
 from app.utils.validation.document_validation import DocumentValidationUtils
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_document_filename(filename: str) -> str:
+    """Return the casefolded, path-stripped, NFC-normalized filename key.
+
+    Used to detect same-conversation duplicates across case and Unicode
+    normalization variants. Raises ``FileValidationError`` for empty
+    inputs because an empty normalized key cannot be stored.
+    """
+    name = str(filename or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if not name:
+        raise FileValidationError(detail="Filename is empty after normalization.")
+    name = unicodedata.normalize("NFC", name)
+    return name.casefold()
 
 
 class DocumentService(IDocumentService):
@@ -128,9 +146,18 @@ class DocumentService(IDocumentService):
 
         await self.processing_service.validate_upload_file(filename, file_size)
 
+        filename_key = normalize_document_filename(filename)
+        if self.repository.filename_exists_in_conversation(conversation_id, filename_key):
+            raise DuplicateDocumentFilenameError(
+                detail=(
+                    f"A document named '{filename}' already exists in this conversation."
+                )
+            )
+
         document_data = DocumentCreate(
             conversation_id=conversation_id,
             filename=filename,
+            filename_key=filename_key,
             file_type=content_type or "unknown",
             status=DocumentStatus.PROCESSING.value,
         )

@@ -1,8 +1,9 @@
 from uuid import UUID
 
 from sqlalchemy import desc
-from sqlalchemy.exc import MultipleResultsFound
+from sqlalchemy.exc import IntegrityError, MultipleResultsFound
 
+from app.core.exceptions.validation import DuplicateDocumentFilenameError
 from app.models.conversation import Conversation
 from app.models.document import Document
 from app.schemas.document import DocumentCreate, DocumentUpdate
@@ -16,18 +17,59 @@ class DocumentRepository:
         self.session_factory = session_factory
 
     def create(self, document_data: DocumentCreate) -> Document:
-        """Create a new document"""
+        """Create a new document.
+
+        Translates the unique-constraint violation on
+        ``(conversation_id, filename_key)`` into ``DuplicateDocumentFilenameError``
+        so callers can present a per-file rejection without recovering from
+        a raw SQLAlchemy error.
+        """
         with self.session_factory() as db:
             db_document = Document(
                 conversation_id=document_data.conversation_id,
                 filename=document_data.filename,
+                filename_key=document_data.filename_key,
                 file_type=document_data.file_type,
                 status=document_data.status,
             )
             db.add(db_document)
-            db.commit()
+            try:
+                db.commit()
+            except IntegrityError as exc:
+                db.rollback()
+                raise DuplicateDocumentFilenameError(
+                    detail=(
+                        f"A document named '{document_data.filename}' already exists "
+                        "in this conversation."
+                    )
+                ) from exc
             db.refresh(db_document)
             return db_document
+
+    def filename_exists_in_conversation(
+        self, conversation_id: UUID, filename_key: str
+    ) -> bool:
+        """Return True if a document with this normalized filename already exists."""
+        with self.session_factory() as db:
+            query = db.query(Document).filter(
+                Document.conversation_id == conversation_id,
+                Document.filename_key == filename_key,
+            )
+            return bool(db.query(query.exists()).scalar())
+
+    def get_by_conversation_and_filename_key(
+        self, conversation_id: UUID, filename_key: str
+    ) -> Document | None:
+        """Return the existing document for a (conversation, filename_key) pair."""
+        with self.session_factory() as db:
+            return (
+                db.query(Document)
+                .filter(
+                    Document.conversation_id == conversation_id,
+                    Document.filename_key == filename_key,
+                )
+                .first()
+            )
 
     def get_by_id(self, document_id: UUID) -> Document | None:
         """Get document by ID"""

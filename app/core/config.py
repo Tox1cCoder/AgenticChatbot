@@ -416,6 +416,37 @@ class Settings(BaseSettings):
         description="Celery result backend URL",
     )
 
+    # Celery worker startup configuration.
+    # Windows local development: pool=auto resolves to 'threads' for real
+    # concurrency. Linux production: pool=auto resolves to 'prefork'.
+    celery_worker_pool: str = Field(
+        default="auto",
+        description=(
+            "Celery worker pool. 'auto' resolves to 'threads' on Windows and "
+            "'prefork' on Linux. Set to 'solo' for single-task debug runs."
+        ),
+    )
+    celery_worker_concurrency: int = Field(
+        default=2,
+        description="Number of worker processes/threads handling tasks concurrently.",
+    )
+    celery_worker_prefetch_multiplier: int = Field(
+        default=1,
+        description="Celery worker prefetch multiplier (1 = no over-fetch).",
+    )
+    celery_worker_max_tasks_per_child: int = Field(
+        default=10,
+        description="Recycle worker process after this many tasks to bound memory growth.",
+    )
+    celery_worker_time_limit: int = Field(
+        default=300,
+        description="Hard task time limit in seconds.",
+    )
+    celery_worker_soft_time_limit: int = Field(
+        default=240,
+        description="Soft task time limit in seconds (raises SoftTimeLimitExceeded).",
+    )
+
     # File Storage Configuration
     temp_storage_path: str = Field(
         default="app/temp",
@@ -890,6 +921,11 @@ class Settings(BaseSettings):
         "auto_continue_max_total_iterations",
         "auto_continue_timeout_seconds",
         "planning_consecutive_errors_limit",
+        "celery_worker_concurrency",
+        "celery_worker_prefetch_multiplier",
+        "celery_worker_max_tasks_per_child",
+        "celery_worker_time_limit",
+        "celery_worker_soft_time_limit",
         mode="before",
     )
     @classmethod

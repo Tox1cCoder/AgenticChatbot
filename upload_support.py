@@ -39,7 +39,6 @@ def _bump_api_cache_version() -> None:
 
 def render_upload_section():
     """Render file upload section - only when conversation is selected"""
-    # Only show upload section if a conversation is selected (not pending or None)
     if (
         st.session_state.get("current_conversation_id")
         and st.session_state.current_conversation_id != "pending_new"
@@ -47,84 +46,107 @@ def render_upload_section():
         st.markdown("### :material/upload_file: Upload Documents")
         st.caption("Upload to current conversation")
 
-        uploaded_file = st.file_uploader(
-            "Choose a file",
+        uploaded_files = st.file_uploader(
+            "Choose one or more files",
             # Mirror app/api/documents.py::SUPPORTED_UPLOAD_EXTENSIONS.
             type=["txt", "pdf", "docx", "pptx", "xlsx", "html", "md"],
+            accept_multiple_files=True,
             help="Upload documents for this conversation",
-            key=f"uploader_{st.session_state.current_conversation_id}",  # Unique key per conversation
+            key=f"uploader_{st.session_state.current_conversation_id}",
         )
 
-        if uploaded_file is not None:
-            # Display file info
-            st.info(
-                f"{uploaded_file.name} ({uploaded_file.size} bytes)",
-                icon=":material/description:",
-            )
+        if uploaded_files:
+            st.caption(f"Selected {len(uploaded_files)} file(s):")
+            for uploaded_file in uploaded_files:
+                st.info(
+                    f"{uploaded_file.name} ({uploaded_file.size} bytes)",
+                    icon=":material/description:",
+                )
 
             if st.button(
-                "Upload File",
+                "Upload Files",
                 icon=":material/upload:",
                 width="stretch",
                 key=f"upload_btn_{st.session_state.current_conversation_id}",
             ):
-                upload_result = upload_document(uploaded_file)
+                upload_result = upload_documents(uploaded_files)
                 if upload_result:
-                    st.success("File uploaded successfully!", icon=":material/check_circle:")
-                    # Clear cache to refresh data
+                    _render_batch_upload_outcome(upload_result)
                     st.cache_data.clear()
-                    st.rerun()
                 else:
                     st.error("Upload failed", icon=":material/cancel:")
 
 
-def upload_document(uploaded_file) -> dict[str, Any] | None:
-    """
-    Upload document to the API with conversation context
+def upload_documents(uploaded_files: list[Any]) -> dict[str, Any] | None:
+    """Upload one or more files via the canonical batch endpoint."""
+    if not uploaded_files:
+        return None
 
-    Args:
-        uploaded_file: Streamlit UploadedFile object
-
-    Returns:
-        Dict containing upload response or None if failed
-    """
     try:
-        # Prepare file for upload
-        files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+        files = [
+            ("files", (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type))
+            for uploaded_file in uploaded_files
+        ]
 
-        # Prepare form data with conversation ID
-        data = {}
+        data: dict[str, str] = {}
         if (
             st.session_state.get("current_conversation_id")
             and st.session_state.current_conversation_id != "pending_new"
         ):
             data["conversation_id"] = st.session_state.current_conversation_id
 
-        # Get auth token from session
-        headers = {}
+        headers: dict[str, str] = {}
         if st.session_state.get("auth_token"):
             headers["Authorization"] = f"Bearer {st.session_state.auth_token}"
 
-        # Make upload request
         response = get_http_session().post(
-            f"{API_BASE_URL}/documents/upload",
+            f"{API_BASE_URL}/documents/uploads",
             files=files,
             data=data,
             headers=headers,
             timeout=REQUEST_TIMEOUT,
         )
 
-        if response.status_code == 201:
+        if response.status_code in {201, 207, 409}:
             result = response.json()
-            _bump_api_cache_version()
+            accepted_count = int((result.get("data") or {}).get("accepted_count") or 0)
+            if accepted_count:
+                _bump_api_cache_version()
             return result
-        else:
-            st.error(f"Upload failed: {response.status_code} - {response.text}")
-            return None
+        st.error(f"Upload failed: {response.status_code} - {response.text}")
+        return None
 
     except Exception as e:
         st.error(f"Upload error: {str(e)}")
         return None
+
+
+def upload_document(uploaded_file) -> dict[str, Any] | None:
+    """Compatibility wrapper — uploads a single file through the batch path."""
+    if uploaded_file is None:
+        return None
+    return upload_documents([uploaded_file])
+
+
+def _render_batch_upload_outcome(upload_result: dict[str, Any]) -> None:
+    """Render per-file accepted/rejected results in the sidebar."""
+    data = upload_result.get("data") or {}
+    accepted = int(data.get("accepted_count") or 0)
+    rejected = int(data.get("rejected_count") or 0)
+
+    if accepted:
+        st.success(
+            f"{accepted} file(s) uploaded and processing.",
+            icon=":material/check_circle:",
+        )
+    if rejected:
+        st.warning(f"{rejected} file(s) rejected.", icon=":material/error:")
+        for item in data.get("files") or []:
+            if (item.get("status") or "").lower() != "rejected":
+                continue
+            error_code = item.get("error_code") or "REJECTED"
+            label = "Duplicate" if error_code == "DUPLICATE_FILENAME" else error_code
+            st.caption(f"- {item.get('filename')} — {label}: {item.get('message') or ''}")
 
 
 def poll_document_status(document_id: str):

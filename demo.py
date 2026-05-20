@@ -33,7 +33,11 @@ from app.ui.subagent_activity import (
     build_live_subagent_activity_view,
     build_subagent_activity_view,
 )
-from upload_support import delete_document, get_uploaded_documents, upload_document
+from upload_support import (
+    delete_document,
+    get_uploaded_documents,
+    upload_documents,
+)
 
 API_BASE_URL = os.environ.get("CHATBOT_API_BASE_URL", "http://127.0.0.1:8000")
 WIDGET_WS_BASE_URL = os.environ.get("CHATBOT_WIDGET_WS_BASE_URL", "").rstrip("/")
@@ -8286,22 +8290,25 @@ def render_documents_tab():
     upload_col, tips_col = st.columns([1.25, 1])
 
     with upload_col:
-        st.subheader("Upload a Document")
+        st.subheader("Upload Documents")
         st.caption(
             "Files attach to this conversation and become searchable once processing completes."
         )
         uploader_key = f"doc_uploader_{conversation_id}"
-        uploaded_file = st.file_uploader(
-            "Select a file",
+        uploaded_files = st.file_uploader(
+            "Select files",
             # Mirror app/api/documents.py::SUPPORTED_UPLOAD_EXTENSIONS.
             type=["txt", "pdf", "docx", "pptx", "xlsx", "html", "md"],
+            accept_multiple_files=True,
             key=uploader_key,
             help="Supported formats: TXT, PDF, DOCX, PPTX, XLSX, HTML, MD",
         )
 
-        if uploaded_file is not None:
-            file_size_kb = uploaded_file.size / 1024
-            st.write(f"**Selected:** {uploaded_file.name} ({file_size_kb:.1f} KB)")
+        if uploaded_files:
+            st.write(f"**Selected {len(uploaded_files)} file(s):**")
+            for uploaded_file in uploaded_files:
+                size_kb = uploaded_file.size / 1024
+                st.caption(f"- {uploaded_file.name} ({size_kb:.1f} KB)")
 
             if st.button(
                 "Upload & Process",
@@ -8309,13 +8316,36 @@ def render_documents_tab():
                 width="stretch",
                 type="primary",
             ):
-                with st.spinner("Uploading document..."):
-                    upload_result = upload_document(uploaded_file)
+                with st.spinner("Uploading documents..."):
+                    upload_result = upload_documents(uploaded_files)
 
-                if upload_result:
-                    st.success("Upload complete. Processing has started.")
-                    st.cache_data.clear()
-                    st.rerun()
+                if upload_result is not None:
+                    data = upload_result.get("data") or {}
+                    accepted = int(data.get("accepted_count") or 0)
+                    rejected = int(data.get("rejected_count") or 0)
+
+                    if accepted:
+                        st.success(
+                            f"{accepted} document(s) queued for processing."
+                        )
+                    if rejected:
+                        st.warning(f"{rejected} file(s) were rejected.")
+                        for item in data.get("files") or []:
+                            if (item.get("status") or "").lower() != "rejected":
+                                continue
+                            error_code = item.get("error_code") or "REJECTED"
+                            label = (
+                                "Duplicate filename"
+                                if error_code == "DUPLICATE_FILENAME"
+                                else error_code
+                            )
+                            st.caption(
+                                f"- {item.get('filename')} — {label}: "
+                                f"{item.get('message') or ''}"
+                            )
+
+                    if accepted:
+                        st.cache_data.clear()
                 else:
                     st.error("Upload failed. Please try again.")
 

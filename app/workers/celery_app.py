@@ -19,9 +19,12 @@ celery_app.conf.timezone = "UTC"
 celery_app.conf.enable_utc = True
 
 
-celery_app.conf.worker_prefetch_multiplier = 1
+celery_app.conf.worker_prefetch_multiplier = settings.celery_worker_prefetch_multiplier
 celery_app.conf.task_acks_late = True
 celery_app.conf.task_reject_on_worker_lost = True
+
+celery_app.conf.task_time_limit = settings.celery_worker_time_limit
+celery_app.conf.task_soft_time_limit = settings.celery_worker_soft_time_limit
 
 celery_app.conf.imports = (
     "app.workers.document_processor",

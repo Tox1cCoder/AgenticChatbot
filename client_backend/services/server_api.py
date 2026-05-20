@@ -60,6 +60,13 @@ class OperationResult(BaseModel):
     message: str
 
 
+class UploadProxyResponse(BaseModel):
+    """Status-aware payload returned by the batch upload proxy."""
+
+    status_code: int
+    payload: dict[str, Any]
+
+
 class ServerAPIClient:
     """
     Async HTTP client for the canonical server backend.
@@ -608,6 +615,62 @@ class ServerAPIClient:
 
     # ── Document Methods ────────────────────────────────────────────────
 
+    async def upload_documents_bytes_with_status(
+        self,
+        *,
+        conversation_id: str,
+        files: list[dict[str, Any]],
+    ) -> "UploadProxyResponse":
+        """Forward a batch of files to the canonical batch upload endpoint.
+
+        Returns the upstream status code alongside the parsed body so the
+        sidecar can preserve 207/409 outcomes for the UI without flattening
+        them into 500s.
+        """
+        multipart = [
+            ("files", (item["filename"], item["content"], item["content_type"]))
+            for item in files
+        ]
+        response = await self.request_response(
+            "POST",
+            "/documents/uploads",
+            data={"conversation_id": conversation_id},
+            files=multipart,
+        )
+        payload = await self._handle_batch_upload_response(response)
+        return UploadProxyResponse(status_code=response.status_code, payload=payload)
+
+    async def upload_documents_bytes(
+        self,
+        *,
+        conversation_id: str,
+        files: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Convenience wrapper that returns the payload only."""
+        result = await self.upload_documents_bytes_with_status(
+            conversation_id=conversation_id,
+            files=files,
+        )
+        return result.payload
+
+    async def _handle_batch_upload_response(
+        self, response: httpx.Response
+    ) -> dict[str, Any]:
+        """Treat 201/207/409 as structured batch responses; raise otherwise."""
+        if response.status_code in {200, 201, 207, 400, 409}:
+            body = await response.aread()
+            if not body:
+                return {}
+            try:
+                return response.json()
+            except Exception as exc:
+                raise ServerAPIError(
+                    f"Server returned a non-JSON batch upload response: {response.status_code}",
+                    status_code=response.status_code,
+                    detail=body.decode("utf-8", errors="replace"),
+                ) from exc
+        return await self._handle_response(response)
+
     async def upload_document_bytes(
         self,
         conversation_id: str,
@@ -615,19 +678,21 @@ class ServerAPIClient:
         content: bytes,
         content_type: str = "application/octet-stream",
     ) -> dict[str, Any]:
+        """Upload a single document using in-memory bytes.
+
+        Kept as a thin wrapper around ``upload_documents_bytes`` so internal
+        callers and existing tests have a single canonical batch code
+        path.
         """
-        Upload a document using in-memory bytes.
-        """
-        return await self.post(
-            "/documents/upload",
-            data={"conversation_id": conversation_id},
-            files={
-                "file": (
-                    filename,
-                    content,
-                    content_type,
-                )
-            },
+        return await self.upload_documents_bytes(
+            conversation_id=conversation_id,
+            files=[
+                {
+                    "filename": filename,
+                    "content": content,
+                    "content_type": content_type,
+                }
+            ],
         )
 
     async def upload_document(
