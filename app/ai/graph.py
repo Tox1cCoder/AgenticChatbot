@@ -15,6 +15,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import RemoveMessage
 from langgraph.types import Command, interrupt
+from langsmith import tracing_context
 from qdrant_client import QdrantClient
 
 from ..core.config import settings
@@ -820,15 +821,82 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             )
             return state
 
+        previous_agent = state.get("selected_agent")
         logger.info(
             "Delegating from '%s' → '%s' (reason: %s)",
-            state.get("selected_agent"),
+            previous_agent,
             target_agent,
             reason,
         )
         state["selected_agent"] = target_agent
         state["delegation_count"] = delegation_count + 1
+
+        # Control-plane handoff metadata — used by ``_messages_for_selected_agent``
+        # to strip handoff control AIMessage/ToolMessage pairs out of the
+        # delegated agent's prompt, and by the streamer to emit an
+        # ``agent_selected`` event when the active agent changes.
+        context = state.get("context") or {}
+        if not isinstance(context, dict):
+            context = {}
+        context["handoff"] = {
+            "active": True,
+            "source_agent": previous_agent,
+            "target_agent": target_agent,
+            "reason": reason,
+            "tool_call_id": hand_off_output.get("tool_call_id"),
+        }
+        state["context"] = context
         return state
+
+    # ------------------------------------------------------------------
+    # Delegated-agent message scoping
+    # ------------------------------------------------------------------
+    def _messages_for_selected_agent(
+        self,
+        state: GraphState,
+        agent_name: str,
+        messages: list,
+    ) -> list:
+        """Return the current-turn message slice scoped for ``agent_name``.
+
+        When the active turn started as a handoff (``state["context"]["handoff"]
+        ["active"]`` is True and the target matches ``agent_name``), strip the
+        source agent's handoff narration ``AIMessage`` and its matching
+        ``ToolMessage(name="hand_off")`` so the delegated agent receives the
+        user's original request without the routing chatter as conversational
+        context.
+
+        Falls back to ``_get_current_turn_messages`` semantics when no handoff
+        is active or the target does not match.
+        """
+        current_turn = self._get_current_turn_messages(messages)
+
+        handoff = (state.get("context") or {}).get("handoff") if isinstance(state, dict) else None
+        if (
+            not isinstance(handoff, dict)
+            or not handoff.get("active")
+            or handoff.get("target_agent") != agent_name
+        ):
+            return current_turn
+
+        tool_call_id = handoff.get("tool_call_id")
+        filtered: list = []
+        for message in current_turn:
+            if isinstance(message, ToolMessage):
+                if getattr(message, "name", None) == "hand_off":
+                    continue
+                if tool_call_id and getattr(message, "tool_call_id", None) == tool_call_id:
+                    continue
+            elif isinstance(message, AIMessage):
+                tool_calls = getattr(message, "tool_calls", None) or []
+                if any(
+                    (tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None))
+                    == "hand_off"
+                    for tc in tool_calls
+                ):
+                    continue
+            filtered.append(message)
+        return filtered
 
     @staticmethod
     def _get_interrupt_payload_from_state(
@@ -1217,7 +1285,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             return
 
         try:
-            await self.graph.aupdate_state(config, {"messages": removals})
+            with tracing_context(enabled=False):
+                await self.graph.aupdate_state(config, {"messages": removals})
         except Exception as exc:
             logger.warning(
                 "Checkpoint compaction aupdate_state failed for thread=%s: %s",
@@ -1751,7 +1820,11 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         attachments = self._get_state_attachments(state)
         device_id = state.get("device_id")
-        current_turn_messages = self._get_current_turn_messages(messages)
+        current_turn_messages = self._messages_for_selected_agent(
+            state,
+            state.get("selected_agent") or "chat_agent",
+            messages,
+        )
         has_images = False
         if attachments:
             current_turn_messages, has_images = self._build_chat_turn_messages_with_attachments(
@@ -1802,6 +1875,11 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         if last_human_idx is not None:
             for msg in messages[last_human_idx + 1 :]:
                 if isinstance(msg, ToolMessage):
+                    # ``hand_off`` ToolMessages are control-plane signals, not
+                    # RAG evidence — skip them so handoff JSON does not leak
+                    # into the delegated agent's tool context.
+                    if getattr(msg, "name", None) == "hand_off":
+                        continue
                     tool_context.append(msg.content)
 
         rag_context = state.get("context", {}) or {}
@@ -2122,7 +2200,11 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             conversation_id, user_id, agent_key="search", state=state
         )
 
-        current_turn_messages = self._get_current_turn_messages(messages)
+        current_turn_messages = self._messages_for_selected_agent(
+            state,
+            state.get("selected_agent") or "search_agent",
+            messages,
+        )
 
         response = await self.search_agent.invoke_model_with_history(
             current_turn_messages,
@@ -2152,7 +2234,11 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             conversation_id, user_id, agent_key="chat", state=state
         )
 
-        current_turn_messages = self._get_current_turn_messages(messages)
+        current_turn_messages = self._messages_for_selected_agent(
+            state,
+            state.get("selected_agent") or "image_generator_agent",
+            messages,
+        )
 
         response = await self.image_generator_agent.invoke_model_with_history(
             current_turn_messages,
@@ -2182,7 +2268,11 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             conversation_id, user_id, agent_key="chat", state=state
         )
 
-        current_turn_messages = self._get_current_turn_messages(messages)
+        current_turn_messages = self._messages_for_selected_agent(
+            state,
+            state.get("selected_agent") or "canvas_agent",
+            messages,
+        )
 
         response = await self.canvas_agent.invoke_model_with_history(
             current_turn_messages,
@@ -3345,6 +3435,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         conversation_id = state_snapshot.values.get("conversation_id")
 
         yield {"type": "agent_selected", "agent": selected_agent}
+        last_emitted_agent = selected_agent
 
         accumulated_content = ""
         accumulated_thinking = ""
@@ -3559,6 +3650,18 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                                     if last_state_values is None:
                                         last_state_values = {}
                                     last_state_values.update(node_state)
+
+                                    new_agent = node_state.get("selected_agent")
+                                    if (
+                                        isinstance(new_agent, str)
+                                        and new_agent != last_emitted_agent
+                                    ):
+                                        last_emitted_agent = new_agent
+                                        yield {
+                                            "type": "agent_selected",
+                                            "agent": new_agent,
+                                            "reason": "handoff",
+                                        }
 
                                 if node_name in ("planning_agent", "planning_tools"):
                                     node_info = {"node": node_name}
@@ -3802,6 +3905,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             return
 
         yield {"type": "agent_selected", "agent": selected_agent}
+        last_emitted_agent = selected_agent
 
         # Agentic RAG is the only path. Document-aware chat streams through the
         # LangGraph pipeline so the search_documents tool loop can execute.
@@ -4059,6 +4163,24 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                                     if last_state_values is None:
                                         last_state_values = {}
                                     last_state_values.update(node_state)
+
+                                    # Emit a second ``agent_selected`` event when
+                                    # this node update changed the active agent
+                                    # (e.g. ``hand_off`` rerouted from planning_agent
+                                    # to search_agent). This lets the UI swap its
+                                    # status indicator to the delegated agent before
+                                    # the next set of tokens arrives.
+                                    new_agent = node_state.get("selected_agent")
+                                    if (
+                                        isinstance(new_agent, str)
+                                        and new_agent != last_emitted_agent
+                                    ):
+                                        last_emitted_agent = new_agent
+                                        yield {
+                                            "type": "agent_selected",
+                                            "agent": new_agent,
+                                            "reason": "handoff",
+                                        }
 
                                 # Emit node completion event for planning nodes
                                 if node_name in ("planning_agent", "planning_tools"):

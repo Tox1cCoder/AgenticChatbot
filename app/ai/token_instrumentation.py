@@ -212,38 +212,45 @@ def compute_token_breakdown(
 
 
 def extract_actual_usage(response: Any) -> dict[str, int | None]:
-    """
-    Extract actual token usage from model response if available.
+    """Extract actual token usage from a model response.
 
-    Works with OpenAI responses that include usage_metadata.
+    Handles two shapes of LangChain ``usage_metadata``:
+    - ``UsageMetadata`` TypedDict (LangChain >= 0.2) — accessed via dict subscript.
+    - Object with ``input_tokens``/``output_tokens`` attributes (older providers).
+
+    Also reads ``response_metadata.usage`` / ``response_metadata.token_usage``
+    for OpenAI-style envelopes.
     """
-    result = {"input_tokens": None, "output_tokens": None}
+    result: dict[str, int | None] = {"input_tokens": None, "output_tokens": None}
 
     if response is None:
         return result
 
-    # Try response_metadata (LangChain convention)
-    if hasattr(response, "response_metadata"):
-        metadata = response.response_metadata
-        if isinstance(metadata, dict):
-            # OpenAI format
-            if "usage" in metadata:
-                usage = metadata["usage"]
-                result["input_tokens"] = usage.get("prompt_tokens")
-                result["output_tokens"] = usage.get("completion_tokens")
-            # Token usage directly in metadata
-            if "token_usage" in metadata:
-                usage = metadata["token_usage"]
-                result["input_tokens"] = usage.get("prompt_tokens")
-                result["output_tokens"] = usage.get("completion_tokens")
-
-    # Try usage_metadata (some providers)
-    if hasattr(response, "usage_metadata") and response.usage_metadata:
-        usage = response.usage_metadata
-        if hasattr(usage, "input_tokens"):
+    # Prefer the standardized usage_metadata shape (LangChain core convention).
+    usage = getattr(response, "usage_metadata", None)
+    if isinstance(usage, dict):
+        if usage.get("input_tokens") is not None:
+            result["input_tokens"] = usage["input_tokens"]
+        if usage.get("output_tokens") is not None:
+            result["output_tokens"] = usage["output_tokens"]
+    elif usage is not None:
+        if getattr(usage, "input_tokens", None) is not None:
             result["input_tokens"] = usage.input_tokens
-        if hasattr(usage, "output_tokens"):
+        if getattr(usage, "output_tokens", None) is not None:
             result["output_tokens"] = usage.output_tokens
+
+    # Fall back to response_metadata.usage / .token_usage if usage_metadata was empty.
+    if result["input_tokens"] is None:
+        metadata = getattr(response, "response_metadata", None)
+        if isinstance(metadata, dict):
+            envelope = metadata.get("usage") or metadata.get("token_usage")
+            if isinstance(envelope, dict):
+                prompt = envelope.get("prompt_tokens")
+                completion = envelope.get("completion_tokens")
+                if prompt is not None:
+                    result["input_tokens"] = prompt
+                if completion is not None:
+                    result["output_tokens"] = completion
 
     return result
 

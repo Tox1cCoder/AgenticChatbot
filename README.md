@@ -466,6 +466,10 @@ Parallelism is config-driven (see [`.env.example`](.env.example)):
 | `CELERY_WORKER_PREFETCH_MULTIPLIER` | `1` | Keep at 1 unless you understand Celery prefetch semantics. |
 | `CELERY_WORKER_MAX_TASKS_PER_CHILD` | `10` | Recycles worker process every N tasks to bound memory growth. |
 | `CELERY_WORKER_TIME_LIMIT` / `CELERY_WORKER_SOFT_TIME_LIMIT` | `300` / `240` | Per-task wall-clock limits (seconds). |
+| `CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS` | `true` | Cancels late-acknowledged running tasks if Redis disconnects so redelivery does not run a duplicate copy concurrently. |
+| `CELERY_BROKER_HEALTH_CHECK_INTERVAL` | `30` | Redis broker socket health-check interval in seconds. |
+| `CELERY_BROKER_VISIBILITY_TIMEOUT` | `3600` | Redis late-ack visibility timeout; keep above expected max document-processing time. |
+| `CELERY_BROKER_SOCKET_KEEPALIVE` / `CELERY_BROKER_RETRY_ON_TIMEOUT` | `true` / `true` | Keep Redis sockets alive and retry timeout-level broker operations. |
 
 On startup the worker prints a banner: `Starting Celery worker: pool=threads concurrency=2 prefetch=1`. If the banner shows `pool=solo` while you are expecting parallel processing, override `CELERY_WORKER_POOL` to `threads` (Windows) or `prefork` (Linux).
 
@@ -1025,6 +1029,7 @@ Wheels can be built with `python -m build`.
 | Windows + async + `localhost` Redis | The config normaliser rewrites `localhost` → `127.0.0.1` automatically on `win32`. |
 | Document uploads stuck in `processing` | Celery worker not running: `python -m app.workers.start_worker`. Check `/health/celery`. |
 | Multiple uploads process one at a time | Check the worker startup banner. On Windows, pool must be `threads` (or another parallel pool); `solo` is single-task debug mode. Set `CELERY_WORKER_POOL=threads` or leave at `auto`. |
+| `consumer: Connection to broker lost` / Redis `WinError 10054` | Redis was restarted or the TCP connection was reset. Confirm `docker ps` shows `sample_chatbot_redis` healthy, then restart the worker. The worker config enables reconnects and cancels late-ack tasks on broker loss to avoid duplicate concurrent document processing after redelivery. |
 | Batch upload returns 207 | Mixed accepted/rejected response. Inspect `data.files` for per-file status and `error_code` (e.g. `DUPLICATE_FILENAME`). Do not treat 207 as a hard failure. |
 | Reranker download slow | First run fetches the HF model. Pin `RERANKER_MODEL` or disable with `ENABLE_RERANKING=false`. |
 | Client-device tool calls fail | Device offline or `CLIENT_RUNTIME_REQUIRE_CONNECTED_DEVICE_FOR_LOCAL_TOOLS=true`. Inspect `GET /device-runtime/connected-devices`. |
