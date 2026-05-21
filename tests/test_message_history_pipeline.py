@@ -284,6 +284,55 @@ async def test_message_service_compacts_checkpoint_after_persist(monkeypatch):
     ]
 
 
+@pytest.mark.asyncio
+async def test_checkpoint_compaction_disables_langsmith_tracing(monkeypatch):
+    """Checkpoint compaction must wrap ``aupdate_state`` in
+    ``tracing_context(enabled=False)`` so the cleanup does not surface as a
+    noisy ``LangGraphUpdateState`` entry with ``remove - No data`` rows in
+    LangSmith. The cleanup *state mutation* still has to run — only its
+    LangSmith trace visibility is suppressed."""
+    from types import SimpleNamespace
+
+    workflow = _make_workflow()
+    workflow.checkpointer = object()
+    calls: list[tuple[str, object]] = []
+
+    class FakeTracingContext:
+        def __init__(self, **kwargs):
+            calls.append(("init", kwargs))
+
+        def __enter__(self):
+            calls.append(("enter", None))
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            calls.append(("exit", None))
+            return False
+
+    async def fake_get_state(_config):
+        return SimpleNamespace(
+            next=[],
+            values={"messages": [AIMessage(content="x", id="m1")]},
+        )
+
+    async def fake_update_state(_config, _payload):
+        calls.append(("update", None))
+
+    workflow.graph = SimpleNamespace(
+        aget_state=fake_get_state,
+        aupdate_state=fake_update_state,
+    )
+    monkeypatch.setattr("app.ai.graph.tracing_context", FakeTracingContext)
+
+    await workflow._compact_checkpoint_after_terminal_response(
+        config={"configurable": {"thread_id": "conv-1"}},
+        thread_id="conv-1",
+    )
+
+    assert ("init", {"enabled": False}) in calls
+    assert calls.index(("enter", None)) < calls.index(("update", None)) < calls.index(("exit", None))
+
+
 def test_workflow_request_round_trip_through_ai_schema():
     """Ensure the AI-layer ``WorkflowExecutionRequest`` mirrors the new
     ID fields on the service-layer schema (round-trip via ``model_dump``)."""

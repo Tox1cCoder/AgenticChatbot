@@ -68,6 +68,11 @@ class ProviderModelOption(CamelModel):
     supports_streaming: bool = False
     supports_reasoning: bool = False
     recommended: bool = False
+    context_window_tokens: int | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+    context_window_source: str | None = None
+    context_window_known: bool | None = None
 
 
 class ProviderOptionsSnapshot(CamelModel):

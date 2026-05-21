@@ -106,3 +106,21 @@ def test_document_processing_service_uses_factory_provider():
         "Celery task gets a fresh instance — singleton/shared state is unsafe "
         "under the threaded worker pool."
     )
+
+
+def test_celery_redis_broker_resilience_is_explicit():
+    """Broker resets should reconnect cleanly and avoid duplicate late-ack work."""
+    from app.workers.celery_app import celery_app
+
+    assert celery_app.conf.broker_connection_retry is True
+    assert celery_app.conf.broker_connection_retry_on_startup is True
+    assert celery_app.conf.worker_cancel_long_running_tasks_on_connection_loss is True
+
+    broker_options = dict(celery_app.conf.broker_transport_options or {})
+    assert broker_options["health_check_interval"] == 30
+    assert broker_options["socket_keepalive"] is True
+    assert broker_options["retry_on_timeout"] is True
+    assert broker_options["visibility_timeout"] == 3600
+
+    result_options = dict(celery_app.conf.result_backend_transport_options or {})
+    assert result_options["visibility_timeout"] == 3600

@@ -28,3 +28,4 @@ class ResolvedRuntimeModelConfig:
     provider_fallback: dict[str, Any] | None = None
     fallback_config: RuntimeFallbackConfig | None = None
     reasoning_effort: str | None = None
+    context_window: dict[str, Any] | None = None

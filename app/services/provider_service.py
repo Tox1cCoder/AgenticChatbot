@@ -19,6 +19,11 @@ from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from app.ai.model_context import (
+    ModelContextWindow,
+    normalize_context_window_metadata,
+    resolve_model_context_window,
+)
 from app.core.config import settings
 from app.models.model_provider import ModelProvider
 from app.repositories.model_provider import ModelProviderRepository
@@ -340,12 +345,46 @@ class ProviderService:
             "config_error": None,
         }
 
+    def _backfill_context_window(self, model_entry: dict[str, Any]) -> dict[str, Any]:
+        """Fill missing context-window fields on a cached catalog entry.
+
+        Catalog rows written before the context-window fields existed lack the
+        new ``context_window_*`` keys. Resolve them on read from the registry
+        so the demo UI sees populated values without forcing a manual re-sync.
+        Existing values are never overwritten.
+        """
+        if not isinstance(model_entry, dict):
+            return model_entry
+        if model_entry.get("context_window_known") is not None:
+            return model_entry
+
+        model_id = str(model_entry.get("id") or "").strip()
+        provider = str(model_entry.get("provider_type") or "").strip().lower()
+        if not model_id or not provider:
+            return model_entry
+
+        resolved = resolve_model_context_window(provider, model_id).to_dict()
+
+        for snake_key in (
+            "context_window_tokens",
+            "max_input_tokens",
+            "max_output_tokens",
+        ):
+            if model_entry.get(snake_key) is None:
+                model_entry[snake_key] = resolved.get(snake_key)
+        if model_entry.get("context_window_source") is None:
+            model_entry["context_window_source"] = resolved.get("source")
+        if model_entry.get("context_window_known") is None:
+            model_entry["context_window_known"] = resolved.get("known")
+        return model_entry
+
     def get_cached_provider_models(self, user_id: UUID, provider_type: str) -> list[dict[str, Any]]:
         provider_type = self._normalize_provider_type(provider_type)
         credentials = self.resolve_provider_credentials(user_id, provider_type)
         catalog = self._normalize_catalog_metadata(credentials.get("provider_metadata"))
         models = catalog.get("models", [])
-        return deepcopy(models) if isinstance(models, list) else []
+        models = deepcopy(models) if isinstance(models, list) else []
+        return [self._backfill_context_window(m) for m in models]
 
     def get_cached_provider_status(self, user_id: UUID, provider_type: str) -> dict[str, Any]:
         provider_type = self._normalize_provider_type(provider_type)
@@ -367,7 +406,10 @@ class ProviderService:
             "sync_status": sync_status,
             "last_synced_at": catalog.get("last_synced_at"),
             "sync_error": config_error or catalog.get("sync_error"),
-            "models": deepcopy(catalog.get("models", [])),
+            "models": [
+                self._backfill_context_window(m)
+                for m in deepcopy(catalog.get("models", []))
+            ],
             "warnings": [],
         }
 
@@ -539,12 +581,47 @@ class ProviderService:
             fragment in model_id for fragment in exclude_fragments
         )
 
+    def _context_window_fields(self, context_window: ModelContextWindow) -> dict[str, Any]:
+        """Render a ``ModelContextWindow`` into the catalog entry fragment."""
+        return {
+            "context_window_tokens": context_window.context_window_tokens,
+            "max_input_tokens": context_window.max_input_tokens,
+            "max_output_tokens": context_window.max_output_tokens,
+            "context_window_source": context_window.source,
+            "context_window_known": context_window.known,
+        }
+
+    def _resolve_catalog_context_window(
+        self,
+        provider: str,
+        model_id: str,
+        provider_api_metadata: dict[str, Any] | None = None,
+    ) -> ModelContextWindow:
+        """Resolve context-window metadata for a single catalog entry.
+
+        Prefers provider-API supplied limits (already in
+        :func:`normalize_context_window_metadata` shape) and falls back to the
+        built-in registry, then to the ``unknown`` sentinel.
+        """
+        if provider_api_metadata:
+            normalized = normalize_context_window_metadata(
+                provider, model_id, provider_api_metadata
+            )
+            if normalized is not None:
+                return normalized
+        return resolve_model_context_window(provider, model_id)
+
     def _normalize_openai_model(self, model_id: str) -> dict[str, Any]:
         model_lower = model_id.lower()
         supports_reasoning = model_lower.startswith(("o1", "o3", "o4", "gpt-5"))
         supports_vision = any(
             token in model_lower for token in ("gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4")
         )
+
+        # OpenAI's Models API does not expose context-window limits, so the
+        # resolver falls through to the conservative built-in registry (or
+        # the ``unknown`` sentinel for models we don't recognise).
+        context_window = self._resolve_catalog_context_window("openai", model_id)
 
         return {
             "id": model_id,
@@ -555,6 +632,7 @@ class ProviderService:
             "supports_streaming": True,
             "supports_reasoning": supports_reasoning,
             "recommended": False,
+            **self._context_window_fields(context_window),
         }
 
     def _should_include_gemini_model(self, model_id: str, supported_actions: list[str]) -> bool:
@@ -574,10 +652,24 @@ class ProviderService:
         display_name: str | None,
         supported_actions: list[str],
         thinking_metadata: Any | None,
+        input_token_limit: int | None = None,
+        output_token_limit: int | None = None,
     ) -> dict[str, Any]:
         model_lower = model_id.lower()
         supports_reasoning = bool(thinking_metadata) or any(
             token in model_lower for token in ("2.5", "3", "pro")
+        )
+
+        provider_api_metadata: dict[str, Any] | None = None
+        if input_token_limit is not None or output_token_limit is not None:
+            provider_api_metadata = {}
+            if input_token_limit is not None:
+                provider_api_metadata["input_token_limit"] = input_token_limit
+            if output_token_limit is not None:
+                provider_api_metadata["output_token_limit"] = output_token_limit
+
+        context_window = self._resolve_catalog_context_window(
+            "gemini", model_id, provider_api_metadata
         )
 
         return {
@@ -589,6 +681,7 @@ class ProviderService:
             "supports_streaming": True,
             "supports_reasoning": supports_reasoning,
             "recommended": False,
+            **self._context_window_fields(context_window),
         }
 
     def _apply_recommended_model_flags(
@@ -669,6 +762,8 @@ class ProviderService:
                     display_name=getattr(model, "display_name", None),
                     supported_actions=supported_actions,
                     thinking_metadata=getattr(model, "thinking", None),
+                    input_token_limit=getattr(model, "input_token_limit", None),
+                    output_token_limit=getattr(model, "output_token_limit", None),
                 )
             )
 

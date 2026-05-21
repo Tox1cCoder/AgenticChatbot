@@ -446,6 +446,32 @@ class Settings(BaseSettings):
         default=240,
         description="Soft task time limit in seconds (raises SoftTimeLimitExceeded).",
     )
+    celery_worker_cancel_long_running_tasks_on_connection_loss: bool = Field(
+        default=True,
+        description=(
+            "Cancel late-acknowledged running tasks when the broker connection is lost. "
+            "This avoids duplicate concurrent execution after Redis reconnect/redelivery."
+        ),
+    )
+    celery_broker_health_check_interval: int = Field(
+        default=30,
+        description="Redis broker socket health-check interval in seconds.",
+    )
+    celery_broker_visibility_timeout: int = Field(
+        default=3600,
+        description=(
+            "Redis broker visibility timeout in seconds for late-acknowledged tasks. "
+            "Must exceed expected task runtime."
+        ),
+    )
+    celery_broker_socket_keepalive: bool = Field(
+        default=True,
+        description="Enable TCP keepalive on Redis broker sockets.",
+    )
+    celery_broker_retry_on_timeout: bool = Field(
+        default=True,
+        description="Retry Redis broker operations that fail with socket timeouts.",
+    )
 
     # File Storage Configuration
     temp_storage_path: str = Field(
@@ -926,6 +952,8 @@ class Settings(BaseSettings):
         "celery_worker_max_tasks_per_child",
         "celery_worker_time_limit",
         "celery_worker_soft_time_limit",
+        "celery_broker_health_check_interval",
+        "celery_broker_visibility_timeout",
         mode="before",
     )
     @classmethod

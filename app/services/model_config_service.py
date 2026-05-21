@@ -18,6 +18,7 @@ from typing import Any
 from uuid import UUID
 
 from app.ai.agent_config import AGENT_CONFIG
+from app.ai.model_context import resolve_model_context_window
 from app.core.runtime_modeling import (
     ResolvedRuntimeModelConfig,
     RuntimeFallbackConfig,
@@ -434,6 +435,29 @@ class ModelConfigService(IRuntimeModelResolver):
             "supports_reasoning": any(token in model_lower for token in ("2.5", "3", "pro")),
         }
 
+    def _resolve_context_window_metadata(
+        self,
+        provider: str,
+        model_id: str,
+        provider_snapshot: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Resolve context-window metadata for the final (provider, model) pair.
+
+        Prefers the catalog entry from the provider snapshot. Falls back to
+        the static registry. Always returns a populated dict (with
+        ``known=False`` for unknown models).
+        """
+        catalog_entry: dict[str, Any] | None = None
+        if model_id and provider_snapshot:
+            catalog_entry = self._get_model_metadata(provider_snapshot, model_id)
+
+        resolved = resolve_model_context_window(
+            provider,
+            model_id or "",
+            catalog_metadata=catalog_entry,
+        )
+        return resolved.to_dict()
+
     def _build_runtime_fallback_candidate(
         self,
         *,
@@ -526,6 +550,9 @@ class ModelConfigService(IRuntimeModelResolver):
                 warnings=["User context is missing; using default Gemini runtime configuration."],
                 capabilities=self._build_capabilities("gemini", default_model, {}),
                 reasoning_effort=reasoning_effort,
+                context_window=self._resolve_context_window_metadata(
+                    "gemini", default_model, {}
+                ),
             )
 
         provider_snapshots = self._get_provider_snapshots(user_id)
@@ -663,6 +690,12 @@ class ModelConfigService(IRuntimeModelResolver):
             provider_snapshots.get(provider, {}),
         )
 
+        context_window = self._resolve_context_window_metadata(
+            provider,
+            model,
+            provider_snapshots.get(provider, {}),
+        )
+
         if provider_fallback:
             logger.warning(
                 "Runtime config fallback for user=%s agent=%s: %s -> %s (%s)",
@@ -699,6 +732,7 @@ class ModelConfigService(IRuntimeModelResolver):
             provider_fallback=provider_fallback,
             fallback_config=fallback_config,
             reasoning_effort=reasoning_effort,
+            context_window=context_window,
         )
 
     def get_effective_model_config(self, user_id: UUID) -> dict[str, dict[str, Any]]:

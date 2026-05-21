@@ -1762,3 +1762,102 @@ async def test_dispatch_result_includes_requested_and_resolved_model(monkeypatch
     assert entry.resolved_model["reasoning_effort"] == "high"
     # Sanitized: no API keys ever surfaced.
     assert "api_key" not in entry.resolved_model
+
+
+# ---------------------------------------------------------------------------
+# Handoff control-plane scoping
+# ---------------------------------------------------------------------------
+
+
+def test_delegated_agent_messages_strip_handoff_control_messages():
+    """When a hand_off is the routing reason for this turn, the delegated
+    agent must receive only the user's request — not the source agent's
+    transfer narration AIMessage or the matching hand_off ToolMessage.
+    """
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    messages = [
+        HumanMessage(content="what changed in the latest release?"),
+        AIMessage(
+            content="Transfering your request to Search Agent...",
+            tool_calls=[
+                {"id": "handoff-1", "name": "hand_off", "args": {"target_agent": "search_agent"}}
+            ],
+        ),
+        ToolMessage(
+            content='{"hand_off": "search_agent", "reason": "needs current info"}',
+            tool_call_id="handoff-1",
+            name="hand_off",
+        ),
+    ]
+    state: dict[str, Any] = {
+        "selected_agent": "search_agent",
+        "messages": messages,
+        "context": {
+            "handoff": {
+                "active": True,
+                "source_agent": "planning_agent",
+                "target_agent": "search_agent",
+                "tool_call_id": "handoff-1",
+            }
+        },
+    }
+
+    delegated = workflow._messages_for_selected_agent(state, "search_agent", messages)
+
+    assert delegated == [messages[0]]
+
+
+def test_apply_hand_off_records_control_metadata():
+    """Successful hand_off must stamp ``state['context']['handoff']`` so the
+    streamer and delegated-agent scoping can react to it deterministically.
+    """
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    workflow.agents = {"search_agent": object(), "planning_agent": object()}
+
+    state: dict[str, Any] = {
+        "selected_agent": "planning_agent",
+        "messages": [],
+        "context": {},
+    }
+    tool_outputs = [
+        {
+            "tool_call_id": "handoff-9",
+            "name": "hand_off",
+            "content": '{"hand_off": "search_agent", "reason": "needs current info"}',
+        }
+    ]
+
+    new_state = workflow._apply_hand_off_if_present(state, tool_outputs)
+
+    assert new_state["selected_agent"] == "search_agent"
+    handoff = new_state["context"]["handoff"]
+    assert handoff == {
+        "active": True,
+        "source_agent": "planning_agent",
+        "target_agent": "search_agent",
+        "reason": "needs current info",
+        "tool_call_id": "handoff-9",
+    }
+
+
+def test_delegated_agent_messages_passthrough_when_no_active_handoff():
+    """Without an active handoff entry, scoping must behave like
+    ``_get_current_turn_messages`` — return the slice from the last
+    ``HumanMessage`` onward, untouched."""
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    messages = [
+        HumanMessage(content="old"),
+        AIMessage(content="prior answer"),
+        HumanMessage(content="new question"),
+        ToolMessage(content="some result", tool_call_id="t1", name="search_documents"),
+    ]
+    state: dict[str, Any] = {
+        "selected_agent": "search_agent",
+        "messages": messages,
+        "context": {},
+    }
+
+    delegated = workflow._messages_for_selected_agent(state, "search_agent", messages)
+
+    assert delegated == messages[2:]
+

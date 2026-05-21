@@ -15,8 +15,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from app.core.runtime_modeling import ResolvedRuntimeModelConfig
 
 
@@ -294,3 +292,254 @@ def test_model_config_service_has_split_supported_agent_keys():
     assert "image_generator" in SUPPORTED_RUNTIME_AGENT_KEYS
     # Runtime keys must be a strict superset of persisted keys.
     assert set(SUPPORTED_AGENT_KEYS) <= set(SUPPORTED_RUNTIME_AGENT_KEYS)
+
+
+# ---------------------------------------------------------------------------
+# Task 4: context_window metadata threaded through ResolvedRuntimeModelConfig
+# ---------------------------------------------------------------------------
+
+
+def _gemini_snapshot(
+    *,
+    configured: bool = True,
+    key_source: str = "env",
+    models: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if models is None:
+        models = [
+            {
+                "id": "gemini-3-flash-preview",
+                "display_name": "gemini-3-flash-preview",
+                "provider_type": "gemini",
+                "supports_vision": True,
+                "supports_tool_calling": True,
+                "supports_streaming": True,
+                "supports_reasoning": True,
+                "recommended": True,
+                "context_window_tokens": 1_048_576,
+                "max_input_tokens": 1_048_576,
+                "max_output_tokens": 65536,
+                "context_window_source": "registry",
+                "context_window_known": True,
+            }
+        ]
+    return {
+        "configured": configured,
+        "key_source": key_source,
+        "models": models,
+        "sync_status": "ready",
+        "provider_type": "gemini",
+    }
+
+
+def _openai_snapshot(
+    *,
+    configured: bool = True,
+    key_source: str = "env",
+    models: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if models is None:
+        models = [
+            {
+                "id": "gpt-4o",
+                "display_name": "gpt-4o",
+                "provider_type": "openai",
+                "supports_vision": True,
+                "supports_tool_calling": True,
+                "supports_streaming": True,
+                "supports_reasoning": False,
+                "recommended": True,
+                "context_window_tokens": 128000,
+                "max_input_tokens": 128000,
+                "max_output_tokens": 16384,
+                "context_window_source": "provider_api",
+                "context_window_known": True,
+            }
+        ]
+    return {
+        "configured": configured,
+        "key_source": key_source,
+        "models": models,
+        "sync_status": "ready",
+        "provider_type": "openai",
+    }
+
+
+def _make_service(
+    *,
+    provider_snapshots: dict[str, dict[str, Any]] | None = None,
+    persisted_rows: list[Any] | None = None,
+    credentials_by_provider: dict[str, dict[str, Any]] | None = None,
+):
+    from unittest.mock import MagicMock
+
+    from app.services.model_config_service import ModelConfigService
+
+    repo = MagicMock()
+    repo.get_all_by_user.return_value = persisted_rows or []
+    repo.get_by_user_and_agent_key.return_value = None
+
+    snapshots = provider_snapshots or {}
+    credentials = credentials_by_provider or {}
+
+    provider_svc = MagicMock()
+    provider_svc.get_cached_provider_status.side_effect = lambda uid, ptype: snapshots.get(
+        ptype,
+        {"configured": False, "key_source": "none", "models": []},
+    )
+    provider_svc.resolve_provider_credentials.side_effect = lambda uid, ptype: credentials.get(
+        ptype,
+        {"api_key": None, "key_source": "none"},
+    )
+
+    return ModelConfigService(repository=repo, provider_service=provider_svc)
+
+
+def test_context_window_default_gemini_when_user_id_none():
+    """``user_id=None`` early return must expose ``context_window`` for the
+    default Gemini model. The default chat model is in the registry, so
+    ``known`` should be True."""
+    service = _make_service()
+
+    resolved = service.resolve_runtime_config(user_id=None, agent_key="chat")
+
+    assert resolved.context_window is not None
+    assert resolved.context_window["provider"] == "gemini"
+    assert resolved.context_window["model"] == resolved.model
+    assert isinstance(resolved.context_window.get("known"), bool)
+    # The configured default chat model ``gemini-3-flash-preview`` is in the
+    # built-in registry.
+    assert resolved.context_window["known"] is True
+    assert resolved.context_window["source"] == "registry"
+    assert resolved.context_window["context_window_tokens"] == 1_048_576
+
+
+def test_context_window_runtime_override_known_openai_model():
+    """A runtime override that selects OpenAI ``gpt-4o`` with a populated
+    provider snapshot must surface ``context_window`` sourced from the
+    catalog (``provider_api``)."""
+    from uuid import uuid4
+
+    snapshots = {
+        "gemini": _gemini_snapshot(),
+        "openai": _openai_snapshot(),
+    }
+    credentials = {
+        "gemini": {"api_key": "gemini-key", "key_source": "env"},
+        "openai": {"api_key": "openai-key", "key_source": "env"},
+    }
+    service = _make_service(
+        provider_snapshots=snapshots,
+        credentials_by_provider=credentials,
+    )
+
+    resolved = service.resolve_runtime_config(
+        user_id=uuid4(),
+        agent_key="chat",
+        request_override={"provider_type": "openai", "model": "gpt-4o"},
+    )
+
+    assert resolved.provider == "openai"
+    assert resolved.model == "gpt-4o"
+    assert resolved.context_window is not None
+    assert resolved.context_window["known"] is True
+    assert resolved.context_window["source"] == "provider_api"
+    assert resolved.context_window["context_window_tokens"] == 128000
+    assert resolved.context_window["max_output_tokens"] == 16384
+
+
+def test_context_window_custom_unknown_model():
+    """A custom-model override with an unrecognised model id must yield an
+    unknown ``context_window`` payload (``known=False``, ``source='unknown'``)."""
+    from uuid import uuid4
+
+    snapshots = {
+        "gemini": _gemini_snapshot(),
+        "openai": _openai_snapshot(),
+    }
+    credentials = {
+        "gemini": {"api_key": "gemini-key", "key_source": "env"},
+        "openai": {"api_key": "openai-key", "key_source": "env"},
+    }
+    service = _make_service(
+        provider_snapshots=snapshots,
+        credentials_by_provider=credentials,
+    )
+
+    resolved = service.resolve_runtime_config(
+        user_id=uuid4(),
+        agent_key="chat",
+        request_override={
+            "provider_type": "openai",
+            "model": "weird-custom-id",
+            "allow_custom_model": True,
+        },
+    )
+
+    assert resolved.provider == "openai"
+    assert resolved.model == "weird-custom-id"
+    assert resolved.is_custom_model is True
+    assert resolved.context_window is not None
+    assert resolved.context_window["known"] is False
+    assert resolved.context_window["source"] == "unknown"
+    assert resolved.context_window["context_window_tokens"] is None
+
+
+def test_context_window_reflects_final_provider_after_fallback():
+    """If the requested provider is unconfigured, fallback should swap the
+    provider/model AND the ``context_window`` should reflect the fallback
+    target, not the originally-requested one."""
+    from uuid import uuid4
+
+    snapshots = {
+        "gemini": _gemini_snapshot(),
+        "openai": _openai_snapshot(configured=False, models=[]),
+    }
+    credentials = {
+        "gemini": {"api_key": "gemini-key", "key_source": "env"},
+        "openai": {"api_key": None, "key_source": "none"},
+    }
+    service = _make_service(
+        provider_snapshots=snapshots,
+        credentials_by_provider=credentials,
+    )
+
+    resolved = service.resolve_runtime_config(
+        user_id=uuid4(),
+        agent_key="chat",
+        request_override={"provider_type": "openai", "model": "gpt-4o"},
+    )
+
+    # Fallback should have kicked in: provider becomes gemini.
+    assert resolved.provider == "gemini"
+    assert resolved.context_window is not None
+    assert resolved.context_window["provider"] == "gemini"
+    assert resolved.context_window["model"] == resolved.model
+    assert resolved.context_window["known"] is True
+
+
+def test_context_window_default_gemini_resolution_with_configured_provider():
+    """No request override, no persisted row -> default Gemini path; the
+    final ``context_window`` should reflect the chosen Gemini model."""
+    from uuid import uuid4
+
+    snapshots = {"gemini": _gemini_snapshot()}
+    credentials = {"gemini": {"api_key": "gemini-key", "key_source": "env"}}
+    service = _make_service(
+        provider_snapshots=snapshots,
+        credentials_by_provider=credentials,
+    )
+
+    resolved = service.resolve_runtime_config(
+        user_id=uuid4(),
+        agent_key="chat",
+    )
+
+    assert resolved.provider == "gemini"
+    assert resolved.context_window is not None
+    assert resolved.context_window["provider"] == "gemini"
+    assert resolved.context_window["model"] == resolved.model
+    assert resolved.context_window["known"] is True
+    # Catalog-driven, so the source should reflect the snapshot's flag.
+    assert resolved.context_window["source"] in {"provider_api", "registry"}
+    assert resolved.context_window["context_window_tokens"] == 1_048_576

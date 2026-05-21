@@ -58,11 +58,7 @@ class Router:
         # router should never wander off to chat_agent just because the user
         # phrased a delegation request casually. The LLM router is unreliable
         # for this, so we short-circuit deterministically.
-        if (
-            planning_mode_enabled
-            and has_existing_plan
-            and "planning_agent" in available_agents
-        ):
+        if planning_mode_enabled and has_existing_plan and "planning_agent" in available_agents:
             return "planning_agent"
 
         metadata = message.metadata or {}

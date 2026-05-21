@@ -33,6 +33,7 @@ from ..deferred_tool_binding import (
 )
 from ..hand_off_tool import hand_off as _hand_off_tool
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
+from ..model_context import build_context_window_usage, resolve_model_context_window
 from ..prompts import DELEGATION_SUFFIX, TOOL_CONTEXT_SUFFIX, TOOL_EXPLORATION_SUFFIX
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..skills_tool import create_activate_skill_tool, get_available_skill_summaries
@@ -629,6 +630,14 @@ class BaseAgent(ABC):
             f"Provider fallback applied: {from_provider} -> {fallback.provider} ({reason})."
         )
 
+        # Fallback bypasses ModelConfigService, so we resolve the context
+        # window from the static registry. Provider catalog metadata is not
+        # available here; the registry is good enough for the rare fallback
+        # path.
+        context_window = resolve_model_context_window(
+            fallback.provider, fallback.model
+        ).to_dict()
+
         return ResolvedRuntimeModelConfig(
             agent_key=self.agent_config_key,
             provider=fallback.provider,
@@ -649,6 +658,7 @@ class BaseAgent(ABC):
                 "to": fallback.provider,
                 "reason": reason,
             },
+            context_window=context_window,
         )
 
     def _create_langchain_model_from_runtime(
@@ -745,6 +755,35 @@ class BaseAgent(ABC):
             metadata["provider_fallback"] = runtime_config.provider_fallback
         if getattr(runtime_config, "reasoning_effort", None):
             metadata["reasoning_effort"] = runtime_config.reasoning_effort
+
+        if runtime_config.context_window:
+            metadata["context_window"] = dict(runtime_config.context_window)
+
+    def _merge_context_window_usage(
+        self,
+        metadata: dict[str, Any],
+        token_breakdown: dict[str, Any] | None,
+    ) -> None:
+        """Merge token-usage fields into ``metadata['context_window']``.
+
+        Expects ``_apply_runtime_metadata`` to have already populated the
+        static context-window fields. Computes the dynamic usage fields
+        (``used_tokens``, ``used_token_source``, ``usage_ratio``,
+        ``display_state``) from the supplied token breakdown and merges them
+        into the existing payload.
+
+        Only ``invoke_model_with_history`` calls this — other response paths
+        (chat vision, agentic RAG, planning emission) emit static context
+        fields via ``_apply_runtime_metadata`` but skip usage because they
+        do not assemble a ``token_breakdown``.
+        """
+        context_window = metadata.get("context_window")
+        if not context_window:
+            return
+
+        merged = dict(context_window)
+        merged.update(build_context_window_usage(context_window, token_breakdown))
+        metadata["context_window"] = merged
 
     async def _ainvoke_with_retries(
         self,
@@ -1056,14 +1095,16 @@ class BaseAgent(ABC):
                 reasoning_summary = extract_openai_reasoning_summary(response.content)
                 reasoning_tokens = extract_openai_reasoning_tokens(response)
 
+            token_breakdown_dict = token_breakdown.to_dict()
             metadata = {
                 "conversation_id": conversation_id,
                 "has_tool_calls": tool_calls is not None,
-                "token_breakdown": token_breakdown.to_dict(),
+                "token_breakdown": token_breakdown_dict,
             }
             if context_overflow_retried:
                 metadata["context_overflow_retry"] = True
             self._apply_runtime_metadata(metadata, runtime_config)
+            self._merge_context_window_usage(metadata, token_breakdown_dict)
 
             if thinking:
                 metadata["thinking"] = thinking

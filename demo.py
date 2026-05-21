@@ -1000,6 +1000,38 @@ APP_STYLE = """
     .canvas-artifact-header a.canvas-newlab:hover {
         background: #bae6fd;
     }
+
+    /* Context window indicator (assistant provider/model row) */
+    .ctx-window-row {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.8rem;
+        color: rgba(49, 51, 63, 0.6);
+        line-height: 1.4;
+    }
+    .ctx-window-circle {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        flex-shrink: 0;
+        border: 1px solid transparent;
+        vertical-align: middle;
+    }
+    .ctx-window-circle.unknown {
+        background-color: transparent;
+        border-color: rgba(120, 120, 120, 0.6);
+    }
+    .ctx-window-circle.ok {
+        background-color: #2ecc71;
+    }
+    .ctx-window-circle.warn {
+        background-color: #f39c12;
+    }
+    .ctx-window-circle.danger {
+        background-color: #e74c3c;
+    }
 </style>
 """
 
@@ -1450,6 +1482,11 @@ def _sanitize_rendered_html(html_fragment: str) -> str:
     parser.feed(html_fragment)
     parser.close()
     return "".join(parser.result)
+
+
+from app.ui.stream_markdown import (
+    normalize_stream_markdown_text as normalize_stream_markdown_text,
+)
 
 
 @st.cache_data(show_spinner=False, max_entries=500)
@@ -6073,6 +6110,116 @@ def render_suggestion_buttons(suggestions: list[str], msg_id: str):
                 st.rerun()
 
 
+def _format_tokens(value: Any) -> str:
+    """Format an integer token count as a compact short string (e.g. '12.0k')."""
+    if value is None:
+        return "?"
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return "?"
+    if n < 0:
+        return "?"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        formatted = f"{n / 1_000:.1f}k"
+        return formatted.replace(".0k", "k")
+    return str(n)
+
+
+def _get_context_window_metadata(message_metadata: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract a valid context_window dict from message metadata.
+
+    Returns None if metadata is missing or the context_window field is the wrong shape.
+    """
+    if not isinstance(message_metadata, dict):
+        return None
+    cw = message_metadata.get("context_window")
+    return cw if isinstance(cw, dict) else None
+
+
+def _format_context_window_label(context_window: dict[str, Any]) -> str:
+    """Build a human-readable usage label for the context window tooltip.
+
+    Examples:
+      '12.0k / 128k tokens (9%) - actual'
+      '128k token window'
+      'Window unknown'
+    Returns an empty string only if the input is not a dict.
+    """
+    if not isinstance(context_window, dict):
+        return ""
+
+    known = context_window.get("known")
+    window_tokens = context_window.get("context_window_tokens")
+    if known is False and not window_tokens:
+        return "Window unknown"
+    if not window_tokens:
+        return "Window unknown"
+
+    window_str = _format_tokens(window_tokens)
+    used_tokens = context_window.get("used_tokens")
+    usage_ratio = context_window.get("usage_ratio")
+    used_source = context_window.get("used_token_source")
+
+    parts: list[str] = []
+    if used_tokens is not None:
+        parts.append(f"{_format_tokens(used_tokens)} / {window_str} tokens")
+        if isinstance(usage_ratio, (int, float)):
+            pct = max(0, min(999, int(round(float(usage_ratio) * 100))))
+            parts.append(f"({pct}%)")
+    else:
+        parts.append(f"{window_str} token window")
+
+    label = " ".join(parts).strip()
+    if isinstance(used_source, str) and used_source.strip():
+        suffix = used_source.strip().replace("_", " ")
+        label = f"{label} - {suffix}"
+    return label
+
+
+def _render_context_window_indicator(
+    provider: str | None,
+    model: str | None,
+    context_window: dict[str, Any] | None,
+) -> None:
+    """Render the provider/model line with an inline context-window circle.
+
+    Falls back to st.caption(...) if context_window metadata is absent.
+    """
+    raw_provider = str(provider).strip() if provider else ""
+    raw_model = str(model).strip() if model else ""
+    if raw_provider and raw_model:
+        plain_label = f"{raw_provider}:{raw_model}"
+    else:
+        plain_label = raw_model or raw_provider
+
+    if not plain_label:
+        return
+
+    if context_window is None:
+        st.caption(plain_label)
+        return
+
+    display_state = str(context_window.get("display_state") or "").strip().lower()
+    if display_state not in {"ok", "warn", "danger"}:
+        display_state = "unknown"
+
+    tooltip = _format_context_window_label(context_window) or "Context usage unavailable"
+    safe_label = html.escape(plain_label)
+    safe_tooltip = html.escape(tooltip)
+
+    html_row = (
+        '<div class="ctx-window-row">'
+        f"<span>{safe_label}</span>"
+        f'<span class="ctx-window-circle {display_state}" '
+        f'title="{safe_tooltip}" aria-label="{safe_tooltip}"></span>'
+        "</div>"
+    )
+    st.markdown(html_row, unsafe_allow_html=True)
+
+
 def render_message_bubble(
     msg: dict[str, Any],
     is_user: bool,
@@ -6095,10 +6242,8 @@ def render_message_bubble(
             provider = message_metadata.get("provider")
             model = message_metadata.get("model")
             if provider or model:
-                if provider and model:
-                    st.caption(f"{provider}:{model}")
-                else:
-                    st.caption(str(model or provider))
+                context_window = _get_context_window_metadata(message_metadata)
+                _render_context_window_indicator(provider, model, context_window)
 
         st.markdown(content_text)  # Native markdown with LaTeX support
 
@@ -7282,7 +7427,9 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 if _has_live_trace_panel_content():
                     st.session_state.stream_trace_expanded = False
                     render_live_trace_panel(trace_placeholder)
-                response_placeholder.markdown(accumulated_content)
+                response_placeholder.markdown(
+                    normalize_stream_markdown_text(accumulated_content)
+                )
                 status.update(label="Resuming response...", state="running")
                 continue
 
@@ -7858,7 +8005,9 @@ def render_chat_view():
                                 st.session_state.stream_trace_expanded = False
                                 render_live_trace_panel(trace_placeholder)
                             # Display with native markdown for LaTeX support
-                            response_placeholder.markdown(accumulated_content)
+                            response_placeholder.markdown(
+                                normalize_stream_markdown_text(accumulated_content)
+                            )
 
                         elif event_type == "tool":
                             _upsert_stream_tool_trace(event)
@@ -9090,6 +9239,14 @@ def render_models_view() -> None:
                 st.caption("Save a key to enable sync and per-user model selection.")
 
         if models:
+            def _ctx_window_cell(m: dict[str, Any]) -> str:
+                value = m.get("contextWindowTokens") or m.get("context_window_tokens")
+                return _format_tokens(value) if value else ""
+
+            def _max_output_cell(m: dict[str, Any]) -> str:
+                value = m.get("maxOutputTokens") or m.get("max_output_tokens")
+                return _format_tokens(value) if value else ""
+
             model_rows = [
                 {
                     "ID": str(model.get("id") or "").strip(),
@@ -9109,6 +9266,8 @@ def render_models_view() -> None:
                     "Reasoning": "Yes"
                     if model.get("supportsReasoning") or model.get("supports_reasoning")
                     else "",
+                    "Context Window": _ctx_window_cell(model),
+                    "Max Output": _max_output_cell(model),
                 }
                 for model in models
             ]
