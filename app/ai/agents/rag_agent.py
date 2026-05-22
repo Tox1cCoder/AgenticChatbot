@@ -36,6 +36,7 @@ from ..prompts import (
 )
 from ..rag_tools import create_search_documents_tool
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from ..token_instrumentation import compute_token_breakdown, extract_actual_usage
 from ..utils import coerce_response_text
 from .base_agent import BaseAgent
 
@@ -744,6 +745,20 @@ class RAGAgent(BaseAgent):
         """
         current_runtime = runtime_config
         context_overflow_retried = False
+        system_prompt = "\n\n".join(
+            coerce_response_text(getattr(message, "content", ""))
+            for message in messages
+            if isinstance(message, SystemMessage)
+        )
+        non_system_messages = [
+            message for message in messages if not isinstance(message, SystemMessage)
+        ]
+        token_breakdown = compute_token_breakdown(
+            system_prompt=system_prompt,
+            history_messages=[],
+            current_turn_messages=non_system_messages,
+            tools=tools if tools and not disable_tools else None,
+        )
 
         async def _invoke_with_optional_config(
             model: Any,
@@ -806,6 +821,12 @@ class RAGAgent(BaseAgent):
 
         response_text = coerce_response_text(response.content or "")
         tool_calls = None
+        actual_usage = extract_actual_usage(response)
+        if any(value is not None for value in actual_usage.values()):
+            token_breakdown.actual_input_tokens = actual_usage.get("input_tokens")
+            token_breakdown.actual_output_tokens = actual_usage.get("output_tokens")
+            token_breakdown.actual_total_tokens = actual_usage.get("total_tokens")
+            token_breakdown.actual_reasoning_tokens = actual_usage.get("reasoning_tokens")
 
         if hasattr(response, "tool_calls") and response.tool_calls:
             tool_calls = response.tool_calls
@@ -824,7 +845,10 @@ class RAGAgent(BaseAgent):
             "conversation_id": conversation_id,
             "agentic_mode": True,
             "has_tool_calls": bool(tool_calls),
+            "token_breakdown": token_breakdown.to_dict(),
         }
+        if isinstance(actual_usage.get("reasoning_tokens"), int):
+            metadata["reasoning_tokens"] = actual_usage["reasoning_tokens"]
         if agentic_images_count:
             metadata["agentic_images_count"] = agentic_images_count
         if has_images:
@@ -834,6 +858,7 @@ class RAGAgent(BaseAgent):
         if context_overflow_retried:
             metadata["context_overflow_retry"] = True
         self._apply_runtime_metadata(metadata, runtime_config)
+        self._merge_context_window_usage(metadata, metadata["token_breakdown"])
 
         return AgentResponse(
             agent_type=AgentType.RAG,

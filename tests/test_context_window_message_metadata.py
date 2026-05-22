@@ -20,7 +20,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from app.ai.token_instrumentation import TokenBudgetBreakdown, extract_actual_usage
+from langchain_core.messages import ToolMessage
+
+from app.ai.token_instrumentation import (
+    TokenBudgetBreakdown,
+    estimate_message_tokens,
+    extract_actual_usage,
+)
 from app.core.runtime_modeling import (
     ResolvedRuntimeModelConfig,
     RuntimeFallbackConfig,
@@ -144,7 +150,7 @@ def test_apply_runtime_metadata_copies_context_window():
 
 
 def test_context_window_usage_merged_in_invoke():
-    """With a known context window and actual_input_tokens set, the merge
+    """With a known context window and actual_total_tokens set, the merge
     helper must produce all four usage fields and preserve the static fields.
     """
     from app.ai.agents import base_agent as base_module
@@ -161,6 +167,8 @@ def test_context_window_usage_merged_in_invoke():
         total_tokens=1000,
         actual_input_tokens=12000,
         actual_output_tokens=200,
+        actual_total_tokens=12500,
+        actual_reasoning_tokens=300,
     )
     base_module.BaseAgent._merge_context_window_usage(
         agent, metadata, breakdown.to_dict()
@@ -176,9 +184,9 @@ def test_context_window_usage_merged_in_invoke():
     assert cw["source"] == "registry"
     assert cw["known"] is True
     # Usage fields populated.
-    assert cw["used_tokens"] == 12000
-    assert cw["used_token_source"] == "actual_input"
-    assert cw["usage_ratio"] == 12000 / 128000
+    assert cw["used_tokens"] == 12500
+    assert cw["used_token_source"] == "actual_total"
+    assert cw["usage_ratio"] == 12500 / 128000
     assert cw["display_state"] == "ok"
 
 
@@ -347,12 +355,18 @@ def test_extract_actual_usage_handles_dict_usage_metadata():
             "input_tokens": 1234,
             "output_tokens": 56,
             "total_tokens": 1290,
+            "output_token_details": {"reasoning": 12},
         }
     )
 
     result = extract_actual_usage(response)
 
-    assert result == {"input_tokens": 1234, "output_tokens": 56}
+    assert result == {
+        "input_tokens": 1234,
+        "output_tokens": 56,
+        "total_tokens": 1290,
+        "reasoning_tokens": 12,
+    }
 
 
 def test_extract_actual_usage_handles_object_usage_metadata():
@@ -363,19 +377,36 @@ def test_extract_actual_usage_handles_object_usage_metadata():
 
     result = extract_actual_usage(response)
 
-    assert result == {"input_tokens": 987, "output_tokens": 10}
+    assert result == {
+        "input_tokens": 987,
+        "output_tokens": 10,
+        "total_tokens": 997,
+        "reasoning_tokens": None,
+    }
 
 
 def test_extract_actual_usage_falls_back_to_response_metadata_usage():
     """If usage_metadata is absent, fall back to response_metadata['usage']
     using OpenAI's prompt_tokens/completion_tokens keys."""
     response = SimpleNamespace(
-        response_metadata={"usage": {"prompt_tokens": 500, "completion_tokens": 20}}
+        response_metadata={
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 20,
+                "total_tokens": 550,
+                "completion_tokens_details": {"reasoning_tokens": 9},
+            }
+        }
     )
 
     result = extract_actual_usage(response)
 
-    assert result == {"input_tokens": 500, "output_tokens": 20}
+    assert result == {
+        "input_tokens": 500,
+        "output_tokens": 20,
+        "total_tokens": 550,
+        "reasoning_tokens": 9,
+    }
 
 
 def test_extract_actual_usage_handles_token_usage_envelope():
@@ -388,7 +419,12 @@ def test_extract_actual_usage_handles_token_usage_envelope():
 
     result = extract_actual_usage(response)
 
-    assert result == {"input_tokens": 600, "output_tokens": 30}
+    assert result == {
+        "input_tokens": 600,
+        "output_tokens": 30,
+        "total_tokens": 630,
+        "reasoning_tokens": None,
+    }
 
 
 def test_extract_actual_usage_prefers_usage_metadata_over_response_metadata():
@@ -400,7 +436,12 @@ def test_extract_actual_usage_prefers_usage_metadata_over_response_metadata():
 
     result = extract_actual_usage(response)
 
-    assert result == {"input_tokens": 111, "output_tokens": 22}
+    assert result == {
+        "input_tokens": 111,
+        "output_tokens": 22,
+        "total_tokens": 133,
+        "reasoning_tokens": None,
+    }
 
 
 def test_extract_actual_usage_returns_nones_for_unknown_shape():
@@ -409,14 +450,24 @@ def test_extract_actual_usage_returns_nones_for_unknown_shape():
 
     result = extract_actual_usage(response)
 
-    assert result == {"input_tokens": None, "output_tokens": None}
+    assert result == {
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "reasoning_tokens": None,
+    }
 
 
 def test_extract_actual_usage_returns_nones_for_none_response():
     """Defensive: a None response yields Nones — no AttributeError."""
     result = extract_actual_usage(None)
 
-    assert result == {"input_tokens": None, "output_tokens": None}
+    assert result == {
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "reasoning_tokens": None,
+    }
 
 
 def test_extract_actual_usage_handles_dict_with_none_values():
@@ -428,4 +479,26 @@ def test_extract_actual_usage_handles_dict_with_none_values():
 
     result = extract_actual_usage(response)
 
-    assert result == {"input_tokens": None, "output_tokens": None}
+    assert result == {
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "reasoning_tokens": None,
+    }
+
+
+def test_estimate_message_tokens_counts_tool_result_identity():
+    """Fallback estimates should include the tool-result envelope, not only
+    the visible result text, because providers receive name/id metadata too."""
+    with_identity = ToolMessage(
+        content="result body",
+        tool_call_id="call-abc-123",
+        name="search_documents",
+    )
+    without_identity = ToolMessage(
+        content="result body",
+        tool_call_id="",
+        name="",
+    )
+
+    assert estimate_message_tokens(with_identity) > estimate_message_tokens(without_identity)

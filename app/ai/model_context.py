@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 ContextSource = Literal["provider_api", "registry", "heuristic", "unknown"]
 DisplayState = Literal["unknown", "ok", "warn", "danger"]
-UsedTokenSource = Literal["actual_input", "estimated_total", "unknown"]
+UsedTokenSource = Literal["actual_total", "actual_input", "estimated_total", "unknown"]
 
 
 @dataclass
@@ -293,6 +293,9 @@ def _select_used_tokens(
 
     actual = token_breakdown.get("actual") or {}
     if isinstance(actual, dict):
+        actual_total = actual.get("total_tokens")
+        if isinstance(actual_total, int) and actual_total >= 0:
+            return actual_total, "actual_total"
         actual_input = actual.get("input_tokens")
         if isinstance(actual_input, int) and actual_input >= 0:
             return actual_input, "actual_input"
@@ -349,9 +352,14 @@ def build_context_window_usage(
             "display_state": "unknown",
         }
 
-    denominator = context_window.get("max_input_tokens") or context_window.get(
-        "context_window_tokens"
-    )
+    if used_source == "actual_total":
+        denominator = context_window.get("context_window_tokens") or context_window.get(
+            "max_input_tokens"
+        )
+    else:
+        denominator = context_window.get("max_input_tokens") or context_window.get(
+            "context_window_tokens"
+        )
     if not isinstance(denominator, int) or denominator <= 0:
         return {
             "used_tokens": used_tokens,

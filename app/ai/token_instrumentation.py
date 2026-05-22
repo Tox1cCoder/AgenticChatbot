@@ -36,6 +36,8 @@ class TokenBudgetBreakdown:
     # Actual usage from provider (when available)
     actual_input_tokens: int | None = None
     actual_output_tokens: int | None = None
+    actual_total_tokens: int | None = None
+    actual_reasoning_tokens: int | None = None
 
     # Metadata
     history_message_count: int = 0
@@ -57,6 +59,8 @@ class TokenBudgetBreakdown:
             "actual": {
                 "input_tokens": self.actual_input_tokens,
                 "output_tokens": self.actual_output_tokens,
+                "total_tokens": self.actual_total_tokens,
+                "reasoning_tokens": self.actual_reasoning_tokens,
             },
             "counts": {
                 "history_messages": self.history_message_count,
@@ -95,6 +99,15 @@ def estimate_message_tokens(message: BaseMessage) -> int:
             if isinstance(args, dict):
                 tokens += estimate_tokens(str(args))
             tokens += 10  # tool call structure overhead
+
+    # Tool result messages carry identity metadata alongside the visible body.
+    if isinstance(message, ToolMessage):
+        tool_name = getattr(message, "name", "") or ""
+        tool_call_id = getattr(message, "tool_call_id", "") or ""
+        if tool_name or tool_call_id:
+            tokens += estimate_tokens(str(tool_name))
+            tokens += estimate_tokens(str(tool_call_id))
+            tokens += 8  # tool result envelope overhead
 
     return tokens
 
@@ -211,6 +224,82 @@ def compute_token_breakdown(
     return breakdown
 
 
+def _coerce_usage_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        ivalue = int(value)
+    except (TypeError, ValueError):
+        return None
+    return ivalue if ivalue >= 0 else None
+
+
+def _get_raw_value(data: Any, key: str) -> Any:
+    if isinstance(data, dict):
+        return data.get(key)
+    return getattr(data, key, None)
+
+
+def _first_int(data: Any, keys: tuple[str, ...]) -> int | None:
+    for key in keys:
+        value = _coerce_usage_int(_get_raw_value(data, key))
+        if value is not None:
+            return value
+    return None
+
+
+def _nested_int(data: Any, paths: tuple[tuple[str, ...], ...]) -> int | None:
+    for path in paths:
+        current = data
+        for key in path:
+            current = _get_raw_value(current, key)
+            if current is None:
+                break
+        value = _coerce_usage_int(current)
+        if value is not None:
+            return value
+    return None
+
+
+def _fill_total_from_parts(result: dict[str, int | None]) -> None:
+    if result.get("total_tokens") is not None:
+        return
+    input_tokens = result.get("input_tokens")
+    output_tokens = result.get("output_tokens")
+    if input_tokens is not None and output_tokens is not None:
+        result["total_tokens"] = input_tokens + output_tokens
+
+
+def _extract_usage_like(
+    usage: Any,
+    *,
+    input_keys: tuple[str, ...],
+    output_keys: tuple[str, ...],
+    total_keys: tuple[str, ...],
+) -> dict[str, int | None]:
+    result: dict[str, int | None] = {
+        "input_tokens": _first_int(usage, input_keys),
+        "output_tokens": _first_int(usage, output_keys),
+        "total_tokens": _first_int(usage, total_keys),
+        "reasoning_tokens": _nested_int(
+            usage,
+            (
+                ("output_token_details", "reasoning"),
+                ("output_token_details", "reasoning_tokens"),
+                ("output_token_details", "thinking"),
+                ("output_token_details", "thinking_tokens"),
+                ("output_tokens_details", "reasoning"),
+                ("output_tokens_details", "reasoning_tokens"),
+                ("output_tokens_details", "thinking"),
+                ("output_tokens_details", "thinking_tokens"),
+                ("completion_tokens_details", "reasoning_tokens"),
+            ),
+        ),
+    }
+    _fill_total_from_parts(result)
+    return result
+
+
 def extract_actual_usage(response: Any) -> dict[str, int | None]:
     """Extract actual token usage from a model response.
 
@@ -221,36 +310,53 @@ def extract_actual_usage(response: Any) -> dict[str, int | None]:
     Also reads ``response_metadata.usage`` / ``response_metadata.token_usage``
     for OpenAI-style envelopes.
     """
-    result: dict[str, int | None] = {"input_tokens": None, "output_tokens": None}
+    result: dict[str, int | None] = {
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "reasoning_tokens": None,
+    }
 
     if response is None:
         return result
 
     # Prefer the standardized usage_metadata shape (LangChain core convention).
     usage = getattr(response, "usage_metadata", None)
-    if isinstance(usage, dict):
-        if usage.get("input_tokens") is not None:
-            result["input_tokens"] = usage["input_tokens"]
-        if usage.get("output_tokens") is not None:
-            result["output_tokens"] = usage["output_tokens"]
-    elif usage is not None:
-        if getattr(usage, "input_tokens", None) is not None:
-            result["input_tokens"] = usage.input_tokens
-        if getattr(usage, "output_tokens", None) is not None:
-            result["output_tokens"] = usage.output_tokens
+    if isinstance(usage, dict) or usage is not None:
+        result.update(
+            _extract_usage_like(
+                usage,
+                input_keys=("input_tokens", "prompt_tokens"),
+                output_keys=("output_tokens", "completion_tokens"),
+                total_keys=("total_tokens",),
+            )
+        )
 
     # Fall back to response_metadata.usage / .token_usage if usage_metadata was empty.
-    if result["input_tokens"] is None:
+    if result["input_tokens"] is None and result["total_tokens"] is None:
         metadata = getattr(response, "response_metadata", None)
         if isinstance(metadata, dict):
             envelope = metadata.get("usage") or metadata.get("token_usage")
             if isinstance(envelope, dict):
-                prompt = envelope.get("prompt_tokens")
-                completion = envelope.get("completion_tokens")
-                if prompt is not None:
-                    result["input_tokens"] = prompt
-                if completion is not None:
-                    result["output_tokens"] = completion
+                result.update(
+                    _extract_usage_like(
+                        envelope,
+                        input_keys=("prompt_tokens", "input_tokens"),
+                        output_keys=("completion_tokens", "output_tokens"),
+                        total_keys=("total_tokens",),
+                    )
+                )
+    elif result["reasoning_tokens"] is None:
+        metadata = getattr(response, "response_metadata", None)
+        if isinstance(metadata, dict):
+            envelope = metadata.get("usage") or metadata.get("token_usage")
+            if isinstance(envelope, dict):
+                result["reasoning_tokens"] = _extract_usage_like(
+                    envelope,
+                    input_keys=("prompt_tokens", "input_tokens"),
+                    output_keys=("completion_tokens", "output_tokens"),
+                    total_keys=("total_tokens",),
+                )["reasoning_tokens"]
 
     return result
 

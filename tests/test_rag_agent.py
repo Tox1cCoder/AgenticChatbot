@@ -657,6 +657,82 @@ def test_invoke_agentic_rag_model_populates_runtime_metadata():
     assert response.metadata["agentic_mode"] is True
 
 
+def test_invoke_agentic_rag_model_merges_context_window_usage_from_total_tokens():
+    """Agentic RAG bypasses BaseAgent.invoke_model_with_history, so its shared
+    invocation helper must explicitly attach dynamic context usage."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    from app.core.runtime_modeling import ResolvedRuntimeModelConfig
+
+    agent = _build_agentic_invocation_agent()
+    fake_response = SimpleNamespace(
+        content="ok",
+        tool_calls=None,
+        usage_metadata={
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "total_tokens": 140,
+            "output_token_details": {"reasoning": 15},
+        },
+    )
+
+    async def fake_invoke(llm, msgs):
+        return fake_response
+
+    def fake_create_model(rc, *, user_id=None, enable_reasoning_summary=False):
+        return (SimpleNamespace(__name__="fakellm"), False)
+
+    agent._ainvoke_with_retries = fake_invoke
+    agent._create_langchain_model_from_runtime = fake_create_model
+
+    runtime_config = ResolvedRuntimeModelConfig(
+        agent_key="rag",
+        provider="openai",
+        model="gpt-4o-mini",
+        temperature=0.7,
+        api_key=None,
+        key_source="settings",
+        source="agent_default",
+        capabilities={"supports_vision": True},
+        fallback_config=None,
+        warnings=[],
+        provider_fallback=None,
+        is_custom_model=False,
+        context_window={
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "context_window_tokens": 128000,
+            "max_input_tokens": 128000,
+            "max_output_tokens": 16384,
+            "source": "registry",
+            "known": True,
+        },
+    )
+
+    response = asyncio.run(
+        agent._invoke_agentic_rag_model(
+            conversation_id="conv-1",
+            messages=[SystemMessage(content="sys"), HumanMessage(content="hi")],
+            tools=[],
+            disable_tools=True,
+            user_id="user-1",
+            runtime_config=runtime_config,
+        )
+    )
+
+    breakdown = response.metadata["token_breakdown"]
+    assert breakdown["actual"]["input_tokens"] == 100
+    assert breakdown["actual"]["output_tokens"] == 25
+    assert breakdown["actual"]["total_tokens"] == 140
+    assert breakdown["actual"]["reasoning_tokens"] == 15
+
+    context_window = response.metadata["context_window"]
+    assert context_window["used_tokens"] == 140
+    assert context_window["used_token_source"] == "actual_total"
+    assert context_window["usage_ratio"] == 140 / 128000
+    assert context_window["display_state"] == "ok"
+
+
 def test_rag_system_prompt_includes_delegation_suffix():
     """RAG agentic flow must include DELEGATION_SUFFIX (parity with other agents)."""
     from app.ai.prompts import DELEGATION_SUFFIX

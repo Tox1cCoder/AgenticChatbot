@@ -395,7 +395,13 @@ def _summarize_requested_model(
 # Worker response metadata keys carried back as ``resolved_model`` for the
 # Planning Agent / UI. API keys, raw runtime config objects, and warnings are
 # intentionally excluded — supervisors only need provider/model/effort.
-_RESOLVED_MODEL_FIELDS = ("provider", "model", "config_source", "reasoning_effort")
+_RESOLVED_MODEL_FIELDS = (
+    "provider",
+    "model",
+    "config_source",
+    "reasoning_effort",
+    "context_window",
+)
 
 
 def _summarize_resolved_model(response: AgentResponse) -> dict[str, Any] | None:

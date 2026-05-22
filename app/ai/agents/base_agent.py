@@ -1068,14 +1068,21 @@ class BaseAgent(ABC):
                     )
 
             actual_usage = extract_actual_usage(response)
-            if actual_usage.get("input_tokens") is not None:
+            if any(value is not None for value in actual_usage.values()):
                 token_breakdown.actual_input_tokens = actual_usage["input_tokens"]
                 token_breakdown.actual_output_tokens = actual_usage.get("output_tokens")
+                token_breakdown.actual_total_tokens = actual_usage.get("total_tokens")
+                token_breakdown.actual_reasoning_tokens = actual_usage.get("reasoning_tokens")
                 logger.debug(
-                    "%s: Actual token usage - input=%s, output=%s (estimated=%d)",
+                    (
+                        "%s: Actual token usage - input=%s, output=%s, "
+                        "total=%s, reasoning=%s (estimated=%d)"
+                    ),
                     self.agent_id,
                     actual_usage["input_tokens"],
                     actual_usage.get("output_tokens"),
+                    actual_usage.get("total_tokens"),
+                    actual_usage.get("reasoning_tokens"),
                     token_breakdown.total_tokens,
                 )
 
@@ -1090,10 +1097,12 @@ class BaseAgent(ABC):
             response_text = coerce_response_text(response.content)
 
             reasoning_summary = None
-            reasoning_tokens = None
+            reasoning_tokens = actual_usage.get("reasoning_tokens")
             if runtime_config.provider == "openai":
                 reasoning_summary = extract_openai_reasoning_summary(response.content)
-                reasoning_tokens = extract_openai_reasoning_tokens(response)
+                extracted_reasoning_tokens = extract_openai_reasoning_tokens(response)
+                if extracted_reasoning_tokens is not None:
+                    reasoning_tokens = extracted_reasoning_tokens
 
             token_breakdown_dict = token_breakdown.to_dict()
             metadata = {
@@ -1111,8 +1120,8 @@ class BaseAgent(ABC):
 
             if isinstance(reasoning_summary, str) and reasoning_summary.strip():
                 metadata["reasoning_summary"] = reasoning_summary.strip()
-                if isinstance(reasoning_tokens, int) and reasoning_tokens >= 0:
-                    metadata["reasoning_tokens"] = reasoning_tokens
+            if isinstance(reasoning_tokens, int) and reasoning_tokens >= 0:
+                metadata["reasoning_tokens"] = reasoning_tokens
 
             agent_message = AgentMessage(
                 role=MessageRole.ASSISTANT, content=response_text, tool_calls=tool_calls

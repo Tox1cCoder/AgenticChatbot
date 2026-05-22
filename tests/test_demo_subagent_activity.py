@@ -273,6 +273,11 @@ def test_build_subagent_activity_view_surfaces_requested_and_resolved_model():
                     "model": "gpt-5.4",
                     "config_source": "request",
                     "reasoning_effort": "high",
+                    "context_window": {
+                        "used_tokens": 4096,
+                        "used_token_source": "actual_total",
+                        "display_state": "ok",
+                    },
                 },
             }
         ]
@@ -286,6 +291,7 @@ def test_build_subagent_activity_view_surfaces_requested_and_resolved_model():
     assert result["requested_model"]["reasoning_effort"] == "high"
     assert result["resolved_model"]["model"] == "gpt-5.4"
     assert result["resolved_model"]["config_source"] == "request"
+    assert result["resolved_model"]["context_window"]["used_tokens"] == 4096
 
 
 def test_build_subagent_activity_view_keeps_resolved_model_without_override():

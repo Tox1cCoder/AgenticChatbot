@@ -273,6 +273,8 @@ def _breakdown(
     estimated_total: int = 0,
     actual_input: int | None = None,
     actual_output: int | None = None,
+    actual_total: int | None = None,
+    reasoning_tokens: int | None = None,
 ) -> dict:
     return {
         "estimated": {
@@ -286,10 +288,32 @@ def _breakdown(
         "actual": {
             "input_tokens": actual_input,
             "output_tokens": actual_output,
+            "total_tokens": actual_total,
+            "reasoning_tokens": reasoning_tokens,
         },
         "counts": {"history_messages": 0, "tool_messages": 0, "bound_tools": 0},
         "bound_tool_names": [],
     }
+
+
+def test_build_usage_prefers_actual_total_over_actual_input():
+    """Provider-reported total usage includes completion plus reasoning/thinking
+    tokens, so it is the best post-completion denominator for the indicator."""
+    cw = resolve_model_context_window("openai", "gpt-4o").to_dict()
+    usage = build_context_window_usage(
+        cw,
+        _breakdown(
+            estimated_total=20_000,
+            actual_input=12_000,
+            actual_output=2_000,
+            actual_total=15_000,
+            reasoning_tokens=1_000,
+        ),
+    )
+    assert usage["used_tokens"] == 15_000
+    assert usage["used_token_source"] == "actual_total"
+    assert usage["usage_ratio"] == pytest.approx(15_000 / 128_000)
+    assert usage["display_state"] == "ok"
 
 
 def test_build_usage_prefers_actual_input_over_estimated_total():
@@ -411,6 +435,27 @@ def test_build_usage_uses_max_input_tokens_for_ratio():
     }
     usage = build_context_window_usage(cw, _breakdown(actual_input=50))
     assert usage["usage_ratio"] == pytest.approx(0.5)
+
+
+def test_build_usage_uses_context_window_for_actual_total_ratio():
+    """When total usage includes output/reasoning tokens, compare it against
+    the full context window rather than a narrower input-only limit."""
+    cw = {
+        "provider": "openai",
+        "model": "fake",
+        "context_window_tokens": 200,
+        "max_input_tokens": 100,
+        "max_output_tokens": 50,
+        "source": "registry",
+        "known": True,
+    }
+    usage = build_context_window_usage(
+        cw,
+        _breakdown(actual_input=80, actual_output=20, actual_total=120),
+    )
+    assert usage["used_tokens"] == 120
+    assert usage["used_token_source"] == "actual_total"
+    assert usage["usage_ratio"] == pytest.approx(0.6)
 
 
 def test_build_usage_falls_back_to_context_window_when_no_max_input():

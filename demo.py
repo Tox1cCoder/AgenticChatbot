@@ -1,9 +1,11 @@
 import base64
+import contextlib
 import html
 import json
 import mimetypes
 import os
 import re
+import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -13,6 +15,7 @@ from typing import Any
 import markdown as _markdown  # type: ignore
 import requests
 import streamlit as st  # type: ignore
+import streamlit.components.v1 as _stc
 from dateutil import parser
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -503,32 +506,6 @@ APP_STYLE = """
         font-weight: 500;
     }
 
-    /* Status indicators */
-    .status-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 4px 12px;
-        border-radius: 12px;
-        font-size: 0.8rem;
-        font-weight: 500;
-    }
-
-    .status-processing {
-        background: #fef3c7;
-        color: #92400e;
-    }
-
-    .status-ready {
-        background: #d1fae5;
-        color: #065f46;
-    }
-
-    .status-failed {
-        background: #fee2e2;
-        color: #991b1b;
-    }
-
     /* Scrollbar */
     ::-webkit-scrollbar {
         width: 8px;
@@ -985,22 +962,6 @@ APP_STYLE = """
         letter-spacing: 0.04em;
         text-transform: uppercase;
     }
-    .canvas-artifact-header a.canvas-newtab {
-        color: #0369a1;
-        text-decoration: none;
-        font-size: 0.78rem;
-        font-weight: 500;
-        border: 1px solid #bae6fd;
-        border-radius: 6px;
-        padding: 2px 8px;
-        background: #fff;
-        cursor: pointer;
-        transition: background 0.15s;
-    }
-    .canvas-artifact-header a.canvas-newlab:hover {
-        background: #bae6fd;
-    }
-
     /* Context window indicator (assistant provider/model row) */
     .ctx-window-row {
         display: inline-flex;
@@ -1035,102 +996,68 @@ APP_STYLE = """
 </style>
 """
 
-# JavaScript for image lightbox with event delegation for Streamlit compatibility
-IMAGE_LIGHTBOX_JS = """
-<div id="imageLightbox" class="image-lightbox-overlay">
-    <span class="image-lightbox-close">&times;</span>
-    <img id="lightboxImage" class="image-lightbox-content" src="" alt="Full size image">
-</div>
+# Image lightbox setup. Streamlit's `st.markdown(..., unsafe_allow_html=True)`
+# strips <script> tags, so the JS must run inside a components.v1.html iframe
+# and reach into `window.parent.document` to install the delegate + overlay on
+# the actual page. The CSS used here is already defined in APP_STYLE
+# (`.image-lightbox-overlay`, `.image-lightbox-close`, `.image-lightbox-content`).
+_IMAGE_LIGHTBOX_SETUP = """
 <script>
 (function() {
-    // Ensure we only initialize once
-    if (window._lightboxInitialized) return;
-    window._lightboxInitialized = true;
+  var topDoc;
+  try { topDoc = window.parent.document; } catch (_) { return; }
+  if (!topDoc || topDoc.__imgLightboxInstalled) return;
+  topDoc.__imgLightboxInstalled = true;
 
-    function openImageLightbox(src) {
-        var lightbox = document.getElementById('imageLightbox');
-        var img = document.getElementById('lightboxImage');
-        if (lightbox && img) {
-            img.src = src;
-            lightbox.classList.add('active');
-            document.body.style.overflow = 'hidden';
-        }
+  var overlay = topDoc.createElement('div');
+  overlay.id = 'imageLightbox';
+  overlay.className = 'image-lightbox-overlay';
+  overlay.innerHTML = (
+    '<span class="image-lightbox-close">&times;</span>' +
+    '<img id="lightboxImage" class="image-lightbox-content" src="" alt="Full size image">'
+  );
+  topDoc.body.appendChild(overlay);
+
+  function open(src) {
+    var img = topDoc.getElementById('lightboxImage');
+    if (!img) return;
+    img.src = src;
+    overlay.classList.add('active');
+    topDoc.body.style.overflow = 'hidden';
+  }
+
+  function close() {
+    overlay.classList.remove('active');
+    topDoc.body.style.overflow = '';
+  }
+
+  topDoc.addEventListener('click', function(e) {
+    var t = e.target;
+    if (!t || !t.classList) return;
+    if (t.classList.contains('img-thumb')) {
+      e.preventDefault();
+      e.stopPropagation();
+      open(t.src);
+      return;
     }
-
-    function closeImageLightbox() {
-        var lightbox = document.getElementById('imageLightbox');
-        if (lightbox) {
-            lightbox.classList.remove('active');
-            document.body.style.overflow = 'auto';
-        }
+    if (overlay.classList.contains('active') &&
+        (t.classList.contains('image-lightbox-overlay') ||
+         t.classList.contains('image-lightbox-close'))) {
+      close();
     }
+  }, true);
 
-    // Make functions globally available
-    window.openImageLightbox = openImageLightbox;
-    window.closeImageLightbox = closeImageLightbox;
-
-    // Event delegation for image thumbnails - handles dynamically added elements
-    document.addEventListener('click', function(e) {
-        var target = e.target;
-
-        // Check if clicked on an img-thumb image
-        if (target.classList.contains('img-thumb')) {
-            e.preventDefault();
-            e.stopPropagation();
-            openImageLightbox(target.src);
-            return;
-        }
-
-        // Check if clicked on lightbox overlay or close button
-        var lightbox = document.getElementById('imageLightbox');
-        if (lightbox && lightbox.classList.contains('active')) {
-            if (target.classList.contains('image-lightbox-overlay') ||
-                target.classList.contains('image-lightbox-close')) {
-                closeImageLightbox();
-            }
-        }
-    }, true);
-
-    // Escape key to close
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') closeImageLightbox();
-    });
+  topDoc.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') close();
+  });
+})();
 </script>
 """
 
 
-def safe_api_call(
-    method: str,
-    endpoint: str,
-    data: dict | None = None,
-    error_message: str = "API request failed",
-    success_message: str | None = None,
-) -> dict[str, Any] | None:
-    """
-    Wrapper for API calls with consistent error handling and toast notifications.
-
-    Args:
-        method: HTTP method (GET, POST, PUT, DELETE)
-        endpoint: API endpoint path
-        data: Optional request payload
-        error_message: Message to show on error
-        success_message: Optional message to show on success
-
-    Returns:
-        Response data dict or None on error
-    """
-    try:
-        response_data = make_api_request(method, endpoint, data)
-        if response_data and response_data.get("success"):
-            if success_message:
-                st.toast(success_message, icon=":material/check_circle:")
-            return response_data
-        else:
-            st.toast(error_message, icon=":material/cancel:")
-            return None
-    except Exception as e:
-        st.toast(f"{error_message}: {str(e)}", icon=":material/cancel:")
-        return None
+def render_image_lightbox() -> None:
+    """Install the page-level image lightbox once per session run."""
+    _stc.html(_IMAGE_LIGHTBOX_SETUP, height=0)
 
 
 def format_conversation_title(title: str, max_length: int = 40) -> str:
@@ -1149,71 +1076,6 @@ def format_conversation_title(title: str, max_length: int = 40) -> str:
     if len(title) > max_length:
         return title[: max_length - 3] + "..."
     return title
-
-
-def render_status_badge(status: str) -> str:
-    """
-    Render a status badge with consistent styling.
-
-    Args:
-        status: Status string (processing, ready, failed, etc.)
-
-    Returns:
-        HTML for the status badge
-    """
-    status_lower = status.lower()
-    badge_class = f"status-{status_lower}"
-
-    status_icons = {
-        "processing": "schedule",
-        "ready": "check_circle",
-        "failed": "cancel",
-        "pending": "pause_circle",
-        "active": "radio_button_checked",
-        "inactive": "radio_button_unchecked",
-    }
-
-    icon_name = status_icons.get(status_lower)
-    icon_html = (
-        f'<span class="material-symbols-outlined" aria-hidden="true">{html.escape(icon_name)}</span>'
-        if icon_name
-        else ""
-    )
-    display_text = status.replace("_", " ").title()
-
-    return f'<span class="status-badge {badge_class}">{icon_html}{display_text}</span>'
-
-
-def format_timestamp(timestamp: str) -> str:
-    """
-    Format timestamp for display.
-
-    Args:
-        timestamp: ISO format timestamp string
-
-    Returns:
-        Formatted timestamp string
-    """
-    try:
-        dt = parser.isoparse(timestamp)
-        now = datetime.now(dt.tzinfo)
-        diff = now - dt
-
-        if diff < timedelta(minutes=1):
-            return "Just now"
-        elif diff < timedelta(hours=1):
-            minutes = int(diff.total_seconds() / 60)
-            return f"{minutes}m ago"
-        elif diff < timedelta(days=1):
-            hours = int(diff.total_seconds() / 3600)
-            return f"{hours}h ago"
-        elif diff < timedelta(days=7):
-            days = diff.days
-            return f"{days}d ago"
-        else:
-            return dt.strftime("%b %d, %Y")
-    except Exception:
-        return timestamp
 
 
 def get_agent_display_name(agent: str) -> str:
@@ -1326,8 +1188,6 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "conversations_list": list,
     "conversations_loaded": lambda: False,
     "conversations_last_fetch_params": lambda: None,
-    "show_conversation_manager": lambda: False,
-    "conversation_manager_visible": lambda: False,
     CONVERSATION_MANAGER_DIALOG_KEY: lambda: False,
     "show_instructions": lambda: False,
     "auth_token": lambda: None,
@@ -1337,15 +1197,10 @@ SESSION_STATE_DEFAULTS: dict[str, Callable[[], Any] | Any] = {
     "pending_persona_prompt": str,
     "persona_editor_origin": lambda: None,
     "persona_editor_value": str,
-    "persona_feedback": lambda: None,
-    "persona_editor_pending_value": str,
-    "persona_editor_pending": lambda: False,
     "pending_image_attachments": list,
     "message_image_thumbnails": dict,
     "message_chunks": dict,
     "show_attachment_uploader": lambda: False,
-    "image_viewer_open": lambda: False,
-    "image_viewer_payload": lambda: None,
     "API_BASE_URL": lambda: API_BASE_URL,
     "active_view": lambda: "chat",
     "mcp_tools_list": lambda: None,
@@ -1630,30 +1485,26 @@ def format_time(iso_string: str) -> str:
 st.set_page_config(page_title="ChatBot", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown(APP_STYLE, unsafe_allow_html=True)
-st.markdown(IMAGE_LIGHTBOX_JS, unsafe_allow_html=True)
+render_image_lightbox()
 initialize_session_state()
 
 # ── localStorage session-persistence bridge ──────────────────────────────────
 # Allows the auth token to survive F5 / browser refresh.
-import contextlib  # noqa: E402
-import json as _json  # noqa: E402
-
-import streamlit.components.v1 as _stc_ls  # noqa: E402
 
 # Step 1: flush any pending localStorage write/clear from the previous run.
 _ls_op = st.session_state.get("_ls_op")
 if _ls_op is not None:
     st.session_state._ls_op = None
     if isinstance(_ls_op, dict):  # save
-        _tok = _json.dumps(_ls_op.get("token", ""))
-        _uid = _json.dumps(_ls_op.get("uid", ""))
-        _stc_ls.html(
+        _tok = json.dumps(_ls_op.get("token", ""))
+        _uid = json.dumps(_ls_op.get("uid", ""))
+        _stc.html(
             f"<script>try{{localStorage.setItem('cbtoken',{_tok});"
             f"localStorage.setItem('cbuid',{_uid});}}catch(e){{}}</script>",
             height=0,
         )
     elif _ls_op == "clear":  # logout
-        _stc_ls.html(
+        _stc.html(
             "<script>try{localStorage.removeItem('cbtoken');"
             "localStorage.removeItem('cbuid');}catch(e){}</script>",
             height=0,
@@ -1673,7 +1524,7 @@ if not st.session_state.get("auth_token"):
         del st.query_params["__u"]
     elif "__restore" not in _qp:
         # Inject the bridge that reads localStorage and redirects once.
-        _stc_ls.html(
+        _stc.html(
             """<script>
 (function(){
   try{
@@ -1772,12 +1623,8 @@ def reset_conversation_state() -> None:
     st.session_state.pending_persona_prompt = ""
     st.session_state.persona_editor_origin = None
     st.session_state.persona_editor_value = ""
-    st.session_state.persona_editor_pending_value = ""
-    st.session_state.persona_editor_pending = False
     st.session_state.pending_image_attachments = []
     st.session_state.show_attachment_uploader = False
-    st.session_state.image_viewer_open = False
-    st.session_state.image_viewer_payload = None
     st.session_state.message_image_thumbnails = {}
     # Clear in-flight streaming state
     _clear_inflight_state()
@@ -1788,8 +1635,6 @@ _MANAGER_PAGE_SIZE = 100
 
 def open_conversation_manager() -> None:
     """Open the conversation manager dialog on the next render."""
-    st.session_state.conversation_manager_visible = True
-    st.session_state.show_conversation_manager = True
     st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = True
     # Reset lazy-load state so the dialog fetches fresh data on open
     st.session_state.pop("manager_conversations", None)
@@ -1800,8 +1645,6 @@ def open_conversation_manager() -> None:
 
 def close_conversation_manager() -> None:
     """Close the conversation manager dialog and prevent reopening on rerun."""
-    st.session_state.conversation_manager_visible = False
-    st.session_state.show_conversation_manager = False
     st.session_state[CONVERSATION_MANAGER_DIALOG_KEY] = False
     # Free memory held by the manager conversation cache
     st.session_state.pop("manager_conversations", None)
@@ -2513,12 +2356,6 @@ def get_mcp_tools(server_name: str | None = None) -> dict[str, Any] | None:
     return response.get("data") if response else None
 
 
-def get_tool_details(tool_name: str) -> dict[str, Any] | None:
-    """Fetch detailed information about a specific tool"""
-    response = make_api_request("GET", f"/mcp/tools/{tool_name}")
-    return response.get("data") if response else None
-
-
 def execute_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
     """Execute an MCP tool with provided arguments"""
     response = make_api_request("POST", f"/mcp/tools/{tool_name}/execute", {"arguments": arguments})
@@ -2973,7 +2810,7 @@ def render_sidebar():
 
         # Manage conversations button
         if st.button("Manage Conversations", width="stretch"):
-            if st.session_state.get("conversation_manager_visible"):
+            if st.session_state.get(CONVERSATION_MANAGER_DIALOG_KEY):
                 close_conversation_manager()
             else:
                 open_conversation_manager()
@@ -3049,134 +2886,138 @@ def render_sidebar():
                     st.rerun()
 
 
-def _guess_extension(mime: str | None) -> str:
-    """Guess file extension from MIME type"""
-    if not mime:
-        return "png"
-    base_mime = mime.split(";")[0]
-    ext = mimetypes.guess_extension(base_mime)
-    if ext:
-        return ext.lstrip(".")
-    if base_mime.endswith("jpeg"):
-        return "jpg"
-    return "png"
+def _normalize_image_for_gallery(image: Any, fallback_name: str) -> dict[str, str] | None:
+    """Extract `{src, name}` from an attachment-style dict.
 
+    Accepts dicts shaped like `{"url": ...}` (plain URL or `data:` URI) or
+    `{"data": "<base64>", "mime": ...}`. Returns None if neither is usable.
+    """
+    if not isinstance(image, dict):
+        return None
 
-def _build_attachment_thumbnail(href: str, name: str, *, download: str | None = None) -> str:
-    """Create HTML anchor for a single attachment thumbnail."""
-    escaped_href = html.escape(str(href), quote=True)
-    escaped_name = html.escape(str(name), quote=True)
-    download_attr = f' download="{html.escape(str(download), quote=True)}"' if download else ""
-    return (
-        f'<a class="attachment-thumb-link" href="{escaped_href}" target="_blank" '
-        f'rel="noopener noreferrer" aria-label="Open {escaped_name}" '
-        f'title="{escaped_name}"{download_attr}>'
-        f'<div class="attachment-thumb">'
-        f'<img src="{escaped_href}" alt="{escaped_name}" loading="lazy" />'
-        f"</div></a>"
+    name = (
+        image.get("name")
+        or image.get("description")
+        or image.get("caption")
+        or fallback_name
     )
+
+    url_value = image.get("url")
+    if isinstance(url_value, str) and url_value.strip():
+        return {"src": url_value.strip(), "name": name}
+
+    data_b64 = image.get("data")
+    if isinstance(data_b64, str) and data_b64.strip():
+        payload = data_b64.strip()
+        if payload.startswith("data:"):
+            return {"src": payload, "name": name}
+        mime = image.get("mime", "image/png")
+        return {"src": f"data:{mime};base64,{payload}", "name": name}
+
+    return None
+
+
+def _render_thumbnail_gallery(
+    items: list[dict[str, str]],
+    *,
+    thumb_width: int,
+    thumb_height: int,
+    caption_max_chars: int = 40,
+    align: str = "left",
+    card_style: bool = False,
+) -> None:
+    """Render a flex gallery of clickable `img-thumb` thumbnails.
+
+    Each item must be `{"src": str, "name": str}`. Clicks are handled by
+    the page-level lightbox delegate installed by `render_image_lightbox()`.
+
+    `card_style=True` produces the larger framed cards used for agent
+    images; `card_style=False` produces the compact inline thumbnails used
+    for user attachments.
+    """
+    if not items:
+        return
+
+    parts: list[str] = []
+    for item in items:
+        src = item.get("src", "")
+        if not src:
+            continue
+        name = item.get("name", "") or ""
+        display_name = (
+            name if len(name) <= caption_max_chars
+            else name[: caption_max_chars - 3] + "..."
+        )
+        escaped_src = html.escape(src, quote=True)
+        escaped_full_name = html.escape(name, quote=True)
+        escaped_display_name = html.escape(display_name, quote=True)
+
+        if card_style:
+            cap_div = (
+                f'<div style="font-size:.75em; color:#64748b; padding:4px 6px; '
+                f'line-height:1.3; overflow:hidden; text-overflow:ellipsis; '
+                f'white-space:nowrap; max-width:{thumb_width}px;" '
+                f'title="{escaped_full_name}">{escaped_display_name}</div>'
+                if name
+                else ""
+            )
+            parts.append(
+                f'<div style="width:{thumb_width}px; flex-shrink:0; text-align:center; '
+                f"border-radius:8px; overflow:hidden; background:#f8fafc; "
+                f'border:1px solid #e2e8f0;">'
+                f'<img src="{escaped_src}" alt="{escaped_display_name}" '
+                f'class="img-thumb" loading="lazy" '
+                f'title="Click to view full size" '
+                f'style="width:{thumb_width}px; height:{thumb_height}px; '
+                f"object-fit:cover; display:block; cursor:zoom-in; "
+                f'border-radius:8px 8px 0 0;" '
+                f"onerror=\"this.parentElement.style.display='none'\" />"
+                f"{cap_div}</div>"
+            )
+        else:
+            parts.append(
+                f'<div style="display:inline-block; margin:4px; text-align:center; '
+                f'vertical-align:top;" title="{escaped_full_name}">'
+                f'<img src="{escaped_src}" alt="{escaped_full_name}" '
+                f'class="img-thumb" loading="lazy" '
+                f'style="width:{thumb_width}px; height:{thumb_height}px; '
+                f"object-fit:cover; border-radius:8px; "
+                f'border:1px solid #e2e8f0; cursor:pointer;" />'
+                f'<div style="font-size:10px; color:#64748b; max-width:{thumb_width}px; '
+                f"overflow:hidden; text-overflow:ellipsis; white-space:nowrap; "
+                f'margin-top:2px;">{escaped_display_name}</div></div>'
+            )
+
+    if not parts:
+        return
+
+    wrapper_align = "flex-end" if align == "right" else "flex-start"
+    gap = "8px" if card_style else "4px"
+    gallery_html = (
+        f'<div style="display:flex; flex-wrap:wrap; gap:{gap}; '
+        f"justify-content:{wrapper_align}; align-items:flex-start; "
+        f'margin:8px 0;">' + "".join(parts) + "</div>"
+    )
+    st.markdown(gallery_html, unsafe_allow_html=True)
 
 
 def render_attachment_gallery(attachments: list[dict[str, str]], *, align: str) -> None:
-    """Render a compact row of clickable image thumbnails.
-
-    - URL images (from search agent): open in new tab
-    - Base64 images (generated/stored): open in lightbox modal
-    """
+    """User-side compact 72×72 inline image thumbnails."""
     if not attachments:
         return
-
-    # Filter valid attachments (must have data or url)
-    valid_attachments = []
-    for idx, attachment in enumerate(attachments, start=1):
-        name = attachment.get("name") or f"Image {idx}"
-        data_b64 = attachment.get("data")
-        url_value = attachment.get("url")
-        mime = attachment.get("mime", "image/png")
-
-        if isinstance(data_b64, str):
-            data_b64 = data_b64.strip()
-            if data_b64.startswith("data:"):
-                header, _, payload = data_b64.partition(",")
-                if payload:
-                    data_b64 = payload.strip()
-                    header_mime = header[5:].split(";")[0].strip() if header else ""
-                    if "/" in header_mime:
-                        mime = header_mime
-
-        if isinstance(url_value, str):
-            url_value = url_value.strip()
-            if url_value.startswith("data:"):
-                header, _, payload = url_value.partition(",")
-                if payload:
-                    data_b64 = payload.strip()
-                    url_value = None
-                    header_mime = header[5:].split(";")[0].strip() if header else ""
-                    if "/" in header_mime:
-                        mime = header_mime
-
-        if isinstance(data_b64, str) and data_b64:
-            valid_attachments.append(
-                {
-                    "name": name,
-                    "data": data_b64,
-                    "mime": mime,
-                    "type": "base64",
-                }
-            )
-        elif isinstance(url_value, str) and url_value:
-            valid_attachments.append({"name": name, "url": url_value, "type": "url"})
-
-    if not valid_attachments:
-        return
-
-    # Build compact HTML gallery with clickable thumbnails
-    # Using class="img-thumb" for event delegation (no inline onclick needed)
-    gallery_html_parts = []
-    for att in valid_attachments:
-        # Truncate name for display (max 20 chars)
-        display_name = att["name"]
-        if len(display_name) > 20:
-            display_name = display_name[:17] + "..."
-
-        escaped_name = html.escape(display_name, quote=True)
-        escaped_full_name = html.escape(att["name"], quote=True)
-
-        if att["type"] == "base64":
-            # Base64 images: use lightbox modal via event delegation
-            src = f"data:{att.get('mime', 'image/png')};base64,{att['data']}"
-            escaped_src = html.escape(src, quote=True)
-            gallery_html_parts.append(
-                f'<div style="display: inline-block; margin: 4px; text-align: center; vertical-align: top;" '
-                f'title="{escaped_full_name}">'
-                f'<img src="{escaped_src}" alt="{escaped_full_name}" class="img-thumb" '
-                f'style="width: 72px; height: 72px; object-fit: cover; border-radius: 8px; '
-                f'border: 1px solid #e2e8f0; cursor: pointer;" />'
-                f'<div style="font-size: 10px; color: #64748b; max-width: 72px; overflow: hidden; '
-                f'text-overflow: ellipsis; white-space: nowrap; margin-top: 2px;">{escaped_name}</div>'
-                f"</div>"
-            )
-        else:
-            # URL images: also use lightbox for consistent experience
-            escaped_url = html.escape(att["url"], quote=True)
-            gallery_html_parts.append(
-                f'<div style="display: inline-block; margin: 4px; text-align: center; vertical-align: top;" '
-                f'title="{escaped_full_name}">'
-                f'<img src="{escaped_url}" alt="{escaped_full_name}" class="img-thumb" '
-                f'style="width: 72px; height: 72px; object-fit: cover; border-radius: 8px; '
-                f'border: 1px solid #e2e8f0; cursor: pointer;" />'
-                f'<div style="font-size: 10px; color: #64748b; max-width: 72px; overflow: hidden; '
-                f'text-overflow: ellipsis; white-space: nowrap; margin-top: 2px;">{escaped_name}</div>'
-                f"</div>"
-            )
-
-    wrapper_align = "flex-end" if align == "right" else "flex-start"
-    gallery_html = (
-        f'<div style="display: flex; flex-wrap: wrap; gap: 4px; justify-content: {wrapper_align}; '
-        f'margin: 8px 0;">' + "".join(gallery_html_parts) + "</div>"
+    items: list[dict[str, str]] = []
+    for idx, att in enumerate(attachments, start=1):
+        normalized = _normalize_image_for_gallery(att, f"Image {idx}")
+        if normalized:
+            items.append(normalized)
+    _render_thumbnail_gallery(
+        items,
+        thumb_width=72,
+        thumb_height=72,
+        caption_max_chars=20,
+        align=align,
+        card_style=False,
     )
-
-    st.markdown(gallery_html, unsafe_allow_html=True)
 
 
 def render_canvas_artifact(message_metadata: dict):
@@ -3194,8 +3035,6 @@ def render_canvas_artifact(message_metadata: dict):
 
     language = artifact.get("language") or "html"
     title = artifact.get("title") or "Canvas"
-
-    import streamlit.components.v1 as _stc
 
     # Base64-encode the ORIGINAL (unpatched) content so the Open button can
     # recreate it as a Blob URL — avoids the data: URI browser block.
@@ -3272,7 +3111,15 @@ def render_canvas_artifact(message_metadata: dict):
         patched = base_tag + "\n" + injected_toolbar + "\n" + patched
 
     # ── Live iframe ───────────────────────────────────────────────────────────
-    _stc.html(patched, height=520, scrolling=True)
+    # Honor a per-artifact `preferred_height` when the backend supplies one
+    # (e.g. small SVGs vs. full dashboards). Clamp to a sane range so a stray
+    # value can't blow out the page layout.
+    preferred_height = artifact.get("preferred_height")
+    if isinstance(preferred_height, (int, float)) and preferred_height > 0:
+        frame_height = max(200, min(1200, int(preferred_height)))
+    else:
+        frame_height = 520
+    _stc.html(patched, height=frame_height, scrolling=True)
 
     # ── Collapsible source code ───────────────────────────────────────────────
     with st.expander(f"Source Code ({language})", expanded=False):
@@ -4489,8 +4336,6 @@ def render_live_widgets(
     if not widgets:
         return
 
-    import streamlit.components.v1 as _stc
-
     auth_token = str(st.session_state.get("auth_token") or "")
     mount_state = st.session_state.live_widget_mounts
     for index, widget in enumerate(widgets):
@@ -4579,223 +4424,25 @@ def render_live_widgets(
 
 
 def render_agent_images(message_metadata: dict):
-    """Render images from agent responses as thumbnails (Tavily, Image Generator)"""
+    """Agent-side 150×120 framed image cards (Tavily, Image Generator)."""
     if not message_metadata:
         return
-
     images = message_metadata.get("images") or []
     if not images:
         return
-
-    image_items: list[dict[str, Any]] = []
+    items: list[dict[str, str]] = []
     for idx, image in enumerate(images, start=1):
-        if not isinstance(image, dict):
-            continue
-
-        url_value = image.get("url")
-        data_value = image.get("data")
-        image_name = (
-            image.get("name") or image.get("description") or image.get("caption") or f"Image {idx}"
-        )
-
-        if isinstance(url_value, str) and url_value:
-            image_items.append(
-                {
-                    "url": url_value,
-                    "name": image_name,
-                }
-            )
-        elif isinstance(data_value, str) and data_value:
-            payload = data_value.strip()
-            mime = image.get("mime", "image/png")
-
-            if payload.startswith("data:"):
-                header, _, raw_payload = payload.partition(",")
-                if raw_payload:
-                    payload = raw_payload.strip()
-                header_mime = header[5:].split(";")[0].strip() if header else ""
-                if "/" in header_mime:
-                    mime = header_mime
-
-            image_items.append(
-                {
-                    "data": payload,
-                    "mime": mime,
-                    "name": image_name,
-                }
-            )
-
-    if not image_items:
-        return
-
-    import streamlit.components.v1 as _stc
-
-    # Collect image sources for the JS-based lightbox
-    thumb_entries: list[dict[str, str]] = []
-    for _, item in enumerate(image_items):
-        caption = item.get("name") or ""
-        if item.get("url"):
-            src = item["url"]
-        else:
-            data_b64 = item.get("data")
-            if not isinstance(data_b64, str) or not data_b64.strip():
-                continue
-            mime = item.get("mime", "image/png")
-            src = f"data:{mime};base64,{data_b64}"
-        thumb_entries.append({"src": src, "caption": html.escape(caption)})
-
-    if not thumb_entries:
-        return
-
-    # Build thumbnail <img> tags with fixed-size cells and broken-image handling
-    thumbs_html = ""
-    for i, entry in enumerate(thumb_entries):
-        # Truncate caption for display (keep full text in title attribute)
-        short_cap = entry["caption"]
-        if len(short_cap) > 40:
-            short_cap = html.escape(entry["caption"][:37] + "...")
-        else:
-            short_cap = entry["caption"]  # already escaped
-
-        cap_html = (
-            f'<div class="agent-thumb-caption" title="{entry["caption"]}">{short_cap}</div>'
-            if entry["caption"]
-            else ""
-        )
-        thumbs_html += (
-            f'<div class="agent-thumb-cell">'
-            f'  <img src="{entry["src"]}" alt="{short_cap}" '
-            f'       title="Click to view full size" data-idx="{i}" '
-            f'       class="agent-thumb-img" '
-            f"       onerror=\"this.parentElement.classList.add('broken')\" />"
-            f"  {cap_html}"
-            f"</div>"
-        )
-
-    # The JS injects a lightbox overlay into the TOP-LEVEL document (parent
-    # of the Streamlit iframe) so it covers the entire browser window
-    # including the sidebar.  Clicking the overlay closes it.
-    # We JSON-encode the sources list for safe embedding.
-    import json as _json
-
-    sources_json = _json.dumps([e["src"] for e in thumb_entries])
-
-    component_html = f"""
-    <style>
-      #thumb-gallery {{
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        align-items: flex-start;
-      }}
-      .agent-thumb-cell {{
-        width: 150px;
-        flex-shrink: 0;
-        text-align: center;
-        border-radius: 8px;
-        overflow: hidden;
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        transition: box-shadow .2s;
-      }}
-      .agent-thumb-cell:hover {{
-        box-shadow: 0 4px 12px rgba(0,0,0,.12);
-      }}
-      /* Hide entire cell when image is broken */
-      .agent-thumb-cell.broken {{
-        display: none !important;
-      }}
-      .agent-thumb-img {{
-        width: 150px;
-        height: 120px;
-        object-fit: cover;
-        display: block;
-        cursor: zoom-in;
-        border-radius: 8px 8px 0 0;
-        transition: opacity .2s;
-      }}
-      .agent-thumb-img:hover {{
-        opacity: 0.82;
-      }}
-      .agent-thumb-caption {{
-        font-size: .75em;
-        color: #64748b;
-        padding: 4px 6px;
-        line-height: 1.3;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        max-width: 150px;
-      }}
-    </style>
-    <div id="thumb-gallery">
-      {thumbs_html}
-    </div>
-    <script>
-    (function() {{
-      var sources = {sources_json};
-
-      // Find the top-level document (escape iframe)
-      var topDoc = window.top.document;
-
-      // Ensure overlay exists in top document (create once)
-      var OVERLAY_ID = '__agent_img_lightbox';
-      var overlay = topDoc.getElementById(OVERLAY_ID);
-      if (!overlay) {{
-        overlay = topDoc.createElement('div');
-        overlay.id = OVERLAY_ID;
-        overlay.style.cssText = (
-          'display:none;position:fixed;z-index:999999;left:0;top:0;'
-          + 'width:100vw;height:100vh;background:rgba(0,0,0,.88);'
-          + 'align-items:center;justify-content:center;cursor:zoom-out;'
-        );
-        var img = topDoc.createElement('img');
-        img.id = OVERLAY_ID + '_img';
-        img.style.cssText = (
-          'max-width:90vw;max-height:90vh;border-radius:8px;'
-          + 'box-shadow:0 0 40px rgba(0,0,0,.6);'
-        );
-        overlay.appendChild(img);
-        overlay.addEventListener('click', function() {{
-          overlay.style.display = 'none';
-        }});
-        topDoc.body.appendChild(overlay);
-      }}
-
-      // Attach click handlers to thumbnails
-      var gallery = document.getElementById('thumb-gallery');
-      gallery.addEventListener('click', function(e) {{
-        var t = e.target;
-        if (t.tagName === 'IMG' && t.hasAttribute('data-idx')) {{
-          var idx = parseInt(t.getAttribute('data-idx'), 10);
-          var src = sources[idx];
-          if (src) {{
-            var topOverlay = window.top.document.getElementById(OVERLAY_ID);
-            var topImg = window.top.document.getElementById(OVERLAY_ID + '_img');
-            topImg.src = src;
-            topOverlay.style.display = 'flex';
-          }}
-        }}
-      }});
-
-      // After load, shrink iframe to actual content height to remove blank space
-      requestAnimationFrame(function() {{
-        var h = document.getElementById('thumb-gallery').offsetHeight;
-        if (h > 0) {{
-          document.body.style.margin = '0';
-          document.body.style.overflow = 'hidden';
-          var frame = window.frameElement;
-          if (frame) frame.style.height = h + 'px';
-        }}
-      }});
-    }})();
-    </script>
-    """
-
-    cols_per_row = 4
-    row_count = (len(thumb_entries) + cols_per_row - 1) // cols_per_row
-    estimated_height = row_count * 160 + 4
-    _stc.html(component_html, height=estimated_height, scrolling=False)
+        normalized = _normalize_image_for_gallery(image, f"Image {idx}")
+        if normalized:
+            items.append(normalized)
+    _render_thumbnail_gallery(
+        items,
+        thumb_width=150,
+        thumb_height=120,
+        caption_max_chars=40,
+        align="left",
+        card_style=True,
+    )
 
 
 def get_message_metadata(msg: dict[str, Any]) -> dict[str, Any]:
@@ -5745,96 +5392,6 @@ def render_live_trace_panel(trace_placeholder: Any) -> None:
         )
 
 
-def render_tool_artifacts(tool_artifacts: list[dict[str, Any]]):
-    """
-    Render tool execution artifacts as collapsible sections.
-    Shows tool name, status, arguments, and results.
-    """
-    if not tool_artifacts:
-        return
-
-    st.markdown("#### Tool Executions", unsafe_allow_html=True)
-
-    for idx, artifact in enumerate(tool_artifacts, start=1):
-        tool_name = artifact.get("tool", "unknown_tool")
-        artifact_status = str(
-            artifact.get("status") or ("error" if artifact.get("error") is not None else "success")
-        ).lower()
-        has_error = artifact_status == "error" or artifact.get("error") is not None
-
-        # Status badge styling
-        if artifact_status == "rejected":
-            status_badge_md = ":material/block: Rejected"
-            status_badge_label = "Rejected"
-            status_icon_name = "block"
-            badge_color = COLORS["warning"]
-        elif has_error:
-            status_badge_md = ":material/error: Error"
-            status_badge_label = "Error"
-            status_icon_name = "error"
-            badge_color = COLORS["error"]
-        else:
-            status_badge_md = ":material/check_circle: Success"
-            status_badge_label = "Success"
-            status_icon_name = "check_circle"
-            badge_color = COLORS["success"]
-
-        status_badge_html = (
-            f'<span class="material-symbols-outlined" aria-hidden="true">{status_icon_name}</span>'
-            f" {html.escape(status_badge_label)}"
-        )
-
-        # Create expander for each tool
-        with st.expander(f"**[{idx}] {tool_name}** - {status_badge_md}", expanded=False):
-            # Show execution status
-            st.markdown(
-                f'<div style="background-color: {badge_color}15; padding: 8px; border-radius: 4px; margin-bottom: 8px;">'
-                f'<strong style="color: {badge_color};">Status:</strong> {status_badge_html}'
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-
-            # Show arguments if present
-            args = artifact.get("args", {})
-            if args and isinstance(args, dict):
-                st.markdown("**Arguments:**")
-                # Display arguments in a nice format
-                for key, value in args.items():
-                    st.code(f"{key}: {value}", language="text")
-
-            # Show output/result if present
-            output = artifact.get("output")
-            render = artifact.get("render")
-            if output is not None or isinstance(render, dict):
-                st.markdown("**Output:**")
-                if isinstance(render, dict) and render_tool_render_payload(
-                    render,
-                    fallback_output=output,
-                ):
-                    pass
-                elif isinstance(output, (dict, list)):
-                    render_json_output(output, label=f"{tool_name} Output", expanded=False)
-                elif output is not None:
-                    st.code(str(output), language="text")
-
-            # Show error if present
-            if has_error:
-                error_msg = artifact.get("error", "Unknown error")
-                st.markdown("**Error:**")
-                st.error(error_msg)
-
-                # Show recovery hint if available
-                hint = artifact.get("hint")
-                if hint:
-                    st.markdown("**Recovery Hint:**")
-                    st.info(hint)
-
-            # Show execution time if available
-            execution_time = artifact.get("execution_time")
-            if execution_time:
-                st.caption(f":material/timer: Execution time: {execution_time:.2f}s")
-
-
 def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None):
     """
     Render citations from document metadata in a user-friendly format.
@@ -5893,7 +5450,18 @@ def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None
             else:
                 doc_relevance_color = COLORS["error"]
 
-            # Document header - make it clickable if only one chunk
+            # Document header — same markup whether or not it's clickable;
+            # only the surrounding column layout differs.
+            doc_header_html = (
+                f'<div class="citation-document" style="margin-bottom: 12px; '
+                f"padding: 12px; border: 2px solid {doc_relevance_color}; "
+                f"border-radius: 8px; background-color: {doc_relevance_color}10;\">"
+                f'<strong style="font-size: 1.1em;">[Document {doc_num}] {source}</strong><br>'
+                f'<span style="color: {doc_relevance_color}; font-size: 0.9em;">'
+                f"Overall Relevance: ({avg_score:.1%})</span> | "
+                f'<span style="font-size: 0.9em;">{total_chunks} chunk(s)</span></div>'
+            )
+
             if total_chunks == 1 and chunks and msg_id:
                 chunk = chunks[0]
                 chunk_idx = chunk.get("chunk_index", 0)
@@ -5901,14 +5469,7 @@ def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None
 
                 col1, col2 = st.columns([0.85, 0.15])
                 with col1:
-                    st.markdown(
-                        f'<div class="citation-document" style="margin-bottom: 12px; padding: 12px; border: 2px solid {doc_relevance_color}; border-radius: 8px; background-color: {doc_relevance_color}10;">'
-                        f'<strong style="font-size: 1.1em;">[Document {doc_num}] {source}</strong><br>'
-                        f'<span style="color: {doc_relevance_color}; font-size: 0.9em;">Overall Relevance: ({avg_score:.1%})</span> | '
-                        f'<span style="font-size: 0.9em;">{total_chunks} chunk(s)</span>'
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown(doc_header_html, unsafe_allow_html=True)
                 with col2:
                     if st.button(
                         "View",
@@ -5928,14 +5489,7 @@ def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None
                         st.session_state["chunk_preview_dialog_key"] = True
                         st.rerun()
             else:
-                st.markdown(
-                    f'<div class="citation-document" style="margin-bottom: 12px; padding: 12px; border: 2px solid {doc_relevance_color}; border-radius: 8px; background-color: {doc_relevance_color}10;">'
-                    f'<strong style="font-size: 1.1em;">[Document {doc_num}] {source}</strong><br>'
-                    f'<span style="color: {doc_relevance_color}; font-size: 0.9em;">Overall Relevance: ({avg_score:.1%})</span> | '
-                    f'<span style="font-size: 0.9em;">{total_chunks} chunk(s)</span>'
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
+                st.markdown(doc_header_html, unsafe_allow_html=True)
 
             # Show individual chunks if more than one
             if total_chunks > 1:
@@ -5952,18 +5506,21 @@ def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None
                     else:
                         chunk_color = COLORS["error"]
 
-                    # Make individual chunks clickable
+                    chunk_row_html = (
+                        f'<div class="citation-chunk" style="margin-left: 20px; '
+                        f"margin-bottom: 6px; padding: 6px; "
+                        f"border-left: 2px solid {chunk_color}; "
+                        f"background-color: {chunk_color}08;\">"
+                        f'<span style="font-size: 0.9em;">Chunk {chunk_idx} '
+                        f'<span style="color: {chunk_color};">({chunk_score:.1%})</span>'
+                        f"</span></div>"
+                    )
+
                     if msg_id:
                         chunk_data = chunks_map.get(doc_num, {}).get(chunk_idx, {})
                         col1, col2 = st.columns([0.85, 0.15])
                         with col1:
-                            st.markdown(
-                                f'<div class="citation-chunk" style="margin-left: 20px; margin-bottom: 6px; padding: 6px; border-left: 2px solid {chunk_color}; background-color: {chunk_color}08;">'
-                                f'<span style="font-size: 0.9em;">Chunk {chunk_idx} '
-                                f'<span style="color: {chunk_color};">({chunk_score:.1%})</span></span>'
-                                f"</div>",
-                                unsafe_allow_html=True,
-                            )
+                            st.markdown(chunk_row_html, unsafe_allow_html=True)
                         with col2:
                             if st.button(
                                 "Details",
@@ -5983,105 +5540,36 @@ def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None
                                 st.session_state["chunk_preview_dialog_key"] = True
                                 st.rerun()
                     else:
-                        st.markdown(
-                            f'<div class="citation-chunk" style="margin-left: 20px; margin-bottom: 6px; padding: 6px; border-left: 2px solid {chunk_color}; background-color: {chunk_color}08;">'
-                            f'<span style="font-size: 0.9em;">Chunk {chunk_idx} '
-                            f'<span style="color: {chunk_color};">({chunk_score:.1%})</span></span>'
-                            f"</div>",
-                            unsafe_allow_html=True,
-                        )
+                        st.markdown(chunk_row_html, unsafe_allow_html=True)
 
-            # Show images for this document
+            # Show images for this document via the shared thumbnail gallery.
             images = message_metadata.get("images", [])
             if images:
-                # Filter images that belong to this document
-                doc_images = []
+                doc_image_items: list[dict[str, str]] = []
                 for img in images:
-                    # Match by document ID or source filename
                     img_name = img.get("name", "")
-                    if doc_id and doc_id in img_name or source and source in img_name:
-                        doc_images.append(img)
+                    if not ((doc_id and doc_id in img_name) or (source and source in img_name)):
+                        continue
+                    normalized = _normalize_image_for_gallery(img, "Image")
+                    if not normalized:
+                        continue
+                    caption = img.get("caption") or normalized["name"]
+                    page_num = img.get("page_number")
+                    if page_num:
+                        caption = f"{caption} (p. {page_num})"
+                    normalized["name"] = caption
+                    doc_image_items.append(normalized)
 
-                if doc_images:
+                if doc_image_items:
                     st.markdown("**Images:**")
-                    # Build compact clickable gallery for document images
-                    gallery_parts = []
-                    for img in doc_images:
-                        data_b64 = img.get("data", "")
-                        mime = img.get("mime", "image/png")
-                        caption = img.get("caption") or img.get("name", "Image")
-                        page_num = img.get("page_number")
-
-                        if data_b64:
-                            caption_text = caption
-                            if page_num:
-                                caption_text = f"{caption} (p. {page_num})"
-
-                            # Truncate caption for display
-                            display_caption = caption_text
-                            if len(display_caption) > 25:
-                                display_caption = display_caption[:22] + "..."
-
-                            src = f"data:{mime};base64,{data_b64}"
-                            escaped_src = html.escape(src, quote=True)
-                            escaped_caption = html.escape(display_caption, quote=True)
-                            escaped_full = html.escape(caption_text, quote=True)
-
-                            # Use lightbox for base64 images via event delegation
-                            gallery_parts.append(
-                                f'<div style="display: inline-block; margin: 4px; text-align: center; vertical-align: top;" '
-                                f'title="{escaped_full}">'
-                                f'<img src="{escaped_src}" alt="{escaped_full}" class="img-thumb" '
-                                f'style="width: 80px; height: 80px; object-fit: cover; border-radius: 8px; '
-                                f'border: 1px solid #e2e8f0; cursor: pointer;" />'
-                                f'<div style="font-size: 10px; color: #64748b; max-width: 80px; overflow: hidden; '
-                                f'text-overflow: ellipsis; white-space: nowrap; margin-top: 2px;">{escaped_caption}</div>'
-                                f"</div>"
-                            )
-
-                    if gallery_parts:
-                        st.markdown(
-                            '<div style="display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0;">'
-                            + "".join(gallery_parts)
-                            + "</div>",
-                            unsafe_allow_html=True,
-                        )
-
-
-def render_thinking_summary(message_metadata: dict[str, Any]):
-    """Render thinking summary from message metadata in a styled collapsible section."""
-    thinking_summary = message_metadata.get("thinking_summary")
-    if thinking_summary:
-        with st.expander("Thought Process", expanded=False):
-            # Convert markdown to HTML using the markdown library for reliable rendering
-            formatted_html = _markdown.markdown(thinking_summary, extensions=["nl2br"])
-
-            # Use custom styled container for thinking content
-            st.markdown(
-                f'<div class="thinking-container"><div class="thinking-content-rendered">{formatted_html}</div></div>',
-                unsafe_allow_html=True,
-            )
-
-
-def render_reasoning_summary(message_metadata: dict[str, Any]):
-    """Render OpenAI reasoning summary (not chain-of-thought) when available."""
-    reasoning_summary = message_metadata.get("reasoning_summary")
-    if not reasoning_summary:
-        return
-
-    title = "Reasoning (summary)"
-    tokens = message_metadata.get("reasoning_tokens")
-    if isinstance(tokens, int) and tokens >= 0:
-        title = f"{title} - {tokens} tokens"
-
-    with st.expander(title, expanded=False):
-        # Convert markdown to HTML using the markdown library for reliable rendering
-        formatted_html = _markdown.markdown(str(reasoning_summary), extensions=["nl2br"])
-
-        st.markdown(
-            f'<div class="thinking-container"><div class="thinking-content-rendered">{formatted_html}</div></div>',
-            unsafe_allow_html=True,
-        )
+                    _render_thumbnail_gallery(
+                        doc_image_items,
+                        thumb_width=80,
+                        thumb_height=80,
+                        caption_max_chars=25,
+                        align="left",
+                        card_style=False,
+                    )
 
 
 def render_suggestion_buttons(suggestions: list[str], msg_id: str):
@@ -6276,28 +5764,18 @@ def render_message_bubble(
         if attachments:
             render_attachment_gallery(attachments, align="right")
 
-    # Show agent-sent images for assistant messages
     if not is_user:
-        render_agent_images(get_message_metadata(msg))
-
-    # Show canvas artifact for assistant messages (HTML/SVG live preview)
-    if not is_user:
-        render_canvas_artifact(get_message_metadata(msg))
-
-    # Show live widget cards for assistant messages
-    if not is_user:
+        # Show agent-sent images, canvas artifact, live widgets, citations,
+        # and feedback for assistant messages. Reuse the metadata dict
+        # already extracted above instead of re-parsing it five times.
+        render_agent_images(message_metadata)
+        render_canvas_artifact(message_metadata)
         render_live_widgets(
-            get_message_metadata(msg),
+            message_metadata,
             message_key=str(msg.get("id", "")),
             auto_mount=auto_mount_live_widgets,
         )
-
-    # Show citations for assistant messages
-    if not is_user:
-        render_citations(get_message_metadata(msg), str(msg.get("id", "")))
-
-    # Show feedback for assistant messages
-    if not is_user:
+        render_citations(message_metadata, str(msg.get("id", "")))
         render_message_feedback_inline(msg)
 
 
@@ -6616,8 +6094,6 @@ def render_tools_tab():
                                     icon=":material/refresh:",
                                 )
                                 # Small delay to ensure file is written
-                                import time
-
                                 time.sleep(0.5)
                                 st.rerun()
 
@@ -6789,8 +6265,6 @@ def render_tools_tab():
                                     icon=":material/check_circle:",
                                 )
                                 # Small delay to ensure file is written
-                                import time
-
                                 time.sleep(0.5)
                                 st.rerun()
                             else:
@@ -7007,8 +6481,6 @@ def render_skills_tab():
                 if result:
                     msg = result.get("message", "Skills reloaded")
                     st.success(msg, icon=":material/check_circle:")
-                    import time
-
                     time.sleep(0.8)
                     st.rerun()
                 else:
@@ -7871,10 +7343,6 @@ def render_chat_view():
             with col3:
                 _form_attach = st.form_submit_button("Attach", use_container_width=True)
 
-        # Placeholder for the "Stop generating" button lives OUTSIDE the form
-        # but directly below it, so it appears next to Send / Attach.
-        stop_button_placeholder = st.empty()
-
         # ── Process form actions OUTSIDE the form context ──
         if _form_attach:
             st.session_state.show_attachment_uploader = not st.session_state.get(
@@ -7937,6 +7405,12 @@ def render_chat_view():
 
                 if pending_attachments:
                     message_data["attachments"] = pending_attachments
+
+                # Placeholder for the "Stop generating" button lives OUTSIDE
+                # the form but directly below it, so it appears next to Send /
+                # Attach. Created only on the send path so idle reruns don't
+                # leave an empty slot under the form.
+                stop_button_placeholder = st.empty()
 
                 # Use streaming endpoint for real-time response
                 with st.status("Sending message...", expanded=True) as status:
@@ -8024,9 +7498,6 @@ def render_chat_view():
 
                         elif event_type == "interrupt":
                             # Workflow paused for human approval
-                            event.get("thread_id")
-                            event.get("pending_tool_calls") or []
-                            # Extract the full interrupt response data
                             interrupt_data = event.get("interrupt")
                             interrupt_message = extract_interrupt_message(interrupt_data)
                             if interrupt_message:
@@ -8097,12 +7568,7 @@ def render_chat_view():
 
 def render_manage_modal():
     """Conversation management modal dialog"""
-    should_show = st.session_state.get(CONVERSATION_MANAGER_DIALOG_KEY, False)
-
-    st.session_state.conversation_manager_visible = should_show
-    st.session_state.show_conversation_manager = should_show
-
-    if not should_show:
+    if not st.session_state.get(CONVERSATION_MANAGER_DIALOG_KEY, False):
         return
 
     @st.dialog(
@@ -9026,8 +8492,6 @@ def render_settings_view():
             ):
                 sanitized = normalize_persona_input(current_value)
                 st.session_state.pending_persona_prompt = sanitized
-                st.session_state.persona_editor_pending_value = sanitized
-                st.session_state.persona_editor_pending = True
                 st.toast("Persona saved for new chat!", icon=":material/check_circle:")
                 st.session_state.active_view = "chat"
                 st.rerun()
@@ -9052,8 +8516,6 @@ def render_settings_view():
     with col2:
         if is_new_conversation:
             if st.button("Clear", width="stretch"):
-                st.session_state.persona_editor_pending_value = ""
-                st.session_state.persona_editor_pending = True
                 st.session_state.pending_persona_prompt = ""
                 st.rerun()
         else:

@@ -43,7 +43,8 @@ def _normalize_model_info(entry: Any) -> dict[str, Any] | None:
     """Pick the subset of model fields the UI cares about.
 
     Strips API keys, runtime config objects, and any keys other than
-    ``provider``/``model``/``config_source``/``reasoning_effort``/``temperature``.
+    ``provider``/``model``/``config_source``/``reasoning_effort``/``temperature``
+    plus the safe nested ``context_window`` usage contract.
     """
     if not isinstance(entry, dict):
         return None
@@ -52,6 +53,9 @@ def _normalize_model_info(entry: Any) -> dict[str, Any] | None:
         value = entry.get(key)
         if value not in (None, ""):
             snapshot[key] = value
+    context_window = entry.get("context_window")
+    if isinstance(context_window, dict):
+        snapshot["context_window"] = dict(context_window)
     return snapshot or None
 
 

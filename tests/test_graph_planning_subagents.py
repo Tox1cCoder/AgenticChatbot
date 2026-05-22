@@ -1733,6 +1733,19 @@ async def test_dispatch_result_includes_requested_and_resolved_model(monkeypatch
                 "model": "gpt-5.4",
                 "config_source": "request",
                 "reasoning_effort": "high",
+                "context_window": {
+                    "provider": "openai",
+                    "model": "gpt-5.4",
+                    "context_window_tokens": 400000,
+                    "max_input_tokens": 400000,
+                    "max_output_tokens": 128000,
+                    "source": "registry",
+                    "known": True,
+                    "used_tokens": 4096,
+                    "used_token_source": "actual_total",
+                    "usage_ratio": 4096 / 400000,
+                    "display_state": "ok",
+                },
             },
         )
 
@@ -1760,6 +1773,8 @@ async def test_dispatch_result_includes_requested_and_resolved_model(monkeypatch
     assert entry.resolved_model is not None
     assert entry.resolved_model["model"] == "gpt-5.4"
     assert entry.resolved_model["reasoning_effort"] == "high"
+    assert entry.resolved_model["context_window"]["used_tokens"] == 4096
+    assert entry.resolved_model["context_window"]["used_token_source"] == "actual_total"
     # Sanitized: no API keys ever surfaced.
     assert "api_key" not in entry.resolved_model
 
