@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.config import settings
 from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.conversation_service_interface import IConversationService
 from app.interfaces.message_service_interface import IMessageService
@@ -353,6 +354,131 @@ def _extract_image_file_parts_from_metadata(
     return file_parts
 
 
+def _is_v1_rich_items_message(metadata: dict[str, Any] | None) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    return metadata.get("rich_items_version") == 1
+
+
+def _scrub_v1_legacy_image_fields(payload: dict[str, Any]) -> None:
+    """Mutate ``payload`` to remove unselected legacy image data for v1 messages.
+
+    For v1 rich-items messages we never want hidden image candidates to surface
+    through the legacy ``metadata["images"]`` channel or via the AI SDK
+    ``parts`` array. The selected images are already exposed by
+    ``_selected_image_file_parts_from_rich_items()``.
+    """
+    for meta_key in ("message_metadata", "messageMetadata", "metadata"):
+        meta = payload.get(meta_key)
+        if isinstance(meta, dict) and "images" in meta:
+            scrubbed = dict(meta)
+            scrubbed.pop("images", None)
+            payload[meta_key] = scrubbed
+    parts = payload.get("parts")
+    if isinstance(parts, list):
+        rich_items = None
+        for meta_key in ("message_metadata", "messageMetadata", "metadata"):
+            meta = payload.get(meta_key)
+            if isinstance(meta, dict):
+                rich_items = meta.get("rich_items")
+                break
+        allowed_urls: set[str] = set()
+        if isinstance(rich_items, list):
+            for item in rich_items:
+                if not isinstance(item, dict) or item.get("type") != "image":
+                    continue
+                pl = item.get("payload") or {}
+                if pl.get("url"):
+                    allowed_urls.add(str(pl["url"]))
+                elif pl.get("data"):
+                    mime = pl.get("mime_type") or "image/png"
+                    allowed_urls.add(f"data:{mime};base64,{pl['data']}")
+        filtered_parts = []
+        for part in parts:
+            if not isinstance(part, dict):
+                filtered_parts.append(part)
+                continue
+            if part.get("type") == "file" and part.get("url") not in allowed_urls:
+                continue
+            filtered_parts.append(part)
+        payload["parts"] = filtered_parts
+
+
+def _selected_image_file_parts_from_rich_items(
+    metadata: dict[str, Any] | None,
+) -> list[dict[str, str]]:
+    if not isinstance(metadata, dict):
+        return []
+    rich_items = metadata.get("rich_items")
+    if not isinstance(rich_items, list):
+        return []
+    file_parts: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in rich_items:
+        if not isinstance(item, dict) or item.get("type") != "image":
+            continue
+        payload = item.get("payload") or {}
+        url = payload.get("url")
+        data = payload.get("data")
+        mime_type = payload.get("mime_type") or "image/png"
+        if url:
+            file_part = {"url": str(url), "mediaType": str(mime_type)}
+        elif data:
+            file_part = {"url": f"data:{mime_type};base64,{data}", "mediaType": str(mime_type)}
+        else:
+            continue
+        key = (file_part["url"], file_part["mediaType"])
+        if key in seen:
+            continue
+        seen.add(key)
+        file_parts.append(file_part)
+    return file_parts
+
+
+_RICH_MARKER_LINE_PATTERN = None  # Compiled lazily inside the projection helper.
+
+
+def project_ai_sdk_message_for_capability(
+    message: dict[str, Any],
+    *,
+    inline_rich_response_v1: bool,
+) -> dict[str, Any]:
+    """Project a persisted assistant message for an AI SDK consumer.
+
+    When ``inline_rich_response_v1`` is True, the message passes through
+    unchanged (markers preserved, `rich_items` available). When False, the
+    standalone HTML-comment marker lines are stripped from ``content`` so
+    non-capable clients do not render them verbatim, and `rich_items` /
+    `rich_items_version` keys are removed from any metadata field present.
+    """
+    if not isinstance(message, dict):
+        return message
+    if inline_rich_response_v1:
+        return message
+    projected = dict(message)
+    content = projected.get("content")
+    if isinstance(content, str) and "<!--rich:" in content:
+        import re
+
+        global _RICH_MARKER_LINE_PATTERN
+        if _RICH_MARKER_LINE_PATTERN is None:
+            _RICH_MARKER_LINE_PATTERN = re.compile(
+                r"^[ ]{0,3}<!--rich:[A-Za-z0-9_\-.:]+-->[ \t]*$",
+                re.MULTILINE,
+            )
+        projected["content"] = _RICH_MARKER_LINE_PATTERN.sub("", content)
+    for meta_key in ("message_metadata", "messageMetadata", "metadata"):
+        meta = projected.get(meta_key)
+        if isinstance(meta, dict):
+            scrubbed = {
+                k: v
+                for k, v in meta.items()
+                if k not in {"rich_items", "rich_items_version", "rich_reference_warnings"}
+            }
+            projected[meta_key] = scrubbed
+    return projected
+
+
 def _extract_image_file_parts_from_message(
     message: dict[str, Any],
 ) -> list[dict[str, str]]:
@@ -382,7 +508,19 @@ def _attach_image_parts_to_message(message: dict[str, Any]) -> dict[str, Any]:
         elif isinstance(payload.get("messageMetadata"), dict):
             payload["metadata"] = payload["messageMetadata"]
 
-    image_parts = _extract_image_file_parts_from_message(payload)
+    # For v1 rich-items messages, file parts come only from finalized rich_items
+    # (selected images). Skip the legacy metadata["images"] attachment entirely
+    # so hidden candidates cannot leak via `parts`.
+    metadata = None
+    for key in ("message_metadata", "messageMetadata", "metadata"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            metadata = value
+            break
+    if _is_v1_rich_items_message(metadata):
+        image_parts = _selected_image_file_parts_from_rich_items(metadata)
+    else:
+        image_parts = _extract_image_file_parts_from_message(payload)
     if not image_parts:
         return payload
 
@@ -495,7 +633,14 @@ def _coerce_json_object(value: Any) -> Any:
 class StreamState:
     """Maintains the streaming state across event handlers."""
 
-    def __init__(self, message_id: str, text_id: str, reasoning_id: str):
+    def __init__(
+        self,
+        message_id: str,
+        text_id: str,
+        reasoning_id: str,
+        *,
+        inline_rich_response_v1: bool = False,
+    ):
         self.message_id = message_id
         self.text_id = text_id
         self.reasoning_id = reasoning_id
@@ -504,6 +649,7 @@ class StreamState:
         self.any_text_delta = False
         self.tool_seq = 0
         self.pending_tool_call_ids: list[str] = []
+        self.inline_rich_response_v1 = bool(inline_rich_response_v1)
 
 
 class EventHandler(ABC):
@@ -713,6 +859,10 @@ class CompleteEventHandler(EventHandler):
         message = event.get("message") or {}
         if isinstance(message, dict):
             message = _attach_image_parts_to_message(message)
+            message = project_ai_sdk_message_for_capability(
+                message,
+                inline_rich_response_v1=getattr(state, "inline_rich_response_v1", False),
+            )
 
         if not state.any_text_delta:
             content = ""
@@ -729,7 +879,20 @@ class CompleteEventHandler(EventHandler):
                 )
 
         if isinstance(message, dict):
-            for file_part in _extract_image_file_parts_from_message(message):
+            metadata = None
+            for key in ("message_metadata", "messageMetadata", "metadata"):
+                value = message.get(key)
+                if isinstance(value, dict):
+                    metadata = value
+                    break
+            # For v1 messages, file parts come only from finalized rich_items
+            # (the selected images). For legacy messages, fall back to the
+            # existing extraction over metadata["images"].
+            if _is_v1_rich_items_message(metadata):
+                file_parts = _selected_image_file_parts_from_rich_items(metadata)
+            else:
+                file_parts = _extract_image_file_parts_from_message(message)
+            for file_part in file_parts:
                 yield _sse(
                     {
                         "type": "file",
@@ -747,6 +910,10 @@ class CompleteEventHandler(EventHandler):
             # (backend message ID, citations, suggested questions, etc.).
             STRIP_KEYS = {"content"}
             message_meta = {k: v for k, v in message.items() if k not in STRIP_KEYS}
+            # For v1 messages, the legacy `images` field cannot leak unselected
+            # candidates and `parts` must be limited to selected images.
+            if _is_v1_rich_items_message(metadata):
+                _scrub_v1_legacy_image_fields(message_meta)
             if message_meta:
                 yield _sse(
                     {
@@ -795,6 +962,34 @@ class HeartbeatEventHandler(EventHandler):
         yield _sse({"type": "heartbeat"})
 
 
+class RichItemsEventHandler(EventHandler):
+    """Maps canonical `rich_items` upserts to AI SDK transient data parts.
+
+    Image items are excluded by `select_transient_upsert_items()`; only safe
+    created non-image records (widgets, tool renders, citations, resource
+    links) reach the wire. Clients without the v1 capability never receive
+    these events.
+    """
+
+    async def handle(self, event: dict[str, Any], state: StreamState) -> AsyncGenerator[str, None]:
+        if not getattr(state, "inline_rich_response_v1", False):
+            return
+        from app.core.rich_response import select_transient_upsert_items
+
+        items = event.get("items") or []
+        safe_items = select_transient_upsert_items(items)
+        if not safe_items:
+            return
+        operation = event.get("operation") or "upsert"
+        yield _sse(
+            {
+                "type": "data-rich-items",
+                "data": {"operation": operation, "items": safe_items},
+                "transient": True,
+            }
+        )
+
+
 class EventHandlerFactory:
     """Factory for creating event handlers."""
 
@@ -810,6 +1005,7 @@ class EventHandlerFactory:
         "continuation_start": ContinuationEventHandler(),
         "node_complete": NodeCompleteEventHandler(),
         "heartbeat": HeartbeatEventHandler(),
+        "rich_items": RichItemsEventHandler(),
     }
 
     @classmethod
@@ -1129,18 +1325,29 @@ async def chat_ui_message_stream(
     # message (one from the stream, one from the API) after re-fetching.
     bot_message_id = uuid4()
 
+    extra = getattr(payload, "model_extra", {}) or {}
+    inline_rich_response_v1 = bool(
+        extra.get("inline_rich_response_v1")
+        or extra.get("inlineRichResponseV1")
+    )
     state = StreamState(
-        message_id=str(bot_message_id), text_id=str(uuid4()), reasoning_id=str(uuid4())
+        message_id=str(bot_message_id),
+        text_id=str(uuid4()),
+        reasoning_id=str(uuid4()),
+        inline_rich_response_v1=(
+            inline_rich_response_v1
+            and getattr(settings, "inline_rich_response_enabled", False)
+        ),
     )
 
     def event_source():
-        extra = getattr(payload, "model_extra", {}) or {}
         message_create = MessageCreate(
             conversation_id=conversation_id,
             content=user_text or "Please analyze the attached image.",
             role=MessageRole.user,
             attachments=user_attachments or None,
             device_id=extra.get("device_id") or extra.get("deviceId"),
+            inline_rich_response_v1=inline_rich_response_v1,
         )
         return message_service.create_message_stream(
             message_create, current_user_id, bot_message_id=bot_message_id
@@ -1174,8 +1381,17 @@ async def resume_interrupt_ai_sdk(
 ) -> StreamingResponse:
     """Resume execution after handling tool execution interrupts for AI SDK client."""
     bot_message_id = uuid4()
+    inline_rich_response_v1 = bool(
+        getattr(resume_request, "inline_rich_response_v1", False)
+    )
     state = StreamState(
-        message_id=str(bot_message_id), text_id=str(uuid4()), reasoning_id=str(uuid4())
+        message_id=str(bot_message_id),
+        text_id=str(uuid4()),
+        reasoning_id=str(uuid4()),
+        inline_rich_response_v1=(
+            inline_rich_response_v1
+            and getattr(settings, "inline_rich_response_enabled", False)
+        ),
     )
 
     def event_source():
@@ -1187,6 +1403,7 @@ async def resume_interrupt_ai_sdk(
             device_id=resume_request.device_id,
             decisions=resume_request.decisions,
             bot_message_id=bot_message_id,
+            inline_rich_response_v1=inline_rich_response_v1,
         )
 
     return _build_ui_message_stream_response(event_source, state)

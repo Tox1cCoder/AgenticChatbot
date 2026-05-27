@@ -3,9 +3,86 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..core.rich_response import (
+    ALLOWED_IMAGE_MIME_TYPES,
+    RichDisplayPolicy,
+    RichItemType,
+)
 from .schemas import DocumentAction
 
 logger = logging.getLogger(__name__)
+
+
+def _build_document_image_candidate(image: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a public rich-item candidate from a RAG document image record.
+
+    Returns ``None`` for entries missing a stable id or whose MIME type is not
+    in the inline-allowed raster set.
+    """
+    image_id = image.get("id")
+    if not image_id:
+        return None
+    mime_type = image.get("mime_type") or "image/png"
+    if mime_type not in ALLOWED_IMAGE_MIME_TYPES:
+        return None
+    payload: dict[str, Any] = {"mime_type": mime_type}
+    data = image.get("data")
+    url = image.get("url")
+    if url:
+        payload["url"] = str(url)
+    elif data:
+        payload["data"] = str(data)
+    else:
+        return None
+    caption = image.get("caption")
+    if caption:
+        payload["description"] = str(caption)
+    page = image.get("page_number")
+    return {
+        "id": f"image:document:{image_id}",
+        "type": RichItemType.image.value,
+        "source": "rag_document",
+        "display_policy": RichDisplayPolicy.inline_only.value,
+        "alt_text": str(caption or "Document figure"),
+        "title": f"Page {page}" if page is not None else None,
+        "payload": payload,
+        "provenance": {
+            "document_image_id": str(image_id),
+            "page_number": page,
+        },
+    }
+
+
+def register_document_image_candidates(
+    *,
+    context: dict[str, Any],
+    images: list[dict[str, Any]],
+) -> int:
+    """Register RAG document images as public rich-item candidates in
+    ``context["rich_item_candidates"]``. Returns the number of new entries.
+
+    Candidate ids are derived from the document image row id so they remain
+    stable across turns.
+    """
+    if not images:
+        return 0
+    existing: list[dict[str, Any]] = list(context.get("rich_item_candidates", []))
+    seen_ids = {c.get("id") for c in existing if isinstance(c, dict)}
+    added = 0
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        candidate = _build_document_image_candidate(image)
+        if candidate is None:
+            continue
+        if candidate["id"] in seen_ids:
+            continue
+        existing.append(candidate)
+        seen_ids.add(candidate["id"])
+        added += 1
+    if added:
+        context["rich_item_candidates"] = existing
+    return added
 
 
 def merge_agentic_images(
@@ -241,11 +318,19 @@ async def execute_search_documents_action(
                         new_images=images,
                         max_agentic_images=max_agentic_images,
                     )
+                    register_document_image_candidates(
+                        context=context, images=images
+                    )
                     result = f"IMAGES ({len(images)} found, {attached_count} added to context):\n\n"
                     for i, img in enumerate(images, 1):
                         page = img.get("page_number", "?")
                         caption = img.get("caption") or "No caption"
-                        result += f"[{i}] Page {page}: {caption}\n"
+                        img_id = img.get("id")
+                        rich_id = f"image:document:{img_id}" if img_id else ""
+                        if rich_id:
+                            result += f"[{i}] (id: {rich_id}) Page {page}: {caption}\n"
+                        else:
+                            result += f"[{i}] Page {page}: {caption}\n"
                 else:
                     result = f"No images found for document {document_id}"
             else:

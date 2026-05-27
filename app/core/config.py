@@ -937,6 +937,36 @@ class Settings(BaseSettings):
         "Results exceeding this are truncated with a warning.",
     )
 
+    # Inline Rich Response Configuration
+    inline_rich_response_enabled: bool = Field(
+        default=False,
+        description=(
+            "Rollout flag for the inline rich-response feature. When False, the "
+            "backend never emits marker-bearing v1 content or rich-item stream "
+            "events, regardless of the per-request capability. Keep disabled "
+            "until the renderer and security acceptance gates are approved."
+        ),
+    )
+    rich_item_inventory_max_items: int = Field(
+        default=12,
+        description="Maximum rich-item candidates exposed to the model in the bounded inventory block.",
+    )
+    rich_item_inventory_max_chars: int = Field(
+        default=2400,
+        description="Maximum characters of the bounded rich-item inventory block injected into prompts.",
+    )
+    rich_item_summary_max_chars: int = Field(
+        default=180,
+        description="Maximum characters used per rich-item summary line in the inventory block.",
+    )
+    rich_item_selected_image_max_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        description=(
+            "Maximum decoded byte size accepted for a selected inline base64 image payload. "
+            "Oversized inline data is rejected at finalization rather than persisted or streamed."
+        ),
+    )
+
     # ── Validators ──────────────────────────────────────────────────────
 
     @field_validator(

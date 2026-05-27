@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING, Any
 from anyio import BrokenResourceError, ClosedResourceError
 
 from ..core.config import settings
+from ..core.rich_response import (
+    RichDisplayPolicy,
+    RichItemType,
+)
 from .client_runtime_tools import (
     CLIENT_TOOL_PREFIX,
     get_active_client_runtime_session,
@@ -30,8 +34,215 @@ TOOL_LOADING_TOOLS = {"tool_search"}
 _WIDGET_ARTIFACT_TOOLS = {"widget_create", "widget_update"}
 _WIDGET_SESSION_BOUND_TOOLS = {"widget_create", "session_list_widgets"}
 
+# Render-type values that should never produce a public tool_render candidate.
+# Live-widget renders have a dedicated `widget:<id>` candidate; error/text/json
+# noise is not meaningful as an inline placement and would only clutter the
+# inventory.
+_NON_INLINE_RENDER_TYPES = {
+    "live_widget",
+    "error",
+    "text",
+    "json",
+    "subagent_dispatch",
+}
 
-def extract_images_from_tool_result(result_text: str) -> list[dict[str, str]]:
+
+def _guess_mime_from_url(url: str) -> str:
+    lowered = url.lower().split("?", 1)[0]
+    if lowered.endswith(".jpg") or lowered.endswith(".jpeg"):
+        return "image/jpeg"
+    if lowered.endswith(".webp"):
+        return "image/webp"
+    if lowered.endswith(".gif"):
+        return "image/gif"
+    return "image/png"
+
+
+def build_image_candidates_from_tool_result(
+    result_text: str,
+    *,
+    tool_call_id: str | None,
+    tool_name: str,
+) -> list[dict[str, Any]]:
+    """Build typed rich-item image candidates from a tool result payload.
+
+    Each candidate is a public-shape dict (matching the discriminated
+    ``RichItem`` schema) with deterministic id, source, provenance, and
+    payload. The candidate dicts are safe to forward to
+    ``build_bot_metadata()`` as transient `_rich_item_candidates`.
+    """
+    if not result_text:
+        return []
+
+    try:
+        parsed = json.loads(result_text)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+    if not isinstance(parsed, dict):
+        return []
+
+    images = parsed.get("images")
+    if not isinstance(images, list):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for index, image in enumerate(images):
+        if not isinstance(image, dict):
+            continue
+        url = image.get("url")
+        data = image.get("data") or image.get("b64_data")
+        if not url and not data:
+            continue
+        payload: dict[str, Any] = {}
+        mime_type = image.get("mime_type") or image.get("mimeType")
+        if url:
+            payload["url"] = str(url)
+            if not mime_type:
+                mime_type = _guess_mime_from_url(str(url))
+        elif data:
+            payload["data"] = str(data)
+            if not mime_type:
+                mime_type = "image/png"
+        payload["mime_type"] = str(mime_type)
+        source_url = image.get("source_url")
+        if source_url:
+            payload["source_url"] = str(source_url)
+        description = image.get("description")
+        if description:
+            payload["description"] = str(description)
+        candidate_id_base = tool_call_id or tool_name or "tool"
+        candidates.append(
+            {
+                "id": f"image:tool:{candidate_id_base}:{index}",
+                "type": RichItemType.image.value,
+                "source": "web_search" if tool_name == "tavily_search" else "tool_image",
+                "display_policy": RichDisplayPolicy.inline_only.value,
+                "alt_text": str(description or image.get("alt") or "Image from tool result"),
+                "title": image.get("title"),
+                "payload": payload,
+                "provenance": {
+                    "tool_call_id": tool_call_id,
+                    "tool": tool_name,
+                    "index": index,
+                },
+            }
+        )
+    return candidates
+
+
+def build_tool_render_candidate(
+    render: dict[str, Any] | None,
+    *,
+    tool_call_id: str | None,
+    tool_name: str,
+) -> dict[str, Any] | None:
+    """Build a ``tool_render`` rich-item candidate from a normalized render.
+
+    Returns ``None`` for render types that have a dedicated rich-item channel
+    (live widgets) or are not useful as an inline placement (error/text/etc.).
+    """
+    if not isinstance(render, dict) or not tool_call_id:
+        return None
+    render_type = render.get("type")
+    if not isinstance(render_type, str):
+        return None
+    if render_type in _NON_INLINE_RENDER_TYPES:
+        return None
+    return {
+        "id": f"tool:{tool_call_id}",
+        "type": RichItemType.tool_render.value,
+        "source": "tool",
+        "display_policy": RichDisplayPolicy.inline_or_append.value,
+        "title": render.get("title"),
+        "payload": {"render": render},
+        "provenance": {
+            "tool_call_id": tool_call_id,
+            "tool": tool_name,
+        },
+    }
+
+
+def build_live_widget_candidate_from_tool_result(
+    result: str | dict[str, Any] | None,
+    *,
+    tool_name: str,
+) -> dict[str, Any] | None:
+    """Build a public widget mount record without exposing widget state."""
+    if tool_name not in _WIDGET_ARTIFACT_TOOLS or result in (None, ""):
+        return None
+    try:
+        parsed = json.loads(result) if isinstance(result, str) else result
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict) or not parsed.get("widget_id"):
+        return None
+
+    widget_id = str(parsed["widget_id"])
+    return {
+        "id": f"widget:{widget_id}",
+        "type": RichItemType.live_widget.value,
+        "source": "widget_tool",
+        "display_policy": RichDisplayPolicy.inline_or_append.value,
+        "title": parsed.get("title"),
+        "payload": {
+            "widget_id": widget_id,
+            "session_id": str(parsed.get("session_id") or ""),
+            "widget_type": str(parsed.get("widget_type") or ""),
+            "status": str(parsed.get("status") or "active"),
+            "version": int(parsed.get("version") or 1),
+            "connection_endpoint": f"/widgets/{widget_id}/connection",
+        },
+    }
+
+
+def _attach_rich_candidates_to_artifact(
+    artifact: dict[str, Any],
+    *,
+    result_text: str,
+    render: dict[str, Any] | None,
+    tool_call_id: str | None,
+    tool_name: str,
+) -> None:
+    """Compute rich-item candidates for a tool result and attach them as
+    ``artifact["_rich_item_candidates"]`` for the graph layer to lift into
+    ``context["rich_item_candidates"]``.
+    """
+    candidates: list[dict[str, Any]] = []
+    candidates.extend(
+        build_image_candidates_from_tool_result(
+            result_text, tool_call_id=tool_call_id, tool_name=tool_name
+        )
+    )
+    live_widget = build_live_widget_candidate_from_tool_result(
+        result_text,
+        tool_name=tool_name,
+    )
+    if live_widget is not None:
+        candidates.append(live_widget)
+    tool_render = build_tool_render_candidate(
+        render, tool_call_id=tool_call_id, tool_name=tool_name
+    )
+    if tool_render is not None:
+        candidates.append(tool_render)
+    if candidates:
+        artifact["_rich_item_candidates"] = candidates
+
+
+def extract_images_from_tool_result(
+    result_text: str,
+    *,
+    tool_call_id: str | None = None,
+    tool_name: str | None = None,
+) -> list[dict[str, str]]:
+    """Legacy URL/description extraction used by callers that only need the
+    ``tool_images`` shape. New callers should prefer
+    ``build_image_candidates_from_tool_result()`` to receive typed records.
+
+    The kwargs are optional so the existing call sites keep working; when
+    provided they are ignored here (candidate construction is the candidate
+    builder's responsibility).
+    """
     if not result_text:
         return []
 
@@ -696,7 +907,13 @@ async def execute_tool_calls(
         user_id: Optional user ID for tool map refresh
 
     Returns:
-        Tuple of (outputs, artifacts, images)
+        Tuple of (outputs, artifacts, images).
+
+    The list of public rich-item candidates produced during execution is
+    attached to each artifact as ``artifact["_rich_item_candidates"]`` so the
+    graph layer can lift them into ``context["rich_item_candidates"]`` without
+    a separate return-shape change. The key is intentionally prefixed with an
+    underscore so existing consumers (renderers, persistence) ignore it.
     """
     outputs: list[dict[str, Any]] = []
     artifacts: list[dict[str, Any]] = []
@@ -836,17 +1053,23 @@ async def execute_tool_calls(
                     "render": normalized_result.render,
                 }
             )
-            artifacts.append(
-                build_tool_artifact(
-                    tool_call_id=tool_id,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    output_text=result_text,
-                    error=None,
-                    max_output_chars=artifact_max_output_chars,
-                    render=normalized_result.render,
-                )
+            artifact = build_tool_artifact(
+                tool_call_id=tool_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                output_text=result_text,
+                error=None,
+                max_output_chars=artifact_max_output_chars,
+                render=normalized_result.render,
             )
+            _attach_rich_candidates_to_artifact(
+                artifact,
+                result_text=result_text,
+                render=normalized_result.render,
+                tool_call_id=tool_id,
+                tool_name=tool_name,
+            )
+            artifacts.append(artifact)
             if capture_images:
                 images.extend(extract_images_from_tool_result(result_text))
 
@@ -896,17 +1119,23 @@ async def execute_tool_calls(
                             "render": normalized_result.render,
                         }
                     )
-                    artifacts.append(
-                        build_tool_artifact(
-                            tool_call_id=tool_id,
-                            tool_name=tool_name,
-                            tool_args=tool_args,
-                            output_text=result_text,
-                            error=None,
-                            max_output_chars=artifact_max_output_chars,
-                            render=normalized_result.render,
-                        )
+                    artifact = build_tool_artifact(
+                        tool_call_id=tool_id,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        output_text=result_text,
+                        error=None,
+                        max_output_chars=artifact_max_output_chars,
+                        render=normalized_result.render,
                     )
+                    _attach_rich_candidates_to_artifact(
+                        artifact,
+                        result_text=result_text,
+                        render=normalized_result.render,
+                        tool_call_id=tool_id,
+                        tool_name=tool_name,
+                    )
+                    artifacts.append(artifact)
                     if capture_images:
                         images.extend(extract_images_from_tool_result(result_text))
                     _mark_tool_used_if_deferred(tool_name)

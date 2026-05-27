@@ -285,6 +285,75 @@ async def test_message_service_compacts_checkpoint_after_persist(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_capable_widget_response_does_not_invent_missing_marker(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.core.config import settings
+    from app.schemas.workflow import (
+        WorkflowExecutionRequest as ServiceWorkflowExecutionRequest,
+    )
+    from app.schemas.workflow import (
+        WorkflowPlanningContext,
+        WorkflowResponse,
+        WorkflowResponseMessage,
+    )
+    from app.services.message_service import MessageService
+
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    service = MessageService.__new__(MessageService)
+    captured: dict = {}
+    service.task_plan_service = None
+    service._sync_response_plan_state = lambda **_kwargs: False
+    service._generate_and_add_suggestions = AsyncMock()
+    service._schedule_summary_refresh = lambda **_kwargs: None
+
+    def fake_create_bot_response_message(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(id=uuid4())
+
+    service._create_bot_response_message = fake_create_bot_response_message
+    workflow_request = ServiceWorkflowExecutionRequest(
+        message="Explain compound interest with a chart.",
+        conversation_id=str(uuid4()),
+        user_id=str(uuid4()),
+        planning=WorkflowPlanningContext(),
+        inline_rich_response_v1=True,
+    )
+    bot_response = WorkflowResponse(
+        message=WorkflowResponseMessage(
+            content="Compound interest builds over time.\n\nThe later years diverge sharply."
+        ),
+        metadata={"_inline_rich_response_v1": True},
+        tool_artifacts=[
+            {
+                "tool_call_id": "widget-call",
+                "tool": "widget_create",
+                "output": (
+                    '{"widget_id":"w-inline","session_id":"conv-1","widget_type":"chart",'
+                    '"title":"Growth comparison","status":"active","version":1}'
+                ),
+                "status": "success",
+            }
+        ],
+    )
+
+    await service._persist_completed_workflow_response(
+        conversation_id=uuid4(),
+        user_id=uuid4(),
+        bot_response=bot_response,
+        sanitized_persona=None,
+        workflow_request=workflow_request,
+    )
+
+    assert captured["content"] == (
+        "Compound interest builds over time.\n\nThe later years diverge sharply."
+    )
+    assert "<!--rich:" not in captured["content"]
+    assert captured["metadata"]["rich_items_version"] == 1
+    assert captured["metadata"]["rich_items"][0]["id"] == "widget:w-inline"
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_compaction_disables_langsmith_tracing(monkeypatch):
     """Checkpoint compaction must wrap ``aupdate_state`` in
     ``tracing_context(enabled=False)`` so the cleanup does not surface as a

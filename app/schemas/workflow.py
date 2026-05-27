@@ -94,6 +94,14 @@ class WorkflowExecutionRequest(BaseModel):
         default=None,
         description="Reserved DB id for the assistant message this execution will produce",
     )
+    inline_rich_response_v1: bool = Field(
+        default=False,
+        description=(
+            "Capability flag from the API boundary: when true, the client opted "
+            "into the inline rich-response v1 contract and the workflow may "
+            "surface marker syntax / rich-item inventory to agents."
+        ),
+    )
 
 
 class WorkflowResponseMessage(BaseModel):

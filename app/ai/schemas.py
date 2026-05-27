@@ -170,6 +170,14 @@ class GraphContext(TypedDict, total=False):
     # the model still reads dispatch results via the ToolMessage payload).
     subagent_dispatches: list[dict[str, Any]]
     subagent_results: list[dict[str, Any]]
+    # Inline rich-response candidate registry. Populated as tool/RAG/native
+    # outputs become available; consumed at finalization to materialize the
+    # public `rich_items` registry. Turn-scoped, not checkpoint-persisted.
+    rich_item_candidates: list[dict[str, Any]]
+    rich_items_emitted: list[str]
+    # Per-turn capability flag forwarded from the service boundary so workflow
+    # nodes can decide whether to surface marker syntax / inventory to agents.
+    inline_rich_response_v1: bool
 
 
 class GraphState(TypedDict):

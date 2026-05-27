@@ -12,6 +12,7 @@ CANONICAL_STREAM_EVENT_TYPES = (
     "error",
     "continuation_start",
     "node_complete",
+    "rich_items",
 )
 
 TOOL_PHASE_START = "start"
@@ -92,3 +93,18 @@ def build_canonical_tool_event(
         payload["render"] = render
 
     return payload
+
+
+def build_canonical_rich_items_event(
+    *,
+    items: list[dict[str, Any]],
+    operation: str = "upsert",
+) -> dict[str, Any]:
+    """Build a canonical internal SSE rich-item event.
+
+    The returned dict carries only public-shape rich-item records — the caller
+    is responsible for filtering candidates through
+    ``select_transient_upsert_items()`` so unselected images, raw inline data,
+    and canvas source never appear in transient stream traffic.
+    """
+    return {"type": "rich_items", "operation": operation, "items": list(items)}

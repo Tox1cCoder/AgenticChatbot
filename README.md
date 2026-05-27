@@ -927,15 +927,131 @@ In addition to proxying most server routes under both `/...` and `/api/...`, the
 
 | Transport | Endpoint | Notes |
 |---|---|---|
-| SSE | `POST /messages/stream` | `token`, `reasoning`, `tool_call`, `tool_result`, `interrupt`, `heartbeat`, `complete`, `error` |
+| SSE | `POST /messages/stream` | `token`, `reasoning`, `tool_call`, `tool_result`, `interrupt`, `heartbeat`, `complete`, `error`, `rich_items` |
 | SSE | `POST /messages/resume-interrupt` | Same event vocabulary; resumes a suspended graph |
-| SSE | `POST /api/chat/{conversation_id}` | Vercel AI SDK wire format (`text`, `tool-call`, `tool-result`, `finish`, `error`) |
+| SSE | `POST /api/chat/{conversation_id}` | Vercel AI SDK wire format (`text`, `tool-call`, `tool-result`, `finish`, `error`, optional `data-rich-items`) |
 | SSE | `POST /ai/chat/{conversation_id}` | As above |
 | SSE | `POST /ai/resume-interrupt` | As above |
 | WS  | `/device-runtime/{device_id}/connect` | Tool dispatch + results |
 | WS  | `/widgets/{widget_id}/connect` | Widget state streaming |
 
 Heartbeat interval for SSE: **1 s**. `SUPPRESS_INTERNAL_STREAM_CHUNKS=true` drops internal events (e.g. summarisation output) before they reach clients.
+
+---
+
+## Inline Rich Response (v1)
+
+The backend supports an **opt-in inline-rich-response contract** that lets agents place selected images, live widgets, tool renders, canvas artifacts, citations, and resource links at specific positions inside the markdown answer. Disabled by default — set `INLINE_RICH_RESPONSE_ENABLED=true` and have the client advertise the per-request capability to receive marker-bearing content.
+
+### Marker syntax
+
+Rich items are placed using a standalone block-level HTML comment:
+
+```markdown
+The pressure differential causes lift over the upper wing surface.
+
+<!--rich:image:tool:call_7:0-->
+
+*Figure 1. Streamlines around an airfoil.*
+
+This pattern helps explain why the pressure is lower above the wing.
+```
+
+Marker rules:
+
+- Must appear on its own line, optionally with up to three leading spaces and trailing whitespace.
+- `<id>` may contain ASCII letters, digits, `_`, `-`, `.`, and `:` and is at most 128 characters.
+- Markers inside fenced (` ``` ` or `~~~`) or indented (4-space) code blocks are treated as literal markdown.
+- Unknown ids produce a neutral unavailable-content block plus a validation warning in `messageMetadata.rich_reference_warnings`.
+
+### Stable item IDs
+
+| Origin | ID format |
+|---|---|
+| Tool result render | `tool:<tool_call_id>` |
+| Image from a tool result | `image:tool:<tool_call_id>:<zero_based_index>` |
+| RAG document image | `image:document:<document_image_id>` |
+| Generated image | `image:generated:<assistant_message_id>:<zero_based_index>` |
+| Live widget | `widget:<widget_id>` |
+| Canvas artifact | `canvas:<assistant_message_id>` |
+| Structured citation item | `citation:<assistant_message_id>:<zero_based_index>` |
+
+### Per-message metadata
+
+Capable assistant messages persist:
+
+```json
+{
+  "rich_items_version": 1,
+  "rich_items": [
+    {
+      "id": "image:tool:call_7:0",
+      "type": "image",
+      "source": "web_search",
+      "display_policy": "inline_only",
+      "alt_text": "Airflow around an airfoil",
+      "payload": {"url": "https://example.org/airfoil.png", "mime_type": "image/png"}
+    }
+  ],
+  "rich_reference_warnings": []
+}
+```
+
+Item types: `image`, `live_widget`, `tool_render`, `canvas_artifact`, `citation`, `resource_link`. Payloads are type-validated through a Pydantic discriminated union with `extra="forbid"`; only renderer-consumed fields are accepted. Image payloads accept exactly one of `url` (https / dev-only http) or `data` (base64 of an allowed raster MIME).
+
+### Display policy
+
+- `inline_only` — render only at its marker. Image items use this policy and are **never** appended as a gallery. Unreferenced image candidates are dropped entirely.
+- `inline_or_append` — render inline when referenced, otherwise append below the body. Used by `live_widget`, `tool_render`, `canvas_artifact`, `resource_link`.
+
+For capable responses, widget placement is authored dynamically in the response body: a `<!--rich:widget:<widget_id>-->` marker selects its position. The server does not insert a marker when the response omits one.
+
+For v1 messages, the legacy `metadata["images"]` gallery is suppressed in the Streamlit renderer and only selected images surface as AI SDK `file` parts. Pre-v1 messages (no `rich_items_version`) retain their existing gallery.
+
+### Capability negotiation
+
+Clients opt in per-request by setting `inline_rich_response_v1: true` (camelCase or snake_case) on:
+
+- `POST /messages` and `POST /messages/stream` body (`MessageCreate.inline_rich_response_v1`).
+- `POST /ai/chat/{conversation_id}` body extras (`inlineRichResponseV1` / `inline_rich_response_v1`).
+- `POST /messages/resume-interrupt` and `POST /ai/resume-interrupt` body (`InterruptResumeRequest.inline_rich_response_v1`).
+
+Capability is then ANDed with `INLINE_RICH_RESPONSE_ENABLED` server-side. Non-capable AI SDK reads of a persisted v1 message receive a legacy projection: standalone marker lines are stripped from `content`, and `rich_items` / `rich_items_version` / `rich_reference_warnings` are removed from metadata.
+
+### Transient stream events
+
+Capable AI SDK streams emit additive `data-rich-items` parts as safe non-image records become available:
+
+```json
+{
+  "type": "data-rich-items",
+  "data": {
+    "operation": "upsert",
+    "items": [{"id": "widget:2f13", "type": "live_widget", "payload": { ... }}]
+  },
+  "transient": true
+}
+```
+
+Image candidates are **never** streamed transiently — they only surface in the final `data-assistant-message.data.message.messageMetadata.rich_items` after marker selection. Canvas source is excluded from transient upserts. Transient data parts ride in `useChat({ onData })`, not in `message.parts`. The AI SDK response retains the `x-vercel-ai-ui-message-stream: v1` header.
+
+### Client renderer algorithm
+
+1. Opt in with the per-request capability flag.
+2. In `useChat({ onData })`, maintain a map of safe non-image `rich_items` from transient `data-rich-items` upserts.
+3. Accumulate `text-delta` content normally.
+4. Split the accumulated text only on standalone complete markers into blocks.
+5. Render a known typed item at that block position; while a streamed marker is waiting for its widget upsert, render a lightweight inline placeholder there.
+6. On final `data-assistant-message`, replace transient registry data with persisted `messageMetadata.rich_items` and final content (authoritative).
+7. Append only unreferenced items whose `display_policy == "inline_or_append"`. Never build an image gallery from unreferenced image candidates or legacy `images`.
+
+### Migration rules
+
+- Legacy non-image metadata (`tool_artifacts`, `live_widgets`, `canvas_artifact`, citations) is retained for fallback clients.
+- `rich_items` is the new placement contract.
+- For new v1 messages the automatic appended images gallery is disabled; legacy messages keep their gallery until an explicit migration/backfill decision.
+- External AI SDK clients that want the report layout must declare `inline_rich_response_v1`, implement the HTML-comment marker resolver, and consume `data-rich-items` in `onData`. Non-opt-in clients receive a marker-free legacy projection and no `data-rich-items` parts.
+- Custom backends/proxies must keep the `x-vercel-ai-ui-message-stream: v1` header required by the AI SDK UI Message Stream protocol.
 
 ---
 

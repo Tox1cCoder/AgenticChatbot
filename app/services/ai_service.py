@@ -19,6 +19,7 @@ from ..ai.schemas import (
     WorkflowExecutionRequest as AIWorkflowExecutionRequest,
 )
 from ..ai.utils import make_json_safe
+from ..core.config import settings
 from ..core.response_constants import (
     ERROR_NO_RESPONSE,
     ERROR_NO_RESPONSE_RESUME,
@@ -34,7 +35,7 @@ from ..schemas.workflow import (
     WorkflowResponseMessage,
 )
 from ..utils.text_processing import sanitize_persona
-from .stream_events import build_canonical_tool_event
+from .stream_events import build_canonical_rich_items_event, build_canonical_tool_event
 
 
 class AIService:
@@ -67,6 +68,43 @@ class AIService:
             metadata={"error": True},
             error=message,
         )
+
+    @staticmethod
+    def _build_tool_end_rich_items(
+        *,
+        render: Any,
+        result: Any,
+        tool_call_id: Any,
+        tool_name: Any,
+    ) -> list[dict[str, Any]]:
+        """Derive transient `rich_items` upsert records from a tool_end event.
+
+        Returns only safe non-image records. Image candidates are excluded
+        because finalization owns their public visibility. Live widgets use
+        their dedicated compact mount record rather than a generic tool view.
+        """
+        if not isinstance(render, dict) or not tool_call_id:
+            return []
+        from app.ai.tool_execution import (
+            build_live_widget_candidate_from_tool_result,
+            build_tool_render_candidate,
+        )
+        from app.core.rich_response import select_transient_upsert_items
+
+        normalized_tool_name = str(tool_name or "")
+        candidate = build_live_widget_candidate_from_tool_result(
+            result,
+            tool_name=normalized_tool_name,
+        )
+        if candidate is None:
+            candidate = build_tool_render_candidate(
+                render,
+                tool_call_id=str(tool_call_id),
+                tool_name=normalized_tool_name,
+            )
+        if candidate is None:
+            return []
+        return list(select_transient_upsert_items([candidate]))
 
     def _prepare_request(self, request: WorkflowExecutionRequest) -> WorkflowExecutionRequest:
         if request.persona is not None or not request.conversation_id:
@@ -157,7 +195,11 @@ class AIService:
     async def execute_request_stream(self, request: WorkflowExecutionRequest):
         prepared_request = self._prepare_request(request)
         async for mapped_event in self._map_workflow_stream(
-            self.workflow.execute_request_stream(self._to_ai_request(prepared_request))
+            self.workflow.execute_request_stream(self._to_ai_request(prepared_request)),
+            emit_rich_items=bool(
+                getattr(settings, "inline_rich_response_enabled", False)
+                and getattr(prepared_request, "inline_rich_response_v1", False)
+            ),
         ):
             yield mapped_event
 
@@ -186,7 +228,7 @@ class AIService:
 
         return self._build_error_response(ERROR_NO_RESPONSE_RESUME)
 
-    async def _map_workflow_stream(self, workflow_stream):
+    async def _map_workflow_stream(self, workflow_stream, *, emit_rich_items: bool = False):
         final_response = None
         tool_started_at: dict[str, float] = {}
 
@@ -231,14 +273,27 @@ class AIService:
                     started_at = tool_started_at.pop(str(tool_call_id), None)
                     if started_at is not None:
                         duration_ms = int((perf_counter() - started_at) * 1000)
+                render_payload = make_json_safe(event.get("render"))
                 yield build_canonical_tool_event(
                     phase="end",
                     name=tool_name,
                     tool_call_id=tool_call_id,
                     result=result,
                     duration_ms=duration_ms,
-                    render=make_json_safe(event.get("render")),
+                    render=render_payload,
                 )
+                # Emit a `rich_items` upsert for safe non-image candidates as
+                # soon as the tool result exists. Image records are never
+                # streamed transiently; canvas source is excluded.
+                if emit_rich_items:
+                    rich_items = self._build_tool_end_rich_items(
+                        render=render_payload,
+                        result=result,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                    )
+                    if rich_items:
+                        yield build_canonical_rich_items_event(items=rich_items)
 
             elif event_type == "complete":
                 final_response = self._to_service_response(event.get("response"))
@@ -288,6 +343,8 @@ class AIService:
         self,
         thread_id: str,
         decisions: list[InterruptDecision],
+        *,
+        inline_rich_response_v1: bool = False,
     ):
         if not self.checkpointer:
             yield {"type": "error", "error": "Cannot resume: Checkpointing not enabled"}
@@ -297,7 +354,11 @@ class AIService:
             self.workflow.resume_with_decisions_stream(
                 thread_id=thread_id,
                 decisions=self._to_ai_decisions(decisions),
-            )
+            ),
+            emit_rich_items=bool(
+                getattr(settings, "inline_rich_response_enabled", False)
+                and inline_rich_response_v1
+            ),
         ):
             yield mapped_event
 

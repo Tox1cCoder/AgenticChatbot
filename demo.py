@@ -3308,7 +3308,15 @@ def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | 
       let destroyed = false;
       function isObj(v){return !!v && typeof v === "object" && !Array.isArray(v);}
       function esc(v){return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));}
-      function label(v){return (String(v ?? "").replace(/[_-]+/g," ").replace(/\\s+/g," ").trim().replace(/\\b\\w/g, (m) => m.toUpperCase())) || "Widget";}
+      function label(v){
+        const s = String(v ?? "").replace(/[_-]+/g," ").replace(/\\s+/g," ").trim();
+        if(!s) return "Widget";
+        // Unicode-aware title case so Vietnamese (đặc điểm), Thai, etc. are
+        // not mangled by ASCII-only \\b\\w. Uppercase the first Unicode letter
+        // (\\p{L}) that follows start-of-string or any non-letter character
+        // using toLocaleUpperCase() for correct diacritic handling.
+        return s.replace(/(^|[^\\p{L}])(\\p{L})/gu, (_, sep, ch) => sep + ch.toLocaleUpperCase());
+      }
       function numeric(v){const n = Number(v); return Number.isFinite(n) ? n : null;}
       function formatNumber(value){
         const n = numeric(value);
@@ -4323,11 +4331,14 @@ def render_live_widgets(
     *,
     message_key: str = "",
     auto_mount: bool = False,
+    inline: bool = False,
 ):
     """Render live widgets from assistant message metadata.
 
     Historical widgets stay lightweight until opened, which prevents
     conversation-load reruns from mounting every widget iframe at once.
+    Inline items omit attachment chrome so they sit cleanly between markdown
+    segments in a rich response.
     """
     if not message_metadata:
         return
@@ -4354,33 +4365,42 @@ def render_live_widgets(
             mount_state[mount_key] = True
         is_mounted = bool(mount_state.get(mount_key))
 
-        status = str(widget.get("status") or "active")
-        meta_suffix = f"{widget_type} · v{version} · {widget_id[:16]}…"
-        if status != "active":
-            meta_suffix = f"{meta_suffix} · {status}"
-        st.markdown(
-            f"""
-            <div style="
-                border: 1px solid #dbeafe;
-                border-left: 4px solid #2563eb;
-                border-radius: 14px;
-                background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
-                padding: 12px 14px 12px 16px;
-                margin: 8px 0 10px;
-            ">
-              <div style="font-size:11px; font-weight:700; color:#2563eb; text-transform:uppercase; letter-spacing:.06em;">
-                Live Widget
-              </div>
-              <div style="margin-top:4px; font-weight:700; color:#0f172a; font-size:16px;">
-                {html.escape(title)}
-              </div>
-              <div style="margin-top:6px; color:#64748b; font-size:12px;">
-                {html.escape(meta_suffix)}
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        if not inline:
+            status = str(widget.get("status") or "active")
+            meta_suffix = f"{widget_type} · v{version} · {widget_id[:16]}…"
+            if status != "active":
+                meta_suffix = f"{meta_suffix} · {status}"
+            st.markdown(
+                f"""
+                <div style="
+                    border: 1px solid #dbeafe;
+                    border-left: 4px solid #2563eb;
+                    border-radius: 14px;
+                    background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+                    padding: 12px 14px 12px 16px;
+                    margin: 8px 0 10px;
+                ">
+                  <div style="font-size:11px; font-weight:700; color:#2563eb; text-transform:uppercase; letter-spacing:.06em;">
+                    Live Widget
+                  </div>
+                  <div style="margin-top:4px; font-weight:700; color:#0f172a; font-size:16px;">
+                    {html.escape(title)}
+                  </div>
+                  <div style="margin-top:6px; color:#64748b; font-size:12px;">
+                    {html.escape(meta_suffix)}
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        if inline and is_mounted:
+            _stc.html(
+                _build_live_widget_component_html(widget, auth_token),
+                height=_live_widget_frame_height(widget),
+                scrolling=False,
+            )
+            continue
 
         controls = st.columns([1, 5])
         with controls[0]:
@@ -4405,22 +4425,23 @@ def render_live_widgets(
                 scrolling=False,
             )
 
-        with st.expander(f"Widget details: {title}", expanded=False):
-            st.code(
-                json.dumps(
-                    {
-                        "widget_id": widget_id,
-                        "widget_type": widget.get("widget_type"),
-                        "status": widget.get("status"),
-                        "version": widget.get("version"),
-                        "connection_endpoint": widget.get(
-                            "connection_endpoint", f"/widgets/{widget_id}/connection"
-                        ),
-                    },
-                    indent=2,
-                ),
-                language="json",
-            )
+        if not inline:
+            with st.expander(f"Widget details: {title}", expanded=False):
+                st.code(
+                    json.dumps(
+                        {
+                            "widget_id": widget_id,
+                            "widget_type": widget.get("widget_type"),
+                            "status": widget.get("status"),
+                            "version": widget.get("version"),
+                            "connection_endpoint": widget.get(
+                                "connection_endpoint", f"/widgets/{widget_id}/connection"
+                            ),
+                        },
+                        indent=2,
+                    ),
+                    language="json",
+                )
 
 
 def render_agent_images(message_metadata: dict):
@@ -5392,7 +5413,12 @@ def render_live_trace_panel(trace_placeholder: Any) -> None:
         )
 
 
-def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None):
+def render_citations(
+    message_metadata: dict[str, Any],
+    msg_id: str | None = None,
+    *,
+    include_images: bool = True,
+):
     """
     Render citations from document metadata in a user-friendly format.
     Shows documents cited with chunk and page information.
@@ -5409,6 +5435,7 @@ def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None
             with st.expander(f"Sources ({len(legacy_citations)} references)", expanded=False):
                 for idx, citation in enumerate(legacy_citations, start=1):
                     source = citation.get("source", "unknown")
+                    safe_source = html.escape(str(source))
                     score = citation.get("score", 0.0)
 
                     # Determine relevance color
@@ -5421,7 +5448,7 @@ def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None
 
                     st.markdown(
                         f'<div class="citation-chunk" style="margin-bottom: 8px; padding: 8px; border-left: 3px solid {relevance_color}; background-color: {relevance_color}15;">'
-                        f"<strong>[{idx}]</strong> {source}<br>"
+                        f"<strong>[{idx}]</strong> {safe_source}<br>"
                         f'<span style="color: {relevance_color}; font-size: 0.9em;">Relevance: ({score:.1%})</span>'
                         f"</div>",
                         unsafe_allow_html=True,
@@ -5441,6 +5468,9 @@ def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None
             total_chunks = doc_entry.get("total_chunks", 0)
             avg_score = doc_entry.get("avg_score", 0.0)
             chunks = doc_entry.get("chunks", [])
+            safe_doc_num = html.escape(str(doc_num))
+            safe_source = html.escape(str(source))
+            safe_total_chunks = html.escape(str(total_chunks))
 
             # Determine overall document relevance color
             if avg_score >= 0.3:
@@ -5456,10 +5486,10 @@ def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None
                 f'<div class="citation-document" style="margin-bottom: 12px; '
                 f"padding: 12px; border: 2px solid {doc_relevance_color}; "
                 f"border-radius: 8px; background-color: {doc_relevance_color}10;\">"
-                f'<strong style="font-size: 1.1em;">[Document {doc_num}] {source}</strong><br>'
+                f'<strong style="font-size: 1.1em;">[Document {safe_doc_num}] {safe_source}</strong><br>'
                 f'<span style="color: {doc_relevance_color}; font-size: 0.9em;">'
                 f"Overall Relevance: ({avg_score:.1%})</span> | "
-                f'<span style="font-size: 0.9em;">{total_chunks} chunk(s)</span></div>'
+                f'<span style="font-size: 0.9em;">{safe_total_chunks} chunk(s)</span></div>'
             )
 
             if total_chunks == 1 and chunks and msg_id:
@@ -5496,6 +5526,7 @@ def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None
                 st.markdown("**Chunks:**")
                 for chunk in chunks:
                     chunk_idx = chunk.get("chunk_index", "?")
+                    safe_chunk_idx = html.escape(str(chunk_idx))
                     chunk_score = chunk.get("score", 0.0)
 
                     # Chunk relevance color
@@ -5511,7 +5542,7 @@ def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None
                         f"margin-bottom: 6px; padding: 6px; "
                         f"border-left: 2px solid {chunk_color}; "
                         f"background-color: {chunk_color}08;\">"
-                        f'<span style="font-size: 0.9em;">Chunk {chunk_idx} '
+                        f'<span style="font-size: 0.9em;">Chunk {safe_chunk_idx} '
                         f'<span style="color: {chunk_color};">({chunk_score:.1%})</span>'
                         f"</span></div>"
                     )
@@ -5544,7 +5575,7 @@ def render_citations(message_metadata: dict[str, Any], msg_id: str | None = None
 
             # Show images for this document via the shared thumbnail gallery.
             images = message_metadata.get("images", [])
-            if images:
+            if include_images and images:
                 doc_image_items: list[dict[str, str]] = []
                 for img in images:
                     img_name = img.get("name", "")
@@ -5733,7 +5764,21 @@ def render_message_bubble(
                 context_window = _get_context_window_metadata(message_metadata)
                 _render_context_window_indicator(provider, model, context_window)
 
-        st.markdown(content_text)  # Native markdown with LaTeX support
+        # ── Inline rich-response rendering ──────────────────────────────
+        # For v1 messages, render markdown and rich items in their authored
+        # order rather than emitting all of the body first and rich items
+        # below. Legacy messages keep their existing behavior via the view
+        # model's single-markdown-segment shape and the post-body helpers.
+        view = _build_rich_response_view_for_msg(content_text, message_metadata)
+        if view.is_v1:
+            _render_rich_segments(
+                view.segments,
+                message_metadata=message_metadata,
+                message_key=str(msg.get("id", "")),
+                auto_mount=auto_mount_live_widgets,
+            )
+        else:
+            st.markdown(content_text)  # Native markdown with LaTeX support
 
         if not is_user:
             render_subagent_activity(message_metadata)
@@ -5768,15 +5813,296 @@ def render_message_bubble(
         # Show agent-sent images, canvas artifact, live widgets, citations,
         # and feedback for assistant messages. Reuse the metadata dict
         # already extracted above instead of re-parsing it five times.
-        render_agent_images(message_metadata)
-        render_canvas_artifact(message_metadata)
-        render_live_widgets(
+        if not view.is_v1 and view.use_legacy_image_gallery:
+            render_agent_images(message_metadata)
+        if view.is_v1:
+            # Append only the unreferenced inline_or_append items.
+            _render_append_items(
+                view.append_items,
+                message_metadata=message_metadata,
+                message_key=str(msg.get("id", "")),
+                auto_mount=auto_mount_live_widgets,
+            )
+        else:
+            render_canvas_artifact(message_metadata)
+            render_live_widgets(
+                message_metadata,
+                message_key=str(msg.get("id", "")),
+                auto_mount=auto_mount_live_widgets,
+            )
+        render_citations(
             message_metadata,
-            message_key=str(msg.get("id", "")),
-            auto_mount=auto_mount_live_widgets,
+            str(msg.get("id", "")),
+            include_images=not view.is_v1,
         )
-        render_citations(message_metadata, str(msg.get("id", "")))
         render_message_feedback_inline(msg)
+
+
+def _build_rich_response_view_for_msg(content_text: str, message_metadata: dict):
+    """Wrap `build_rich_response_view` import to keep top-of-module imports
+    minimal and avoid coupling demo.py boot to app modules in tests."""
+    from app.ui.rich_response import build_rich_response_view
+
+    return build_rich_response_view(content_text, message_metadata)
+
+
+def _render_rich_segments(
+    segments: list[Any],
+    *,
+    message_metadata: dict[str, Any],
+    message_key: str,
+    auto_mount: bool,
+) -> None:
+    """Render ordered rich-response segments, mounting each widget at most once."""
+    mounted_widget_ids: set[str] = set()
+    for index, segment in enumerate(segments):
+        if segment.kind == "markdown" and segment.text:
+            st.markdown(segment.text)
+            continue
+        if segment.kind == "unavailable":
+            st.caption(
+                f":material/error_outline: rich item `{segment.item_id}` "
+                "is unavailable."
+            )
+            continue
+        if segment.kind != "rich" or not segment.item:
+            continue
+
+        item = segment.item
+        item_id = str(item.get("id") or "")
+        should_auto_mount = auto_mount
+        if item.get("type") == "live_widget":
+            should_auto_mount = auto_mount and item_id not in mounted_widget_ids
+            mounted_widget_ids.add(item_id)
+        _render_inline_rich_item(
+            item,
+            message_metadata=message_metadata,
+            message_key=f"{message_key}:segment:{index}",
+            auto_mount=should_auto_mount,
+        )
+
+
+class _StreamingRichResponseRenderer:
+    """Incrementally render an active assistant body as ordered rich segments.
+
+    The layout is rebuilt only when marker/item structure changes. Plain text
+    deltas update existing markdown slots so an already mounted widget is not
+    recreated for every trailing token.
+    """
+
+    def __init__(self, placeholder: Any, *, message_key: str) -> None:
+        from app.ui.rich_response import RichStreamState
+
+        self.placeholder = placeholder
+        self.message_key = message_key
+        self.state = RichStreamState(latest=True)
+        self._layout_signature: tuple[Any, ...] | None = None
+        self._markdown_slots: dict[int, Any] = {}
+        self._finalized = False
+
+    def append_text(self, delta: str) -> None:
+        self.state.append_text(delta)
+        self.render()
+
+    def apply_rich_items_upsert(self, items: list[dict[str, Any]]) -> None:
+        self.state.apply_rich_items_upsert(items)
+        self._layout_signature = None
+        self.render()
+
+    def finalize(self, message: dict[str, Any] | None) -> None:
+        if not isinstance(message, dict):
+            return
+        self._finalized = True
+        final_content = message.get("content")
+        if isinstance(final_content, str) and final_content != self.state.accumulated_text:
+            self.state.accumulated_text = final_content
+        metadata = get_message_metadata(message)
+        if metadata.get("rich_items_version") == 1:
+            self.state.replace_with_finalized(metadata.get("rich_items") or [])
+            self._layout_signature = None
+        self.render()
+
+    @staticmethod
+    def _signature(view: Any) -> tuple[Any, ...]:
+        segment_signature = []
+        for segment in view.segments:
+            if segment.kind == "markdown":
+                segment_signature.append(("markdown",))
+            elif segment.kind == "rich":
+                segment_signature.append(("rich", (segment.item or {}).get("id")))
+            else:
+                segment_signature.append(("unavailable", segment.item_id))
+        append_signature = tuple(
+            (item.get("type"), item.get("id")) for item in view.append_items
+        )
+        return tuple(segment_signature), append_signature
+
+    def render(self) -> None:
+        view = self.state.build_view()
+        signature = self._signature(view)
+        if signature != self._layout_signature:
+            self._rebuild(view)
+            self._layout_signature = signature
+            return
+        for index, segment in enumerate(view.segments):
+            if segment.kind == "markdown" and index in self._markdown_slots:
+                self._markdown_slots[index].markdown(
+                    normalize_stream_markdown_text(segment.text or "")
+                )
+
+    def _rebuild(self, view: Any) -> None:
+        metadata = {
+            "rich_items_version": 1,
+            "rich_items": list(self.state.items_by_id.values()),
+        }
+        self._markdown_slots = {}
+        mounted_widget_ids: set[str] = set()
+        with self.placeholder.container():
+            for index, segment in enumerate(view.segments):
+                if segment.kind == "markdown":
+                    slot = st.empty()
+                    self._markdown_slots[index] = slot
+                    slot.markdown(normalize_stream_markdown_text(segment.text or ""))
+                    continue
+                if segment.kind == "unavailable":
+                    if self._finalized:
+                        st.caption(
+                            f":material/error_outline: rich item `{segment.item_id}` "
+                            "is unavailable."
+                        )
+                    else:
+                        _render_pending_rich_placeholder(segment.item_id)
+                    continue
+                if segment.kind != "rich" or not segment.item:
+                    continue
+                item = segment.item
+                item_id = str(item.get("id") or "")
+                should_auto_mount = True
+                if item.get("type") == "live_widget":
+                    should_auto_mount = item_id not in mounted_widget_ids
+                    mounted_widget_ids.add(item_id)
+                _render_inline_rich_item(
+                    item,
+                    message_metadata=metadata,
+                    message_key=f"{self.message_key}:segment:{index}",
+                    auto_mount=should_auto_mount,
+                )
+
+            if self._finalized:
+                for index, item in enumerate(view.append_items):
+                    _render_inline_rich_item(
+                        item,
+                        message_metadata=metadata,
+                        message_key=f"{self.message_key}:append:{index}",
+                        auto_mount=True,
+                    )
+
+
+def _render_pending_rich_placeholder(item_id: str | None) -> None:
+    """Reserve the authored inline position until a stream upsert resolves it."""
+    label = (
+        "Preparing interactive widget..."
+        if str(item_id or "").startswith("widget:")
+        else "Preparing rich content..."
+    )
+    st.markdown(
+        (
+            '<div aria-busy="true" style="border:1px dashed #cbd5e1;'
+            'border-radius:10px;padding:12px 14px;margin:8px 0;'
+            'background:#f8fafc;color:#64748b;font-size:13px;">'
+            f"{html.escape(label)}</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _render_inline_rich_item(
+    item: dict[str, Any],
+    *,
+    message_metadata: dict[str, Any],
+    message_key: str,
+    auto_mount: bool,
+) -> None:
+    """Render a single rich-item record at its inline marker position."""
+    item_type = item.get("type")
+    payload = item.get("payload") or {}
+    if item_type == "image":
+        url = payload.get("url")
+        data = payload.get("data")
+        mime = payload.get("mime_type") or "image/png"
+        caption = item.get("alt_text") or item.get("title")
+        if url:
+            st.image(url, caption=caption, use_container_width=True)
+        elif data:
+            st.image(
+                f"data:{mime};base64,{data}",
+                caption=caption,
+                use_container_width=True,
+            )
+    elif item_type == "live_widget":
+        # Reuse existing widget renderer with a single-item metadata shape so
+        # it mounts just this widget, not all live widgets at once. The
+        # registry stores the human-readable title on the rich-item record
+        # (not the payload), so merge it back into the per-widget dict the
+        # legacy renderer expects.
+        widget_for_render = dict(payload)
+        title = item.get("title")
+        if isinstance(title, str) and title and not widget_for_render.get("title"):
+            widget_for_render["title"] = title
+        single = dict(message_metadata)
+        single["live_widgets"] = [widget_for_render]
+        render_live_widgets(
+            single,
+            message_key=f"{message_key}::{item.get('id')}",
+            auto_mount=auto_mount,
+            inline=True,
+        )
+    elif item_type == "tool_render":
+        # Tool renders reuse the existing result renderer; unsupported payloads
+        # still remain inspectable as JSON.
+        render = payload.get("render") or {}
+        title = item.get("title") or render.get("title")
+        if title:
+            st.caption(title)
+        try:
+            rendered = render_tool_render_payload(render)
+        except Exception:
+            rendered = False
+        if not rendered:
+            st.json(render)
+    elif item_type == "canvas_artifact":
+        single = dict(message_metadata)
+        single["canvas_artifact"] = payload
+        render_canvas_artifact(single)
+    elif item_type == "citation":
+        source = payload.get("source") or "source"
+        page = payload.get("page_number")
+        label = f"{source}" + (f" (page {page})" if page else "")
+        st.caption(f":material/menu_book: {label}")
+    elif item_type == "resource_link":
+        title = payload.get("title") or payload.get("url")
+        url = payload.get("url")
+        if url:
+            st.markdown(f"[{title}]({url})")
+
+
+def _render_append_items(
+    items: list[dict[str, Any]],
+    *,
+    message_metadata: dict[str, Any],
+    message_key: str,
+    auto_mount: bool,
+) -> None:
+    """Render unreferenced inline_or_append items below the message body."""
+    if not items:
+        return
+    for item in items:
+        _render_inline_rich_item(
+            item,
+            message_metadata=message_metadata,
+            message_key=message_key,
+            auto_mount=auto_mount,
+        )
 
 
 def render_message_feedback_inline(msg: dict[str, Any]):
@@ -6846,6 +7172,9 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
         "conversationId": conversation_id,
         "interruptId": interrupt_id,
         "decisions": decisions,
+        # Match the send path so resumed turns keep the inline rich-response
+        # contract — widgets/tool outputs render inline at marker position.
+        "inlineRichResponseV1": True,
     }
 
     with st.status("Resuming execution...", expanded=True) as status:
@@ -6853,6 +7182,10 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
         resume_error = None
         trace_placeholder = st.empty()
         response_placeholder = st.empty()
+        stream_renderer = _StreamingRichResponseRenderer(
+            response_placeholder,
+            message_key=f"resume::{conversation_id or thread_id}",
+        )
         accumulated_content = ""
         accumulated_thinking = ""
 
@@ -6899,10 +7232,12 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 if _has_live_trace_panel_content():
                     st.session_state.stream_trace_expanded = False
                     render_live_trace_panel(trace_placeholder)
-                response_placeholder.markdown(
-                    normalize_stream_markdown_text(accumulated_content)
-                )
+                stream_renderer.append_text(content)
                 status.update(label="Resuming response...", state="running")
+                continue
+
+            if event_type == "rich_items":
+                stream_renderer.apply_rich_items_upsert(event.get("items") or [])
                 continue
 
             if event_type == "interrupt":
@@ -6918,6 +7253,7 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                 break
 
             if event_type == "complete":
+                stream_renderer.finalize(event.get("message"))
                 status.update(label="Resume completed", state="complete")
                 break
 
@@ -7401,6 +7737,11 @@ def render_chat_view():
                 message_data = {
                     "content": message_to_send,
                     "conversationId": st.session_state.current_conversation_id,
+                    # Opt into the inline rich-response v1 contract so the backend
+                    # offers the bounded rich-item inventory to the model and the
+                    # response-bubble path renders widgets/tool outputs inline at
+                    # the author-placed marker position rather than appended.
+                    "inlineRichResponseV1": True,
                 }
 
                 if pending_attachments:
@@ -7417,6 +7758,10 @@ def render_chat_view():
                     # Create placeholder for streaming response
                     trace_placeholder = st.empty()
                     response_placeholder = st.empty()
+                    stream_renderer = _StreamingRichResponseRenderer(
+                        response_placeholder,
+                        message_key=f"stream::{conversation_id}",
+                    )
                     accumulated_content = ""  # Initialize empty for accumulation
                     accumulated_thinking = ""  # Accumulate thinking content
                     final_message = None
@@ -7478,10 +7823,7 @@ def render_chat_view():
                             if _has_live_trace_panel_content():
                                 st.session_state.stream_trace_expanded = False
                                 render_live_trace_panel(trace_placeholder)
-                            # Display with native markdown for LaTeX support
-                            response_placeholder.markdown(
-                                normalize_stream_markdown_text(accumulated_content)
-                            )
+                            stream_renderer.append_text(content)
 
                         elif event_type == "tool":
                             _upsert_stream_tool_trace(event)
@@ -7490,6 +7832,9 @@ def render_chat_view():
                                 label=_format_stream_tool_status_label(event),
                                 state="running",
                             )
+
+                        elif event_type == "rich_items":
+                            stream_renderer.apply_rich_items_upsert(event.get("items") or [])
 
                         elif event_type == "node_complete":
                             if _upsert_stream_subagent_activity(event):
@@ -7517,6 +7862,7 @@ def render_chat_view():
                         elif event_type == "complete":
                             # Store final message and complete
                             final_message = event.get("message")
+                            stream_renderer.finalize(final_message)
                             status.update(label="Message sent!", state="complete")
 
                         elif event_type == "error":

@@ -507,3 +507,19 @@ Recommended:
 - [ ] Treat `user_state_patch` as a shallow-merge patch contract
 - [ ] Support the interactive wrapper conventions: `controls`, `control_values`, `views` / `variants`
 - [ ] Reconnect with a fresh token when the widget token expires
+
+## Migration note (2026-05-25): inline rich response v1
+
+The inline rich response v1 contract (`response_format.md`) extends widget delivery with optional **inline placement**:
+
+- Capable assistant messages now persist `messageMetadata.rich_items[]` alongside the existing `live_widgets[]` field. A widget appears with id `widget:<widget_id>` and `display_policy: inline_or_append`.
+- When the assistant body contains a standalone marker `<!--rich:widget:<widget_id>-->`, render that widget at the marker position. The marker is model-authored placement data; the backend does not invent a position when it is omitted. While a streamed marker is waiting for its item upsert, reserve that inline position with a lightweight widget placeholder.
+- The widget WebSocket protocol, token minting, and mount metadata are unchanged. Both `live_widgets[]` (legacy) and `tool_artifacts[]` (audit) continue to be persisted, so widget recovery and ownership checks remain identical.
+- Frontend consumers wanting the inline experience should:
+  1. Opt in with `inlineRichResponseV1: true` on chat/resume requests.
+  2. Maintain a transient registry from `data-rich-items` upserts so a newly created widget can appear at the marker as soon as the marker text arrives in the stream.
+  3. On final `data-assistant-message`, switch to `messageMetadata.rich_items` (authoritative).
+  4. For repeated markers of the same widget id, mount the live WebSocket connection at most once; later occurrences should render a focus/open control rather than a second live mount.
+- Non-opt-in clients receive only the existing `live_widgets[]` shape — no marker text — so no migration is forced on legacy implementations.
+
+See [`README.md`](../README.md) → "Inline Rich Response (v1)" for the full contract.

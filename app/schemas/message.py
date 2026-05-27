@@ -50,6 +50,15 @@ class MessageCreate(BaseModel):
         If omitted, uses system defaults (Gemini).
         """,
     )
+    inline_rich_response_v1: bool = Field(
+        default=False,
+        description=(
+            "When true, the client declares it can render the inline rich-response "
+            "v1 contract (HTML-comment marker syntax + `rich_items` registry). "
+            "Required to receive marker-bearing assistant content over AI SDK "
+            "endpoints and `data-rich-items` transient events."
+        ),
+    )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -171,6 +180,13 @@ class InterruptResumeRequest(BaseModel):
         description="Optional client device ID used to validate sidecar-scoped interrupt resumes.",
     )
     decisions: list[InterruptDecision] = Field(..., description="Approval/rejection/edit decisions")
+    inline_rich_response_v1: bool = Field(
+        default=False,
+        description=(
+            "When true, the client requests the inline rich-response v1 contract "
+            "for the resumed response (marker-bearing content + `data-rich-items`)."
+        ),
+    )
 
     @field_validator("decisions", mode="before")
     @classmethod

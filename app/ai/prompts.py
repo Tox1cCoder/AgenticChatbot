@@ -1,5 +1,48 @@
 from app.core.config import settings
+from app.core.rich_response import build_rich_item_inventory_block
 from app.utils.text_processing import estimate_tokens
+
+INLINE_RICH_RESPONSE_SUFFIX = (
+    "Use `<!--rich:<id>-->` on its own line only for an available rich item that improves\n"
+    "the answer. Never invent an ID. For selected images, add a useful caption in\n"
+    "ordinary markdown after the marker. Created live widgets must be placed with their\n"
+    "available marker in the answer. Do not tell the user a widget is inline unless its\n"
+    "marker appears in the response. Do not mention hidden candidates."
+)
+
+
+def build_rich_response_guidance(
+    *,
+    candidates: list[dict] | None,
+    enabled: bool,
+    capability: bool,
+    max_items: int | None = None,
+    max_chars: int | None = None,
+    summary_chars: int | None = None,
+) -> str:
+    """Return the bounded prompt block (inventory + marker guidance) for the
+    inline rich-response feature.
+
+    Returns an empty string when the rollout flag, per-request capability, or
+    candidate list is missing — so unrelated prompts are unaffected.
+    """
+    if not enabled or not capability:
+        return ""
+    if not candidates:
+        return ""
+    inventory = build_rich_item_inventory_block(
+        candidates,
+        max_items=max_items if max_items is not None else settings.rich_item_inventory_max_items,
+        max_chars=max_chars if max_chars is not None else settings.rich_item_inventory_max_chars,
+        summary_chars=(
+            summary_chars
+            if summary_chars is not None
+            else settings.rich_item_summary_max_chars
+        ),
+    )
+    if not inventory:
+        return ""
+    return f"{inventory}\n\n{INLINE_RICH_RESPONSE_SUFFIX}"
 
 CHAT_SYSTEM_PROMPT = """You are an expert AI assistant and knowledgeable conversationalist. Provide accurate, thorough, and genuinely useful responses.
 

@@ -862,6 +862,7 @@ class BaseAgent(ABC):
         history_summary: str | None = None,
         disable_tools: bool = False,
         tool_budget_notice: str | None = None,
+        rich_response_inventory: str | None = None,
         internal_tools: list[BaseTool] | None = None,
         run_config: RunnableConfig | None = None,
         include_hand_off: bool | None = None,
@@ -902,6 +903,8 @@ class BaseAgent(ABC):
 
             if tool_budget_notice:
                 system_prompt_kwargs["tool_budget_notice"] = tool_budget_notice
+            if rich_response_inventory:
+                system_prompt_kwargs["rich_response_inventory"] = rich_response_inventory
             system_prompt_kwargs["include_hand_off"] = include_hand_off
 
             system_prompt = self._build_system_prompt(
@@ -1191,6 +1194,12 @@ class BaseAgent(ABC):
         if tool_budget_notice:
             system_prompt = (
                 f"{system_prompt}\n\nTOOL BUDGET NOTICE:\n{str(tool_budget_notice).strip()}"
+            )
+
+        rich_response_inventory = _.get("rich_response_inventory")
+        if rich_response_inventory:
+            system_prompt = (
+                f"{system_prompt}\n\n{str(rich_response_inventory).strip()}"
             )
 
         if has_tool_context:

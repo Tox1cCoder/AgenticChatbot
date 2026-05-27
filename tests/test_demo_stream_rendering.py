@@ -44,3 +44,28 @@ def test_normalize_stream_markdown_text_handles_empty_and_non_string():
     assert normalize_stream_markdown_text("") == ""
     assert normalize_stream_markdown_text(None) == ""  # type: ignore[arg-type]
     assert normalize_stream_markdown_text(123) == ""  # type: ignore[arg-type]
+
+
+def test_normalize_stream_markdown_text_strips_inline_rich_markers():
+    """Standalone ``<!--rich:<id>-->`` lines are stripped from the live
+    placeholder so they do not appear as visible text while the stream is
+    in flight. The post-stream rerun resolves the markers and renders the
+    referenced rich item inline via ``build_rich_response_view``.
+    """
+    from app.ui.stream_markdown import normalize_stream_markdown_text
+
+    raw = "Intro paragraph.\n\n<!--rich:widget:abc-123-->\n\nClosing paragraph."
+
+    assert normalize_stream_markdown_text(raw) == (
+        "Intro paragraph.\n\n\n\nClosing paragraph."
+    )
+
+
+def test_normalize_stream_markdown_text_keeps_inline_marker_in_code():
+    """A marker that appears inside an inline-code span is part of prose,
+    not a block-level marker line, and must be preserved verbatim."""
+    from app.ui.stream_markdown import normalize_stream_markdown_text
+
+    raw = "See `<!--rich:foo-->` for the contract grammar."
+
+    assert normalize_stream_markdown_text(raw) == raw

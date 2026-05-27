@@ -6,6 +6,16 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from .config import settings
+from .rich_response import (
+    RICH_ITEMS_VERSION,
+    RichDisplayPolicy,
+    RichItemType,
+    parse_inline_rich_references,
+    validate_public_rich_item,
+    validate_rich_references,
+)
+
 if TYPE_CHECKING:
     from ..schemas.workflow import WorkflowResponse
 
@@ -148,11 +158,187 @@ def extract_live_widgets_from_artifacts(
     return list(widgets_by_id.values())
 
 
+# ---------------------------------------------------------------------------
+# Rich items finalization
+# ---------------------------------------------------------------------------
+
+
+def _widget_rich_item_from_live_widget(widget: dict[str, Any]) -> dict[str, Any]:
+    """Build a public ``live_widget`` rich-item record from a live-widget entry."""
+    widget_id = widget.get("widget_id")
+    return {
+        "id": f"widget:{widget_id}",
+        "type": RichItemType.live_widget.value,
+        "source": "widget_tool",
+        "display_policy": RichDisplayPolicy.inline_or_append.value,
+        "title": widget.get("title"),
+        "payload": {
+            "widget_id": widget_id,
+            "session_id": widget.get("session_id", ""),
+            "widget_type": widget.get("widget_type", ""),
+            "status": widget.get("status", "active"),
+            "version": widget.get("version", 1),
+            "connection_endpoint": widget.get(
+                "connection_endpoint", f"/widgets/{widget_id}/connection"
+            ),
+        },
+    }
+
+
+def _is_image_candidate(candidate: dict[str, Any]) -> bool:
+    return candidate.get("type") == RichItemType.image.value
+
+
+def _candidate_id(candidate: dict[str, Any]) -> str | None:
+    value = candidate.get("id")
+    return value if isinstance(value, str) and value else None
+
+
+def _normalize_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Shallow-copy a candidate descriptor so finalized output is independent of
+    the workflow-internal mutable list."""
+    out = {key: value for key, value in candidate.items() if key not in {"_internal"}}
+    # Drop temporary fields that should never reach the persisted registry.
+    return out
+
+
+def _finalize_rich_items(
+    *,
+    content: str,
+    candidates: list[dict[str, Any]],
+    widget_items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Resolve the final ``rich_items`` registry and validation warnings.
+
+    Args:
+        content: The final assistant markdown.
+        candidates: Transient ``_rich_item_candidates`` descriptors gathered
+            during execution (already type-tagged dicts).
+        widget_items: Public ``live_widget`` rich items derived from existing
+            tool artifacts.
+
+    Returns:
+        A tuple ``(rich_items, warnings)`` where ``rich_items`` is the
+        finalized public registry and ``warnings`` is the validation log.
+    """
+    referenced = parse_inline_rich_references(content)
+    referenced_set = set(referenced)
+
+    rich_items: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    warnings: list[dict[str, str]] = []
+
+    def validated_public_item(item: dict[str, Any]) -> dict[str, Any] | None:
+        item_id = str(item.get("id") or "")
+        try:
+            validated = validate_public_rich_item(
+                item,
+                selected_image_max_bytes=settings.rich_item_selected_image_max_bytes,
+            )
+        except Exception:
+            warnings.append({"code": "invalid_rich_item", "id": item_id})
+            return None
+        return validated.model_dump(mode="json", exclude_none=True)
+
+    # Widgets always persist (they are inline_or_append). Tag inline ones.
+    for widget in widget_items:
+        widget_id = widget.get("id")
+        if not widget_id or widget_id in seen_ids:
+            continue
+        public_widget = validated_public_item(widget)
+        if public_widget is None:
+            continue
+        rich_items.append(public_widget)
+        seen_ids.add(widget_id)
+
+    # Candidates: images persist only when referenced; non-images persist if
+    # their policy allows append or they are referenced.
+    for candidate in candidates:
+        cand_id = _candidate_id(candidate)
+        if cand_id is None or cand_id in seen_ids:
+            continue
+        is_image = _is_image_candidate(candidate)
+        if is_image:
+            if cand_id not in referenced_set:
+                continue
+        public_candidate = validated_public_item(_normalize_candidate(candidate))
+        if public_candidate is None:
+            continue
+        rich_items.append(public_candidate)
+        seen_ids.add(cand_id)
+
+    warnings.extend(validate_rich_references(content, rich_items))
+    return rich_items, warnings
+
+
+def _image_locator(payload: dict[str, Any]) -> str | None:
+    """Return a stable locator (URL or short data digest) for an image record."""
+    if not isinstance(payload, dict):
+        return None
+    url = payload.get("url") or payload.get("source_url")
+    if isinstance(url, str) and url:
+        return f"url::{url}"
+    data = payload.get("data") or payload.get("b64_data")
+    if isinstance(data, str) and data:
+        return f"data::{data[:64]}"
+    return None
+
+
+def _filter_unreferenced_images_from_metadata_images(
+    metadata: dict[str, Any],
+    *,
+    referenced_ids: set[str],
+    candidates: list[dict[str, Any]],
+) -> None:
+    """For v1 messages, drop hidden image candidates from ``metadata["images"]``.
+
+    A candidate is hidden when its rich-item id is not present in the final
+    markdown. Filtering matches by candidate id when available and by URL/data
+    locator otherwise, so unreferenced URLs do not leak through the legacy
+    gallery field.
+    """
+    images = metadata.get("images")
+    if not isinstance(images, list) or not images:
+        return
+
+    hidden_locators: set[str] = set()
+    for candidate in candidates:
+        if not _is_image_candidate(candidate):
+            continue
+        if candidate.get("id") in referenced_ids:
+            continue
+        locator = _image_locator(candidate.get("payload") or {})
+        if locator:
+            hidden_locators.add(locator)
+
+    kept: list[Any] = []
+    for image in images:
+        if not isinstance(image, dict):
+            kept.append(image)
+            continue
+        candidate_id = image.get("rich_item_id") or image.get("id")
+        if isinstance(candidate_id, str) and candidate_id and candidate_id not in referenced_ids:
+            continue
+        locator = _image_locator(image)
+        if locator and locator in hidden_locators:
+            continue
+        kept.append(image)
+    if kept:
+        metadata["images"] = kept
+    else:
+        metadata.pop("images", None)
+
+
 def build_bot_metadata(
     response: WorkflowResponse | None,
     persona: str | None = None,
 ) -> dict[str, Any]:
-    """Build standard bot response metadata from a workflow response."""
+    """Build standard bot response metadata from a workflow response.
+
+    For workflows that produced rich-item candidates, this also materializes
+    the public ``rich_items`` registry, attaches ``rich_items_version``, and
+    records validation warnings.
+    """
     metadata: dict[str, Any] = {}
 
     if response and response.metadata:
@@ -175,9 +361,69 @@ def build_bot_metadata(
     if response and response.metadata and "images" in response.metadata:
         metadata["images"] = response.metadata["images"]
 
-    # Derive live_widgets from widget tool artifacts
+    # Derive live_widgets from widget tool artifacts.
     live_widgets = extract_live_widgets_from_artifacts(metadata.get("tool_artifacts"))
     if live_widgets:
         metadata["live_widgets"] = live_widgets
+
+    if not getattr(settings, "inline_rich_response_enabled", False):
+        # Keep legacy attachment/widget metadata readable while rollout is
+        # disabled, but never persist the internal candidate handoff field.
+        metadata.pop("_rich_item_candidates", None)
+        metadata.pop("_inline_rich_response_v1", None)
+        return metadata
+
+    # ── Rich items finalization ─────────────────────────────────────────
+    # The transient `_rich_item_candidates` field is the workflow-internal
+    # handoff. It is consumed and removed here; it must never appear in the
+    # persisted assistant metadata.
+    raw_candidates = metadata.pop("_rich_item_candidates", None)
+    capable_response = bool(metadata.pop("_inline_rich_response_v1", False))
+    candidates: list[dict[str, Any]] = []
+    if isinstance(raw_candidates, list):
+        candidates = [c for c in raw_candidates if isinstance(c, dict)]
+
+    widget_items = [
+        _widget_rich_item_from_live_widget(widget) for widget in (live_widgets or [])
+    ]
+
+    # Only opt the message into the v1 contract when there is actual rich-item
+    # activity. Legacy messages with neither markers nor candidates retain the
+    # pre-feature shape so existing readers continue to function.
+    content = ""
+    message_obj = getattr(response, "message", None) if response is not None else None
+    message_content = getattr(message_obj, "content", None) if message_obj is not None else None
+    if isinstance(message_content, str):
+        content = message_content
+    has_markers = bool(parse_inline_rich_references(content))
+    has_v1_signal = bool(candidates) or has_markers or (
+        capable_response and bool(widget_items)
+    )
+
+    if not has_v1_signal:
+        return metadata
+
+    rich_items, warnings = _finalize_rich_items(
+        content=content,
+        candidates=candidates,
+        widget_items=widget_items,
+    )
+
+    metadata["rich_items_version"] = RICH_ITEMS_VERSION
+    metadata["rich_items"] = rich_items
+    metadata["rich_reference_warnings"] = warnings
+
+    # For v1 messages, drop unreferenced image candidates from any public
+    # ``metadata["images"]`` field so the legacy gallery cannot surface them.
+    referenced_ids = {
+        str(item.get("id"))
+        for item in rich_items
+        if item.get("type") == RichItemType.image.value and item.get("id")
+    }
+    _filter_unreferenced_images_from_metadata_images(
+        metadata,
+        referenced_ids=referenced_ids,
+        candidates=candidates,
+    )
 
     return metadata

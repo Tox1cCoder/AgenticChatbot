@@ -79,6 +79,30 @@ if TYPE_CHECKING:
 _apply_decisions = apply_hitl_decisions
 
 
+def _build_inline_rich_inventory_for_state(context: dict[str, Any] | None) -> str:
+    """Compute the bounded rich-item inventory block for the current turn.
+
+    Returns an empty string if the rollout flag is off, the request did not
+    advertise the capability, or no candidates exist.
+    """
+    if not isinstance(context, dict):
+        return ""
+    if not getattr(settings, "inline_rich_response_enabled", False):
+        return ""
+    if not context.get("inline_rich_response_v1"):
+        return ""
+    candidates = context.get("rich_item_candidates") or []
+    if not candidates:
+        return ""
+    from .prompts import build_rich_response_guidance
+
+    return build_rich_response_guidance(
+        candidates=list(candidates),
+        enabled=True,
+        capability=True,
+    )
+
+
 class MultiAgentWorkflow(IWorkflowRuntime):
     def __init__(
         self,
@@ -362,6 +386,23 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             else:
                 response.metadata["images"] = tool_images
 
+        # Forward turn-scoped rich-item candidates into the response metadata
+        # so `build_bot_metadata()` can finalize the public `rich_items`
+        # registry at the workflow boundary. Stripped from persisted output.
+        context = state_view.context()
+        rich_enabled = bool(
+            isinstance(context, dict)
+            and getattr(settings, "inline_rich_response_enabled", False)
+            and context.get("inline_rich_response_v1")
+        )
+        rich_candidates = context.get("rich_item_candidates") if rich_enabled else None
+        if rich_enabled:
+            if not response.metadata:
+                response.metadata = {}
+            response.metadata["_inline_rich_response_v1"] = True
+            if rich_candidates:
+                response.metadata["_rich_item_candidates"] = list(rich_candidates)
+
     def _finalize_agent_response(self, state: GraphState, response: AgentResponse) -> GraphState:
         state["response"] = response
 
@@ -398,7 +439,11 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             human_message_kwargs["id"] = request.user_message_id
         initial_state: GraphState = {
             "messages": [HumanMessage(**human_message_kwargs)],
-            "context": {},
+            "context": {
+                "inline_rich_response_v1": bool(
+                    getattr(request, "inline_rich_response_v1", False)
+                ),
+            },
         }
 
         if request.conversation_id is not None:
@@ -1386,8 +1431,17 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     @staticmethod
     def _final_response_kwargs(state: GraphState) -> dict[str, Any]:
         context = GraphStateView(state).context()
+        kwargs: dict[str, Any] = {}
+
+        # Inline rich-response inventory: surfaces compact item descriptors to
+        # the answer-producing agent only when the rollout flag is enabled and
+        # the request advertised the capability.
+        inventory = _build_inline_rich_inventory_for_state(context)
+        if inventory:
+            kwargs["rich_response_inventory"] = inventory
+
         if not context.get("force_final_response"):
-            return {}
+            return kwargs
 
         budget = context.get("tool_budget")
         count = budget.get("count") if isinstance(budget, dict) else None
@@ -1403,7 +1457,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 "Tool-use budget reached. Use the tool results already present in this "
                 "conversation and produce the best final answer now. Do not call any more tools."
             )
-        return {"disable_tools": True, "tool_budget_notice": notice}
+        kwargs.update({"disable_tools": True, "tool_budget_notice": notice})
+        return kwargs
 
     @staticmethod
     def _finalize_forced_final_response(
@@ -1791,6 +1846,30 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             existing_images = list(context.get("tool_images", []))
             existing_images.extend(all_images)
             context["tool_images"] = existing_images
+
+        # Lift artifact-attached rich-item candidates into turn-scoped context.
+        # Each artifact may carry `_rich_item_candidates`; merge unique by id.
+        if tool_artifacts:
+            existing_candidates: list[dict[str, Any]] = list(
+                context.get("rich_item_candidates", [])
+            )
+            seen_ids = {c.get("id") for c in existing_candidates if isinstance(c, dict)}
+            for artifact in tool_artifacts:
+                if not isinstance(artifact, dict):
+                    continue
+                candidates = artifact.get("_rich_item_candidates")
+                if not isinstance(candidates, list):
+                    continue
+                for candidate in candidates:
+                    if not isinstance(candidate, dict):
+                        continue
+                    cid = candidate.get("id")
+                    if not cid or cid in seen_ids:
+                        continue
+                    existing_candidates.append(candidate)
+                    seen_ids.add(cid)
+            if existing_candidates:
+                context["rich_item_candidates"] = existing_candidates
         state["context"] = context
 
         if mirror_to_response:

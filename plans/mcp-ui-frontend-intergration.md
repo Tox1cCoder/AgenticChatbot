@@ -452,3 +452,17 @@ Each step is backward-compatible: before step N, unsupported types fall through 
 - [`mcp_ui_plan.md`](mcp_ui_plan.md) — backend implementation plan for the render contract
 - [`live-widgets-frontend-integration.md`](live-widgets-frontend-integration.md) — full widget mount + WebSocket contract
 - [`live-ui-plan.md`](live-ui-plan.md) — backend widget architecture and decisions
+
+## Migration note (2026-05-25): inline rich response v1
+
+The inline rich response v1 contract (`response_format.md`) introduces a new placement contract:
+
+- For capable clients, MCP `tool_render` payloads become `rich_items` entries with deterministic ids `tool:<tool_call_id>`. Render them at the inline marker `<!--rich:tool:<tool_call_id>-->` when present in markdown; otherwise append below the body (display_policy `inline_or_append`).
+- Legacy `tool_artifacts[].render` continues to be emitted for non-opt-in clients during rollout.
+- Frontend consumers wanting the report layout should:
+  1. Opt in with `inlineRichResponseV1: true` on chat/resume requests.
+  2. Read transient `data-rich-items` upserts in `useChat({ onData })` to learn about created tool renders / widgets as they become available.
+  3. On final `data-assistant-message`, replace transient state with `messageMetadata.rich_items`.
+- The MCP `render` payload shape is unchanged; v1 wraps it inside `rich_items[].payload.render`.
+
+See [`README.md`](../README.md) → "Inline Rich Response (v1)" for the full contract.

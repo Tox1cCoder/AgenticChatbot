@@ -948,6 +948,12 @@ class MessageService(IMessageService):
                             )
                         yield dict(event)
 
+                    elif event_type == "rich_items":
+                        # Preserve safe progressive rich-item upserts for
+                        # clients that render marker-positioned output live.
+                        inflight.touch()
+                        yield dict(event)
+
                     elif event_type == "interrupt":
                         # Yield interrupt event - workflow paused for human approval
                         interrupt_response = event.get("interrupt")
@@ -1481,6 +1487,7 @@ class MessageService(IMessageService):
         interrupt_id: str | None = None,
         device_id: UUID | None = None,
         bot_message_id: UUID | None = None,
+        inline_rich_response_v1: bool = False,
     ):
         fetched_interrupt_record = self._validate_and_claim_interrupt_resume(
             thread_id=thread_id,
@@ -1511,6 +1518,7 @@ class MessageService(IMessageService):
             async for event in self.ai_service.resume_interrupted_execution_stream(
                 thread_id=thread_id,
                 decisions=decisions,
+                inline_rich_response_v1=inline_rich_response_v1,
             ):
                 event_type = event.get("type")
 
@@ -1551,6 +1559,11 @@ class MessageService(IMessageService):
                                 render=event.get("render"),
                             )
                         )
+                    yield dict(event)
+
+                elif event_type == "rich_items":
+                    # Resume streams use the same progressive rich-response
+                    # contract as first-pass response generation.
                     yield dict(event)
 
                 elif event_type == "continuation_start" or event_type == "node_complete":
@@ -2039,6 +2052,9 @@ class MessageService(IMessageService):
             planning=planning_context,
             user_message_id=str(user_message_id) if user_message_id else None,
             assistant_message_id=(str(assistant_message_id) if assistant_message_id else None),
+            inline_rich_response_v1=bool(
+                getattr(message_create_data, "inline_rich_response_v1", False)
+            ),
         )
         return resolved_user_id, sanitized_persona, request
 

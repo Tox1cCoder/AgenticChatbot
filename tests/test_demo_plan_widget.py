@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 import sys
 import types
+from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -134,3 +136,402 @@ def test_chat_view_renders_plan_widget_when_cached_flag_is_false(monkeypatch):
         demo.render_chat_view()
 
     assert calls == [cached_conversation]
+
+
+def test_live_rich_renderer_places_resolved_widget_between_markdown(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    calls: list[tuple[str, Any]] = []
+
+    class MarkdownSlot:
+        def markdown(self, text: str) -> None:
+            calls.append(("markdown", text))
+
+    class RootPlaceholder:
+        def container(self):
+            return nullcontext()
+
+    streamlit_stub.empty = lambda: MarkdownSlot()
+    streamlit_stub.caption = lambda text: calls.append(("caption", text))
+    monkeypatch.setattr(
+        demo,
+        "_render_inline_rich_item",
+        lambda item, **kwargs: calls.append(
+            ("rich", (item["id"], kwargs["auto_mount"]))
+        ),
+    )
+
+    renderer = demo._StreamingRichResponseRenderer(
+        RootPlaceholder(),
+        message_key="active-response",
+    )
+    renderer.append_text("Before\n\n<!--rich:widget:w-1-->\n\nAfter")
+    calls.clear()
+    renderer.apply_rich_items_upsert(
+        [
+            {
+                "id": "widget:w-1",
+                "type": "live_widget",
+                "display_policy": "inline_or_append",
+                "payload": {
+                    "widget_id": "w-1",
+                    "session_id": "conv-1",
+                    "widget_type": "chart",
+                    "status": "active",
+                    "version": 1,
+                    "connection_endpoint": "/widgets/w-1/connection",
+                },
+            }
+        ]
+    )
+
+    assert calls == [
+        ("markdown", "Before"),
+        ("rich", ("widget:w-1", True)),
+        ("markdown", "After"),
+    ]
+
+
+def test_live_rich_renderer_only_auto_mounts_first_repeated_widget_marker(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    auto_mounts: list[bool] = []
+
+    class MarkdownSlot:
+        def markdown(self, _text: str) -> None:
+            return None
+
+    class RootPlaceholder:
+        def container(self):
+            return nullcontext()
+
+    streamlit_stub.empty = lambda: MarkdownSlot()
+    streamlit_stub.caption = lambda _text: None
+    monkeypatch.setattr(
+        demo,
+        "_render_inline_rich_item",
+        lambda _item, **kwargs: auto_mounts.append(kwargs["auto_mount"]),
+    )
+
+    renderer = demo._StreamingRichResponseRenderer(
+        RootPlaceholder(),
+        message_key="active-response",
+    )
+    renderer.append_text(
+        "<!--rich:widget:w-1-->\n\nText\n\n<!--rich:widget:w-1-->"
+    )
+    renderer.apply_rich_items_upsert(
+        [
+            {
+                "id": "widget:w-1",
+                "type": "live_widget",
+                "display_policy": "inline_or_append",
+                "payload": {
+                    "widget_id": "w-1",
+                    "session_id": "conv-1",
+                    "widget_type": "chart",
+                    "status": "active",
+                    "version": 1,
+                    "connection_endpoint": "/widgets/w-1/connection",
+                },
+            }
+        ]
+    )
+
+    assert auto_mounts == [True, False]
+
+
+def test_live_rich_renderer_does_not_append_unplaced_widget_before_completion(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    rendered: list[str] = []
+
+    class MarkdownSlot:
+        def markdown(self, _text: str) -> None:
+            return None
+
+    class RootPlaceholder:
+        def container(self):
+            return nullcontext()
+
+    streamlit_stub.empty = lambda: MarkdownSlot()
+    monkeypatch.setattr(
+        demo,
+        "_render_inline_rich_item",
+        lambda item, **_kwargs: rendered.append(item["id"]),
+    )
+
+    renderer = demo._StreamingRichResponseRenderer(
+        RootPlaceholder(),
+        message_key="active-response",
+    )
+    renderer.append_text("Intro paragraph.\n\nMore explanation.")
+    renderer.apply_rich_items_upsert(
+        [
+            {
+                "id": "widget:w-1",
+                "type": "live_widget",
+                "display_policy": "inline_or_append",
+                "payload": {
+                    "widget_id": "w-1",
+                    "session_id": "conv-1",
+                    "widget_type": "chart",
+                    "status": "active",
+                    "version": 1,
+                    "connection_endpoint": "/widgets/w-1/connection",
+                },
+            }
+        ]
+    )
+
+    assert rendered == []
+
+
+def test_live_rich_renderer_shows_pending_widget_slot_until_upsert(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    rendered: list[tuple[str, str]] = []
+
+    class MarkdownSlot:
+        def markdown(self, _text: str) -> None:
+            return None
+
+    class RootPlaceholder:
+        def container(self):
+            return nullcontext()
+
+    streamlit_stub.empty = lambda: MarkdownSlot()
+    monkeypatch.setattr(
+        demo,
+        "_render_pending_rich_placeholder",
+        lambda item_id: rendered.append(("pending", item_id)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        demo,
+        "_render_inline_rich_item",
+        lambda item, **_kwargs: rendered.append(("rich", item["id"])),
+    )
+
+    renderer = demo._StreamingRichResponseRenderer(
+        RootPlaceholder(),
+        message_key="active-response",
+    )
+    renderer.append_text("Before\n\n<!--rich:widget:w-1-->\n\nAfter")
+    assert rendered == [("pending", "widget:w-1")]
+
+    rendered.clear()
+    renderer.apply_rich_items_upsert(
+        [
+            {
+                "id": "widget:w-1",
+                "type": "live_widget",
+                "display_policy": "inline_or_append",
+                "payload": {
+                    "widget_id": "w-1",
+                    "session_id": "conv-1",
+                    "widget_type": "chart",
+                    "status": "active",
+                    "version": 1,
+                    "connection_endpoint": "/widgets/w-1/connection",
+                },
+            }
+        ]
+    )
+
+    assert rendered == [("rich", "widget:w-1")]
+
+
+def test_inline_live_widget_mount_omits_legacy_attachment_chrome(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    markdown: list[str] = []
+    details: list[str] = []
+    mounts: list[str] = []
+
+    streamlit_stub.session_state.auth_token = "token"
+    streamlit_stub.session_state.live_widget_mounts = {}
+    streamlit_stub.markdown = lambda text, **_kwargs: markdown.append(text)
+
+    def capture_expander(label: str, **_kwargs):
+        details.append(label)
+        return nullcontext()
+
+    streamlit_stub.expander = capture_expander
+    monkeypatch.setattr(
+        demo._stc,
+        "html",
+        lambda markup, **_kwargs: mounts.append(markup),
+    )
+
+    demo.render_live_widgets(
+        {
+            "live_widgets": [
+                {
+                    "widget_id": "w-inline",
+                    "session_id": "conv-1",
+                    "widget_type": "chart",
+                    "title": "Growth",
+                    "status": "active",
+                    "version": 1,
+                }
+            ]
+        },
+        message_key="inline",
+        auto_mount=True,
+        inline=True,
+    )
+
+    assert mounts
+    assert all("Live Widget" not in text for text in markdown)
+    assert details == []
+
+
+def test_rich_item_widget_uses_inline_widget_mode(monkeypatch):
+    demo, _streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        demo,
+        "render_live_widgets",
+        lambda _metadata, **kwargs: calls.append(kwargs),
+    )
+
+    demo._render_inline_rich_item(
+        {
+            "id": "widget:w-inline",
+            "type": "live_widget",
+            "display_policy": "inline_or_append",
+            "payload": {"widget_id": "w-inline", "widget_type": "chart"},
+        },
+        message_metadata={},
+        message_key="answer",
+        auto_mount=True,
+    )
+
+    assert calls[0]["inline"] is True
+
+
+def test_inline_tool_render_uses_existing_demo_renderer(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    rendered: list[dict[str, Any]] = []
+    json_fallbacks: list[dict[str, Any]] = []
+    payload = {"type": "table", "structured_content": [{"name": "Ada"}]}
+
+    monkeypatch.setattr(
+        demo,
+        "render_tool_render_payload",
+        lambda render: rendered.append(render) or True,
+    )
+    streamlit_stub.json = lambda render: json_fallbacks.append(render)
+
+    demo._render_inline_rich_item(
+        {
+            "id": "tool:call-1",
+            "type": "tool_render",
+            "display_policy": "inline_or_append",
+            "payload": {"render": payload},
+        },
+        message_metadata={},
+        message_key="response",
+        auto_mount=False,
+    )
+
+    assert rendered == [payload]
+    assert json_fallbacks == []
+
+
+def test_both_demo_stream_loops_use_segmented_rich_renderer():
+    source = (Path(__file__).resolve().parents[1] / "demo.py").read_text(encoding="utf-8")
+
+    assert source.count("_StreamingRichResponseRenderer(") >= 2
+    assert source.count("stream_renderer.append_text(content)") >= 2
+    assert source.count("stream_renderer.apply_rich_items_upsert") >= 2
+
+
+def test_render_citations_escapes_legacy_source_html(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    rendered: list[str] = []
+    streamlit_stub.expander = lambda *_args, **_kwargs: nullcontext()
+    streamlit_stub.markdown = lambda text, **_kwargs: rendered.append(text)
+
+    demo.render_citations(
+        {
+            "citations": [
+                {
+                    "source": '<img src=x onerror="alert(1)">',
+                    "score": 0.9,
+                }
+            ]
+        }
+    )
+
+    html_output = "\n".join(rendered)
+    assert "<img src=x" not in html_output
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in html_output
+
+
+def test_render_citations_escapes_grouped_source_html(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    rendered: list[str] = []
+    streamlit_stub.session_state.message_chunks = {}
+    streamlit_stub.expander = lambda *_args, **_kwargs: nullcontext()
+    streamlit_stub.markdown = lambda text, **_kwargs: rendered.append(text)
+
+    demo.render_citations(
+        {
+            "documents_cited": [
+                {
+                    "document_number": "<b>1</b>",
+                    "source": "<script>alert(1)</script>",
+                    "total_chunks": 0,
+                    "avg_score": 0.9,
+                    "chunks": [],
+                }
+            ]
+        },
+        "msg-1",
+    )
+
+    html_output = "\n".join(rendered)
+    assert "<script>" not in html_output
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html_output
+    assert "&lt;b&gt;1&lt;/b&gt;" in html_output
+
+
+def test_render_citations_can_suppress_v1_image_gallery(monkeypatch):
+    demo, streamlit_stub = _import_demo_with_ui_stubs(monkeypatch)
+    gallery_calls: list[list[dict[str, str]]] = []
+    streamlit_stub.session_state.message_chunks = {}
+    streamlit_stub.expander = lambda *_args, **_kwargs: nullcontext()
+    monkeypatch.setattr(
+        demo,
+        "_render_thumbnail_gallery",
+        lambda items, **_kwargs: gallery_calls.append(items),
+    )
+
+    demo.render_citations(
+        {
+            "documents_cited": [
+                {
+                    "document_id": "doc-1",
+                    "document_number": 1,
+                    "source": "report.pdf",
+                    "total_chunks": 0,
+                    "avg_score": 0.9,
+                    "chunks": [],
+                }
+            ],
+            "images": [
+                {
+                    "name": "doc-1-page-1",
+                    "url": "https://img.test/selected.png",
+                    "mime": "image/png",
+                }
+            ],
+        },
+        "msg-1",
+        include_images=False,
+    )
+
+    assert gallery_calls == []
+
+
+def test_v1_message_bubble_disables_citation_image_gallery():
+    source = (Path(__file__).resolve().parents[1] / "demo.py").read_text(encoding="utf-8")
+
+    assert "include_images=not view.is_v1" in source

@@ -93,6 +93,7 @@ class IMessageService(ABC):
         interrupt_id: str | None = None,
         device_id: UUID | None = None,
         bot_message_id: UUID | None = None,
+        inline_rich_response_v1: bool = False,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Resume an interrupted workflow and stream the assistant response"""
         pass
