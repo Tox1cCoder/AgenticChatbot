@@ -754,6 +754,29 @@ Widgets are interactive UI elements rendered by the frontend but driven by the a
 
 Widget state is Redis-backed (see startup banner `"Widget runtime: Redis-backed storage active"`). Without Redis, widget flows degrade; a warning is logged at startup.
 
+### Meaningful Widgets contract
+
+Live widgets read like article-quality inline visuals. The shared state envelope is identical between the AI SDK frontend path and the Streamlit `demo.py` path; agents create widgets through the `widgets` MCP server using a unified shape:
+
+- `presentation` — `title`, `caption`, `x_label`, `y_label`, `unit`, `x_kind` (`time`/`ordered`/`sequence`), and `annotations[]` for callouts. Rendered inline near the chart body, not as a heavy header.
+- `controls` + `control_values` — local interaction (sliders, segmented controls, filters, chart-type pickers) that only update widget state.
+- `views` / `variants` — pre-computed scenario payloads keyed by control values.
+- `actions[]` — assistant-triggering controls. Each action of `type: "assistant_message"` declares a `message_template` that can reference `{{control_values.<key>}}`, `{{input_values.<key>}}`, `{{state.<path>}}`, or `{{presentation.<key>}}`.
+
+Quality enforcement happens at widget-tool time (`app/services/widget_quality.py`). Objective failures — empty chart labels, line/area charts without an ordered `x_kind`, donut charts with negative values, html widgets with empty content or out-of-range height — block the create/update. Soft guidance is returned in the response as `quality_guidance: [...]` so the model can iterate.
+
+Action resolution endpoint: `POST /widgets/{widget_id}/actions/{action_key}` applies an optional `state_patch`, renders the action template, records `last_action` on widget state, and returns `{widget_id, session_id, action_key, content}`. Frontends submit the returned `content` through the normal chat stream — the endpoint does not invoke the assistant directly.
+
+Test commands:
+
+```bash
+pytest tests/test_widget_quality.py tests/test_widget_runtime.py tests/test_widgets_api.py tests/test_widget_actions_api.py
+pytest tests/test_demo_meaningful_widgets.py tests/test_demo_plan_widget.py tests/test_demo_rich_response.py
+pytest tests/client_backend/test_widget_action_proxy.py
+```
+
+See [`plans/live-widgets-frontend-integration.md`](plans/live-widgets-frontend-integration.md) § 11 for the full AI SDK renderer contract and reference snippets.
+
 ---
 
 ## API Reference
@@ -887,6 +910,7 @@ See [Client Runtime Bridge](#client-runtime-bridge).
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/widgets/{widget_id}/connection` | Mint short-lived handshake token |
+| `POST` | `/widgets/{widget_id}/actions/{action_key}` | Resolve an action template into a chat message |
 | `WS`  | `/widgets/{widget_id}/connect` | Widget state WebSocket |
 
 ### AI SDK surface ([`/ai/*` + `/api/chat/*`](app/api/ai_sdk.py))

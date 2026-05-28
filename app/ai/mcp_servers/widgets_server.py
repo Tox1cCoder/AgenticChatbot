@@ -8,9 +8,11 @@ the same widget state.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import sys
+from typing import Any
 
 # Ensure the project root is on sys.path so `app.*` imports resolve
 # when this file is launched as a subprocess by MCPManager.
@@ -21,9 +23,40 @@ if _project_root not in sys.path:
 
 from mcp.server.fastmcp import FastMCP
 
+from app.services.widget_quality import assess_widget_state
 from app.services.widget_runtime import get_widget_store
 
 mcp = FastMCP("widgets")
+
+
+def _parse_widget_state(raw: str, *, field: str = "initial_state") -> Any:
+    """Parse a widget state JSON string with a clear error on failure.
+
+    Falls back to ``ast.literal_eval`` for Python-style literals
+    (``True``/``False``/``None``/single-quoted keys) so a single common
+    formatting slip from the model doesn't lose the whole widget creation.
+    On true malformation, raise a ``ValueError`` whose message includes the
+    offending snippet so the model can self-correct on the next turn.
+    """
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        try:
+            value = ast.literal_eval(raw)
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            value = None
+        if value is not None and isinstance(value, (dict, list)):
+            return value
+        snippet_start = max(0, exc.pos - 30)
+        snippet_end = min(len(raw), exc.pos + 30)
+        snippet = raw[snippet_start:snippet_end].replace("\n", " ").replace("\r", " ")
+        raise ValueError(
+            f"{field} must be a valid JSON string "
+            f"({exc.msg} at character {exc.pos}). "
+            f"Context: ...{snippet}... "
+            "Use double-quoted keys and strings, lowercase true/false/null, "
+            "no trailing commas, and escape any embedded quotes."
+        ) from None
 
 
 @mcp.tool()
@@ -43,6 +76,24 @@ async def widget_create(
     - A compact concept explainer for comparisons, taxonomies, timelines, or decision guides
     - A compact bespoke micro-app rendered in a sandboxed iframe when the built-in widget types are too rigid
 
+    Treat widgets like inline visuals in an article: provide a `presentation` block
+    (title, caption, axis labels, units, annotations) and place the widget marker
+    near the paragraph it supports. Soft guidance is returned in the response as
+    `quality_guidance` when the widget is accepted but could be improved.
+
+    `initial_state` must be a valid JSON string — double-quoted keys and strings,
+    lowercase `true`/`false`/`null`, no trailing commas, embedded quotes escaped
+    as `\\"`. If the parser rejects the input, the error message includes the
+    offending snippet so you can fix and retry on the next turn.
+
+    Objective validation rejects widgets that are clearly low-value, including:
+    - chart with fewer than two labels or non-numeric datasets
+    - line/area chart without an ordered/time/sequence `x_kind`
+    - donut/pie with negative values or multiple unrelated series
+    - empty dashboard with no panels or fallback metrics
+    - table with no rows/columns and no `empty_state`
+    - html widget with empty content or height outside 260..960
+
     Args:
         session_id: The conversation ID this widget belongs to.
         widget_type: Widget kind — e.g. "table", "chart", "dashboard", "form", "list", or "html".
@@ -51,8 +102,21 @@ async def widget_create(
             behaves more like a compact Canvas artifact.
         initial_state: JSON string with the widget's initial data/configuration.
             Preferred state conventions:
-            - table: {"columns": ["Column"], "rows": [["Value"]]}
-            - chart: {"chart_type": "bar", "labels": ["A", "B"], "datasets": [{"label": "Score", "data": [1, 2]}]}
+            - table: {"columns": ["Column"], "rows": [["Value"]], "presentation": {"caption": "..."}}
+            - chart (article-style): {
+                "chart_type": "bar",
+                "labels": ["A", "B"],
+                "datasets": [{"label": "Score", "data": [1, 2]}],
+                "presentation": {
+                    "title": "Score by option",
+                    "caption": "B leads A by roughly 2x.",
+                    "x_label": "Option",
+                    "y_label": "Score",
+                    "unit": "points",
+                    "annotations": [{"label": "Best", "series": "Score", "point_index": 1}]
+                }
+              }
+            - line chart: include `"presentation": {"x_kind": "time"}` (or "ordered"/"sequence")
             - dashboard: {"panels": [{"type": "metric", "title": "Total", "value": 42}, {"type": "chart", "title": "Trend", "data": {...}}]}
             - form: {"fields": [{"key": "topic", "label": "Topic", "type": "text"}], "values": {"topic": "Widgets"}}
             - list: {"items": [{"id": "a", "label": "Option A", "description": "Why it matters"}], "selection": "a"}
@@ -66,13 +130,21 @@ async def widget_create(
                 "control_values": {"metric": "revenue"},
                 "views": {
                     "metric=revenue": {"chart_type": "bar", "labels": ["Jan", "Feb"], "datasets": [{"label": "Revenue", "data": [12, 18]}]},
-                    "metric=profit": {"chart_type": "line", "labels": ["Jan", "Feb"], "datasets": [{"label": "Profit", "data": [3, 5]}]}
+                    "metric=profit": {"chart_type": "line", "labels": ["Jan", "Feb"], "datasets": [{"label": "Profit", "data": [3, 5]}], "presentation": {"x_kind": "time"}}
                 }
               }
             - alternative interactive shape: {
                 "controls": [...],
                 "control_values": {...},
                 "variants": [{"match": {"metric": "revenue"}, "state": {...}}, {"match": {"metric": "profit"}, "state": {...}}]
+              }
+            - assistant actions: {
+                "actions": [{
+                    "key": "explain_current_state",
+                    "label": "Explain current state",
+                    "type": "assistant_message",
+                    "message_template": "Explain the widget state for damping={{control_values.damping}} in the context of the current answer."
+                }]
               }
             Prefer putting reusable controls at the top level and per-view chart/table payloads in `views` or `variants`.
             For dashboards, prefer layered, polished explainer layouts over a single raw chart:
@@ -85,17 +157,24 @@ async def widget_create(
         title: Optional short human-readable title for the widget.
 
     Returns:
-        JSON object describing the created widget (widget_id, version, etc.).
+        JSON object describing the created widget (widget_id, version, etc.), and a
+        `quality_guidance` list of soft recommendations when present.
     """
     store = get_widget_store()
-    state = json.loads(initial_state)
+    state = _parse_widget_state(initial_state, field="initial_state")
+    quality = assess_widget_state(widget_type, state)
+    if not quality.allowed:
+        raise ValueError("; ".join(quality.messages))
     record = await store.create(
         session_id=session_id,
         widget_type=widget_type,
         initial_state=state,
         title=title or None,
     )
-    return json.dumps(record.to_dict(), default=str)
+    payload = record.to_dict()
+    if quality.soft_messages:
+        payload["quality_guidance"] = list(quality.soft_messages)
+    return json.dumps(payload, default=str)
 
 
 @mcp.tool()
@@ -122,13 +201,22 @@ async def widget_update(
         JSON object with the updated widget record.
     """
     store = get_widget_store()
-    new_state = json.loads(state)
+    new_state = _parse_widget_state(state, field="state")
+    existing = await store.get(widget_id)
+    if existing is None:
+        raise KeyError(f"Widget {widget_id} not found")
+    quality = assess_widget_state(existing.widget_type, new_state)
+    if not quality.allowed:
+        raise ValueError("; ".join(quality.messages))
     record = await store.update(
         widget_id=widget_id,
         state=new_state,
         expected_version=version if version > 0 else None,
     )
-    return json.dumps(record.to_dict(), default=str)
+    payload = record.to_dict()
+    if quality.soft_messages:
+        payload["quality_guidance"] = list(quality.soft_messages)
+    return json.dumps(payload, default=str)
 
 
 @mcp.tool()

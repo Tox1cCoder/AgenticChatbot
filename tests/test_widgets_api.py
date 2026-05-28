@@ -226,6 +226,96 @@ def test_widget_connection_restores_missing_widget_from_message_metadata(
     assert restored.state["chart_type"] == "line"
 
 
+def test_widget_connection_restores_widget_with_enriched_state(
+    widget_test_client, monkeypatch
+):
+    """Recovering a widget from persisted tool_artifacts must preserve presentation,
+    controls, and actions keys so the renderer can reconstruct the article-style view."""
+    client, store, _token_service = widget_test_client
+    widget_id = "restored-enriched-widget"
+    enriched_state = {
+        "chart_type": "line",
+        "labels": ["t0", "t1", "t2"],
+        "datasets": [{"label": "Trajectory", "data": [0.1, 0.4, 0.9]}],
+        "presentation": {
+            "title": "Phase-space",
+            "caption": "Oscillator becomes easier to read.",
+            "x_label": "Position",
+            "y_label": "Velocity",
+            "x_kind": "time",
+            "annotations": [{"label": "Stable", "series": "Trajectory", "point_index": 2}],
+        },
+        "controls": [{"key": "damping", "type": "slider", "value": 0.2}],
+        "control_values": {"damping": 0.2},
+        "actions": [
+            {
+                "key": "explain_current_state",
+                "type": "assistant_message",
+                "message_template": "Explain damping={{control_values.damping}}",
+            }
+        ],
+    }
+    import json as _json
+
+    metadata = {
+        "live_widgets": [
+            {
+                "widget_id": widget_id,
+                "session_id": TEST_SESSION_ID,
+                "widget_type": "chart",
+                "title": "Phase-space",
+                "status": "active",
+                "version": 1,
+                "connection_endpoint": f"/widgets/{widget_id}/connection",
+            }
+        ],
+        "tool_artifacts": [
+            {
+                "tool": "widget_create",
+                "status": "success",
+                "error": None,
+                "args": {
+                    "session_id": TEST_SESSION_ID,
+                    "widget_type": "chart",
+                    "title": "Phase-space",
+                    "initial_state": _json.dumps(enriched_state),
+                },
+                "output": _json.dumps(
+                    {
+                        "widget_id": widget_id,
+                        "session_id": TEST_SESSION_ID,
+                        "widget_type": "chart",
+                        "title": "Phase-space",
+                        "status": "active",
+                        "version": 1,
+                    }
+                ),
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        widgets_api,
+        "_iter_widget_messages_for_user",
+        lambda *_args: [
+            SimpleNamespace(
+                conversation_id=UUID(TEST_SESSION_ID),
+                message_metadata=metadata,
+            )
+        ],
+    )
+
+    response = client.post(f"/widgets/{widget_id}/connection")
+
+    assert response.status_code == 200
+    restored = asyncio.run(store.get(widget_id))
+    assert restored is not None
+    assert restored.state["presentation"]["title"] == "Phase-space"
+    assert restored.state["presentation"]["x_kind"] == "time"
+    assert restored.state["controls"][0]["key"] == "damping"
+    assert restored.state["control_values"]["damping"] == 0.2
+    assert restored.state["actions"][0]["key"] == "explain_current_state"
+
+
 def test_widget_websocket_sync_and_user_patch(widget_test_client):
     client, store, token_service = widget_test_client
     created = asyncio.run(

@@ -232,3 +232,16 @@ async def proxy_widget_connection(
         request,
         upstream_path=f"/widgets/{widget_id}/connection",
     )
+
+
+@router.post("/widgets/{widget_id}/actions/{action_key}")
+async def proxy_widget_action(
+    widget_id: str,
+    action_key: str,
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(
+        request,
+        upstream_path=f"/widgets/{widget_id}/actions/{action_key}",
+    )

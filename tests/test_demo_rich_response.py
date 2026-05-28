@@ -90,6 +90,26 @@ def test_referenced_widget_renders_inline_not_appended():
     assert all(item["id"] != "widget:w-1" for item in view.append_items)
 
 
+def test_inline_widget_segment_carries_no_state_chrome():
+    """Inline widget segments inherit only the compact payload — the renderer is
+    responsible for hydrating presentation/actions over the WebSocket, and the
+    rich-response view must not duplicate widget chrome at the marker position.
+    """
+    body = "Body\n\n<!--rich:widget:w-1-->"
+    view = build_rich_response_view(body, metadata_with_image_and_widget)
+    inline_widget = next(
+        segment for segment in view.segments
+        if segment.kind == "rich" and segment.item["type"] == "live_widget"
+    )
+    payload = inline_widget.item.get("payload") or {}
+    # The article-style chrome (presentation/actions/state) lives on the live
+    # widget itself, not on the rich-item record passed to the renderer.
+    assert "presentation" not in payload
+    assert "actions" not in payload
+    assert "state" not in payload
+    assert payload.get("widget_id") == "w-1"
+
+
 def test_view_skips_markers_inside_code_fences():
     body = "Code:\n\n```\n<!--rich:image:document:1-->\n```\n\nEnd"
     view = build_rich_response_view(body, metadata_with_selected_image)

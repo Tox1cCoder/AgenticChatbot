@@ -3263,6 +3263,22 @@ def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | 
       .lw-meta-note{font-size:12px;color:#64748b;font-weight:600}
       .lw-sort-button{width:100%;display:inline-flex;align-items:center;justify-content:space-between;gap:10px;padding:0;border:none;background:transparent;color:inherit;border-radius:0}
       .lw-sort-button[data-active="true"]{color:#1d4ed8}
+      .lw-presentation{display:grid;gap:6px;padding:0 0 12px}
+      .lw-caption{font-size:13px;color:#334155;line-height:1.55}
+      .lw-units{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;font-weight:700}
+      .lw-axis-pair{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:#475569}
+      .lw-axis-pair span{display:inline-flex;align-items:center;gap:5px}
+      .lw-annotations{display:grid;gap:6px;margin:0 0 10px;font-size:12px;color:#0f172a}
+      .lw-annotation{display:inline-flex;align-items:center;gap:7px;padding:6px 10px;border-radius:999px;background:#fef9c3;border:1px solid #fde68a;color:#854d0e;font-weight:700}
+      .lw-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+      .lw-action-button{padding:9px 14px;border:1px solid #1d4ed8;border-radius:999px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;font:inherit;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;cursor:pointer;transition:transform .15s ease,box-shadow .15s ease}
+      .lw-action-button:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 10px 24px rgba(37,99,235,.22)}
+      .lw-action-button:disabled{opacity:.6;cursor:not-allowed}
+      .lw-action-result{margin-top:12px;padding:12px 14px;border:1px dashed #bfdbfe;border-radius:14px;background:rgba(239,246,255,.6);font-size:12px;color:#1e293b;line-height:1.55;white-space:pre-wrap}
+      .lw-tooltip{position:fixed;pointer-events:none;display:none;z-index:9999;padding:8px 11px;border-radius:10px;background:rgba(15,23,42,.94);color:#f8fafc;font-size:12px;font-weight:600;box-shadow:0 14px 28px rgba(15,23,42,.28);max-width:240px;line-height:1.4}
+      .lw-tooltip[data-visible="true"]{display:block}
+      .lw-tooltip strong{display:block;color:#fff;font-weight:800;margin-bottom:2px}
+      [data-tooltip]{cursor:crosshair}
       @media (max-width:760px){.lw-head{flex-direction:column;align-items:stretch}.lw-donut{grid-template-columns:1fr}.lw-ring{max-width:240px;justify-self:center}}
     </style>
     <div class="lw-card">
@@ -3281,6 +3297,7 @@ def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | 
       <div class="lw-error" id="lw-error" hidden></div>
       <div class="lw-body" id="lw-body"><div class="lw-empty">Connecting widget…</div></div>
     </div>
+    <div class="lw-tooltip" id="lw-tooltip" role="status" aria-live="polite"></div>
     <script>
     (() => {
       const cfg = __CFG__;
@@ -3293,6 +3310,7 @@ def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | 
         version: document.getElementById("lw-version"),
         error: document.getElementById("lw-error"),
         body: document.getElementById("lw-body"),
+        tooltip: document.getElementById("lw-tooltip"),
       };
       const state = {
         data: null,
@@ -3953,7 +3971,9 @@ def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | 
           const y = value >= 0 ? yValue : zeroY;
           const barHeight = Math.max(2, Math.abs(yValue - zeroY));
           const valueLabel = normalized.labels.length <= 8 && normalized.series.length <= 2 ? `<text class="lw-axis-text" x="${x + barWidth / 2}" y="${value >= 0 ? y - 8 : y + barHeight + 16}" text-anchor="middle">${esc(formatNumber(value))}</text>` : "";
-          return `<g><rect x="${x}" y="${y}" width="${Math.max(4, barWidth - 4)}" height="${barHeight}" rx="10" fill="${esc(seriesItem.color)}"></rect>${valueLabel}</g>`;
+          const tooltipText = `${seriesItem.label}|${normalized.labels[idx]}|${formatNumber(value)}`;
+          const tip = `<title>${esc(`${seriesItem.label} · ${normalized.labels[idx]}: ${formatNumber(value)}`)}</title>`;
+          return `<g aria-label="${esc(`${seriesItem.label} ${normalized.labels[idx]} ${formatNumber(value)}`)}"><rect x="${x}" y="${y}" width="${Math.max(4, barWidth - 4)}" height="${barHeight}" rx="10" fill="${esc(seriesItem.color)}" data-tooltip="${esc(tooltipText)}">${tip}</rect>${valueLabel}</g>`;
         }).join("")).join("");
         const xLabels = normalized.labels.map((labelValue, idx) => {
           if(!labelIndexes.has(idx)) return "";
@@ -3989,7 +4009,13 @@ def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | 
           const points = seriesItem.data.map((value, idx) => ({x: xFor(idx), y: yFor(value)}));
           const path = points.map((point, idx) => `${idx === 0 ? "M" : "L"}${point.x},${point.y}`).join(" ");
           const areaPath = fillArea ? `${path} L ${points[points.length - 1].x},${margin.top + innerHeight} L ${points[0].x},${margin.top + innerHeight} Z` : "";
-          const dots = points.map((point) => `<circle class="lw-point" cx="${point.x}" cy="${point.y}" r="4.5" fill="${esc(seriesItem.color)}"></circle>`).join("");
+          const dots = points.map((point, idx) => {
+            const value = seriesItem.data[idx];
+            const labelValue = normalized.labels[idx];
+            const tooltipText = `${seriesItem.label}|${labelValue}|${formatNumber(value)}`;
+            const titleTag = `<title>${esc(`${seriesItem.label} · ${labelValue}: ${formatNumber(value)}`)}</title>`;
+            return `<circle class="lw-point" cx="${point.x}" cy="${point.y}" r="5.5" fill="${esc(seriesItem.color)}" data-tooltip="${esc(tooltipText)}" aria-label="${esc(`${seriesItem.label} ${labelValue} ${formatNumber(value)}`)}">${titleTag}</circle>`;
+          }).join("");
           return `<g>${fillArea ? `<path class="lw-area-path" d="${areaPath}" fill="${esc(colorWithAlpha(seriesItem.color, 0.18))}"></path>` : ""}<path class="lw-line-path" d="${path}" stroke="${esc(seriesItem.color)}"></path>${dots}</g>`;
         }).join("");
         return `<svg class="lw-chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet">${grid}${seriesMarkup}${xLabels}</svg>`;
@@ -4013,8 +4039,11 @@ def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | 
           const end = cursor / total * 100;
           return `${slice.color} ${start}% ${end}%`;
         }).join(",");
-        const legend = slices.map((slice) => `<div class="lw-donut-item"><span class="lw-dot" style="background:${esc(slice.color)}"></span><div><div class="lw-donut-value">${esc(truncateText(slice.label, 22))}</div><div class="lw-donut-share">${esc(formatNumber((slice.value / total) * 100))}% share</div></div><div class="lw-donut-value">${esc(formatNumber(slice.value))}</div></div>`).join("");
-        return `<div class="lw-donut"><div class="lw-ring" style="background:conic-gradient(${gradient})"><div class="lw-ring-hole"><strong>${esc(formatNumber(total))}</strong><span>Total</span></div></div><div class="lw-donut-legend">${legend}</div></div>`;
+        const legend = slices.map((slice) => {
+          const tooltipText = `${slice.label}||${formatNumber(slice.value)} (${formatNumber((slice.value / total) * 100)}%)`;
+          return `<div class="lw-donut-item" data-tooltip="${esc(tooltipText)}" aria-label="${esc(`${slice.label}: ${formatNumber(slice.value)} (${formatNumber((slice.value / total) * 100)}%)`)}"><span class="lw-dot" style="background:${esc(slice.color)}"></span><div><div class="lw-donut-value">${esc(truncateText(slice.label, 22))}</div><div class="lw-donut-share">${esc(formatNumber((slice.value / total) * 100))}% share</div></div><div class="lw-donut-value">${esc(formatNumber(slice.value))}</div></div>`;
+        }).join("");
+        return `<div class="lw-donut"><div class="lw-ring" style="background:conic-gradient(${gradient})" data-tooltip="${esc(`Total||${formatNumber(total)}`)}"><div class="lw-ring-hole"><strong>${esc(formatNumber(total))}</strong><span>Total</span></div></div><div class="lw-donut-legend">${legend}</div></div>`;
       }
       function renderChartPreview(source){
         if(Array.isArray(source.rows)) return renderTable(source);
@@ -4114,6 +4143,59 @@ def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | 
         });
         return `<div class="lw-dash">${metrics.length ? `<div class="lw-metrics">${metrics.join("")}</div>` : ""}${details.join("")}</div>`;
       }
+      function renderPresentation(data){
+        if(!isObj(data)) return "";
+        const presentation = isObj(data.presentation) ? data.presentation : null;
+        if(!presentation) return "";
+        const caption = String(presentation.caption || "").trim();
+        const xLabel = String(presentation.x_label || "").trim();
+        const yLabel = String(presentation.y_label || "").trim();
+        const unit = String(presentation.unit || "").trim();
+        const annotations = Array.isArray(presentation.annotations) ? presentation.annotations : [];
+        const axisLine = xLabel || yLabel
+          ? `<div class="lw-axis-pair">${xLabel ? `<span><strong>X:</strong>${esc(xLabel)}</span>` : ""}${yLabel ? `<span><strong>Y:</strong>${esc(yLabel)}</span>` : ""}${unit ? `<span class="lw-units">${esc(unit)}</span>` : ""}</div>`
+          : (unit ? `<div class="lw-units">${esc(unit)}</div>` : "");
+        const captionHtml = caption ? `<div class="lw-caption">${esc(caption)}</div>` : "";
+        if(!captionHtml && !axisLine) return "";
+        return `<div class="lw-presentation">${captionHtml}${axisLine}</div>`;
+      }
+      function renderAnnotations(data){
+        if(!isObj(data)) return "";
+        const presentation = isObj(data.presentation) ? data.presentation : null;
+        if(!presentation) return "";
+        const annotations = Array.isArray(presentation.annotations) ? presentation.annotations : [];
+        if(!annotations.length) return "";
+        const items = annotations
+          .map((annotation) => {
+            if(!isObj(annotation)) return "";
+            const labelText = String(annotation.label || "").trim();
+            const seriesText = String(annotation.series || "").trim();
+            if(!labelText && !seriesText) return "";
+            const seriesSuffix = seriesText ? ` · ${esc(seriesText)}` : "";
+            return `<span class="lw-annotation">${esc(labelText || seriesText)}${seriesSuffix}</span>`;
+          })
+          .filter(Boolean)
+          .join("");
+        return items ? `<div class="lw-annotations">${items}</div>` : "";
+      }
+      function renderActions(data, readOnly){
+        if(!isObj(data) || readOnly) return "";
+        const actions = Array.isArray(data.actions) ? data.actions : [];
+        if(!actions.length) return "";
+        const buttons = actions
+          .map((action) => {
+            if(!isObj(action)) return "";
+            const key = String(action.key || "").trim();
+            const labelText = String(action.label || key || "").trim();
+            const type = String(action.type || "").trim();
+            if(!key || !labelText || type !== "assistant_message") return "";
+            return `<button type="button" class="lw-action-button" data-widget-action="${esc(key)}">${esc(labelText)}</button>`;
+          })
+          .filter(Boolean)
+          .join("");
+        if(!buttons) return "";
+        return `<div class="lw-actions">${buttons}</div><div class="lw-action-result" id="lw-action-result" hidden></div>`;
+      }
       function renderBody(){
         meta();
         if(!state.data){el.body.innerHTML='<div class="lw-empty">Connecting widget…</div>';resize();return;}
@@ -4121,7 +4203,12 @@ def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | 
         const readOnly = state.status === "closed";
         const resolved = resolveInteractiveData(state.data);
         const payload = resolved.payload;
+        const presentationHtml = renderPresentation(payload);
+        const titleSource = isObj(payload.presentation) ? payload.presentation.title : "";
+        if(titleSource && el.title && !el.title.textContent){el.title.textContent = String(titleSource);}
+        const annotationsHtml = renderAnnotations(payload);
         const controlsHtml = renderControls(resolved.controls, resolved.controlValues, readOnly);
+        const actionsHtml = renderActions(state.data, readOnly);
         let bodyHtml = renderJson(payload);
         if(type === "table") bodyHtml = renderTable(payload, readOnly);
         else if(type === "chart") bodyHtml = renderChart(payload, readOnly);
@@ -4129,7 +4216,7 @@ def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | 
         else if(type === "form") bodyHtml = renderForm(payload, readOnly);
         else if(type === "list") bodyHtml = renderList(payload, readOnly);
         else if(type === "html" || type === "iframe" || type === "micro_app") bodyHtml = renderHtmlWidget(payload);
-        el.body.innerHTML = `${controlsHtml}${bodyHtml}`;
+        el.body.innerHTML = `${presentationHtml}${annotationsHtml}${controlsHtml}${bodyHtml}${actionsHtml}`;
         resize();
       }
       function wsBase(){
@@ -4219,9 +4306,141 @@ def _build_live_widget_component_html(widget: dict[str, Any], auth_token: str | 
           if(!(error && error.permanent)) scheduleReconnect();
         }
       }
+      function hideTooltip(){
+        if(!el.tooltip) return;
+        el.tooltip.removeAttribute("data-visible");
+        el.tooltip.innerHTML = "";
+      }
+      function showTooltip(text, x, y){
+        if(!el.tooltip || !text) return;
+        const parts = String(text).split("|");
+        const series = parts[0] ? `<strong>${esc(parts[0])}</strong>` : "";
+        const labelLine = parts[1] ? `<span>${esc(parts[1])}</span><br/>` : "";
+        const valueLine = parts.slice(2).filter(Boolean).join(" ");
+        el.tooltip.innerHTML = `${series}${labelLine}<span>${esc(valueLine || parts[1] || "")}</span>`;
+        el.tooltip.setAttribute("data-visible", "true");
+        const offsetX = 14;
+        const offsetY = 18;
+        el.tooltip.style.left = `${Math.max(8, x + offsetX)}px`;
+        el.tooltip.style.top = `${Math.max(8, y + offsetY)}px`;
+      }
+      function setActionResult(text, isError){
+        const resultEl = document.getElementById("lw-action-result");
+        if(!resultEl) return;
+        if(!text){resultEl.hidden = true; resultEl.textContent = ""; return;}
+        resultEl.hidden = false;
+        resultEl.textContent = text;
+        resultEl.style.borderColor = isError ? "#fecaca" : "#bfdbfe";
+        resultEl.style.background = isError ? "rgba(254,242,242,0.85)" : "rgba(239,246,255,0.6)";
+      }
+      function setActionButtonsDisabled(disabled){
+        el.body.querySelectorAll("[data-widget-action]").forEach((btn) => {
+          if(btn instanceof HTMLButtonElement) btn.disabled = disabled;
+        });
+      }
+      async function streamAssistantResponse(content){
+        const conversationId = isObj(state.data) && state.data.session_id
+          ? String(state.data.session_id)
+          : (cfg.widget && cfg.widget.session_id ? String(cfg.widget.session_id) : "");
+        const body = {
+          content,
+          conversationId,
+          role: "user",
+          inlineRichResponseV1: true,
+        };
+        let acc = "";
+        try{
+          const response = await fetch(new URL("/messages/stream", `${cfg.apiBaseUrl}/`).toString(), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${cfg.authToken}`,
+              Accept: "text/event-stream",
+            },
+            body: JSON.stringify(body),
+          });
+          if(!response.ok || !response.body){
+            setActionResult(`Action submitted, but streaming failed (${response.status}).`, true);
+            return;
+          }
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          while(true){
+            const {done, value} = await reader.read();
+            if(done) break;
+            const chunk = decoder.decode(value, {stream: true});
+            chunk.split("\\n").forEach((line) => {
+              const trimmed = line.trim();
+              if(!trimmed.startsWith("data:")) return;
+              const data = trimmed.slice(5).trim();
+              if(data === "[DONE]") return;
+              try{
+                const event = JSON.parse(data);
+                if(isObj(event) && typeof event.delta === "string") acc += event.delta;
+                else if(isObj(event) && isObj(event.message) && typeof event.message.content === "string") acc = event.message.content;
+              }catch{}
+              if(acc) setActionResult(acc, false);
+            });
+          }
+          if(acc) setActionResult(`${acc}\\n\\n— saved to conversation`, false);
+        }catch(error){
+          setActionResult(error instanceof Error ? error.message : "Streaming failed.", true);
+        }
+      }
+      async function runWidgetAction(actionKey){
+        if(!cfg.widget.widget_id || !cfg.authToken) return;
+        setActionButtonsDisabled(true);
+        setActionResult("Resolving…", false);
+        try{
+          const controlValues = isObj(state.data) && isObj(state.data.control_values)
+            ? state.data.control_values
+            : {};
+          const response = await fetch(
+            new URL(`/widgets/${cfg.widget.widget_id}/actions/${encodeURIComponent(actionKey)}`, `${cfg.apiBaseUrl}/`).toString(),
+            {
+              method: "POST",
+              headers: {"Content-Type": "application/json", Authorization: `Bearer ${cfg.authToken}`},
+              body: JSON.stringify({state_patch: {control_values: controlValues}}),
+            },
+          );
+          const raw = await response.text();
+          let payload = {};
+          if(raw){try{payload = JSON.parse(raw);}catch{}}
+          if(!response.ok){
+            const message = (isObj(payload) && (payload.error || payload.message)) || `Widget action failed (${response.status}).`;
+            setActionResult(message, true);
+            return;
+          }
+          const content = isObj(payload) && typeof payload.content === "string" ? payload.content : "";
+          if(!content){
+            setActionResult("Action did not return a message.", true);
+            return;
+          }
+          await streamAssistantResponse(content);
+        }catch(error){
+          setActionResult(error instanceof Error ? error.message : "Action failed.", true);
+        }finally{
+          setActionButtonsDisabled(false);
+        }
+      }
+      el.body.addEventListener("mousemove", (event) => {
+        const target = event.target;
+        if(!(target instanceof Element)){ hideTooltip(); return; }
+        const tipHost = target.closest("[data-tooltip]");
+        if(!tipHost){ hideTooltip(); return; }
+        const text = tipHost.getAttribute("data-tooltip") || "";
+        showTooltip(text, event.clientX, event.clientY);
+      });
+      el.body.addEventListener("mouseleave", hideTooltip);
       el.body.addEventListener("click", (event) => {
         const rawTarget = event.target;
         if(!(rawTarget instanceof Element)) return;
+        const actionButton = rawTarget.closest("[data-widget-action]");
+        if(actionButton){
+          const actionKey = actionButton.getAttribute("data-widget-action") || "";
+          if(actionKey) runWidgetAction(actionKey);
+          return;
+        }
         const controlOption = rawTarget.closest("[data-control-option='true']");
         if(controlOption){
           const key = controlOption.getAttribute("data-control-key");

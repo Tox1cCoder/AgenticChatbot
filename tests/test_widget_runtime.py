@@ -797,6 +797,156 @@ class TestPromptUpdates:
         assert "LiveUI widgets are for compact in-chat aids" in ROUTER_SYSTEM_PROMPT
         assert "Do not route to canvas_agent merely because a widget" in ROUTER_SYSTEM_PROMPT
 
+    def test_prompt_mentions_article_style_widget_quality(self):
+        from app.ai.prompts import CHAT_SYSTEM_PROMPT
+
+        prompt = CHAT_SYSTEM_PROMPT.lower()
+        assert "article" in prompt
+        assert "annotations" in prompt
+        assert "choose chart type" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Widget tool quality enforcement
+# ---------------------------------------------------------------------------
+class TestWidgetToolQualityEnforcement:
+    async def test_widget_create_rejects_empty_chart(self, monkeypatch):
+        from app.ai.mcp_servers import widgets_server
+        import app.services.widget_runtime as widget_runtime
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+
+        with pytest.raises(ValueError, match="chart requires at least two labels"):
+            await widgets_server.widget_create(
+                session_id="conv-1",
+                widget_type="chart",
+                initial_state=json.dumps(
+                    {"chart_type": "bar", "labels": [], "datasets": []}
+                ),
+                title="Empty",
+            )
+
+        listed = await store.list_by_session("conv-1")
+        assert listed == []
+
+    async def test_widget_create_rejects_donut_with_negative_values(self, monkeypatch):
+        from app.ai.mcp_servers import widgets_server
+        import app.services.widget_runtime as widget_runtime
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+
+        with pytest.raises(ValueError, match="non-negative"):
+            await widgets_server.widget_create(
+                session_id="conv-1",
+                widget_type="chart",
+                initial_state=json.dumps(
+                    {
+                        "chart_type": "donut",
+                        "labels": ["A", "B"],
+                        "datasets": [{"label": "Share", "data": [5, -1]}],
+                    }
+                ),
+                title="Bad donut",
+            )
+
+    async def test_widget_create_allows_valid_bar_chart(self, monkeypatch):
+        from app.ai.mcp_servers import widgets_server
+        import app.services.widget_runtime as widget_runtime
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+
+        result = await widgets_server.widget_create(
+            session_id="conv-2",
+            widget_type="chart",
+            initial_state=json.dumps(
+                {
+                    "chart_type": "bar",
+                    "labels": ["A", "B"],
+                    "datasets": [{"label": "Score", "data": [1, 2]}],
+                }
+            ),
+            title="Good chart",
+        )
+
+        payload = json.loads(result)
+        assert payload["widget_type"] == "chart"
+        assert payload["status"] == "active"
+        assert payload.get("quality_guidance"), "expected soft guidance for missing caption/labels"
+
+    async def test_widget_create_accepts_python_style_literal_fallback(self, monkeypatch):
+        from app.ai.mcp_servers import widgets_server
+        import app.services.widget_runtime as widget_runtime
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+
+        # Python-style literal: True instead of true, single quotes. json.loads
+        # rejects this; ast.literal_eval recovers it.
+        python_style = "{'chart_type': 'bar', 'labels': ['A', 'B'], 'datasets': [{'label': 'S', 'data': [1, 2]}], 'is_demo': True}"
+
+        result = await widgets_server.widget_create(
+            session_id="conv-py",
+            widget_type="chart",
+            initial_state=python_style,
+        )
+
+        payload = json.loads(result)
+        assert payload["widget_type"] == "chart"
+        assert payload["status"] == "active"
+
+    async def test_widget_create_malformed_json_returns_helpful_error(self, monkeypatch):
+        from app.ai.mcp_servers import widgets_server
+        import app.services.widget_runtime as widget_runtime
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+
+        # Truly malformed — neither valid JSON nor a valid Python literal
+        broken = '{"chart_type": "bar" "labels": ["A", "B"]}'  # missing comma
+
+        with pytest.raises(ValueError) as exc_info:
+            await widgets_server.widget_create(
+                session_id="conv-broken",
+                widget_type="chart",
+                initial_state=broken,
+            )
+
+        message = str(exc_info.value)
+        assert "must be a valid JSON string" in message
+        assert "Context:" in message
+        # Common-fix nudge is present so the model can self-correct
+        assert "double-quoted" in message
+        assert "true/false/null" in message
+
+    async def test_widget_update_rejects_invalid_state(self, monkeypatch):
+        from app.ai.mcp_servers import widgets_server
+        import app.services.widget_runtime as widget_runtime
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+
+        created = await widgets_server.widget_create(
+            session_id="conv-3",
+            widget_type="chart",
+            initial_state=json.dumps(
+                {
+                    "chart_type": "bar",
+                    "labels": ["A", "B"],
+                    "datasets": [{"label": "Score", "data": [1, 2]}],
+                }
+            ),
+        )
+        widget_id = json.loads(created)["widget_id"]
+
+        with pytest.raises(ValueError, match="at least two labels"):
+            await widgets_server.widget_update(
+                widget_id=widget_id,
+                state=json.dumps({"chart_type": "bar", "labels": [], "datasets": []}),
+            )
+
 
 # ---------------------------------------------------------------------------
 # MCP config

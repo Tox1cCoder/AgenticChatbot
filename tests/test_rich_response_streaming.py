@@ -383,3 +383,32 @@ async def test_message_service_forwards_rich_items_during_resume_stream():
     ]
 
     assert any(event.get("type") == "rich_items" for event in events)
+
+
+def test_live_widget_rich_item_does_not_embed_state():
+    """Widget rich items must stay compact — state arrives over the WebSocket."""
+    from app.core.response_constants import _widget_rich_item_from_live_widget
+
+    item = _widget_rich_item_from_live_widget(
+        {
+            "widget_id": "w-1",
+            "session_id": "conv-1",
+            "widget_type": "chart",
+            "title": "Meaningful Chart",
+            "status": "active",
+            "version": 1,
+            "state": {
+                "labels": ["A", "B"],
+                "datasets": [{"data": [1, 2]}],
+                "presentation": {"caption": "should not leak"},
+                "actions": [{"key": "k", "type": "assistant_message", "message_template": "x"}],
+            },
+        }
+    )
+
+    assert "state" not in item["payload"]
+    assert "presentation" not in item["payload"]
+    assert "actions" not in item["payload"]
+    assert item["type"] == "live_widget"
+    assert item["display_policy"] == "inline_or_append"
+    assert item["payload"]["widget_id"] == "w-1"

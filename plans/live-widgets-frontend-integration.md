@@ -523,3 +523,111 @@ The inline rich response v1 contract (`response_format.md`) extends widget deliv
 - Non-opt-in clients receive only the existing `live_widgets[]` shape — no marker text — so no migration is forced on legacy implementations.
 
 See [`README.md`](../README.md) → "Inline Rich Response (v1)" for the full contract.
+
+## 11. Meaningful Widgets — Shared State Contract (2026-05-28)
+
+Live widgets now read like article-quality inline visuals. All renderers (AI SDK clients **and** the Streamlit demo) should consume the same enriched state contract when present. Legacy widget shapes remain valid.
+
+### State envelope
+
+```json
+{
+  "presentation": {
+    "title": "Phase-space intuition",
+    "caption": "The same oscillator becomes easier to read when position and velocity are viewed together.",
+    "layout": "article",
+    "x_label": "Position",
+    "y_label": "Velocity",
+    "unit": "normalized",
+    "x_kind": "time",
+    "annotations": [
+      {"label": "Stable orbit", "series": "Trajectory", "point_index": 8}
+    ]
+  },
+  "chart_type": "line",
+  "labels": ["t0", "t1", "t2"],
+  "datasets": [{"label": "Trajectory", "data": [0.1, 0.4, 0.9]}],
+  "controls": [
+    {"key": "damping", "label": "Damping", "type": "slider", "min": 0, "max": 1, "step": 0.05, "value": 0.2}
+  ],
+  "control_values": {"damping": 0.2},
+  "views": {
+    "damping=0.2": {"chart_type": "line", "labels": ["t0", "t1", "t2"], "datasets": [{"label": "Trajectory", "data": [0.1, 0.4, 0.9]}]}
+  },
+  "actions": [
+    {
+      "key": "explain_current_state",
+      "label": "Explain current state",
+      "type": "assistant_message",
+      "message_template": "Explain the widget state for damping={{control_values.damping}} in the context of the current answer."
+    }
+  ]
+}
+```
+
+### Required frontend behavior
+
+- Opt into `inlineRichResponseV1` on chat/resume requests.
+- Read **transient** widgets from `data-rich-items` SSE events as they stream.
+- Read **final** widgets from `messageMetadata.rich_items` after `data-assistant-message`.
+- Hydrate widget state through `POST /widgets/{id}/connection` and the widget WebSocket. **No widget state is embedded in `rich_items` — state always arrives over the WebSocket.**
+- Render `presentation`, `controls`, `views`/`variants`, chart hover values, and `actions` using the same conventions the Streamlit demo uses.
+- For action buttons, call `POST /widgets/{id}/actions/{action_key}` with optional `state_patch` and `input_values`. Submit the returned `content` through the normal AI SDK chat stream (do **not** invoke the assistant directly from the action endpoint — that endpoint only renders the message).
+
+### Action endpoint contract
+
+Request body (`POST /widgets/{widget_id}/actions/{action_key}`):
+
+```json
+{
+  "input_values": {"note": "optional user input"},
+  "state_patch": {"control_values": {"damping": 0.4}}
+}
+```
+
+Both fields are optional. `state_patch` is applied as a shallow merge to widget state **before** the action template is rendered.
+
+Response:
+
+```json
+{
+  "widget_id": "w-1",
+  "session_id": "conversation-id",
+  "action_key": "explain_current_state",
+  "content": "Explain the widget state for damping=0.4 in the context of the current answer."
+}
+```
+
+Errors:
+- `404` — widget or action not found
+- `400` — action is not of type `assistant_message`, or has no `message_template`
+- `403` — access denied (widget belongs to another conversation)
+
+The endpoint also records the latest action in `widget.state.last_action` so a subsequent `widget_get_state` call from the agent can inspect user intent.
+
+### Hover values
+
+Bars, line points, and donut slices include both `data-tooltip` (custom hover) and SVG `<title>` (accessibility fallback). The tooltip payload is the pipe-delimited string `series|label|value` (donut slices use `series||value`). Frontends are free to ignore the custom format and rely on `<title>` + `aria-label`, but the recommendation is to mirror the demo's `.lw-tooltip` floating box for consistent UX.
+
+### Reference snippet — running a widget action
+
+```ts
+async function runWidgetAction(widgetId: string, actionKey: string, statePatch: unknown) {
+  const response = await fetch(`/widgets/${widgetId}/actions/${actionKey}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ state_patch: statePatch }),
+  });
+  if (!response.ok) throw new Error(`Widget action failed: ${response.status}`);
+  const payload = await response.json();
+  sendMessage({ text: payload.content }); // submit through the normal chat stream
+}
+```
+
+### Implementer checklist
+
+- [ ] Render `presentation.title`, `caption`, `x_label`, `y_label`, `unit` near the widget body, not as a heavy header card
+- [ ] Render `presentation.annotations` as callouts/markers when their target series + point_index resolves
+- [ ] Attach hover values to bars, line points, and donut slices (custom tooltip **or** SVG `<title>` minimum)
+- [ ] Render `actions` of type `assistant_message` as buttons; submit returned `content` through the AI SDK chat stream with `inlineRichResponseV1: true`
+- [ ] For repeated widget markers, mount the WebSocket once; later occurrences should focus/open the existing widget

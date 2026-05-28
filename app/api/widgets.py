@@ -16,17 +16,27 @@ from typing import Any
 from uuid import UUID
 
 import jwt as pyjwt
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Body, Depends, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import Text, cast, select
 
 from app.core.auth import get_current_user_id
 from app.models.message import Message
+from app.services.widget_quality import resolve_widget_action_message
 from app.services.widget_runtime import (
     get_widget_connection_manager,
     get_widget_store,
     get_widget_token_service,
 )
+
+
+class WidgetActionRequest(BaseModel):
+    input_values: dict[str, Any] | None = Field(default=None)
+    state_patch: dict[str, Any] | None = Field(default=None)
+
+
+WidgetActionRequest.model_rebuild()
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/widgets", tags=["widgets"])
@@ -445,6 +455,95 @@ async def widget_connection(
             "ws_url": f"/widgets/{widget_id}/connect?session_id={session_id}&token={token}",
             "token": token,
             "expires_at": expires_at.isoformat(),
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /widgets/{widget_id}/actions/{action_key}
+# ---------------------------------------------------------------------------
+@router.post("/{widget_id}/actions/{action_key}")
+async def widget_action(
+    widget_id: str,
+    action_key: str,
+    payload: WidgetActionRequest | None = Body(default=None),  # noqa: B008
+    user_id: UUID = Depends(get_current_user_id),  # noqa: B008
+) -> JSONResponse:
+    """Resolve a widget action into a chat message.
+
+    Applies an optional ``state_patch`` to the widget, then renders the action's
+    ``message_template`` against the resulting state. The endpoint does **not**
+    invoke the assistant — frontends submit the returned ``content`` through their
+    normal stream path.
+    """
+    request_body = payload or WidgetActionRequest()
+    store = get_widget_store()
+    record = await store.get(widget_id)
+    if record is None:
+        record = await _restore_widget_record_from_messages(user_id, widget_id)
+        if record is None:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"error": f"Widget {widget_id} not found"},
+            )
+
+    session_id = _resolve_widget_session_id(
+        user_id=user_id,
+        widget_id=widget_id,
+        stored_session_id=record.session_id,
+    )
+    if not session_id:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"error": "Access denied to this widget"},
+        )
+
+    if request_body.state_patch:
+        try:
+            record = await store.patch(widget_id, request_body.state_patch)
+        except (KeyError, ValueError) as exc:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": str(exc)},
+            )
+
+    try:
+        content = resolve_widget_action_message(
+            record.state,
+            action_key,
+            input_values=request_body.input_values or {},
+        )
+    except KeyError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"error": str(exc).strip("'\"")},
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": str(exc)},
+        )
+
+    last_action_entry = {
+        "action_key": action_key,
+        "content": content,
+        "input_values": request_body.input_values or {},
+        "control_values": record.state.get("control_values")
+        if isinstance(record.state.get("control_values"), dict)
+        else {},
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        await store.patch(widget_id, {"last_action": last_action_entry})
+    except (KeyError, ValueError):
+        logger.debug("Failed to record last_action for widget %s", widget_id, exc_info=True)
+
+    return JSONResponse(
+        content={
+            "widget_id": widget_id,
+            "session_id": session_id,
+            "action_key": action_key,
+            "content": content,
         }
     )
 
