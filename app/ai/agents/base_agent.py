@@ -112,6 +112,8 @@ def _openai_effort_from_reasoning_effort(effort: str) -> str | None:
         # OpenAI has no "none" effort. Treat as "minimal" for the lowest tier.
         return "minimal"
     return effort
+
+
 _OPENAI_REASONING_SUMMARY_DISABLED_USERS: set[str] = set()
 
 # Agents that must NOT receive widget tools.
@@ -634,9 +636,7 @@ class BaseAgent(ABC):
         # window from the static registry. Provider catalog metadata is not
         # available here; the registry is good enough for the rare fallback
         # path.
-        context_window = resolve_model_context_window(
-            fallback.provider, fallback.model
-        ).to_dict()
+        context_window = resolve_model_context_window(fallback.provider, fallback.model).to_dict()
 
         return ResolvedRuntimeModelConfig(
             agent_key=self.agent_config_key,
@@ -1198,9 +1198,7 @@ class BaseAgent(ABC):
 
         rich_response_inventory = _.get("rich_response_inventory")
         if rich_response_inventory:
-            system_prompt = (
-                f"{system_prompt}\n\n{str(rich_response_inventory).strip()}"
-            )
+            system_prompt = f"{system_prompt}\n\n{str(rich_response_inventory).strip()}"
 
         if has_tool_context:
             system_prompt = f"{system_prompt}\n\n{TOOL_CONTEXT_SUFFIX}"

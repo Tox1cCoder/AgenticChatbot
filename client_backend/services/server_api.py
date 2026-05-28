@@ -628,8 +628,7 @@ class ServerAPIClient:
         them into 500s.
         """
         multipart = [
-            ("files", (item["filename"], item["content"], item["content_type"]))
-            for item in files
+            ("files", (item["filename"], item["content"], item["content_type"])) for item in files
         ]
         response = await self.request_response(
             "POST",
@@ -653,9 +652,7 @@ class ServerAPIClient:
         )
         return result.payload
 
-    async def _handle_batch_upload_response(
-        self, response: httpx.Response
-    ) -> dict[str, Any]:
+    async def _handle_batch_upload_response(self, response: httpx.Response) -> dict[str, Any]:
         """Treat 201/207/409 as structured batch responses; raise otherwise."""
         if response.status_code in {200, 201, 207, 400, 409}:
             body = await response.aread()

@@ -356,8 +356,7 @@ class AIService:
                 decisions=self._to_ai_decisions(decisions),
             ),
             emit_rich_items=bool(
-                getattr(settings, "inline_rich_response_enabled", False)
-                and inline_rich_response_v1
+                getattr(settings, "inline_rich_response_enabled", False) and inline_rich_response_v1
             ),
         ):
             yield mapped_event

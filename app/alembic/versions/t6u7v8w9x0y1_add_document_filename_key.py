@@ -42,9 +42,7 @@ def upgrade() -> None:
     )
 
     bind = op.get_bind()
-    rows = bind.execute(
-        sa.text("SELECT id, conversation_id, filename FROM documents")
-    ).fetchall()
+    rows = bind.execute(sa.text("SELECT id, conversation_id, filename FROM documents")).fetchall()
 
     # First pass: compute the normalized key for every row.
     keyed: list[tuple[str, str, str]] = []

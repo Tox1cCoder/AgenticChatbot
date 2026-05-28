@@ -149,9 +149,7 @@ class DocumentService(IDocumentService):
         filename_key = normalize_document_filename(filename)
         if self.repository.filename_exists_in_conversation(conversation_id, filename_key):
             raise DuplicateDocumentFilenameError(
-                detail=(
-                    f"A document named '{filename}' already exists in this conversation."
-                )
+                detail=(f"A document named '{filename}' already exists in this conversation.")
             )
 
         document_data = DocumentCreate(

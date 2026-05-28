@@ -92,8 +92,7 @@ def _seed_widget(store, *, actions=None, state_overrides=None):
                 "label": "Explain",
                 "type": "assistant_message",
                 "message_template": (
-                    "Explain damping={{control_values.damping}}"
-                    " note={{input_values.note}}"
+                    "Explain damping={{control_values.damping}} note={{input_values.note}}"
                 ),
             }
         ],

@@ -1327,16 +1327,14 @@ async def chat_ui_message_stream(
 
     extra = getattr(payload, "model_extra", {}) or {}
     inline_rich_response_v1 = bool(
-        extra.get("inline_rich_response_v1")
-        or extra.get("inlineRichResponseV1")
+        extra.get("inline_rich_response_v1") or extra.get("inlineRichResponseV1")
     )
     state = StreamState(
         message_id=str(bot_message_id),
         text_id=str(uuid4()),
         reasoning_id=str(uuid4()),
         inline_rich_response_v1=(
-            inline_rich_response_v1
-            and getattr(settings, "inline_rich_response_enabled", False)
+            inline_rich_response_v1 and getattr(settings, "inline_rich_response_enabled", False)
         ),
     )
 
@@ -1381,16 +1379,13 @@ async def resume_interrupt_ai_sdk(
 ) -> StreamingResponse:
     """Resume execution after handling tool execution interrupts for AI SDK client."""
     bot_message_id = uuid4()
-    inline_rich_response_v1 = bool(
-        getattr(resume_request, "inline_rich_response_v1", False)
-    )
+    inline_rich_response_v1 = bool(getattr(resume_request, "inline_rich_response_v1", False))
     state = StreamState(
         message_id=str(bot_message_id),
         text_id=str(uuid4()),
         reasoning_id=str(uuid4()),
         inline_rich_response_v1=(
-            inline_rich_response_v1
-            and getattr(settings, "inline_rich_response_enabled", False)
+            inline_rich_response_v1 and getattr(settings, "inline_rich_response_enabled", False)
         ),
     )
 

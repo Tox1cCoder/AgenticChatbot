@@ -968,11 +968,14 @@ def test_dispatch_input_round_trips_model_override():
 
 
 def test_build_worker_model_request_returns_none_when_no_override_and_no_parent():
-    assert build_worker_model_request(
-        parent_model_request=None,
-        agent_key="search",
-        override=None,
-    ) is None
+    assert (
+        build_worker_model_request(
+            parent_model_request=None,
+            agent_key="search",
+            override=None,
+        )
+        is None
+    )
 
 
 def test_build_worker_model_request_returns_copy_of_parent_when_no_override():
@@ -1016,9 +1019,7 @@ def test_build_worker_model_request_overlays_only_target_agent_key():
 
 def test_build_worker_model_request_does_not_mutate_parent_input():
     parent = {"chat": {"model": "x"}}
-    override = SubagentModelOverride.model_validate(
-        {"provider": "openai", "model": "gpt-5.4"}
-    )
+    override = SubagentModelOverride.model_validate({"provider": "openai", "model": "gpt-5.4"})
     build_worker_model_request(
         parent_model_request=parent,
         agent_key="search",

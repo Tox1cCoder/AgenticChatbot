@@ -163,7 +163,7 @@ def test_live_widget_component_js_strings_have_no_raw_newlines(monkeypatch):
                 if c == "\n":
                     raise AssertionError(
                         f"Raw newline inside JS double-quoted string at line ~{line}: "
-                        f"{script[max(0, i - 30):j + 10]!r}"
+                        f"{script[max(0, i - 30) : j + 10]!r}"
                     )
                 if c == '"':
                     break

@@ -56,9 +56,7 @@ def test_build_bot_metadata_persists_only_inline_selected_images():
 
 def test_unreferenced_widget_is_kept_for_appended_compatibility():
     response = WorkflowResponse(
-        message=WorkflowResponseMessage(
-            content="The comparison widget is available below."
-        ),
+        message=WorkflowResponseMessage(content="The comparison widget is available below."),
         metadata={"_inline_rich_response_v1": True},
         tool_artifacts=[
             {
@@ -130,9 +128,7 @@ def test_disabled_rollout_keeps_widget_on_legacy_metadata_only(monkeypatch):
 
 def test_referenced_widget_marker_is_not_duplicated_in_append():
     response = WorkflowResponse(
-        message=WorkflowResponseMessage(
-            content="Here is the widget:\n\n<!--rich:widget:w-2-->"
-        ),
+        message=WorkflowResponseMessage(content="Here is the widget:\n\n<!--rich:widget:w-2-->"),
         tool_artifacts=[
             {
                 "tool_call_id": "widget-call",
@@ -224,8 +220,7 @@ def test_v1_finalization_rejects_selected_image_with_invalid_url_scheme():
 
     assert metadata["rich_items"] == []
     assert any(
-        warning.get("code") == "invalid_rich_item"
-        and warning.get("id") == "image:tool:c1:0"
+        warning.get("code") == "invalid_rich_item" and warning.get("id") == "image:tool:c1:0"
         for warning in metadata["rich_reference_warnings"]
     )
 
@@ -254,7 +249,6 @@ def test_v1_finalization_rejects_selected_image_over_decoded_byte_limit(monkeypa
 
     assert metadata["rich_items"] == []
     assert any(
-        warning.get("code") == "invalid_rich_item"
-        and warning.get("id") == "image:document:1"
+        warning.get("code") == "invalid_rich_item" and warning.get("id") == "image:document:1"
         for warning in metadata["rich_reference_warnings"]
     )

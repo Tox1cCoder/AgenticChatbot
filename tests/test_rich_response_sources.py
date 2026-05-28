@@ -16,7 +16,6 @@ from app.ai.tool_execution import (
     extract_images_from_tool_result,
 )
 
-
 # ---------------------------------------------------------------------------
 # Tavily-style image candidates
 # ---------------------------------------------------------------------------
@@ -322,9 +321,7 @@ async def test_execute_tool_calls_attaches_rich_candidates_to_artifact():
     from app.ai.tool_execution import execute_tool_calls
 
     outputs, artifacts, _images = await execute_tool_calls(
-        tool_calls=[
-            {"id": "call_99", "name": "tavily_search", "args": {"query": "wings"}}
-        ],
+        tool_calls=[{"id": "call_99", "name": "tavily_search", "args": {"query": "wings"}}],
         tool_map={"tavily_search": _TavilyStyleTool()},
     )
     candidates = artifacts[0].get("_rich_item_candidates", [])

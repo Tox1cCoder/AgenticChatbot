@@ -258,9 +258,8 @@ def _finalize_rich_items(
         if cand_id is None or cand_id in seen_ids:
             continue
         is_image = _is_image_candidate(candidate)
-        if is_image:
-            if cand_id not in referenced_set:
-                continue
+        if is_image and cand_id not in referenced_set:
+            continue
         public_candidate = validated_public_item(_normalize_candidate(candidate))
         if public_candidate is None:
             continue
@@ -383,9 +382,7 @@ def build_bot_metadata(
     if isinstance(raw_candidates, list):
         candidates = [c for c in raw_candidates if isinstance(c, dict)]
 
-    widget_items = [
-        _widget_rich_item_from_live_widget(widget) for widget in (live_widgets or [])
-    ]
+    widget_items = [_widget_rich_item_from_live_widget(widget) for widget in (live_widgets or [])]
 
     # Only opt the message into the v1 contract when there is actual rich-item
     # activity. Legacy messages with neither markers nor candidates retain the
@@ -396,9 +393,7 @@ def build_bot_metadata(
     if isinstance(message_content, str):
         content = message_content
     has_markers = bool(parse_inline_rich_references(content))
-    has_v1_signal = bool(candidates) or has_markers or (
-        capable_response and bool(widget_items)
-    )
+    has_v1_signal = bool(candidates) or has_markers or (capable_response and bool(widget_items))
 
     if not has_v1_signal:
         return metadata

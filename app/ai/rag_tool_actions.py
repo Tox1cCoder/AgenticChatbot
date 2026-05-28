@@ -318,9 +318,7 @@ async def execute_search_documents_action(
                         new_images=images,
                         max_agentic_images=max_agentic_images,
                     )
-                    register_document_image_candidates(
-                        context=context, images=images
-                    )
+                    register_document_image_candidates(context=context, images=images)
                     result = f"IMAGES ({len(images)} found, {attached_count} added to context):\n\n"
                     for i, img in enumerate(images, 1):
                         page = img.get("page_number", "?")

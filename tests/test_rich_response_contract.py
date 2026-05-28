@@ -129,9 +129,7 @@ def test_unreferenced_widget_is_an_append_fallback():
 
 def test_referenced_items_are_never_append_fallbacks():
     widget = _make_widget()
-    assert (
-        select_append_fallback_items([widget], referenced_ids={widget.id}) == []
-    )
+    assert select_append_fallback_items([widget], referenced_ids={widget.id}) == []
 
 
 def test_transient_upserts_exclude_image_items_entirely():
@@ -197,9 +195,7 @@ def test_inventory_omits_payload_data_and_respects_budget():
         title="A" * 300,
         payload={"data": "QUJDRA==", "mime_type": "image/png"},
     )
-    block = build_rich_item_inventory_block(
-        [image], max_items=1, max_chars=220, summary_chars=30
-    )
+    block = build_rich_item_inventory_block([image], max_items=1, max_chars=220, summary_chars=30)
     assert "QUJDRA==" not in block
     assert len(block) <= 220
 
@@ -216,9 +212,7 @@ def test_inventory_truncates_summary_to_summary_chars():
             "description": "Z" * 400,
         },
     )
-    block = build_rich_item_inventory_block(
-        [image], max_items=1, max_chars=2400, summary_chars=20
-    )
+    block = build_rich_item_inventory_block([image], max_items=1, max_chars=2400, summary_chars=20)
     # The 'Z' repeat should not appear in full because of summary truncation.
     assert "Z" * 21 not in block
 
@@ -233,7 +227,9 @@ def test_inventory_prefers_non_image_items_when_trimming():
 
 
 def test_inventory_block_is_empty_when_no_items():
-    assert build_rich_item_inventory_block([], max_items=12, max_chars=2400, summary_chars=180) == ""
+    assert (
+        build_rich_item_inventory_block([], max_items=12, max_chars=2400, summary_chars=180) == ""
+    )
 
 
 # ---------------------------------------------------------------------------

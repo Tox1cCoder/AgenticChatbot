@@ -2895,12 +2895,7 @@ def _normalize_image_for_gallery(image: Any, fallback_name: str) -> dict[str, st
     if not isinstance(image, dict):
         return None
 
-    name = (
-        image.get("name")
-        or image.get("description")
-        or image.get("caption")
-        or fallback_name
-    )
+    name = image.get("name") or image.get("description") or image.get("caption") or fallback_name
 
     url_value = image.get("url")
     if isinstance(url_value, str) and url_value.strip():
@@ -2945,8 +2940,7 @@ def _render_thumbnail_gallery(
             continue
         name = item.get("name", "") or ""
         display_name = (
-            name if len(name) <= caption_max_chars
-            else name[: caption_max_chars - 3] + "..."
+            name if len(name) <= caption_max_chars else name[: caption_max_chars - 3] + "..."
         )
         escaped_src = html.escape(src, quote=True)
         escaped_full_name = html.escape(name, quote=True)
@@ -2955,7 +2949,7 @@ def _render_thumbnail_gallery(
         if card_style:
             cap_div = (
                 f'<div style="font-size:.75em; color:#64748b; padding:4px 6px; '
-                f'line-height:1.3; overflow:hidden; text-overflow:ellipsis; '
+                f"line-height:1.3; overflow:hidden; text-overflow:ellipsis; "
                 f'white-space:nowrap; max-width:{thumb_width}px;" '
                 f'title="{escaped_full_name}">{escaped_display_name}</div>'
                 if name
@@ -5191,7 +5185,7 @@ def _format_subagent_model_badge(item: dict[str, Any]) -> str | None:
     effort = str(source.get("reasoning_effort") or "").strip()
     if effort:
         label_parts.append(
-            f"<span class=\"subagent-worker-model-effort\">{html.escape(effort)}</span>"
+            f'<span class="subagent-worker-model-effort">{html.escape(effort)}</span>'
         )
 
     # Highlight when the supervisor explicitly assigned a model (override path)
@@ -5209,7 +5203,7 @@ def _format_subagent_model_badge(item: dict[str, Any]) -> str | None:
     return (
         f'<div class="subagent-worker-model{extra_class}" title="{title}">'
         f'<span class="material-symbols-outlined" aria-hidden="true" style="font-size:0.85rem;">'
-        f'memory</span>{" ".join(label_parts)}</div>'
+        f"memory</span>{' '.join(label_parts)}</div>"
     )
 
 
@@ -5704,7 +5698,7 @@ def render_citations(
             doc_header_html = (
                 f'<div class="citation-document" style="margin-bottom: 12px; '
                 f"padding: 12px; border: 2px solid {doc_relevance_color}; "
-                f"border-radius: 8px; background-color: {doc_relevance_color}10;\">"
+                f'border-radius: 8px; background-color: {doc_relevance_color}10;">'
                 f'<strong style="font-size: 1.1em;">[Document {safe_doc_num}] {safe_source}</strong><br>'
                 f'<span style="color: {doc_relevance_color}; font-size: 0.9em;">'
                 f"Overall Relevance: ({avg_score:.1%})</span> | "
@@ -5760,7 +5754,7 @@ def render_citations(
                         f'<div class="citation-chunk" style="margin-left: 20px; '
                         f"margin-bottom: 6px; padding: 6px; "
                         f"border-left: 2px solid {chunk_color}; "
-                        f"background-color: {chunk_color}08;\">"
+                        f'background-color: {chunk_color}08;">'
                         f'<span style="font-size: 0.9em;">Chunk {safe_chunk_idx} '
                         f'<span style="color: {chunk_color};">({chunk_score:.1%})</span>'
                         f"</span></div>"
@@ -6079,10 +6073,7 @@ def _render_rich_segments(
             st.markdown(segment.text)
             continue
         if segment.kind == "unavailable":
-            st.caption(
-                f":material/error_outline: rich item `{segment.item_id}` "
-                "is unavailable."
-            )
+            st.caption(f":material/error_outline: rich item `{segment.item_id}` is unavailable.")
             continue
         if segment.kind != "rich" or not segment.item:
             continue
@@ -6151,9 +6142,7 @@ class _StreamingRichResponseRenderer:
                 segment_signature.append(("rich", (segment.item or {}).get("id")))
             else:
                 segment_signature.append(("unavailable", segment.item_id))
-        append_signature = tuple(
-            (item.get("type"), item.get("id")) for item in view.append_items
-        )
+        append_signature = tuple((item.get("type"), item.get("id")) for item in view.append_items)
         return tuple(segment_signature), append_signature
 
     def render(self) -> None:
@@ -6227,7 +6216,7 @@ def _render_pending_rich_placeholder(item_id: str | None) -> None:
     st.markdown(
         (
             '<div aria-busy="true" style="border:1px dashed #cbd5e1;'
-            'border-radius:10px;padding:12px 14px;margin:8px 0;'
+            "border-radius:10px;padding:12px 14px;margin:8px 0;"
             'background:#f8fafc;color:#64748b;font-size:13px;">'
             f"{html.escape(label)}</div>"
         ),
@@ -8505,9 +8494,7 @@ def render_documents_tab():
                     rejected = int(data.get("rejected_count") or 0)
 
                     if accepted:
-                        st.success(
-                            f"{accepted} document(s) queued for processing."
-                        )
+                        st.success(f"{accepted} document(s) queued for processing.")
                     if rejected:
                         st.warning(f"{rejected} file(s) were rejected.")
                         for item in data.get("files") or []:
@@ -8520,8 +8507,7 @@ def render_documents_tab():
                                 else error_code
                             )
                             st.caption(
-                                f"- {item.get('filename')} — {label}: "
-                                f"{item.get('message') or ''}"
+                                f"- {item.get('filename')} — {label}: {item.get('message') or ''}"
                             )
 
                     if accepted:
@@ -9266,6 +9252,7 @@ def render_models_view() -> None:
                 st.caption("Save a key to enable sync and per-user model selection.")
 
         if models:
+
             def _ctx_window_cell(m: dict[str, Any]) -> str:
                 value = m.get("contextWindowTokens") or m.get("context_window_tokens")
                 return _format_tokens(value) if value else ""

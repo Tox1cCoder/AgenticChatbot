@@ -170,9 +170,7 @@ def test_context_window_usage_merged_in_invoke():
         actual_total_tokens=12500,
         actual_reasoning_tokens=300,
     )
-    base_module.BaseAgent._merge_context_window_usage(
-        agent, metadata, breakdown.to_dict()
-    )
+    base_module.BaseAgent._merge_context_window_usage(agent, metadata, breakdown.to_dict())
 
     cw = metadata["context_window"]
     # Static fields preserved.
@@ -206,9 +204,7 @@ def test_context_window_usage_uses_estimated_when_actual_missing():
         current_turn_tokens=500,
         total_tokens=1000,
     )
-    base_module.BaseAgent._merge_context_window_usage(
-        agent, metadata, breakdown.to_dict()
-    )
+    base_module.BaseAgent._merge_context_window_usage(agent, metadata, breakdown.to_dict())
 
     cw = metadata["context_window"]
     assert cw["used_tokens"] == 1000
@@ -233,9 +229,7 @@ def test_context_window_usage_unknown_model_no_misleading_ratio():
         total_tokens=1500,
         actual_input_tokens=1500,
     )
-    base_module.BaseAgent._merge_context_window_usage(
-        agent, metadata, breakdown.to_dict()
-    )
+    base_module.BaseAgent._merge_context_window_usage(agent, metadata, breakdown.to_dict())
 
     cw = metadata["context_window"]
     assert cw["known"] is False
@@ -255,9 +249,7 @@ def test_merge_context_window_usage_noop_when_no_context_window():
     metadata: dict[str, Any] = {"provider": "openai"}
     breakdown = TokenBudgetBreakdown(total_tokens=500, actual_input_tokens=500)
 
-    base_module.BaseAgent._merge_context_window_usage(
-        agent, metadata, breakdown.to_dict()
-    )
+    base_module.BaseAgent._merge_context_window_usage(agent, metadata, breakdown.to_dict())
 
     assert "context_window" not in metadata
 
@@ -371,9 +363,7 @@ def test_extract_actual_usage_handles_dict_usage_metadata():
 
 def test_extract_actual_usage_handles_object_usage_metadata():
     """Older providers may expose usage_metadata as an object with attributes."""
-    response = SimpleNamespace(
-        usage_metadata=SimpleNamespace(input_tokens=987, output_tokens=10)
-    )
+    response = SimpleNamespace(usage_metadata=SimpleNamespace(input_tokens=987, output_tokens=10))
 
     result = extract_actual_usage(response)
 
@@ -412,9 +402,7 @@ def test_extract_actual_usage_falls_back_to_response_metadata_usage():
 def test_extract_actual_usage_handles_token_usage_envelope():
     """Some providers nest the envelope under ``token_usage`` instead."""
     response = SimpleNamespace(
-        response_metadata={
-            "token_usage": {"prompt_tokens": 600, "completion_tokens": 30}
-        }
+        response_metadata={"token_usage": {"prompt_tokens": 600, "completion_tokens": 30}}
     )
 
     result = extract_actual_usage(response)
@@ -473,9 +461,7 @@ def test_extract_actual_usage_returns_nones_for_none_response():
 def test_extract_actual_usage_handles_dict_with_none_values():
     """If the dict explicitly carries None values, result stays None
     rather than overwriting with None (and definitely does not raise)."""
-    response = SimpleNamespace(
-        usage_metadata={"input_tokens": None, "output_tokens": None}
-    )
+    response = SimpleNamespace(usage_metadata={"input_tokens": None, "output_tokens": None})
 
     result = extract_actual_usage(response)
 

@@ -22,8 +22,9 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+from collections.abc import Iterable
 from enum import Enum
-from typing import Annotated, Any, Iterable, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
@@ -99,7 +100,7 @@ class ImagePayload(PublicPayload):
     description: str | None = None
 
     @model_validator(mode="after")
-    def _has_exactly_one_source(self) -> "ImagePayload":
+    def _has_exactly_one_source(self) -> ImagePayload:
         if (self.url is None) == (self.data is None):
             raise ValueError("image payload requires exactly one of url or data")
         if self.mime_type not in ALLOWED_IMAGE_MIME_TYPES:
@@ -148,7 +149,7 @@ class ResourceLinkPayload(PublicPayload):
     description: str | None = None
 
     @model_validator(mode="after")
-    def _validate_url(self) -> "ResourceLinkPayload":
+    def _validate_url(self) -> ResourceLinkPayload:
         _validate_url_scheme(self.url)
         return self
 
@@ -169,13 +170,11 @@ class RichItemBase(BaseModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def _validate_id(self) -> "RichItemBase":
+    def _validate_id(self) -> RichItemBase:
         if not self.id:
             raise ValueError("rich item id must be non-empty")
         if len(self.id) > RICH_ITEM_ID_MAX_LENGTH:
-            raise ValueError(
-                f"rich item id length exceeds {RICH_ITEM_ID_MAX_LENGTH} characters"
-            )
+            raise ValueError(f"rich item id length exceeds {RICH_ITEM_ID_MAX_LENGTH} characters")
         if not _ITEM_ID_PATTERN.match(self.id):
             raise ValueError(f"rich item id contains invalid characters: {self.id!r}")
         return self
@@ -353,7 +352,7 @@ def parse_inline_rich_references(markdown: str) -> list[str]:
 
 
 def validate_rich_references(
-    markdown: str, items: Iterable["RichItem | BaseModel | dict[str, Any]"]
+    markdown: str, items: Iterable[RichItem | BaseModel | dict[str, Any]]
 ) -> list[dict[str, str]]:
     """Return a list of warning dicts for references that cannot be resolved.
 
@@ -363,7 +362,10 @@ def validate_rich_references(
     unavailable-content blocks without crashing.
     """
     referenced = parse_inline_rich_references(markdown)
-    known_ids = {getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else None) for item in items}
+    known_ids = {
+        getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else None)
+        for item in items
+    }
     known_ids.discard(None)
     warnings: list[dict[str, str]] = []
     for ref in referenced:
@@ -378,8 +380,8 @@ def validate_rich_references(
 
 
 def select_append_fallback_items(
-    items: Iterable["RichItem"], referenced_ids: set[str]
-) -> list["RichItem"]:
+    items: Iterable[RichItem], referenced_ids: set[str]
+) -> list[RichItem]:
     """Return items that should be appended after the body because they are
     unreferenced and their display policy allows append.
 
@@ -397,8 +399,8 @@ def select_append_fallback_items(
 
 
 def select_transient_upsert_items(
-    items: Iterable["RichItem | BaseModel | dict[str, Any]"],
-) -> list["RichItem | dict[str, Any]"]:
+    items: Iterable[RichItem | BaseModel | dict[str, Any]],
+) -> list[RichItem | dict[str, Any]]:
     """Return the subset of ``items`` that may be streamed as transient
     ``rich_items`` upserts before final selection.
 
@@ -444,9 +446,7 @@ def _payload_has_inline_binary(item: Any) -> bool:
         return False
     if payload.get("data"):
         return True
-    if payload.get("content") and _get_type(item) == RichItemType.canvas_artifact.value:
-        return True
-    return False
+    return bool(payload.get("content") and _get_type(item) == RichItemType.canvas_artifact.value)
 
 
 # ---------------------------------------------------------------------------
@@ -520,9 +520,7 @@ def build_rich_item_inventory_block(
 
     lines = [_INVENTORY_HEADER]
     for item in ordered:
-        item_id = getattr(item, "id", None) or (
-            item.get("id") if isinstance(item, dict) else None
-        )
+        item_id = getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else None)
         item_type = _get_type(item) or "unknown"
         summary = _summary_text(item, summary_chars)
         if summary:

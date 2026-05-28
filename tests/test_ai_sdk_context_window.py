@@ -89,9 +89,7 @@ def test_ai_sdk_messages_expose_context_window_on_both_metadata_keys():
     current_user_id = uuid4()
 
     response = asyncio.run(
-        get_conversation_messages_ai_sdk(
-            conversation_id, message_service, current_user_id
-        )
+        get_conversation_messages_ai_sdk(conversation_id, message_service, current_user_id)
     )
 
     message_service.get_conversation_messages.assert_called_once()
@@ -140,9 +138,7 @@ def test_ai_sdk_messages_metadata_keys_share_identity_for_assistant_messages():
     assistant_msg = _build_assistant_message_with_context_window()
     message_service = _build_message_service([assistant_msg])
 
-    response = asyncio.run(
-        get_conversation_messages_ai_sdk(uuid4(), message_service, uuid4())
-    )
+    response = asyncio.run(get_conversation_messages_ai_sdk(uuid4(), message_service, uuid4()))
 
     ui_message = response.data.messages[0]
     payload = ui_message.model_dump(by_alias=True)

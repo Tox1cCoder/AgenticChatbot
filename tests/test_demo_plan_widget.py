@@ -155,9 +155,7 @@ def test_live_rich_renderer_places_resolved_widget_between_markdown(monkeypatch)
     monkeypatch.setattr(
         demo,
         "_render_inline_rich_item",
-        lambda item, **kwargs: calls.append(
-            ("rich", (item["id"], kwargs["auto_mount"]))
-        ),
+        lambda item, **kwargs: calls.append(("rich", (item["id"], kwargs["auto_mount"]))),
     )
 
     renderer = demo._StreamingRichResponseRenderer(
@@ -215,9 +213,7 @@ def test_live_rich_renderer_only_auto_mounts_first_repeated_widget_marker(monkey
         RootPlaceholder(),
         message_key="active-response",
     )
-    renderer.append_text(
-        "<!--rich:widget:w-1-->\n\nText\n\n<!--rich:widget:w-1-->"
-    )
+    renderer.append_text("<!--rich:widget:w-1-->\n\nText\n\n<!--rich:widget:w-1-->")
     renderer.apply_rich_items_upsert(
         [
             {

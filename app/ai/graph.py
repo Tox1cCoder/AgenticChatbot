@@ -440,9 +440,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         initial_state: GraphState = {
             "messages": [HumanMessage(**human_message_kwargs)],
             "context": {
-                "inline_rich_response_v1": bool(
-                    getattr(request, "inline_rich_response_v1", False)
-                ),
+                "inline_rich_response_v1": bool(getattr(request, "inline_rich_response_v1", False)),
             },
         }
 
@@ -1321,11 +1319,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         values = getattr(snapshot, "values", None) or {}
         messages = values.get("messages", []) if isinstance(values, dict) else []
-        removals = [
-            RemoveMessage(id=msg.id)
-            for msg in messages
-            if getattr(msg, "id", None)
-        ]
+        removals = [RemoveMessage(id=msg.id) for msg in messages if getattr(msg, "id", None)]
         if not removals:
             return
 
@@ -1822,9 +1816,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             # can remove them. tool_call_id alone is unique within a turn but
             # langchain BaseMessage id is what RemoveMessage targets.
             if assistant_message_id and output.get("tool_call_id"):
-                tool_kwargs["id"] = (
-                    f"{assistant_message_id}-toolmsg-{output['tool_call_id']}"
-                )
+                tool_kwargs["id"] = f"{assistant_message_id}-toolmsg-{output['tool_call_id']}"
             state.setdefault("messages", []).append(ToolMessage(**tool_kwargs))
 
         state["iteration_count"] = (state.get("iteration_count") or 0) + 1
@@ -2431,7 +2423,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             rag_context = dict(parent_state.get("context") or {})
             tool_context: list[str] = []
             accumulated_artifacts: list[dict[str, Any]] = []
-            last_response: AgentResponse | None = None
             rag_tool_map: dict[str, Any] | None = None
 
             while True:
@@ -2452,7 +2443,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     },
                 )
                 response = await agent.process_message(agent_msg, conversation_id)
-                last_response = response
 
                 if response.error:
                     if accumulated_artifacts:
@@ -2944,9 +2934,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             # actually trips, so we don't duplicate that here.
             warn_threshold = max(2, error_limit - 1)
             if current >= warn_threshold and current < error_limit:
-                logger.warning(
-                    "Planning consecutive errors: %d/%d", current, error_limit
-                )
+                logger.warning("Planning consecutive errors: %d/%d", current, error_limit)
             else:
                 logger.info("Planning consecutive errors: %d/%d", current, error_limit)
         else:
@@ -2977,9 +2965,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             and delegated_agent != "planning_agent"
             and delegated_agent in self.agents
         ):
-            logger.info(
-                "Planning hand_off detected: routing planning_tools → %s", delegated_agent
-            )
+            logger.info("Planning hand_off detected: routing planning_tools → %s", delegated_agent)
             return delegated_agent
 
         planning_call_count = state.get("planning_call_count", 0)

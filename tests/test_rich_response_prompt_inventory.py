@@ -4,17 +4,17 @@ references (response_format.md Task 4).
 
 from __future__ import annotations
 
+from app.ai.graph import MultiAgentWorkflow
 from app.ai.prompts import (
     INLINE_RICH_RESPONSE_SUFFIX,
     build_rich_response_guidance,
 )
+from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from app.core.config import settings
 from app.core.rich_response import (
     RichDisplayPolicy,
     RichItemType,
 )
-from app.ai.graph import MultiAgentWorkflow
-from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from app.core.config import settings
 
 
 def _image_candidate(id_: str, description: str = "An image") -> dict:
@@ -95,9 +95,7 @@ def test_build_rich_response_guidance_includes_suffix_and_inventory():
 def test_build_rich_response_guidance_omits_base64_data():
     candidate = _image_candidate("image:doc:1")
     candidate["payload"] = {"data": "QUJDRA==", "mime_type": "image/png"}
-    block = build_rich_response_guidance(
-        candidates=[candidate], enabled=True, capability=True
-    )
+    block = build_rich_response_guidance(candidates=[candidate], enabled=True, capability=True)
     assert "QUJDRA==" not in block
 
 

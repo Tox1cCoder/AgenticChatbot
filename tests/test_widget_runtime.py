@@ -811,8 +811,8 @@ class TestPromptUpdates:
 # ---------------------------------------------------------------------------
 class TestWidgetToolQualityEnforcement:
     async def test_widget_create_rejects_empty_chart(self, monkeypatch):
-        from app.ai.mcp_servers import widgets_server
         import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
 
         store = InMemoryWidgetStore()
         monkeypatch.setattr(widget_runtime, "_widget_store", store)
@@ -821,9 +821,7 @@ class TestWidgetToolQualityEnforcement:
             await widgets_server.widget_create(
                 session_id="conv-1",
                 widget_type="chart",
-                initial_state=json.dumps(
-                    {"chart_type": "bar", "labels": [], "datasets": []}
-                ),
+                initial_state=json.dumps({"chart_type": "bar", "labels": [], "datasets": []}),
                 title="Empty",
             )
 
@@ -831,8 +829,8 @@ class TestWidgetToolQualityEnforcement:
         assert listed == []
 
     async def test_widget_create_rejects_donut_with_negative_values(self, monkeypatch):
-        from app.ai.mcp_servers import widgets_server
         import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
 
         store = InMemoryWidgetStore()
         monkeypatch.setattr(widget_runtime, "_widget_store", store)
@@ -852,8 +850,8 @@ class TestWidgetToolQualityEnforcement:
             )
 
     async def test_widget_create_allows_valid_bar_chart(self, monkeypatch):
-        from app.ai.mcp_servers import widgets_server
         import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
 
         store = InMemoryWidgetStore()
         monkeypatch.setattr(widget_runtime, "_widget_store", store)
@@ -877,8 +875,8 @@ class TestWidgetToolQualityEnforcement:
         assert payload.get("quality_guidance"), "expected soft guidance for missing caption/labels"
 
     async def test_widget_create_accepts_python_style_literal_fallback(self, monkeypatch):
-        from app.ai.mcp_servers import widgets_server
         import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
 
         store = InMemoryWidgetStore()
         monkeypatch.setattr(widget_runtime, "_widget_store", store)
@@ -898,8 +896,8 @@ class TestWidgetToolQualityEnforcement:
         assert payload["status"] == "active"
 
     async def test_widget_create_malformed_json_returns_helpful_error(self, monkeypatch):
-        from app.ai.mcp_servers import widgets_server
         import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
 
         store = InMemoryWidgetStore()
         monkeypatch.setattr(widget_runtime, "_widget_store", store)
@@ -922,8 +920,8 @@ class TestWidgetToolQualityEnforcement:
         assert "true/false/null" in message
 
     async def test_widget_update_rejects_invalid_state(self, monkeypatch):
-        from app.ai.mcp_servers import widgets_server
         import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
 
         store = InMemoryWidgetStore()
         monkeypatch.setattr(widget_runtime, "_widget_store", store)

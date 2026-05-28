@@ -213,7 +213,4 @@ async def test_messages_stream_route_forwards_context_window_metadata(monkeypatc
     assert len(data_lines) == 1
     forwarded_event = json.loads(data_lines[0])
     assert forwarded_event == complete_event
-    assert (
-        forwarded_event["message"]["metadata"]["context_window"]
-        == context_window_payload
-    )
+    assert forwarded_event["message"]["metadata"]["context_window"] == context_window_payload

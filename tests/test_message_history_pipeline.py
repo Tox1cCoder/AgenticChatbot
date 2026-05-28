@@ -399,7 +399,9 @@ async def test_checkpoint_compaction_disables_langsmith_tracing(monkeypatch):
     )
 
     assert ("init", {"enabled": False}) in calls
-    assert calls.index(("enter", None)) < calls.index(("update", None)) < calls.index(("exit", None))
+    assert (
+        calls.index(("enter", None)) < calls.index(("update", None)) < calls.index(("exit", None))
+    )
 
 
 def test_workflow_request_round_trip_through_ai_schema():

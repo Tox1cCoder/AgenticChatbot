@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from app.ui.rich_response import build_rich_response_view
 
-
 metadata_with_selected_image = {
     "rich_items_version": 1,
     "rich_items": [
@@ -82,7 +81,8 @@ def test_referenced_widget_renders_inline_not_appended():
     body = "Body\n\n<!--rich:widget:w-1-->"
     view = build_rich_response_view(body, metadata_with_image_and_widget)
     inline_widget = next(
-        segment for segment in view.segments
+        segment
+        for segment in view.segments
         if segment.kind == "rich" and segment.item["type"] == "live_widget"
     )
     assert inline_widget.item["id"] == "widget:w-1"
@@ -98,7 +98,8 @@ def test_inline_widget_segment_carries_no_state_chrome():
     body = "Body\n\n<!--rich:widget:w-1-->"
     view = build_rich_response_view(body, metadata_with_image_and_widget)
     inline_widget = next(
-        segment for segment in view.segments
+        segment
+        for segment in view.segments
         if segment.kind == "rich" and segment.item["type"] == "live_widget"
     )
     payload = inline_widget.item.get("payload") or {}
@@ -257,7 +258,5 @@ def test_stream_state_does_not_track_unselected_image_until_finalize():
     )
     view = state.build_view()
     # No marker → image is not in segments and not appended (inline_only).
-    assert all(
-        s.kind != "rich" or (s.item or {}).get("type") != "image" for s in view.segments
-    )
+    assert all(s.kind != "rich" or (s.item or {}).get("type") != "image" for s in view.segments)
     assert view.append_items == []

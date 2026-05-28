@@ -71,11 +71,7 @@ def _assess_chart(state: dict[str, Any]) -> WidgetQualityResult:
         return WidgetQualityResult(False, ["chart requires at least two labels"])
     if not isinstance(datasets, list) or not datasets:
         return WidgetQualityResult(False, ["chart requires at least one dataset"])
-    numeric_series = [
-        _numeric_values(dataset)
-        for dataset in datasets
-        if isinstance(dataset, dict)
-    ]
+    numeric_series = [_numeric_values(dataset) for dataset in datasets if isinstance(dataset, dict)]
     if not numeric_series or any(len(series) != len(labels) for series in numeric_series):
         return WidgetQualityResult(
             False, ["chart datasets must contain numeric values for every label"]
@@ -90,7 +86,9 @@ def _assess_chart(state: dict[str, Any]) -> WidgetQualityResult:
         if any(value < 0 for value in numeric_series[0]):
             return WidgetQualityResult(False, ["donut charts require non-negative values"])
     if "line" in chart_type or "area" in chart_type:
-        presentation = state.get("presentation") if isinstance(state.get("presentation"), dict) else {}
+        presentation = (
+            state.get("presentation") if isinstance(state.get("presentation"), dict) else {}
+        )
         axis_kind = str(presentation.get("x_kind") or state.get("x_kind") or "").lower()
         if axis_kind not in {"ordered", "time", "sequence"}:
             return WidgetQualityResult(
@@ -154,8 +152,12 @@ def render_action_template(
 ) -> str:
     scope = {
         "state": state,
-        "presentation": state.get("presentation") if isinstance(state.get("presentation"), dict) else {},
-        "control_values": state.get("control_values") if isinstance(state.get("control_values"), dict) else {},
+        "presentation": state.get("presentation")
+        if isinstance(state.get("presentation"), dict)
+        else {},
+        "control_values": state.get("control_values")
+        if isinstance(state.get("control_values"), dict)
+        else {},
         "input_values": input_values,
     }
 

@@ -550,9 +550,7 @@ class ModelConfigService(IRuntimeModelResolver):
                 warnings=["User context is missing; using default Gemini runtime configuration."],
                 capabilities=self._build_capabilities("gemini", default_model, {}),
                 reasoning_effort=reasoning_effort,
-                context_window=self._resolve_context_window_metadata(
-                    "gemini", default_model, {}
-                ),
+                context_window=self._resolve_context_window_metadata("gemini", default_model, {}),
             )
 
         provider_snapshots = self._get_provider_snapshots(user_id)

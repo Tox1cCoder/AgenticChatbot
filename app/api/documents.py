@@ -145,9 +145,7 @@ def _rejection_from_duplicate(
     )
 
 
-def _rejection_from_validation(
-    filename: str, exc: FileValidationError
-) -> DocumentUploadFileResult:
+def _rejection_from_validation(filename: str, exc: FileValidationError) -> DocumentUploadFileResult:
     return DocumentUploadFileResult(
         filename=filename,
         status=DocumentUploadFileStatus.REJECTED,
@@ -219,9 +217,7 @@ async def _upload_documents_batch(
 
         results.append(result)
 
-    accepted_count = sum(
-        1 for item in results if item.status == DocumentUploadFileStatus.ACCEPTED
-    )
+    accepted_count = sum(1 for item in results if item.status == DocumentUploadFileStatus.ACCEPTED)
     rejected_count = len(results) - accepted_count
 
     return DocumentBatchUploadResponse(
@@ -242,10 +238,7 @@ def _status_code_for_batch_result(result: DocumentBatchUploadResponse) -> int:
     if result.accepted_count > 0 and result.rejected_count > 0:
         return status.HTTP_207_MULTI_STATUS
     # All rejected — choose 409 if everything was a duplicate, otherwise 400.
-    if all(
-        item.error_code == "DUPLICATE_FILENAME"
-        for item in result.files
-    ):
+    if all(item.error_code == "DUPLICATE_FILENAME" for item in result.files):
         return status.HTTP_409_CONFLICT
     return status.HTTP_400_BAD_REQUEST
 

@@ -407,8 +407,7 @@ class ProviderService:
             "last_synced_at": catalog.get("last_synced_at"),
             "sync_error": config_error or catalog.get("sync_error"),
             "models": [
-                self._backfill_context_window(m)
-                for m in deepcopy(catalog.get("models", []))
+                self._backfill_context_window(m) for m in deepcopy(catalog.get("models", []))
             ],
             "warnings": [],
         }

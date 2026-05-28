@@ -520,7 +520,6 @@ async def test_run_agent_in_isolated_context_does_not_pollute_parent_messages(mo
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     workflow._get_conversation_history = AsyncMock(return_value=[])
 
-
     async def fake_invoke(messages, conversation_history, persona, **kwargs):
         # The worker ought to have received its own isolated state with
         # a single HumanMessage carrying the task prompt.
@@ -928,7 +927,6 @@ async def test_planning_tools_node_executes_dispatch_subagents(monkeypatch):
     """
     from langchain_core.messages import AIMessage, HumanMessage
 
-
     monkeypatch.setattr(settings, "planning_subagents_enabled", True)
 
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
@@ -1123,7 +1121,11 @@ async def test_run_agent_in_isolated_context_reuses_worker_tool_map(monkeypatch)
         tool_name = tool_calls[0]["name"]
         if tool_name == "tool_search":
             tool_map["loaded_tool"] = object()
-            return [{"tool_call_id": "search-1", "name": "tool_search", "content": "loaded"}], [], []
+            return (
+                [{"tool_call_id": "search-1", "name": "tool_search", "content": "loaded"}],
+                [],
+                [],
+            )
         if tool_name == "loaded_tool":
             execute_seen_loaded = "loaded_tool" in tool_map
             return [{"tool_call_id": "loaded-1", "name": "loaded_tool", "content": "ok"}], [], []
@@ -1215,9 +1217,7 @@ async def test_planning_tools_node_applies_hand_off_to_target_agent(monkeypatch)
         return {
             "hand_off": SimpleNamespace(
                 name="hand_off",
-                ainvoke=AsyncMock(
-                    return_value='{"hand_off": "chat_agent", "reason": "off-plan"}'
-                ),
+                ainvoke=AsyncMock(return_value='{"hand_off": "chat_agent", "reason": "off-plan"}'),
             )
         }
 
@@ -1307,9 +1307,7 @@ async def test_planning_tools_node_handles_hand_off_alongside_dispatch(monkeypat
         return {
             "hand_off": SimpleNamespace(
                 name="hand_off",
-                ainvoke=AsyncMock(
-                    return_value='{"hand_off": "chat_agent", "reason": "off-plan"}'
-                ),
+                ainvoke=AsyncMock(return_value='{"hand_off": "chat_agent", "reason": "off-plan"}'),
             )
         }
 
@@ -1458,9 +1456,7 @@ async def test_planning_consecutive_errors_only_warns_near_threshold(caplog, mon
 
 
 @pytest.mark.asyncio
-async def test_planning_consecutive_errors_small_limit_does_not_warn_on_first(
-    caplog, monkeypatch
-):
+async def test_planning_consecutive_errors_small_limit_does_not_warn_on_first(caplog, monkeypatch):
     """A small ``planning_consecutive_errors_limit`` must still log the first
     error as INFO. Earlier logic flagged the first error as WARNING when the
     limit was 2, which was noise — the circuit breaker hasn't tripped yet.
@@ -1504,9 +1500,7 @@ async def test_planning_consecutive_errors_small_limit_does_not_warn_on_first(
         await workflow._planning_tools_node(state)
     msgs = [r for r in caplog.records if "consecutive errors" in r.getMessage()]
     assert msgs, "expected a consecutive-errors log line"
-    assert msgs[-1].levelno == logging.INFO, (
-        "first error must not warn even on small limits"
-    )
+    assert msgs[-1].levelno == logging.INFO, "first error must not warn even on small limits"
 
 
 # ---------------------------------------------------------------------------
@@ -1638,7 +1632,6 @@ async def test_dispatcher_isolates_sibling_worker_overrides(monkeypatch):
     """
     from app.ai.planning_subagents import (
         DispatchSubagentsInput,
-        PlanningSubagentDispatcher,
         PlanningSubagentName,
         PlanningSubagentTask,
         SubagentModelOverride,
@@ -1648,7 +1641,9 @@ async def test_dispatcher_isolates_sibling_worker_overrides(monkeypatch):
 
     seen_per_agent: dict[str, list[dict[str, Any]]] = {}
 
-    async def fake_runner(*, agent_name, task_prompt, parent_state, related_todo_ids=None, model_override=None):
+    async def fake_runner(
+        *, agent_name, task_prompt, parent_state, related_todo_ids=None, model_override=None
+    ):
         from app.ai.planning_subagents import build_worker_model_request
 
         worker_request = build_worker_model_request(
@@ -1708,7 +1703,9 @@ async def test_dispatcher_isolates_sibling_worker_overrides(monkeypatch):
     assert "search" not in chat_request
     assert chat_request["chat"]["model"] == "gemini-3-flash-preview"
     # And neither worker observed the other worker's override.
-    assert "chat" not in search_request or search_request["chat"]["model"] != "gemini-3-flash-preview"
+    assert (
+        "chat" not in search_request or search_request["chat"]["model"] != "gemini-3-flash-preview"
+    )
 
 
 @pytest.mark.asyncio
@@ -1723,7 +1720,9 @@ async def test_dispatch_result_includes_requested_and_resolved_model(monkeypatch
 
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
 
-    async def fake_runner(*, agent_name, task_prompt, parent_state, related_todo_ids=None, model_override=None):
+    async def fake_runner(
+        *, agent_name, task_prompt, parent_state, related_todo_ids=None, model_override=None
+    ):
         return AgentResponse(
             agent_type=AgentType.SEARCH,
             agent_id="search_agent",
@@ -1875,4 +1874,3 @@ def test_delegated_agent_messages_passthrough_when_no_active_handoff():
     delegated = workflow._messages_for_selected_agent(state, "search_agent", messages)
 
     assert delegated == messages[2:]
-

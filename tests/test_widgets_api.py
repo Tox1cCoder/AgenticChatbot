@@ -226,9 +226,7 @@ def test_widget_connection_restores_missing_widget_from_message_metadata(
     assert restored.state["chart_type"] == "line"
 
 
-def test_widget_connection_restores_widget_with_enriched_state(
-    widget_test_client, monkeypatch
-):
+def test_widget_connection_restores_widget_with_enriched_state(widget_test_client, monkeypatch):
     """Recovering a widget from persisted tool_artifacts must preserve presentation,
     controls, and actions keys so the renderer can reconstruct the article-style view."""
     client, store, _token_service = widget_test_client

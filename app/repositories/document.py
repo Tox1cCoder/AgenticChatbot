@@ -46,9 +46,7 @@ class DocumentRepository:
             db.refresh(db_document)
             return db_document
 
-    def filename_exists_in_conversation(
-        self, conversation_id: UUID, filename_key: str
-    ) -> bool:
+    def filename_exists_in_conversation(self, conversation_id: UUID, filename_key: str) -> bool:
         """Return True if a document with this normalized filename already exists."""
         with self.session_factory() as db:
             query = db.query(Document).filter(

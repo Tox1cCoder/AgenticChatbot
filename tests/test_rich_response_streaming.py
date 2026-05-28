@@ -20,6 +20,7 @@ from app.api.ai_sdk import (
     project_ai_sdk_message_for_capability,
 )
 from app.core.config import settings
+from app.core.rich_response import select_transient_upsert_items
 from app.models.enums import MessageRole
 from app.schemas.message import MessageCreate
 from app.schemas.workflow import (
@@ -28,11 +29,9 @@ from app.schemas.workflow import (
     WorkflowResponse,
     WorkflowResponseMessage,
 )
-from app.services.message_service import MessageService
 from app.services.ai_service import AIService
-from app.core.rich_response import select_transient_upsert_items
+from app.services.message_service import MessageService
 from app.services.stream_events import build_canonical_rich_items_event
-
 
 SAFE_WIDGET_ITEM = {
     "id": "widget:w-1",
@@ -203,9 +202,7 @@ async def test_ai_sdk_complete_does_not_emit_unselected_image_file_parts():
                 "content": "No relevant image selected.",
                 "message_metadata": {
                     "rich_items_version": 1,
-                    "images": [
-                        {"url": "https://img.test/hidden.png", "mime": "image/png"}
-                    ],
+                    "images": [{"url": "https://img.test/hidden.png", "mime": "image/png"}],
                     "rich_items": [],
                 },
             },
@@ -239,9 +236,7 @@ def test_non_capable_history_projection_removes_standalone_markers():
         "content": "Intro\n\n<!--rich:image:tool:c1:0-->\n\nConclusion",
         "messageMetadata": {"rich_items_version": 1, "rich_items": []},
     }
-    projected = project_ai_sdk_message_for_capability(
-        message, inline_rich_response_v1=False
-    )
+    projected = project_ai_sdk_message_for_capability(message, inline_rich_response_v1=False)
     assert "<!--rich:" not in projected["content"]
 
 
@@ -250,9 +245,7 @@ def test_capable_projection_preserves_markers():
         "content": "Intro\n\n<!--rich:image:tool:c1:0-->\n\nConclusion",
         "messageMetadata": {"rich_items_version": 1, "rich_items": []},
     }
-    projected = project_ai_sdk_message_for_capability(
-        message, inline_rich_response_v1=True
-    )
+    projected = project_ai_sdk_message_for_capability(message, inline_rich_response_v1=True)
     assert "<!--rich:image:tool:c1:0-->" in projected["content"]
 
 

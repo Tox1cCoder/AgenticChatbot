@@ -35,14 +35,13 @@ def build_rich_response_guidance(
         max_items=max_items if max_items is not None else settings.rich_item_inventory_max_items,
         max_chars=max_chars if max_chars is not None else settings.rich_item_inventory_max_chars,
         summary_chars=(
-            summary_chars
-            if summary_chars is not None
-            else settings.rich_item_summary_max_chars
+            summary_chars if summary_chars is not None else settings.rich_item_summary_max_chars
         ),
     )
     if not inventory:
         return ""
     return f"{inventory}\n\n{INLINE_RICH_RESPONSE_SUFFIX}"
+
 
 CHAT_SYSTEM_PROMPT = """You are an expert AI assistant and knowledgeable conversationalist. Provide accurate, thorough, and genuinely useful responses.
 

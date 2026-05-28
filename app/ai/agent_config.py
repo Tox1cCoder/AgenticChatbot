@@ -202,7 +202,5 @@ def create_langchain_model(
                 thinking_budget = 8192
             model_kwargs["thinking_budget"] = thinking_budget
         else:
-            model_kwargs["thinking_level"] = (
-                thinking_level_override or settings.thinking_level
-            )
+            model_kwargs["thinking_level"] = thinking_level_override or settings.thinking_level
     return ChatGoogleGenerativeAI(**model_kwargs)
