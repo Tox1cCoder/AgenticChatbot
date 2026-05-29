@@ -41,7 +41,7 @@ Scale/Scope:
 
 - Initial static worker registry: `chat_agent`, `rag_agent`, `search_agent`, `image_generator_agent`, and `canvas_agent`.
 - Explicitly exclude `planning_agent` as a subagent target to prevent recursive planning supervisors.
-- No subagent-specific task-count, worker-timeout, worker-iteration, or parallelism config caps. Existing provider/tool timeouts, request cancellation, HITL gating, and generic tool-result size controls remain the production safety boundary.
+- No subagent-specific task-count, worker-timeout, worker-iteration, parallelism, or answer-size config caps. Existing provider/tool timeouts, request cancellation, HITL gating, model output limits, concise worker prompt guidance, and context-overflow recovery remain the production safety boundary.
 
 ## Constitution Check
 
@@ -69,7 +69,7 @@ Security and Safety Gate:
 
 - Pass: no background jobs and no cross-conversation execution.
 - Pass: carry `conversation_id`, `user_id`, and `device_id` through existing scoped tool binding.
-- Pass: request-scoped worker execution, underlying timeout/error normalization, generic tool-result sizing, and explicit failure reporting.
+- Pass: request-scoped worker execution, underlying timeout/error normalization, concise full-answer handoff, compact activity metadata, and explicit failure reporting.
 - Pass: no subagent direct user interaction; all output returns through the Planning Agent.
 
 Re-check after design: still pass. The feature adds a request-scoped supervisor tool rather than another orchestrator, so it does not conflict with the existing multi-agent graph.
@@ -181,9 +181,9 @@ FR-014: If a worker attempts an operation that requires human approval, the firs
 
 FR-015: The Planning Agent must decide todo updates after reading subagent results. The dispatcher must not mark tasks complete directly.
 
-FR-016: Dispatch output must include enough metadata for debugging and todo reconciliation: worker id, agent target, status, elapsed milliseconds, output summary, related todo ids, and error message when present. Worker tool artifacts/images must not be embedded in dispatch results.
+FR-016: Dispatch output must include enough metadata for debugging and todo reconciliation: worker id, agent target, status, elapsed milliseconds, full output answer, compact activity summary, related todo ids, and error message when present. Worker tool artifacts/images must not be embedded in dispatch results.
 
-FR-017: Dispatch output sent back to the model must use the same generic tool-result size controls as the rest of the graph and remain deterministic.
+FR-017: Dispatch output sent back to the Planning Agent must hand off the full worker answer without silent substring truncation and remain deterministic. Workers are prompted to answer concisely but with enough detail for supervisor reconciliation.
 
 FR-018: The top-level `dispatch_subagents` tool artifact/render should be attached to response metadata/tool artifacts for UI/debug visibility when practical.
 
@@ -235,6 +235,7 @@ Example tool result returned to the Planning Agent:
       "agent": "search_agent",
       "status": "completed",
       "elapsed_ms": 1834,
+      "answer": "Current docs confirm ...",
       "summary": "Current docs confirm ...",
       "related_todo_ids": ["todo-7"]
     },
@@ -243,6 +244,7 @@ Example tool result returned to the Planning Agent:
       "agent": "chat_agent",
       "status": "completed",
       "elapsed_ms": 912,
+      "answer": "Likely files: app/ai/graph.py, app/ai/agents/planning_agent.py ...",
       "summary": "Likely files: app/ai/graph.py, app/ai/agents/planning_agent.py ...",
       "related_todo_ids": ["todo-8"]
     }
@@ -306,13 +308,14 @@ Fields:
 - `agent: PlanningSubagentName`
 - `status: Literal["completed", "failed", "timeout", "requires_approval"]`
 - `elapsed_ms: int`
+- `answer: str`
 - `summary: str`
 - `related_todo_ids: list[str] = []`
 - `error: str | None = None`
 
 Serialization rule:
 
-- Model-facing JSON and `GraphContext["subagent_results"]` must omit worker `artifacts` and `images`. Large worker tool payloads are not useful for supervisor reconciliation and can bloat LLM input and persisted message metadata. Summary text uses the existing generic tool-result size control rather than subagent-specific config.
+- Model-facing JSON must include the full worker `answer` and omit worker `artifacts` and `images`. `GraphContext["subagent_results"]` / final metadata must keep only compact activity fields and omit the full `answer`, worker artifacts, and images. Large worker tool payloads are not useful for persisted metadata; when the supervisor needs the worker result, it uses the model-facing `answer`.
 
 ### `DispatchSubagentsResult`
 
@@ -342,7 +345,7 @@ Responsibilities:
 - Do not apply a subagent-specific per-worker timeout.
 - Preserve input order in output.
 - Normalize worker output into `PlanningSubagentResult`.
-- Keep model-facing summaries within the generic tool-result size budget.
+- Return full worker answers to the Planning Agent and compact summaries to activity metadata.
 
 Constructor dependencies:
 
@@ -572,10 +575,10 @@ Design decision: the dispatcher is built per-turn using `lambda: state` as the p
 - [x] Result ordering preserved automatically because `gather` returns in input order and we feed it tasks in iteration order.
 - [x] Worker exceptions converted to `PlanningSubagentResult(status="failed", error=str(exc))`.
 - [x] Underlying `asyncio.TimeoutError` converted to `PlanningSubagentResult(status="timeout", error="timeout")`.
-- [x] Model-facing `summary` uses the existing generic `tool_result_max_chars` budget with a `…[truncated]` notice.
+- [x] Model-facing dispatch results include a full worker `answer`; `summary` is only a compact activity/UI preview and is not the supervisor's source of truth.
 - [x] Concurrency, ordering, failure-isolation, and timeout tests added in `tests/test_planning_subagents.py` and pass.
 
-Design decision: subagents should not fail from subagent-only task, timeout, parallelism, or iteration caps. Operational protection comes from request cancellation, provider/tool timeouts, HITL gating, generic tool-result size controls, and the Planning Agent prompt, not from a second set of subagent-specific budget knobs.
+Design decision: subagents should not fail from subagent-only task, timeout, parallelism, iteration, or answer-size caps. Operational protection comes from request cancellation, provider/tool timeouts, HITL gating, the workers' model output limits, concise worker prompt guidance, and context-overflow recovery rather than a second set of subagent-specific budget knobs.
 
 ### Phase 4: Isolated Existing-Agent Runner — UPDATED 2026-05-15
 
@@ -599,7 +602,7 @@ Design decisions:
 
 ### Phase 5: Planning Prompt and Todo Reconciliation — DONE 2026-05-08
 
-- [x] Updated the executing-phase block in `PlanningAgent._build_system_prompt` to introduce `dispatch_subagents`, restrict it to independent work, and explicitly state the reconciliation contract (workers cannot mutate todos; the supervisor must call `write_todos` after reading results; failed/timeout/requires_approval results leave the related todo pending).
+- [x] Updated the executing-phase block in `PlanningAgent._build_system_prompt` to introduce `dispatch_subagents`, restrict it to independent work, and explicitly state the reconciliation contract (workers cannot mutate todos; the supervisor must call `write_todos` after reading each full `answer`; failed/timeout/requires_approval results leave the related todo pending).
 - [x] Planning phase prompt left unchanged so it does not encourage dispatch during plan creation/editing.
 - [x] Prompt-invariant tests added in `tests/test_planning_subagents.py`: executing phase mentions `dispatch_subagents`, planning phase does not, the prompt says workers cannot mutate todos, and the prompt says the supervisor must reconcile with `write_todos`.
 
@@ -607,7 +610,7 @@ Design decisions:
 
 - [x] `_planning_node` now binds a schema-only `dispatch_subagents` tool via `_build_planning_internal_tools(state)` and threads it into `planning_agent.invoke_model_with_history(...)` as `internal_tools`. It does not construct an executable dispatcher during schema binding.
 - [x] `_planning_tools_node` only constructs and injects the executable dispatch tool when the AI message actually contains a `dispatch_subagents` call. The planning agent's resulting `dispatch_subagents` tool call is treated like any other external tool call: it goes through `_execute_agent_tool_calls`, which produces a normal `ToolMessage` for the next planning model call to read.
-- [x] Dispatch tool stashes a compact summary on `state["context"]["subagent_dispatches"]` (per-call: rationale, task ids, agents, aggregate status) and compact per-result entries on `state["context"]["subagent_results"]`. Both the model-facing JSON and final metadata omit nested worker artifacts/images.
+- [x] Dispatch tool returns model-facing JSON with each worker's full `answer` plus compact `summary`, and stashes compact activity metadata on `state["context"]["subagent_dispatches"]` / `state["context"]["subagent_results"]`. Final metadata omits the full `answer` and nested worker artifacts/images.
 - [x] The top-level `dispatch_subagents` tool artifact remains available through the existing `tool_artifacts` pipeline for UI activity rendering; nested worker artifacts are not copied into subagent result payloads.
 - [x] Graph integration test `test_planning_tools_node_executes_dispatch_subagents` verifies the end-to-end path: dispatch tool call → executed → ToolMessage in state → context summaries populated → both worker prompts dispatched.
 
@@ -635,7 +638,7 @@ rtk pytest tests/test_router.py tests/test_rag_agent.py tests/test_rag_tool_loop
 
 ### Phase 8: Review Hardening — DONE 2026-05-12
 
-- [x] Removed nested worker artifacts/images from `PlanningSubagentResult` outputs. `dispatch_subagents` now returns compact result JSON to the Planning Agent and stores compact `subagent_results` in graph context/final metadata.
+- [x] Removed nested worker artifacts/images from `PlanningSubagentResult` outputs. `dispatch_subagents` now returns full worker answers to the Planning Agent and stores compact `subagent_results` in graph context/final metadata.
 - [x] Changed Planning binding to use a schema-only dispatch tool so `_planning_node` does not allocate an executable dispatcher just to expose the tool schema.
 - [x] Gated executable dispatch-tool construction in `_planning_tools_node` on the presence of a `dispatch_subagents` call. `write_todos`-only turns no longer build the dispatcher.
 - [x] Reused each generic worker's execution `tool_map` across iterations, letting `execute_tool_calls(...)` keep `tool_search` refreshes in-place for follow-up worker tool calls.
@@ -654,7 +657,7 @@ rtk pytest tests/test_router.py tests/test_rag_agent.py tests/test_rag_tool_loop
 - [x] Removed `planning_subagents_max_tasks` validation from `DispatchSubagentsInput`.
 - [x] Removed subagent-specific per-worker `asyncio.wait_for(...)` from the dispatcher. Underlying provider/tool `asyncio.TimeoutError` is still normalized to a `timeout` worker result.
 - [x] Removed subagent-specific worker iteration caps from generic and RAG isolated worker loops.
-- [x] Kept model-facing summary sizing on the existing generic `tool_result_max_chars` setting so dispatch output follows the same context-budget safety rule as other tool results.
+- [x] Stopped applying `tool_result_max_chars` and generic tool-result offload to subagent worker answers. The Planning Agent receives each full `answer`; the compact `summary` remains activity metadata only.
 - [x] Updated the Planning prompt to keep dispatch calls focused instead of referring to an oversized-batch rejection rule.
 - [x] Updated README and this plan to reflect Planning-mode availability and the removal of subagent-specific config caps.
 - [x] Verification:
@@ -893,7 +896,7 @@ Design decisions:
 - [ ] Parent graph messages do not include worker intermediate messages.
 - [ ] Worker calls carry user/device/conversation context for scoped tool access.
 - [ ] Worker calls do not receive the parent's rolling `history_summary`.
-- [ ] `dispatch_subagents` model-facing JSON and `subagent_results` metadata omit nested worker artifacts/images.
+- [ ] `dispatch_subagents` model-facing JSON includes full worker `answer`; `subagent_results` metadata omits full `answer` and nested worker artifacts/images.
 - [ ] `_planning_tools_node` does not construct the executable dispatcher when no `dispatch_subagents` call exists.
 - [ ] Worker tool maps are reused across iterations so `tool_search` refreshes remain available to follow-up tool calls.
 - [ ] RAG workers execute their local `search_documents` loop before returning a final answer.
@@ -920,7 +923,7 @@ Mitigation: preserve existing scoping by `conversation_id`, `agent_key`, `device
 
 Risk: subagent output bloats the Planning Agent context.
 
-Mitigation: use the existing generic tool-result size control for model-facing summaries and omit nested worker artifacts/images from both the model-facing dispatch JSON and persisted `subagent_results` metadata. Keep only the top-level `dispatch_subagents` artifact/render payload for UI activity.
+Mitigation: hand the full worker `answer` to the Planning Agent, prompt workers to be concise but detail-rich, keep `summary` as compact activity metadata, and omit nested worker artifacts/images from both the model-facing dispatch JSON and persisted `subagent_results` metadata. Keep only the top-level `dispatch_subagents` artifact/render payload for UI activity.
 
 Risk: Planning Agent over-dispatches trivial work.
 

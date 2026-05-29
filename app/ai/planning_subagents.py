@@ -3,7 +3,7 @@
 This module implements the supervisor-side primitive that lets the Planning
 Agent fan out *independent* worker tasks to existing graph agents inside
 the same chat turn. Workers run concurrently, each in an isolated execution
-context, and only structured summaries are returned to the Planning Agent
+context, and structured worker answers are returned to the Planning Agent
 through the ``dispatch_subagents`` tool.
 
 The dispatcher is **NOT** a generic parallel tool runner: it is a
@@ -206,6 +206,13 @@ class PlanningSubagentResult(BaseModel):
     status: Literal["completed", "failed", "timeout", "requires_approval"]
     elapsed_ms: int
     summary: str
+    answer: str = Field(
+        default="",
+        description=(
+            "Full worker answer handed back to the Planning supervisor. This "
+            "is not substring-truncated by the subagent dispatcher."
+        ),
+    )
     related_todo_ids: list[str] = Field(default_factory=list)
     error: str | None = None
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
@@ -325,19 +332,40 @@ def build_worker_model_request(
 
 
 _TRUNCATION_NOTICE = "\n…[truncated]"
+_ACTIVITY_SUMMARY_MAX_CHARS = 1200
+
+_SUBAGENT_RESPONSE_CONTRACT = """
+
+Response contract:
+- Return a complete answer the Planning Agent can directly use.
+- Be concise but detail-rich: include concrete findings, file paths, commands,
+  source links, decisions, and blockers that matter.
+- Prefer short sections or bullets. Avoid filler.
+- Do not dump raw logs, raw tool output, or large artifacts unless the task
+  explicitly asks for them; synthesize the result and cite the important ids,
+  paths, or source references instead.
+""".strip()
 
 
 def _truncate_summary(text: str, max_chars: int) -> str:
     if max_chars <= 0:
-        return ""
+        return text
     if len(text) <= max_chars:
         return text
     keep = max(0, max_chars - len(_TRUNCATION_NOTICE))
     return text[:keep] + _TRUNCATION_NOTICE
 
 
-def _compact_result_payload(result: PlanningSubagentResult) -> dict[str, Any]:
-    """Return the model/UI activity payload without nested worker artifacts.
+def _activity_summary_from_answer(answer: str) -> str:
+    return _truncate_summary(answer.strip(), _ACTIVITY_SUMMARY_MAX_CHARS)
+
+
+def _result_payload(
+    result: PlanningSubagentResult,
+    *,
+    include_answer: bool,
+) -> dict[str, Any]:
+    """Return a result payload without nested worker artifacts.
 
     ``requested_model``/``resolved_model`` are kept so the supervisor (and the
     UI) can see exactly which model answered each worker, but the underlying
@@ -345,9 +373,13 @@ def _compact_result_payload(result: PlanningSubagentResult) -> dict[str, Any]:
     cannot leak here.
     """
 
+    excluded = {"artifacts", "images"}
+    if not include_answer:
+        excluded.add("answer")
+
     return result.model_dump(
         mode="json",
-        exclude={"artifacts", "images"},
+        exclude=excluded,
         exclude_none=True,
     )
 
@@ -355,7 +387,7 @@ def _compact_result_payload(result: PlanningSubagentResult) -> dict[str, Any]:
 def _compact_dispatch_payload(result: DispatchSubagentsResult) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "status": result.status,
-        "results": [_compact_result_payload(entry) for entry in result.results],
+        "results": [_result_payload(entry, include_answer=True) for entry in result.results],
     }
     if result.rationale is not None:
         payload["rationale"] = result.rationale
@@ -374,6 +406,7 @@ def _build_task_prompt(task: PlanningSubagentTask) -> str:
             ctx_json = str(task.context)
         parts.append("\nContext (JSON):")
         parts.append(ctx_json)
+    parts.append("\n" + _SUBAGENT_RESPONSE_CONTRACT)
     return "\n".join(parts).strip()
 
 
@@ -431,9 +464,6 @@ class PlanningSubagentDispatcher:
         self._workflow = workflow
         self._settings = settings or global_settings
 
-    def _result_max_chars(self) -> int:
-        return int(getattr(self._settings, "tool_result_max_chars", 0) or 0)
-
     async def dispatch(
         self,
         request: DispatchSubagentsInput,
@@ -453,13 +483,12 @@ class PlanningSubagentDispatcher:
     ) -> PlanningSubagentResult:
         """Run a single worker, converting exceptions/timeouts into structured results."""
         wall_start = time.perf_counter()
-        max_chars = self._result_max_chars()
 
         requested_model = _summarize_requested_model(task.model_override)
 
         def _result(
             status: Literal["completed", "failed", "timeout", "requires_approval"],
-            summary: str,
+            answer: str,
             error: str | None = None,
             artifacts: list[dict[str, Any]] | None = None,
             resolved_model: dict[str, Any] | None = None,
@@ -469,7 +498,8 @@ class PlanningSubagentDispatcher:
                 agent=task.agent,
                 status=status,
                 elapsed_ms=int((time.perf_counter() - wall_start) * 1000),
-                summary=_truncate_summary(summary, max_chars),
+                summary=_activity_summary_from_answer(answer),
+                answer=answer,
                 related_todo_ids=list(task.related_todo_ids),
                 error=error,
                 artifacts=list(artifacts or []),
@@ -539,6 +569,8 @@ _DISPATCH_TOOL_DESCRIPTION = (
     "Dispatch independent worker tasks to other graph agents during PLANNING "
     "execution. Workers run in parallel and the call blocks until every "
     "worker completes, fails, times out, or signals it needs human approval. "
+    "Each result returns a full worker `answer` for supervisor reconciliation "
+    "plus a compact `summary` for activity display. "
     "Workers receive their own isolated context — they do NOT see the "
     "Planning Agent's chat history and they CANNOT update todos directly. "
     "After this tool returns, the Planning Agent must read each result and "
@@ -612,7 +644,7 @@ def create_dispatch_subagents_tool(
 
             results_log = list(context.get("subagent_results") or [])
             for entry in result.results:
-                results_log.append(_compact_result_payload(entry))
+                results_log.append(_result_payload(entry, include_answer=False))
             context["subagent_results"] = results_log
 
             # Surface worker tool artifacts in the UI activity panel without

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 TOOL_LOADING_TOOLS = {"tool_search"}
 _WIDGET_ARTIFACT_TOOLS = {"widget_create", "widget_update"}
 _WIDGET_SESSION_BOUND_TOOLS = {"widget_create", "session_list_widgets"}
+_FULL_MODEL_HANDOFF_TOOLS = {"dispatch_subagents"}
 
 # Render-type values that should never produce a public tool_render candidate.
 # Live-widget renders have a dedicated `widget:<id>` candidate; error/text/json
@@ -369,6 +370,11 @@ def _apply_offload_to_outputs_and_artifacts(
     }
 
     for output in outputs:
+        # The Planning supervisor must receive complete worker answers from
+        # dispatch_subagents; replacing that ToolMessage with a blob preview
+        # would hide the result it needs to reconcile todos.
+        if output.get("name") in _FULL_MODEL_HANDOFF_TOOLS:
+            continue
         tool_call_id = output.get("tool_call_id")
         public_text, blob_info = apply_tool_output_offload(
             output_text=output.get("content"),

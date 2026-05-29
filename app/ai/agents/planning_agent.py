@@ -192,10 +192,11 @@ class PlanningAgent(BaseAgent):
                 - Keep dispatch calls focused: include only the independent
                   worker tasks needed for the current step.
                 - Workers CANNOT mutate todos. After the call returns, read
-                  each `summary` and call `write_todos` (complete or update)
-                  for related todos. If a result is `failed`, `timeout`, or
-                  `requires_approval`, leave the todo pending and explain the
-                  blocker in your reply.
+                  each `answer` (the full worker answer; `summary` is only
+                  the compact activity preview) and call `write_todos`
+                  (complete or update) for related todos. If a result is
+                  `failed`, `timeout`, or `requires_approval`, leave the todo
+                  pending and explain the blocker in your reply.
                 - You are the only actor allowed to call `write_todos`.
 
                 ### Task fields — required shapes

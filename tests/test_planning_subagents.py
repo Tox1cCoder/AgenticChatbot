@@ -209,6 +209,47 @@ def test_planning_subagent_task_rejects_obviously_bad_context_type():
         )
 
 
+def test_dispatch_subagents_output_is_not_offloaded_before_supervisor_reads_answer():
+    from app.ai.tool_execution import _apply_offload_to_outputs_and_artifacts
+
+    class _FakeOffloadService:
+        threshold_chars = 10
+
+        def offload_if_large(self, **kwargs):
+            return {
+                "blob_id": "blob-1",
+                "size_bytes": len(kwargs["output_text"].encode("utf-8")),
+                "output": "preview only\n\n[Output offloaded]",
+            }
+
+    full_handoff = '{"results":[{"id":"w1","answer":"' + ("detail " * 50) + '"}]}'
+    outputs = [
+        {
+            "tool_call_id": "dispatch-1",
+            "name": "dispatch_subagents",
+            "content": full_handoff,
+        }
+    ]
+    artifacts = [
+        {
+            "tool_call_id": "dispatch-1",
+            "tool": "dispatch_subagents",
+            "output": full_handoff[:1000],
+        }
+    ]
+
+    _apply_offload_to_outputs_and_artifacts(
+        outputs=outputs,
+        artifacts=artifacts,
+        conversation_id="00000000-0000-0000-0000-000000000001",
+        user_id="00000000-0000-0000-0000-000000000002",
+        offload_service=_FakeOffloadService(),
+    )
+
+    assert outputs[0]["content"] == full_handoff
+    assert "blob_id" not in artifacts[0]
+
+
 # ---------------------------------------------------------------------------
 # Aggregate status logic
 # ---------------------------------------------------------------------------
@@ -475,11 +516,13 @@ async def test_dispatcher_does_not_apply_subagent_specific_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_truncates_summary_to_configured_size(monkeypatch):
+async def test_dispatcher_returns_full_answer_despite_tool_result_budget(monkeypatch):
     monkeypatch.setattr(settings, "tool_result_max_chars", 100)
 
+    long_answer = "x" * 10_000
+
     async def runner(**kwargs):
-        return _ok_response("x" * 10_000)
+        return _ok_response(long_answer)
 
     workflow = _StubWorkflow(runner)
     dispatcher = PlanningSubagentDispatcher(workflow=workflow, settings=settings)
@@ -495,7 +538,70 @@ async def test_dispatcher_truncates_summary_to_configured_size(monkeypatch):
     )
 
     result = await dispatcher.dispatch(request, parent_state={})
-    assert len(result.results[0].summary) <= 100
+    assert result.results[0].answer == long_answer
+    assert result.results[0].summary
+    assert len(result.results[0].summary) < len(long_answer)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tool_returns_full_answer_but_stashes_compact_activity(monkeypatch):
+    monkeypatch.setattr(settings, "tool_result_max_chars", 100)
+
+    long_answer = "full worker answer " + ("detail " * 2000)
+
+    async def runner(**kwargs):
+        return _ok_response(long_answer)
+
+    workflow = _StubWorkflow(runner)
+    dispatcher = PlanningSubagentDispatcher(workflow=workflow, settings=settings)
+    parent_state: dict[str, Any] = {}
+    tool = create_dispatch_subagents_tool(
+        dispatcher=dispatcher,
+        parent_state_provider=lambda: parent_state,
+    )
+
+    result_json = await tool.ainvoke({"tasks": [_valid_task("w1", "chat_agent")]})
+    parsed = json.loads(result_json)
+
+    assert parsed["results"][0]["answer"] == long_answer
+    assert parsed["results"][0]["summary"]
+    assert len(parsed["results"][0]["summary"]) < len(long_answer)
+
+    activity_result = parent_state["context"]["subagent_results"][0]
+    assert "answer" not in activity_result
+    assert activity_result["summary"] == parsed["results"][0]["summary"]
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_adds_concise_detail_rich_worker_prompt_contract(monkeypatch):
+    monkeypatch.setattr(settings, "tool_result_max_chars", 6000)
+
+    captured: dict[str, str] = {}
+
+    async def runner(**kwargs):
+        captured["task_prompt"] = kwargs["task_prompt"]
+        return _ok_response("done")
+
+    workflow = _StubWorkflow(runner)
+    dispatcher = PlanningSubagentDispatcher(workflow=workflow, settings=settings)
+
+    await dispatcher.dispatch(
+        DispatchSubagentsInput(
+            tasks=[
+                PlanningSubagentTask(
+                    id="w1",
+                    agent=PlanningSubagentName.CHAT_AGENT,
+                    task="Inspect the implementation and report the best fix",
+                )
+            ]
+        ),
+        parent_state={},
+    )
+
+    prompt = captured["task_prompt"].lower()
+    assert "concise but detail-rich" in prompt
+    assert "complete answer" in prompt
+    assert "raw logs" in prompt
 
 
 @pytest.mark.asyncio
@@ -504,9 +610,8 @@ async def test_dispatcher_keeps_worker_artifacts_for_ui_but_not_in_model_json(mo
 
     The dispatcher captures every worker's tool_artifacts on the
     ``PlanningSubagentResult`` so the Streamlit UI can expand them per worker.
-    The model-facing JSON (and the ``subagent_results`` context entries built
-    from ``_compact_result_payload``) must still omit those nested artifacts to
-    keep supervisor prompts compact.
+    The model-facing JSON must still omit nested artifacts/images, while
+    ``subagent_results`` context entries keep only the compact activity fields.
     """
     monkeypatch.setattr(settings, "tool_result_max_chars", 6000)
 
@@ -542,13 +647,16 @@ async def test_dispatcher_keeps_worker_artifacts_for_ui_but_not_in_model_json(mo
     model_json = await tool.ainvoke(payload)
     parsed = json.loads(model_json)
 
-    # Model context: compact, no artifacts/images leaked.
+    # Model context: full answer is handed off, no artifacts/images leaked.
+    assert parsed["results"][0]["answer"] == "worker summary"
     assert parsed["results"][0]["summary"] == "worker summary"
     assert "artifacts" not in parsed["results"][0]
     assert "images" not in parsed["results"][0]
 
-    # subagent_results in context is built from the same compact payload.
-    assert parent_state["context"]["subagent_results"][0].get("artifacts") in (None, [])
+    # subagent_results in context stays compact for final metadata/UI activity.
+    activity_result = parent_state["context"]["subagent_results"][0]
+    assert "answer" not in activity_result
+    assert activity_result.get("artifacts") in (None, [])
 
     # subagent_worker_artifacts in context carries the full artifact list so
     # the UI activity panel can render them under each worker.
@@ -595,6 +703,7 @@ async def test_dispatch_subagents_tool_returns_valid_json_string(monkeypatch):
         assert entry["status"] in ("completed", "failed", "timeout", "requires_approval")
         assert "elapsed_ms" in entry
         assert "summary" in entry
+        assert "answer" in entry
         assert "agent" in entry
 
 
@@ -633,12 +742,14 @@ async def test_dispatch_subagents_tool_stashes_compact_results_without_artifacts
     )
 
     parsed = json.loads(result_json)
+    assert parsed["results"][0]["answer"] == "done"
     assert parsed["results"][0]["summary"] == "done"
     assert "artifacts" not in parsed["results"][0]
     assert "images" not in parsed["results"][0]
 
     context_results = parent_state["context"]["subagent_results"]
     assert context_results[0]["summary"] == "done"
+    assert "answer" not in context_results[0]
     assert "artifacts" not in context_results[0]
     assert "images" not in context_results[0]
 
@@ -799,6 +910,21 @@ def test_planning_prompt_says_supervisor_must_reconcile_with_write_todos():
     lowered = prompt.lower()
     assert "supervisor" in lowered or "only actor allowed to call" in lowered
     assert "write_todos" in prompt
+
+
+def test_planning_prompt_reads_full_subagent_answer_not_summary_only():
+    agent = _make_planning_agent_for_prompt()
+    prompt = agent._build_system_prompt(
+        persona=None,
+        has_tool_context=False,
+        todos=[],
+        current_task_index=0,
+        planning_phase="executing",
+    )
+    lowered = prompt.lower()
+    normalized = " ".join(lowered.split())
+    assert "read each `answer`" in normalized or "read each answer" in normalized
+    assert "full worker answer" in normalized
 
 
 def test_planning_prompt_clarifies_context_shape():
