@@ -132,26 +132,54 @@ def _normalize_lookup_names(skills: list[ResolvedSkill]) -> list[ResolvedSkill]:
     return normalized
 
 
+def _ref_matches_skill(ref: dict[str, Any], skill: ResolvedSkill) -> bool:
+    if str(ref.get("source") or "") != skill.source:
+        return False
+    lookup_name = ref.get("lookup_name")
+    name = ref.get("name")
+    return skill.lookup_name in (lookup_name, name) or skill.name in (lookup_name, name)
+
+
+def filter_skills_by_refs(
+    skills: list[ResolvedSkill],
+    allowed_skill_refs: list[dict[str, Any]] | None,
+) -> list[ResolvedSkill]:
+    """Restrict skills to a custom agent's selected refs (no-op when None)."""
+    if allowed_skill_refs is None:
+        return skills
+    return [s for s in skills if any(_ref_matches_skill(ref, s) for ref in allowed_skill_refs)]
+
+
 def list_resolved_skills(
     *,
     user_id: str | None,
     device_id: str | None,
+    allowed_skill_refs: list[dict[str, Any]] | None = None,
 ) -> list[ResolvedSkill]:
-    """Return all runtime-visible skills for this execution scope."""
+    """Return all runtime-visible skills for this execution scope.
+
+    When ``allowed_skill_refs`` is provided (custom agents), the result is
+    restricted to skills matching one of the selected refs.
+    """
     combined = _list_server_skills()
     combined.extend(_list_client_skills(user_id=user_id, device_id=device_id))
     normalized = _normalize_lookup_names(combined)
-    return sorted(normalized, key=lambda item: item.lookup_name.lower())
+    restricted = filter_skills_by_refs(normalized, allowed_skill_refs)
+    return sorted(restricted, key=lambda item: item.lookup_name.lower())
 
 
 def get_available_skill_summaries(
     *,
     user_id: str | None,
     device_id: str | None,
+    allowed_skill_refs: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return prompt-safe skill summaries for the active request scope."""
     return [
-        skill.to_summary() for skill in list_resolved_skills(user_id=user_id, device_id=device_id)
+        skill.to_summary()
+        for skill in list_resolved_skills(
+            user_id=user_id, device_id=device_id, allowed_skill_refs=allowed_skill_refs
+        )
     ]
 
 
@@ -160,9 +188,12 @@ def resolve_skill_reference(
     skill_name: str,
     user_id: str | None,
     device_id: str | None,
+    allowed_skill_refs: list[dict[str, Any]] | None = None,
 ) -> tuple[ResolvedSkill | None, str | None]:
     """Resolve a model-selected skill name to one explicit skill source."""
-    available_skills = list_resolved_skills(user_id=user_id, device_id=device_id)
+    available_skills = list_resolved_skills(
+        user_id=user_id, device_id=device_id, allowed_skill_refs=allowed_skill_refs
+    )
     available_names = [skill.lookup_name for skill in available_skills]
 
     exact_lookup_match = next(

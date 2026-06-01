@@ -107,6 +107,7 @@ class MessageService(IMessageService):
         task_plan_service: ITaskPlanService | None = None,
         summary_repository: Any | None = None,
         conversation_summarizer: Any | None = None,
+        custom_agent_service: Any | None = None,
     ):
         self.repository = message_repository
         self.conversation_validation_utils = conversation_validation_utils
@@ -117,6 +118,8 @@ class MessageService(IMessageService):
         self.task_plan_service = task_plan_service
         self.summary_repository = summary_repository
         self.conversation_summarizer = conversation_summarizer
+        # Resolves attached custom agents into workflow state each user turn.
+        self.custom_agent_service = custom_agent_service
         self.redis_client = self._init_redis_client()
         # Coalesces concurrent summary refreshes per conversation. ``_pending``
         # holds the latest (user_id, through_message_id) tuple for an
@@ -903,7 +906,9 @@ class MessageService(IMessageService):
                     if event_type == "agent_selected":
                         inflight.selected_agent = event.get("agent")
                         inflight.touch()
-                        yield {"type": "agent_selected", "agent": event.get("agent")}
+                        yield self._agent_selected_event(
+                            event.get("agent"), workflow_request.custom_agents
+                        )
 
                     elif event_type == "token":
                         token_content = event.get("content", "")
@@ -991,10 +996,13 @@ class MessageService(IMessageService):
                                 tool_artifacts=stream_tool_artifacts or None,
                             ).model_dump(mode="json"),
                         }
-                        # Workflow is paused - don't create a bot message yet
+                        # Workflow is paused - don't create a bot message yet.
+                        # Keep the entry as a paused lock token (carrying the
+                        # resolved selected_agent) so a custom agent cannot be
+                        # edited/deleted/detached while this run can still resume.
                         _cancel_title_task()
                         inflight.resolve()
-                        registry.remove(user_message_id)
+                        registry.mark_paused(user_message_id)
                         return
 
                     elif event_type == "continuation_start":
@@ -1501,6 +1509,9 @@ class MessageService(IMessageService):
         user_id, persona = self._get_conversation_context(conversation_id, user_id)
         sanitized_persona = sanitize_persona(persona)
 
+        # Reload/validate the custom-agent map before resuming.
+        self._revalidate_resume_custom_agent(user_id, conversation_id)
+
         self._audit_interrupt_resume_decisions(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -1523,7 +1534,10 @@ class MessageService(IMessageService):
                 event_type = event.get("type")
 
                 if event_type == "agent_selected":
-                    yield {"type": "agent_selected", "agent": event.get("agent")}
+                    yield self._agent_selected_event(
+                        event.get("agent"),
+                        self._resolve_custom_agents_state(user_id, conversation_id),
+                    )
 
                 elif event_type == "token":
                     token_content = event.get("content", "")
@@ -1657,6 +1671,11 @@ class MessageService(IMessageService):
                     bot_message_persisted = True
                     await self._compact_checkpoint_after_persist(thread_id=thread_id)
 
+                    # Resume resolved the paused run — release its lock token.
+                    get_generation_registry().clear_paused_for_conversation(
+                        user_id, conversation_id
+                    )
+
                     yield {
                         "type": "complete",
                         "message": bot_message.model_dump(mode="json"),
@@ -1665,6 +1684,9 @@ class MessageService(IMessageService):
 
                 elif event_type == "error":
                     self._clear_redis_interrupt(conversation_id, interrupt_id)
+                    get_generation_registry().clear_paused_for_conversation(
+                        user_id, conversation_id
+                    )
 
                     error_msg = event.get("error", UNKNOWN_ERROR)
                     error_message = self._create_bot_response_message(
@@ -2041,6 +2063,9 @@ class MessageService(IMessageService):
             ),
         )
         attachments, model_request = self._extract_message_execution_inputs(message_create_data)
+        custom_agents_state = self._resolve_custom_agents_state(
+            resolved_user_id, message_create_data.conversation_id
+        )
         request = WorkflowExecutionRequest(
             message=message_create_data.content,
             conversation_id=str(message_create_data.conversation_id),
@@ -2050,6 +2075,7 @@ class MessageService(IMessageService):
             attachments=attachments,
             model_request=model_request,
             planning=planning_context,
+            custom_agents=custom_agents_state,
             user_message_id=str(user_message_id) if user_message_id else None,
             assistant_message_id=(str(assistant_message_id) if assistant_message_id else None),
             inline_rich_response_v1=bool(
@@ -2057,6 +2083,78 @@ class MessageService(IMessageService):
             ),
         )
         return resolved_user_id, sanitized_persona, request
+
+    def _resolve_custom_agents_state(
+        self, owner_id: UUID | None, conversation_id: UUID | None
+    ) -> dict[str, Any]:
+        """Resolve attached custom agents into the workflow ``custom_agents`` map.
+
+        Best-effort: returns ``{}`` when no service is wired or none are
+        attached, preserving all behavior for conversations without custom
+        agents. Used by streaming, non-streaming, and AI SDK paths alike since
+        they all build the request through this method.
+        """
+        service = getattr(self, "custom_agent_service", None)
+        if service is None or not owner_id or not conversation_id:
+            return {}
+        try:
+            return service.build_runtime_state(owner_id, conversation_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.warning("Failed to resolve custom agents for conversation: %s", exc)
+            return {}
+
+    @staticmethod
+    def _agent_selected_event(
+        agent: str | None, custom_agents: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Build an agent_selected event, adding ``agent_name`` for custom agents.
+
+        Consumers that only read the raw ``agent`` field are unaffected.
+        """
+        event: dict[str, Any] = {"type": "agent_selected", "agent": agent}
+        if isinstance(custom_agents, dict) and agent in custom_agents:
+            entry = custom_agents.get(agent)
+            name = entry.get("name") if isinstance(entry, dict) else None
+            if name:
+                event["agent_name"] = name
+        return event
+
+    def _revalidate_resume_custom_agent(
+        self, owner_id: UUID | None, conversation_id: UUID
+    ) -> None:
+        """Fail resume if a paused run's selected custom agent is gone.
+
+        A paused HITL run carries its selected runtime agent. If that custom
+        agent has since been deleted or detached, the run can no longer resume
+        with the same identity — surface a clear conflict instead of silently
+        running with stale config.
+        """
+        if getattr(self, "custom_agent_service", None) is None or not owner_id:
+            return
+        from app.ai.custom_agent_runtime import is_custom_runtime_id
+
+        registry = get_generation_registry()
+        paused = [e for e in registry.find_by_conversation(conversation_id) if e.paused]
+        if not paused:
+            return
+        attached = set(
+            self._resolve_custom_agents_state(owner_id, conversation_id).keys()
+        )
+        for entry in paused:
+            selected = entry.selected_agent
+            if (
+                selected
+                and is_custom_runtime_id(selected)
+                and selected not in attached
+            ):
+                raise CustomHTTPException(
+                    status_code=409,
+                    detail=(
+                        "The custom agent for this paused conversation is no longer "
+                        "attached and cannot be resumed."
+                    ),
+                    error_code="CUSTOM_AGENT_RESUME_CONFLICT",
+                )
 
     async def _execute_user_message_workflow(
         self,

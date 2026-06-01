@@ -285,6 +285,21 @@ class PlanningAgent(BaseAgent):
         if todos:
             prompt += "\n\n" + self._format_todos_context(todos, current_task_index)
 
+        custom_workers = kwargs.get("custom_workers")
+        if custom_workers:
+            worker_lines = []
+            for worker in custom_workers:
+                runtime_id = worker.get("runtime_agent_id")
+                name = worker.get("name") or runtime_id
+                description = (worker.get("description") or "").strip()
+                worker_lines.append(f'- {runtime_id} (name: "{name}"): {description}')
+            prompt += (
+                "\n\n## Custom worker agents available to dispatch_subagents\n"
+                "In addition to base workers, you may dispatch to these attached "
+                "custom agents by using their runtime id as the task `agent`:\n"
+                + "\n".join(worker_lines)
+            )
+
         return prompt
 
     def _format_todos_context(

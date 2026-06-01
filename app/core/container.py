@@ -31,6 +31,7 @@ from app.repositories.conversation import ConversationRepository
 from app.repositories.conversation_memory_summary import (
     ConversationMemorySummaryRepository,
 )
+from app.repositories.custom_agent import CustomAgentRepository
 from app.repositories.document import DocumentRepository
 from app.repositories.document_chunk import DocumentChunkRepository
 from app.repositories.document_image import DocumentImageRepository
@@ -47,11 +48,13 @@ from app.repositories.user_memory import UserMemoryRepository
 from app.services.ai_service import AIService
 from app.services.auth_service import AuthService
 from app.services.conversation_service import ConversationService
+from app.services.custom_agent_service import CustomAgentService
 from app.services.document_chunk_builder import DocumentChunkBuilder
 from app.services.document_index_service import DocumentIndexService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
 from app.services.feedback_service import FeedbackService
+from app.services.generation_registry import get_generation_registry
 from app.services.jwt_service import JwtService
 from app.services.mcp_service import MCPService
 from app.services.message_service import MessageService
@@ -81,6 +84,7 @@ class Container(containers.DeclarativeContainer):
             "app.api.auth",
             "app.api.users",
             "app.api.conversations",
+            "app.api.custom_agents",
             "app.api.messages",
             "app.api.feedback",
             "app.api.documents",
@@ -172,6 +176,11 @@ class Container(containers.DeclarativeContainer):
 
     conversation_repository = providers.Factory(
         ConversationRepository,
+        session_factory=db.provided.session,
+    )
+
+    custom_agent_repository = providers.Factory(
+        CustomAgentRepository,
         session_factory=db.provided.session,
     )
 
@@ -356,6 +365,17 @@ class Container(containers.DeclarativeContainer):
         checkpoint_manager=checkpoint_manager,
     )
 
+    # Custom agents (per-user, per-conversation). generation_registry is the
+    # module-level singleton so locks see the same in-flight/paused entries the
+    # streaming and resume paths register.
+    custom_agent_service = providers.Factory(
+        CustomAgentService,
+        repository=custom_agent_repository,
+        conversation_validation_utils=conversation_validation_utils,
+        model_config_service=model_config_service,
+        generation_registry=providers.Callable(get_generation_registry),
+    )
+
     planning_runtime_service: providers.Provider[IPlanningRuntimeService] = providers.Factory(
         PlanningRuntimeAdapter,
         planning_agent=planning_agent,
@@ -381,6 +401,7 @@ class Container(containers.DeclarativeContainer):
         task_plan_service=task_plan_service,
         summary_repository=conversation_memory_summary_repository,
         conversation_summarizer=conversation_summarizer,
+        custom_agent_service=custom_agent_service,
     )
 
     feedback_service: providers.Provider[IFeedbackService] = providers.Factory(

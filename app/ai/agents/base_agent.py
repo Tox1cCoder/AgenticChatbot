@@ -60,6 +60,9 @@ _MODEL_REQUEST_SUPPORTED_AGENT_KEYS = {
     "planning",
     "canvas",
     "image_generator",
+    # Custom agents resolve their model through the generic "custom" key with a
+    # per-agent request override; not a persistable agent_model_configs entry.
+    "custom",
 }
 
 # Provider-agnostic reasoning effort levels accepted by SubagentModelOverride.
@@ -194,6 +197,10 @@ class BaseAgent(ABC):
         runtime_model_resolver: IRuntimeModelResolver | None = None,
     ):
         self.agent_config_key = agent_config_key
+        # Key used for deferred/loaded tool state. Defaults to the model config
+        # key; custom agents override it to their runtime id (custom_agent:<uuid>)
+        # so multiple custom agents in one conversation never share tool state.
+        self.tool_state_key = agent_config_key
         self.model_name = model_name or AGENT_CONFIG[agent_config_key]["model"]
         self.runtime_model_resolver = runtime_model_resolver
         self.gemini_client = None
@@ -454,7 +461,7 @@ class BaseAgent(ABC):
             # Build deferred tool list
             tools = build_deferred_tool_list(
                 conversation_id=conversation_id,
-                agent_key=self.agent_config_key,
+                agent_key=getattr(self, "tool_state_key", None) or self.agent_config_key,
                 mcp_manager=None if client_only_scope else self.mcp_manager,
                 all_mcp_tools=[] if client_only_scope else self.tools,
                 internal_tools=internal_tools,
@@ -471,7 +478,7 @@ class BaseAgent(ABC):
                     loaded.tool_name
                     for loaded in get_deferred_tool_state().get_loaded_client_tools(
                         conversation_id,
-                        self.agent_config_key,
+                        getattr(self, "tool_state_key", None) or self.agent_config_key,
                         device_id=str(device_id) if device_id else None,
                         session_id=(
                             active_session.session_id if active_session is not None else None
@@ -1130,6 +1137,8 @@ class BaseAgent(ABC):
                 role=MessageRole.ASSISTANT, content=response_text, tool_calls=tool_calls
             )
 
+            self._augment_response_metadata(metadata)
+
             return AgentResponse(
                 agent_type=self.agent_type,
                 agent_id=self.agent_id,
@@ -1144,6 +1153,14 @@ class BaseAgent(ABC):
                 conversation_id=conversation_id,
                 error=str(e),
             )
+
+    def _augment_response_metadata(self, metadata: dict[str, Any]) -> None:
+        """Hook for subclasses to inject extra response metadata.
+
+        Base agents add nothing. ``CustomAgent`` overrides this to attach
+        custom-agent identity and unavailable-tool/skill warnings.
+        """
+        return None
 
     def _build_system_prompt(
         self,
@@ -1217,9 +1234,16 @@ class BaseAgent(ABC):
         *,
         user_id: str | None = None,
         device_id: str | None = None,
+        allowed_skill_refs: list[dict[str, Any]] | None = None,
     ) -> str:
-        """Build a suffix listing active server/client skill summaries."""
-        active_skills = get_available_skill_summaries(user_id=user_id, device_id=device_id)
+        """Build a suffix listing active server/client skill summaries.
+
+        ``allowed_skill_refs`` restricts the listed skills to a custom agent's
+        selected skills (None = base-agent behavior, all skills visible).
+        """
+        active_skills = get_available_skill_summaries(
+            user_id=user_id, device_id=device_id, allowed_skill_refs=allowed_skill_refs
+        )
 
         if not active_skills:
             return ""

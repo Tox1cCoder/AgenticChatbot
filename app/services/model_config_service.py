@@ -39,6 +39,10 @@ SUPPORTED_RUNTIME_AGENT_KEYS = (
     "planning",
     "canvas",
     "image_generator",
+    # Generic custom-agent runtime key. Custom agents resolve their model via
+    # request override (provider/model from the custom_agents row); they are
+    # never persisted as agent_model_configs rows (not in SUPPORTED_AGENT_KEYS).
+    "custom",
 )
 SUPPORTED_PROVIDERS = ("gemini", "openai")
 
@@ -158,6 +162,47 @@ class ModelConfigService(IRuntimeModelResolver):
                     return model_id
 
         return fallback_model
+
+    def validate_provider_model(
+        self,
+        user_id: UUID | None,
+        provider_type: str,
+        model: str,
+        *,
+        allow_custom_model: bool = False,
+    ) -> None:
+        """Validate a (provider_type, model) selection (e.g. for a custom agent).
+
+        Applies the same provider-credential and catalog checks used for base
+        agents. Raises ``ValueError`` when the provider is unsupported or not
+        configured, or when the model is absent from the synced catalog (unless
+        ``allow_custom_model`` is set).
+        """
+        provider = (provider_type or "").strip().lower()
+        if provider not in SUPPORTED_PROVIDERS:
+            raise ValueError(
+                f"Unsupported provider '{provider_type}'. "
+                f"Supported: {', '.join(SUPPORTED_PROVIDERS)}."
+            )
+
+        model_id = (model or "").strip()
+        if not model_id:
+            raise ValueError("A model must be selected.")
+
+        snapshot = self.provider_service.get_cached_provider_status(user_id, provider)
+        if not snapshot.get("configured"):
+            raise ValueError(
+                f"Provider '{provider}' is not configured. "
+                "Configure it before saving this agent."
+            )
+
+        if model_id in self._get_catalog_model_lookup(snapshot):
+            return
+        if allow_custom_model:
+            return
+        raise ValueError(
+            f"Model '{model_id}' is not present in the current {provider} catalog."
+        )
 
     def _select_default_provider(self, provider_snapshots: Mapping[str, dict[str, Any]]) -> str:
         gemini_snapshot = provider_snapshots.get("gemini", {})

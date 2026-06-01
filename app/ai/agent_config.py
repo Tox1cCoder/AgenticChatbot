@@ -47,6 +47,13 @@ AGENT_CONFIG = {
         "model": "gemini-3.1-pro-preview",
         "temperature": 1.0,
     },
+    # Generic entry for custom agents. Per-agent provider/model/temperature come
+    # from the custom_agents row at runtime; this only supplies a display/default
+    # fallback. Custom-agent settings are never persisted in agent_model_configs.
+    "custom": {
+        "model": settings.chat_agent_model,
+        "temperature": 1.0,
+    },
     "suggestion": {
         "model": "gemini-3-flash-preview",
         "temperature": 1.0,

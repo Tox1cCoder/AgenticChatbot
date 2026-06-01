@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 
 from google import genai
 
@@ -47,8 +48,14 @@ class Router:
         has_documents: bool = False,
         planning_mode_enabled: bool = False,
         has_existing_plan: bool = False,
+        custom_agent_descriptors: list[dict] | None = None,
     ) -> str:
-        """Route a user message to the most appropriate agent via LLM."""
+        """Route a user message to the most appropriate agent via LLM.
+
+        ``custom_agent_descriptors`` carries attached custom agents
+        ({runtime_agent_id, name, description, agent_order}); their runtime ids
+        are expected to already be present in ``available_agents``.
+        """
         if not available_agents:
             return "chat_agent"
 
@@ -60,6 +67,13 @@ class Router:
         # for this, so we short-circuit deterministically.
         if planning_mode_enabled and has_existing_plan and "planning_agent" in available_agents:
             return "planning_agent"
+
+        # Deterministic override: when the user explicitly names an attached
+        # custom agent (by display name or runtime id), select it before the
+        # LLM router runs — UUID-like ids confuse the LLM.
+        explicit = self._match_explicit_custom_agent(content, custom_agent_descriptors)
+        if explicit and explicit in available_agents:
+            return explicit
 
         metadata = message.metadata or {}
         persona = metadata.get("persona")
@@ -75,6 +89,7 @@ class Router:
             has_existing_plan=has_existing_plan,
             user_id=request_user_id,
             device_id=request_device_id,
+            custom_agent_descriptors=custom_agent_descriptors,
         )
 
         selected_agent = await self._call_llm(prompt, available_agents)
@@ -120,6 +135,7 @@ class Router:
         has_existing_plan: bool,
         user_id: str | None,
         device_id: str | None,
+        custom_agent_descriptors: list[dict] | None = None,
     ) -> str:
         prompt_parts: list[str] = []
 
@@ -144,6 +160,21 @@ class Router:
         prompt_parts.append(build_runtime_time_context_block().strip())
         prompt_parts.append(ROUTER_SYSTEM_PROMPT)
 
+        if custom_agent_descriptors:
+            lines = []
+            for descriptor in sorted(
+                custom_agent_descriptors, key=lambda d: d.get("agent_order", 0)
+            ):
+                runtime_id = descriptor.get("runtime_agent_id")
+                name = descriptor.get("name") or runtime_id
+                description = (descriptor.get("description") or "").strip()
+                lines.append(f"- {runtime_id} (name: \"{name}\"): {description}")
+            prompt_parts.append(
+                "\nCustom agents attached to this conversation. To select one, "
+                "respond with its exact runtime id (custom_agent:<uuid>):\n"
+                + "\n".join(lines)
+            )
+
         active_skills = get_available_skill_summaries(user_id=user_id, device_id=device_id)
         if active_skills:
             skills_context = "\n".join(
@@ -158,6 +189,23 @@ class Router:
 
         prompt_parts.append(f"\n\nUser message: {content}")
         return "\n".join(prompt_parts)
+
+    @staticmethod
+    def _match_explicit_custom_agent(
+        content: str, descriptors: list[dict] | None
+    ) -> str | None:
+        """Return a custom runtime id when the user explicitly names it."""
+        if not content or not descriptors:
+            return None
+        lowered = content.lower()
+        for descriptor in descriptors:
+            runtime_id = descriptor.get("runtime_agent_id")
+            if runtime_id and runtime_id.lower() in lowered:
+                return runtime_id
+            name = (descriptor.get("name") or "").strip().lower()
+            if name and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", lowered):
+                return runtime_id
+        return None
 
     @staticmethod
     def _extract_agent_name(response_text: str, available_agents: list[str]) -> str | None:

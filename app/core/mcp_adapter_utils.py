@@ -236,4 +236,10 @@ def clone_mcp_tool(tool: Any, *, server_name: str | None = None) -> Any:
         server_name=server_name,
     )
     cloned_tool.args_schema = sanitize_mcp_schema(getattr(tool, "args_schema", None))
+    if server_name:
+        metadata = dict(getattr(cloned_tool, "metadata", {}) or {})
+        metadata.setdefault("tool_origin", "server_mcp")
+        metadata.setdefault("server_name", server_name)
+        metadata.setdefault("qualified_tool_id", f"{server_name}::{cloned_tool.name}")
+        cloned_tool.metadata = metadata
     return cloned_tool

@@ -33,6 +33,10 @@ class InflightEntry:
     partial_text: str = ""
     partial_thinking: str = ""
     selected_agent: str | None = None
+    # True once the run has paused on a HITL interrupt and can resume with the
+    # same ``selected_agent``. Paused entries remain in the registry so custom
+    # agent edit/delete/detach stay blocked until the run resolves.
+    paused: bool = False
     started_at: float = field(default_factory=time.monotonic)
     last_event_at: float = field(default_factory=time.monotonic)
 
@@ -42,8 +46,13 @@ class InflightEntry:
 
     def __post_init__(self) -> None:
         if self.done is None:
-            loop = asyncio.get_event_loop()
-            self.done = loop.create_future()
+            # Created inside the running event loop in production. Outside a
+            # loop (e.g. lock-only unit tests) we leave ``done`` unset; the
+            # lock queries never touch it.
+            try:
+                self.done = asyncio.get_running_loop().create_future()
+            except RuntimeError:
+                self.done = None  # type: ignore[assignment]
 
     # ------------------------------------------------------------------
     # Helpers
@@ -63,7 +72,7 @@ class InflightEntry:
 
     def resolve(self, result=None) -> None:
         """Resolve the ``done`` future if not already resolved."""
-        if not self.done.done():
+        if self.done is not None and not self.done.done():
             self.done.set_result(result)
 
 
@@ -92,13 +101,104 @@ class GenerationRegistry:
         user_message_id: UUID,
         conversation_id: UUID,
         user_id: UUID,
+        *,
+        selected_agent: str | None = None,
+        paused: bool = False,
     ) -> InflightEntry:
         """Register a new in-flight generation. Returns the entry."""
         key = str(user_message_id)
-        entry = InflightEntry(conversation_id=conversation_id, user_id=user_id)
+        entry = InflightEntry(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            selected_agent=selected_agent,
+            paused=paused,
+        )
         self._store[key] = entry
         logger.debug("Registered in-flight generation for user_message_id=%s", key)
         return entry
+
+    def mark_paused(self, user_message_id: UUID) -> InflightEntry | None:
+        """Flag an entry as paused (HITL) so it remains a lock token until resume."""
+        entry = self.get(user_message_id)
+        if entry is not None:
+            entry.paused = True
+            entry.touch()
+            logger.debug("Marked generation paused for user_message_id=%s", user_message_id)
+        return entry
+
+    def set_selected_agent(self, user_message_id: UUID, agent_id: str | None) -> None:
+        """Record the currently selected runtime agent for an entry."""
+        entry = self.get(user_message_id)
+        if entry is not None:
+            entry.selected_agent = agent_id
+            entry.touch()
+
+    # ------------------------------------------------------------------
+    # Lock queries (custom-agent edit/delete/detach gating)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _matches(left, right) -> bool:
+        return left is not None and right is not None and str(left) == str(right)
+
+    def find_by_user(self, user_id) -> list[InflightEntry]:
+        return [e for e in list(self._store.values()) if self._matches(e.user_id, user_id)]
+
+    def find_by_conversation(self, conversation_id) -> list[InflightEntry]:
+        return [
+            e
+            for e in list(self._store.values())
+            if self._matches(e.conversation_id, conversation_id)
+        ]
+
+    def is_runtime_agent_in_use(
+        self,
+        owner_id,
+        runtime_agent_id: str,
+        conversation_id=None,
+    ) -> bool:
+        """True if any active or paused generation is running ``runtime_agent_id``.
+
+        When ``conversation_id`` is supplied, also returns True if a generation
+        is active in that conversation with no resolved selected agent yet
+        (conservative gate while selected-agent metadata is unavailable).
+        """
+        for entry in list(self._store.values()):
+            if not self._matches(entry.user_id, owner_id):
+                continue
+            if self._matches(entry.selected_agent, runtime_agent_id):
+                return True
+            if (
+                conversation_id is not None
+                and self._matches(entry.conversation_id, conversation_id)
+                and not entry.selected_agent
+            ):
+                return True
+        return False
+
+    def has_active_unknown_agent_in_conversation(self, owner_id, conversation_id) -> bool:
+        """True if a generation is active in the conversation with no selected agent."""
+        for entry in list(self._store.values()):
+            if (
+                self._matches(entry.user_id, owner_id)
+                and self._matches(entry.conversation_id, conversation_id)
+                and not entry.selected_agent
+            ):
+                return True
+        return False
+
+    def clear_paused_for_conversation(self, owner_id, conversation_id) -> int:
+        """Remove paused entries for a conversation once a resume resolves them."""
+        removed = 0
+        for key, entry in list(self._store.items()):
+            if (
+                entry.paused
+                and self._matches(entry.user_id, owner_id)
+                and self._matches(entry.conversation_id, conversation_id)
+            ):
+                self._store.pop(key, None)
+                removed += 1
+        return removed
 
     def get(self, user_message_id: UUID) -> InflightEntry | None:
         """Look up an in-flight entry (returns ``None`` if expired/missing)."""

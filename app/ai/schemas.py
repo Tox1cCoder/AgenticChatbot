@@ -131,6 +131,9 @@ class WorkflowExecutionRequest(BaseModel):
     attachments: list[Any] | None = None
     model_request: dict[str, Any] | None = None
     planning: WorkflowPlanningContext = Field(default_factory=WorkflowPlanningContext)
+    # Resolved per-conversation custom agents keyed by runtime id
+    # ("custom_agent:<uuid>"). Empty preserves all existing behavior.
+    custom_agents: dict[str, Any] = Field(default_factory=dict)
     user_message_id: str | None = None
     assistant_message_id: str | None = None
 
@@ -188,6 +191,9 @@ class GraphState(TypedDict):
     selected_agent: NotRequired[str | None]
     response: NotRequired[AgentResponse | None]
     context: NotRequired[GraphContext]
+    # Per-conversation custom agents keyed by runtime id ("custom_agent:<uuid>").
+    # Absent/empty for all conversations without attached custom agents.
+    custom_agents: NotRequired[dict[str, Any] | None]
     persona: NotRequired[str | None]
     attachments: NotRequired[list[Any] | None]
     iteration_count: NotRequired[int | None]
@@ -247,6 +253,10 @@ class GraphStateView:
     def selected_agent(self) -> str | None:
         value = self._state.get("selected_agent")
         return value if isinstance(value, str) or value is None else str(value)
+
+    def custom_agents(self) -> dict[str, Any]:
+        value = self._state.get("custom_agents")
+        return value if isinstance(value, dict) else {}
 
     def iteration_count(self, default: int = 0) -> int:
         value = self._state.get("iteration_count")

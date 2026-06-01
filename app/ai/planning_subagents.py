@@ -100,7 +100,15 @@ class PlanningSubagentTask(BaseModel):
     """One independent worker task the Planning Agent wants to dispatch."""
 
     id: str = Field(..., description="Stable identifier for correlating results back to a todo.")
-    agent: PlanningSubagentName = Field(..., description="Worker agent to execute this task.")
+    agent: str = Field(
+        ...,
+        description=(
+            "Worker to execute this task: a base worker agent "
+            "(chat_agent, rag_agent, search_agent, image_generator_agent, canvas_agent) "
+            "or an attached custom agent runtime id (custom_agent:<uuid>). "
+            "planning_agent is not allowed."
+        ),
+    )
     task: str = Field(..., description="Concrete instructions for the worker.")
     related_todo_ids: list[str] = Field(
         default_factory=list,
@@ -128,6 +136,18 @@ class PlanningSubagentTask(BaseModel):
         if not value or not value.strip():
             raise ValueError("PlanningSubagentTask.id must be non-empty.")
         return value.strip()
+
+    @field_validator("agent")
+    @classmethod
+    def _agent_must_be_valid_worker(cls, value: str) -> str:
+        agent = (value or "").strip()
+        if not agent:
+            raise ValueError("PlanningSubagentTask.agent must be non-empty.")
+        if agent == "planning_agent":
+            raise ValueError(
+                "planning_agent cannot be a worker target (recursive planning is forbidden)."
+            )
+        return agent
 
     @field_validator("task")
     @classmethod
@@ -202,7 +222,7 @@ class PlanningSubagentResult(BaseModel):
     """Structured outcome of a single worker execution."""
 
     id: str
-    agent: PlanningSubagentName
+    agent: str
     status: Literal["completed", "failed", "timeout", "requires_approval"]
     elapsed_ms: int
     summary: str
@@ -510,7 +530,7 @@ class PlanningSubagentDispatcher:
         prompt = _build_task_prompt(task)
         try:
             response = await self._workflow._run_agent_in_isolated_context(
-                agent_name=task.agent.value,
+                agent_name=task.agent,
                 task_prompt=prompt,
                 parent_state=parent_state,
                 related_todo_ids=list(task.related_todo_ids),
@@ -519,14 +539,14 @@ class PlanningSubagentDispatcher:
         except asyncio.TimeoutError:
             return _result(
                 "timeout",
-                f"Worker {task.id} ({task.agent.value}) timed out in an underlying operation.",
+                f"Worker {task.id} ({task.agent}) timed out in an underlying operation.",
                 error="timeout",
             )
         except Exception as exc:  # pragma: no cover - sanity net
             logger.warning("Subagent worker %s raised: %s", task.id, exc)
             return _result(
                 "failed",
-                f"Worker {task.id} ({task.agent.value}) failed: {exc}",
+                f"Worker {task.id} ({task.agent}) failed: {exc}",
                 error=str(exc),
             )
 
@@ -619,7 +639,7 @@ def create_dispatch_subagents_tool(
             dispatch_entry: dict[str, Any] = {
                 "rationale": rationale,
                 "task_ids": [task.id for task in request.tasks],
-                "agents": [task.agent.value for task in request.tasks],
+                "agents": [task.agent for task in request.tasks],
                 "status": result.status,
             }
 

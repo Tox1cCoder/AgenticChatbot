@@ -476,9 +476,7 @@ class McpToolCatalog:
             if allowlist:
                 allowlist_set = set(allowlist)
                 visible = [
-                    d
-                    for d in descriptors
-                    if d.tool_name in allowlist_set or d.server_name in allowlist_set
+                    d for d in descriptors if self._descriptor_matches_allowlist(d, allowlist_set)
                 ]
                 if not visible:
                     continue
@@ -497,6 +495,19 @@ class McpToolCatalog:
                 }
             )
         return summaries
+
+    @staticmethod
+    def _descriptor_matches_allowlist(
+        descriptor: ToolDescriptor,
+        allowlist_set: set[str],
+    ) -> bool:
+        qualified_id = f"{descriptor.server_name}::{descriptor.tool_name}"
+        return (
+            descriptor.tool_name in allowlist_set
+            or descriptor.server_name in allowlist_set
+            or qualified_id in allowlist_set
+            or descriptor.get_call_name() in allowlist_set
+        )
 
     def search(
         self,
@@ -523,7 +534,8 @@ class McpToolCatalog:
             canonical_server = self.resolve_server_name(server_name)
             if canonical_server is None:
                 logger.debug(
-                    "tool_search: server_name=%r not found in catalog (case-insensitive lookup failed)",
+                    "tool_search: server_name=%r not found in catalog "
+                    "(case-insensitive lookup failed)",
                     server_name,
                 )
                 return []
@@ -543,9 +555,7 @@ class McpToolCatalog:
         if allowlist:
             allowlist_set = set(allowlist)
             candidates = [
-                t
-                for t in candidates
-                if t.tool_name in allowlist_set or t.server_name in allowlist_set
+                t for t in candidates if self._descriptor_matches_allowlist(t, allowlist_set)
             ]
 
         if not candidates:
@@ -586,9 +596,7 @@ class McpToolCatalog:
         if allowlist:
             allowlist_set = set(allowlist)
             candidates = [
-                t
-                for t in candidates
-                if t.tool_name in allowlist_set or t.server_name in allowlist_set
+                t for t in candidates if self._descriptor_matches_allowlist(t, allowlist_set)
             ]
 
         if not candidates or not query or not query.strip():
@@ -645,7 +653,7 @@ class McpToolCatalog:
 
         allowlist_set = set(allowlist)
 
-        return [t for t in tools if t.tool_name in allowlist_set or t.server_name in allowlist_set]
+        return [t for t in tools if self._descriptor_matches_allowlist(t, allowlist_set)]
 
     def get_tool(
         self,

@@ -80,9 +80,16 @@ def get_available_skill_summaries(
     *,
     user_id: str | None,
     device_id: str | None,
+    allowed_skill_refs: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return prompt-safe skill summaries for the active execution scope."""
-    return get_resolved_skill_summaries(user_id=user_id, device_id=device_id)
+    """Return prompt-safe skill summaries for the active execution scope.
+
+    ``allowed_skill_refs`` (custom agents) restricts the result to selected
+    skills; None preserves base-agent behavior (all skills visible).
+    """
+    return get_resolved_skill_summaries(
+        user_id=user_id, device_id=device_id, allowed_skill_refs=allowed_skill_refs
+    )
 
 
 # ── Tool factory ────────────────────────────────────────────────────
@@ -92,6 +99,7 @@ def create_activate_skill_tool(
     *,
     user_id: str | None,
     device_id: str | None,
+    allowed_skill_refs: list[dict[str, Any]] | None = None,
 ):
     """
     Create the ``activate_skill`` tool that the LLM can call to load
@@ -101,6 +109,9 @@ def create_activate_skill_tool(
     over the runtime bridge so the canonical backend does not need direct
     access to client-local skill files. Server-local skills continue to
     load directly from the canonical backend registry.
+
+    When ``allowed_skill_refs`` is provided (custom agents), only skills in
+    that allowlist can be resolved and activated; any other name is rejected.
     """
 
     session = get_bound_device_session(user_id=user_id, device_id=device_id)
@@ -120,6 +131,7 @@ def create_activate_skill_tool(
             skill_name=skill_name,
             user_id=bound_user_id,
             device_id=bound_device_id,
+            allowed_skill_refs=allowed_skill_refs,
         )
         if resolution_error:
             return resolution_error

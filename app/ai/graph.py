@@ -25,11 +25,13 @@ from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
 from ..models.enums import PlanLifecycle
 from .agents.canvas_agent import CanvasAgent
 from .agents.chat_agent import ChatAgent
+from .agents.custom_agent import CustomAgent
 from .agents.image_generator_agent import ImageGeneratorAgent
 from .agents.planning_agent import PlanningAgent
 from .agents.rag_agent import RAGAgent
 from .agents.router import Router
 from .agents.search_agent import SearchAgent
+from .custom_agent_runtime import build_custom_agent_runtime_spec, is_custom_runtime_id
 from .hand_off_tool import MAX_DELEGATION_DEPTH
 from .history import ConversationHistoryProvider
 from .hitl_config import build_interrupt_response, requires_human_approval
@@ -144,6 +146,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         self.checkpointer = checkpointer
         self.document_repository = document_repository
+        # Stored so per-turn CustomAgent instances resolve models the same way
+        # base agents do. Custom agents are built on demand from workflow state.
+        self._runtime_model_resolver = runtime_model_resolver
 
         # Conversation history cache with bounded size + automatic TTL eviction.
         # Replaces the plain dict to prevent unbounded memory growth.
@@ -462,6 +467,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         initial_state["planning_mode_enabled"] = request.planning.planning_mode_enabled
         initial_state["has_existing_plan"] = request.planning.has_existing_plan
         initial_state["iteration_count"] = None
+        initial_state["custom_agents"] = dict(request.custom_agents or {})
 
         if request.planning.current_task:
             initial_state["current_task"] = request.planning.current_task
@@ -642,6 +648,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         workflow.add_node("image_generator_agent", self._image_generator_node)
         workflow.add_node("planning_agent", self._planning_node)
         workflow.add_node("canvas_agent", self._canvas_node)
+        # Single static node that multiplexes every runtime custom-agent id
+        # (custom_agent:<uuid>). The graph is never rebuilt per conversation.
+        workflow.add_node("custom_agent", self._custom_agent_node)
         workflow.add_node("planning_tools", self._planning_tools_node)
         workflow.add_node("rag_tools", self._rag_tools_node)
         workflow.add_node("approval", self._approval_node)
@@ -662,6 +671,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 "image_generator_agent": "image_generator_agent",
                 "planning_agent": "planning_agent",
                 "canvas_agent": "canvas_agent",
+                "custom_agent": "custom_agent",
                 "end": END,
             },
         )
@@ -672,6 +682,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             "search_agent",
             "image_generator_agent",
             "canvas_agent",
+            "custom_agent",
         ]
         for agent_name in tool_calling_agents:
             workflow.add_conditional_edges(
@@ -719,6 +730,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         # LangGraph accepts ``selected_agent`` as a valid return from
         # ``_should_continue_planning``.
         planning_tools_routing = {agent_name: agent_name for agent_name in self.agents}
+        planning_tools_routing["custom_agent"] = "custom_agent"
         planning_tools_routing["end"] = END
         workflow.add_conditional_edges(
             "planning_tools",
@@ -731,6 +743,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         # Dynamic tool routing map based on agent registry
         # Include ALL agents (including rag_agent) so hand_off delegation works.
         tool_routing_map = {agent_name: agent_name for agent_name in self.agents}
+        tool_routing_map["custom_agent"] = "custom_agent"
         tool_routing_map["end"] = END
 
         workflow.add_conditional_edges(
@@ -770,7 +783,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             return state
 
         selected_agent_name = state.get("selected_agent")
-        agent = self.agents.get(selected_agent_name)
+        agent = self._resolve_runtime_agent(state, selected_agent_name)
         if not agent:
             logger.warning(
                 "Skipping tool execution: selected_agent '%s' not in agent registry",
@@ -838,9 +851,25 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             logger.warning("Malformed hand_off tool output; ignoring delegation")
             return state
 
-        # Validate target agent exists
-        if target_agent not in self.agents:
-            logger.warning("hand_off requested unknown agent '%s'; ignoring", target_agent)
+        # Validate target agent exists: a base agent or an attached custom agent.
+        if target_agent not in self.agents and not self._is_attached_custom_agent(
+            state, target_agent
+        ):
+            logger.warning("hand_off requested unknown/unattached agent '%s'", target_agent)
+            tool_call_id = hand_off_output.get("tool_call_id")
+            if tool_call_id:
+                state.setdefault("messages", []).append(
+                    ToolMessage(
+                        content=(
+                            f"Hand-off refused: '{target_agent}' is not a valid target. "
+                            "It is not a base agent and not a custom agent attached to this "
+                            "conversation. Answer the request yourself or hand off to a listed "
+                            "target."
+                        ),
+                        tool_call_id=tool_call_id,
+                        name="hand_off",
+                    )
+                )
             return state
 
         # Circuit-breaker: cap delegation depth
@@ -1117,7 +1146,11 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         max_iterations = max(1, int(settings.react_agent_max_iterations))
         selected_agent = state_view.selected_agent() or "end"
 
-        if selected_agent != "end" and selected_agent not in self.agents:
+        if (
+            selected_agent != "end"
+            and selected_agent not in self.agents
+            and not self._is_attached_custom_agent(state, selected_agent)
+        ):
             return "end"
 
         can_route_for_final_response = (
@@ -1138,7 +1171,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                         count=iteration_count,
                         limit=soft_limit,
                     )
-                    return selected_agent
+                    return self._route_target_for(state, selected_agent)
 
                 self._set_continuation_signal(
                     state,
@@ -1159,7 +1192,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     count=iteration_count,
                     limit=max_iterations,
                 )
-                return selected_agent
+                return self._route_target_for(state, selected_agent)
 
             if settings.auto_continue_enabled and state_view.messages():
                 self._set_continuation_signal(
@@ -1181,7 +1214,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 )
             return "end"
 
-        return selected_agent
+        return self._route_target_for(state, selected_agent)
 
     def _build_interrupt_agent_response(
         self,
@@ -1266,12 +1299,27 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         available_agents = list(self.agents.keys())
 
+        # Surface attached custom agents to the router (runtime ids as routable
+        # targets + descriptors for the prompt / deterministic matching).
+        custom_agents = GraphStateView(state).custom_agents()
+        custom_descriptors = [
+            {
+                "runtime_agent_id": entry.get("runtime_agent_id") or runtime_id,
+                "name": entry.get("name"),
+                "description": entry.get("description"),
+                "agent_order": entry.get("agent_order", 0),
+            }
+            for runtime_id, entry in custom_agents.items()
+        ]
+        available_agents.extend(d["runtime_agent_id"] for d in custom_descriptors)
+
         selected_agent = await self.router.route_message(
             agent_msg,
             available_agents,
             has_documents=has_documents,
             planning_mode_enabled=planning_mode_enabled,
             has_existing_plan=has_existing_plan,
+            custom_agent_descriptors=custom_descriptors or None,
         )
 
         if selected_agent == "rag_agent" and not has_documents:
@@ -1924,6 +1972,85 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)
 
+    # ------------------------------------------------------------------
+    # Custom-agent multiplexing
+    # ------------------------------------------------------------------
+    def _resolve_runtime_agent(self, state: GraphState, selected_agent: str | None) -> Any:
+        """Resolve a base agent or build a custom agent for the selected id."""
+        if selected_agent in self.agents:
+            return self.agents[selected_agent]
+        if is_custom_runtime_id(selected_agent):
+            return self._build_custom_agent(state, selected_agent)
+        return None
+
+    def _custom_handoff_targets(
+        self, state: GraphState, runtime_agent_id: str | None
+    ) -> list[str]:
+        """Valid hand_off targets for a custom agent: base agents + other custom."""
+        targets = [name for name in self.agents if name != "planning_agent"]
+        targets.extend(
+            cid
+            for cid in GraphStateView(state).custom_agents()
+            if cid != runtime_agent_id
+        )
+        return targets
+
+    def _build_custom_agent(
+        self, state: GraphState, runtime_agent_id: str | None
+    ) -> CustomAgent | None:
+        """Build a live CustomAgent from the workflow ``custom_agents`` state.
+
+        Built fresh each invocation so edited configuration applies to future
+        turns (live config). Returns ``None`` if the agent is not attached.
+        """
+        entry = GraphStateView(state).custom_agents().get(runtime_agent_id)
+        if not entry:
+            return None
+        spec = build_custom_agent_runtime_spec(
+            entry,
+            allowed_handoff_targets=self._custom_handoff_targets(state, runtime_agent_id),
+        )
+        return CustomAgent(spec, runtime_model_resolver=self._runtime_model_resolver)
+
+    async def _custom_agent_node(self, state: GraphState) -> GraphState:
+        messages = state.get("messages", [])
+        if not messages:
+            return state
+
+        selected_agent = state.get("selected_agent")
+        agent = self._build_custom_agent(state, selected_agent)
+        if agent is None:
+            logger.warning(
+                "custom_agent node reached for unattached/unknown id '%s'", selected_agent
+            )
+            return state
+
+        conversation_id = state.get("conversation_id")
+        user_id = state.get("user_id")
+        device_id = state.get("device_id")
+        conversation_history = await self._get_conversation_history(
+            conversation_id, user_id, agent_key="chat", state=state
+        )
+        current_turn_messages = self._messages_for_selected_agent(
+            state, selected_agent, messages
+        )
+
+        response = await agent.invoke_model_with_history(
+            current_turn_messages,
+            conversation_history,
+            state.get("persona"),
+            conversation_id,
+            user_id=user_id,
+            device_id=device_id,
+            model_request=state.get("model_request"),
+            history_summary=state.get("history_summary"),
+            **self._final_response_kwargs(state),
+        )
+
+        response = self._finalize_forced_final_response(state, response)
+        self._merge_tool_artifacts(state, response)
+        return self._finalize_agent_response(state, response)
+
     async def _rag_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
         if not messages:
@@ -2390,6 +2517,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             )
 
         agent = self.agents.get(agent_name)
+        if agent is None and is_custom_runtime_id(agent_name):
+            # Custom worker: resolve from the parent conversation's attached
+            # custom agents (live config). Rejected if not attached.
+            agent = self._build_custom_agent(parent_state, agent_name)
         if agent is None:
             raise ValueError(f"Unknown subagent target: {agent_name}")
 
@@ -2694,6 +2825,15 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         internal_tools = self._build_planning_internal_tools(state)
 
         # Call the planning agent with history
+        custom_workers = [
+            {
+                "runtime_agent_id": entry.get("runtime_agent_id") or runtime_id,
+                "name": entry.get("name"),
+                "description": entry.get("description"),
+            }
+            for runtime_id, entry in GraphStateView(state).custom_agents().items()
+        ]
+
         response = await self.planning_agent.invoke_model_with_history(
             messages=current_turn_messages,
             conversation_history=conversation_history,
@@ -2708,6 +2848,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             planning_phase=planning_phase,
             should_describe_plan=should_generate_plan_response,
             internal_tools=internal_tools or None,
+            custom_workers=custom_workers or None,
             **self._final_response_kwargs(state),
         )
 
@@ -3129,7 +3270,26 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         selected_agent = state.get("selected_agent")
         if selected_agent in self.agents:
             return selected_agent
+        # Any attached custom runtime id routes to the single static node.
+        if is_custom_runtime_id(selected_agent) and self._is_attached_custom_agent(
+            state, selected_agent
+        ):
+            return "custom_agent"
         return "end"
+
+    def _is_attached_custom_agent(self, state: GraphState, runtime_agent_id: str | None) -> bool:
+        """True when ``runtime_agent_id`` is an attached custom agent in state."""
+        if not is_custom_runtime_id(runtime_agent_id):
+            return False
+        return runtime_agent_id in GraphStateView(state).custom_agents()
+
+    def _route_target_for(self, state: GraphState, selected_agent: str) -> str:
+        """Map a selected agent to its graph node name (custom ids → custom_agent)."""
+        if is_custom_runtime_id(selected_agent) and self._is_attached_custom_agent(
+            state, selected_agent
+        ):
+            return "custom_agent"
+        return selected_agent
 
     def _get_agent_type(self, selected_agent: str | None) -> AgentType:
         agent_type_map = {

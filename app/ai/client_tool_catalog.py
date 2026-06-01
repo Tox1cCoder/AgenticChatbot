@@ -193,8 +193,8 @@ class ClientToolCatalog:
 
         if str(session.user_id) != str(self._user_id):
             logger.warning(
-                "Ignoring client tool catalog refresh for device %s because it is bound to user %s, "
-                "not user %s",
+                "Ignoring client tool catalog refresh for device %s because it is bound "
+                "to user %s, not user %s",
                 self._device_id,
                 session.user_id,
                 self._user_id,
@@ -432,9 +432,7 @@ class ClientToolCatalog:
         if allowlist:
             allowlist_set = set(allowlist)
             candidates = [
-                t
-                for t in candidates
-                if t.tool_name in allowlist_set or t.server_name in allowlist_set
+                t for t in candidates if self._descriptor_matches_allowlist(t, allowlist_set)
             ]
 
         if not candidates:
@@ -489,11 +487,7 @@ class ClientToolCatalog:
         """List all tools in the catalog."""
         if allowlist:
             allowlist_set = set(allowlist)
-            return [
-                t
-                for t in self._tools
-                if t.tool_name in allowlist_set or t.server_name in allowlist_set
-            ]
+            return [t for t in self._tools if self._descriptor_matches_allowlist(t, allowlist_set)]
         return list(self._tools)
 
     def get_server_inventory(self, allowlist: list[str] | None = None) -> list[dict[str, Any]]:
@@ -503,14 +497,12 @@ class ClientToolCatalog:
             tools = self._tools_by_server[server_name]
             if allowlist:
                 allowlist_set = set(allowlist)
-                if server_name not in allowlist_set and not any(
-                    tool.tool_name in allowlist_set for tool in tools
+                if not any(
+                    self._descriptor_matches_allowlist(tool, allowlist_set) for tool in tools
                 ):
                     continue
                 tool_count = sum(
-                    1
-                    for tool in tools
-                    if server_name in allowlist_set or tool.tool_name in allowlist_set
+                    1 for tool in tools if self._descriptor_matches_allowlist(tool, allowlist_set)
                 )
             else:
                 tool_count = len(tools)
@@ -526,6 +518,18 @@ class ClientToolCatalog:
                 }
             )
         return inventory
+
+    @staticmethod
+    def _descriptor_matches_allowlist(
+        descriptor: ClientToolDescriptor,
+        allowlist_set: set[str],
+    ) -> bool:
+        return (
+            descriptor.tool_name in allowlist_set
+            or descriptor.server_name in allowlist_set
+            or descriptor.qualified_tool_id in allowlist_set
+            or descriptor.tool_instance_id in allowlist_set
+        )
 
     @property
     def tool_count(self) -> int:

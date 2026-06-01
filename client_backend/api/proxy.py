@@ -8,8 +8,19 @@ from fastapi.responses import Response
 from client_backend.api.common import proxy_server_request
 from client_backend.core.auth import require_local_session
 from client_backend.core.security import LocalSessionPayload
+from client_backend.services.runtime_bridge import get_runtime_bridge
 
 router = APIRouter(tags=["proxy"])
+
+
+def _params_with_active_device(request: Request):
+    params = list(request.query_params.multi_items())
+    if any(key == "deviceId" for key, _value in params):
+        return params
+    device_id = get_runtime_bridge().get_registered_device_id()
+    if device_id:
+        params.append(("deviceId", device_id))
+    return params
 
 
 @router.get("/users/{user_id}")
@@ -84,6 +95,55 @@ async def proxy_model_config_reset(
     _session: LocalSessionPayload = Depends(require_local_session),
 ) -> Response:
     return await proxy_server_request(request, upstream_path="/model-config/reset")
+
+
+@router.api_route("/custom-agents", methods=["GET", "POST"])
+async def proxy_custom_agents(
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(
+        request,
+        upstream_path="/custom-agents",
+        params_override=_params_with_active_device(request),
+    )
+
+
+@router.get("/custom-agents/options")
+async def proxy_custom_agents_options(
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(
+        request,
+        upstream_path="/custom-agents/options",
+        params_override=_params_with_active_device(request),
+    )
+
+
+@router.api_route("/custom-agents/{custom_agent_id}", methods=["GET", "PATCH", "DELETE"])
+async def proxy_custom_agent(
+    custom_agent_id: str,
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(
+        request,
+        upstream_path=f"/custom-agents/{custom_agent_id}",
+        params_override=_params_with_active_device(request),
+    )
+
+
+@router.api_route("/conversations/{conversation_id}/custom-agents", methods=["GET", "PUT"])
+async def proxy_conversation_custom_agents(
+    conversation_id: str,
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(
+        request,
+        upstream_path=f"/conversations/{conversation_id}/custom-agents",
+    )
 
 
 @router.api_route("/messages/{message_id}/feedbacks", methods=["GET", "POST"])

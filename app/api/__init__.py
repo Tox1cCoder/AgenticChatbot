@@ -8,6 +8,10 @@ from app.api.ai_sdk import router as ai_sdk_router  # noqa: E402
 from app.api.auth import router as auth_router  # noqa: E402
 from app.api.client_devices import router as client_devices_router  # noqa: E402
 from app.api.conversations import router as conversations_router  # noqa: E402
+from app.api.custom_agents import (  # noqa: E402
+    conversation_router as custom_agents_conversation_router,
+)
+from app.api.custom_agents import router as custom_agents_router  # noqa: E402
 from app.api.device_runtime import router as device_runtime_router  # noqa: E402
 from app.api.documents import router as documents_router  # noqa: E402
 from app.api.feedback import router as feedback_router  # noqa: E402
@@ -28,6 +32,8 @@ __all__ = [
     "documents_router",
     "users_router",
     "conversations_router",
+    "custom_agents_router",
+    "custom_agents_conversation_router",
     "messages_router",
     "feedback_router",
     "mcp_router",

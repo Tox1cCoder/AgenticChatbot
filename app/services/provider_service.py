@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 SUPPORTED_PROVIDERS = ("gemini", "openai", "anthropic")
 CATALOG_METADATA_KEY = "catalog"
 IN_SCOPE_PROVIDER_TYPES = ("gemini", "openai")
+# A cached provider catalog older than this is re-synced on the next status
+# read (via refresh_if_missing) so newly published models appear without a
+# manual sync, while still avoiding a provider API call on every page load.
+PROVIDER_CATALOG_TTL_SECONDS = 6 * 3600
 OPENAI_PREFERRED_MODEL_ORDER = (
     "gpt-5-mini",
     "gpt-5",
@@ -53,6 +57,19 @@ GEMINI_PREFERRED_MODEL_ORDER = (
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _catalog_is_stale(last_synced_at: Any, ttl_seconds: int = PROVIDER_CATALOG_TTL_SECONDS) -> bool:
+    """True when a synced catalog is missing or older than the TTL."""
+    if not last_synced_at:
+        return True
+    try:
+        synced = datetime.fromisoformat(str(last_synced_at).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if synced.tzinfo is None:
+        synced = synced.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - synced).total_seconds() > ttl_seconds
 
 
 class ProviderService:
@@ -426,7 +443,10 @@ class ProviderService:
             refresh_if_missing
             and provider_type in IN_SCOPE_PROVIDER_TYPES
             and cached_status.get("configured")
-            and not cached_status.get("models")
+            and (
+                not cached_status.get("models")
+                or _catalog_is_stale(cached_status.get("last_synced_at"))
+            )
         )
         if should_refresh:
             try:

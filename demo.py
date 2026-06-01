@@ -1093,9 +1093,542 @@ def get_agent_display_name(agent: str) -> str:
         "rag_agent": "RAG Agent",
         "search_agent": "Search Agent",
         "image_generator_agent": "Image Generator",
+        "planning_agent": "Planning Agent",
+        "canvas_agent": "Canvas Agent",
         "router": "Router",
     }
+    # Custom agents carry a runtime id (custom_agent:<uuid>). Resolve the display
+    # name from the session cache populated by streamed metadata / attachments.
+    if isinstance(agent, str) and agent.startswith("custom_agent:"):
+        try:
+            cache = st.session_state.get("custom_agent_names", {})
+        except Exception:
+            cache = {}
+        return cache.get(agent, "Custom Agent")
     return agent_names.get(agent, agent.replace("_", " ").title())
+
+
+# --------------------------------------------------------------------------- #
+# Custom agents — API helpers + management UI
+# --------------------------------------------------------------------------- #
+
+
+def _custom_agent_request(
+    method: str,
+    endpoint: str,
+    json_body: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """Call a custom-agent backend route. Returns (status_code, payload)."""
+    headers: dict[str, str] = {}
+    auth_token = st.session_state.get("auth_token")
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    try:
+        response = get_http_session().request(
+            method,
+            f"{API_BASE_URL}{endpoint}",
+            headers=headers,
+            json=json_body,
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        return 0, {"message": str(exc)}
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    return response.status_code, payload if isinstance(payload, dict) else {}
+
+
+def _custom_agent_device_query() -> str:
+    device_id = st.session_state.get("device_id")
+    return f"?deviceId={device_id}" if device_id else ""
+
+
+def list_custom_agents() -> list[dict[str, Any]]:
+    status, payload = _custom_agent_request("GET", "/custom-agents")
+    if status == 200:
+        agents = payload.get("data") or []
+        # Refresh the runtime-id -> name cache used by get_agent_display_name.
+        cache = st.session_state.setdefault("custom_agent_names", {})
+        for agent in agents:
+            runtime_id = agent.get("runtimeAgentId") or f"custom_agent:{agent.get('id')}"
+            if agent.get("name"):
+                cache[runtime_id] = agent["name"]
+        return agents
+    return []
+
+
+def get_custom_agent_options() -> dict[str, Any]:
+    status, payload = _custom_agent_request(
+        "GET", f"/custom-agents/options{_custom_agent_device_query()}"
+    )
+    return payload.get("data") or {} if status == 200 else {}
+
+
+def create_custom_agent(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    return _custom_agent_request("POST", f"/custom-agents{_custom_agent_device_query()}", body)
+
+
+def update_custom_agent(agent_id: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    return _custom_agent_request(
+        "PATCH", f"/custom-agents/{agent_id}{_custom_agent_device_query()}", body
+    )
+
+
+def delete_custom_agent(agent_id: str) -> tuple[int, dict[str, Any]]:
+    return _custom_agent_request("DELETE", f"/custom-agents/{agent_id}")
+
+
+def get_conversation_custom_agents(conversation_id: str) -> list[dict[str, Any]]:
+    status, payload = _custom_agent_request(
+        "GET", f"/conversations/{conversation_id}/custom-agents"
+    )
+    return payload.get("data") or [] if status == 200 else []
+
+
+def set_conversation_custom_agents(
+    conversation_id: str, custom_agent_ids: list[str]
+) -> tuple[int, dict[str, Any]]:
+    return _custom_agent_request(
+        "PUT",
+        f"/conversations/{conversation_id}/custom-agents",
+        {"customAgentIds": custom_agent_ids},
+    )
+
+
+def _provider_model_options(options: dict[str, Any]) -> dict[str, list[str]]:
+    providers: dict[str, list[str]] = {}
+    for entry in options.get("providers") or []:
+        provider_type = entry.get("provider_type")
+        if not provider_type:
+            continue
+        models = [
+            str(m.get("id"))
+            for m in (entry.get("models") or [])
+            if isinstance(m, dict) and m.get("id")
+        ]
+        providers[provider_type] = models
+    return providers
+
+
+def render_custom_agents_view() -> None:
+    """Custom Agents workspace tab — layout consistent with the Models tab."""
+    st.markdown("# Custom Agents")
+    st.caption(
+        "Create per-user agents with their own prompt, model, tools, and skills, then "
+        "attach them to a conversation. They participate in routing, hand-off, and "
+        "planning as first-class agents."
+    )
+
+    if not (st.session_state.get("current_user_id") and st.session_state.get("auth_token")):
+        st.info("Sign in to manage custom agents.")
+        return
+
+    render_custom_agents_manager()
+
+    st.divider()
+    st.subheader("Attach to the current conversation")
+    current_conv = st.session_state.get("current_conversation_id")
+    if current_conv and current_conv != "pending_new":
+        render_conversation_custom_agents_panel(current_conv)
+    else:
+        st.caption("Open or start a conversation (Chat tab) to attach custom agents to it.")
+
+
+def render_custom_agents_manager() -> None:
+    """List/create/edit/delete custom agents. Controls warn on 409 (in use)."""
+    st.subheader("Your agents")
+    options = get_custom_agent_options()
+    providers = _provider_model_options(options)
+    # The API serializes CustomAgentOptions with camelCase aliases; accept
+    # snake_case and the older serverTools field for robustness.
+    server_default_tools = (
+        options.get("serverDefaultTools") or options.get("server_default_tools") or []
+    )
+    server_tools = options.get("serverTools") or options.get("server_tools") or []
+    client_tools = options.get("clientTools") or options.get("client_tools") or []
+    skills = options.get("skills") or []
+    selectable_server_tools = [*server_default_tools, *server_tools]
+    tool_labels = {
+        _custom_agent_tool_option_key(t): _custom_agent_tool_label(t)
+        for t in selectable_server_tools
+    }
+    tool_labels.update(
+        {_custom_agent_tool_option_key(t): _custom_agent_tool_label(t) for t in client_tools}
+    )
+    skill_labels = {
+        _custom_agent_skill_key(s): f"[{s.get('source')}] {s.get('lookup_name')}"
+        for s in skills
+        if _custom_agent_skill_key(s) is not None
+    }
+
+    agents = list_custom_agents()
+    if not agents:
+        st.caption("No custom agents yet. Create one below.")
+    for agent in agents:
+        with st.expander(agent.get("name", "Custom Agent"), expanded=False):
+            st.caption(f"{agent.get('providerType')} / {agent.get('model')}")
+            edit_name = st.text_input(
+                "Name", value=agent.get("name", ""), key=f"ca_edit_name_{agent['id']}"
+            )
+            edit_desc = st.text_input(
+                "Description",
+                value=agent.get("description") or "",
+                key=f"ca_edit_desc_{agent['id']}",
+            )
+            edit_prompt = st.text_area(
+                "System prompt", value=agent.get("prompt", ""), key=f"ca_edit_prompt_{agent['id']}"
+            )
+            edit_model = st.text_input(
+                "Model", value=agent.get("model", ""), key=f"ca_edit_model_{agent['id']}"
+            )
+            current_tool_refs = agent.get("toolRefs") or agent.get("tool_refs") or []
+            current_skill_refs = agent.get("skillRefs") or agent.get("skill_refs") or []
+            tool_refs_editable = _custom_agent_tool_refs_available(
+                current_tool_refs,
+                selectable_server_tools,
+                client_tools,
+            )
+            skill_refs_editable = _custom_agent_skill_refs_available(current_skill_refs, skills)
+            edit_tool_ids = st.multiselect(
+                "Tools",
+                list(tool_labels.keys()),
+                default=_custom_agent_selected_tool_keys(
+                    current_tool_refs,
+                    selectable_server_tools,
+                    client_tools,
+                ),
+                format_func=lambda tid: tool_labels.get(tid, tid),
+                disabled=not tool_refs_editable,
+                key=f"ca_edit_tools_{agent['id']}",
+            )
+            if not tool_refs_editable:
+                st.caption("Reconnect the original device to edit this agent's tools.")
+            edit_skill_keys = st.multiselect(
+                "Skills",
+                list(skill_labels.keys()),
+                default=_custom_agent_selected_skill_keys(
+                    current_skill_refs,
+                    skills,
+                ),
+                format_func=lambda key: skill_labels.get(key, str(key)),
+                disabled=not skill_refs_editable,
+                key=f"ca_edit_skills_{agent['id']}",
+            )
+            if not skill_refs_editable:
+                st.caption("Reconnect the original device to edit this agent's skills.")
+            col_save, col_del = st.columns(2)
+            with col_save:
+                if st.button("Save", key=f"ca_save_{agent['id']}"):
+                    body = {
+                        "name": edit_name,
+                        "description": edit_desc or None,
+                        "prompt": edit_prompt,
+                        "model": edit_model,
+                    }
+                    if tool_refs_editable:
+                        body["tool_refs"] = _build_tool_refs(
+                            edit_tool_ids, selectable_server_tools, client_tools
+                        )
+                    if skill_refs_editable:
+                        body["skill_refs"] = _build_skill_refs(edit_skill_keys, skills)
+                    status, payload = update_custom_agent(
+                        agent["id"],
+                        body,
+                    )
+                    if status == 200:
+                        st.success("Saved.")
+                        st.rerun()
+                    elif status == 409:
+                        st.warning("Agent is active or paused — cannot edit right now.")
+                    else:
+                        st.error(_extract_api_error_message(status, payload))
+            with col_del:
+                if st.button("Delete", key=f"ca_del_{agent['id']}"):
+                    status, payload = delete_custom_agent(agent["id"])
+                    if status in (200, 204):
+                        st.success("Deleted.")
+                        st.rerun()
+                    elif status == 409:
+                        st.warning("Agent is active or paused — cannot delete right now.")
+                    else:
+                        st.error(_extract_api_error_message(status, payload))
+
+    st.markdown("**Create a custom agent**")
+    provider_names = list(providers.keys()) or ["openai", "gemini"]
+    # Provider selector lives OUTSIDE the form so changing it reruns the page and
+    # refreshes the dependent Model list (st.form defers reruns until submit,
+    # which would otherwise leave the model list stale). Matches the Models tab.
+    provider_type = st.selectbox("Provider", provider_names, key="ca_new_provider")
+    model_choices = providers.get(provider_type, [])
+
+    with st.form("create_custom_agent_form", clear_on_submit=False):
+        name = st.text_input("Name", key="ca_new_name")
+        description = st.text_input("Description", key="ca_new_desc")
+        prompt = st.text_area("System prompt", key="ca_new_prompt")
+        # No persistent key on Model: options change with Provider, and a stale
+        # stored selection would raise "value not in options" on switch.
+        model = (
+            st.selectbox("Model", model_choices)
+            if model_choices
+            else st.text_input("Model", key="ca_new_model_text")
+        )
+        temperature = st.slider("Temperature", 0.0, 2.0, 1.0, 0.1, key="ca_new_temp")
+        selected_tool_ids = st.multiselect(
+            "Tools",
+            list(tool_labels.keys()),
+            format_func=lambda tid: tool_labels.get(tid, tid),
+            key="ca_new_tools",
+        )
+        selected_skill_keys = st.multiselect(
+            "Skills",
+            list(skill_labels.keys()),
+            format_func=lambda key: skill_labels.get(key, str(key)),
+            key="ca_new_skills",
+        )
+        submitted = st.form_submit_button("Create")
+        if submitted:
+            tool_refs = _build_tool_refs(selected_tool_ids, selectable_server_tools, client_tools)
+            skill_refs = _build_skill_refs(selected_skill_keys, skills)
+            body = {
+                "name": name,
+                "description": description or None,
+                "prompt": prompt,
+                "provider_type": provider_type,
+                "model": model,
+                "temperature": temperature,
+                "tool_refs": tool_refs,
+                "skill_refs": skill_refs,
+            }
+            validation_error = _validate_custom_agent_create_body(body)
+            if validation_error:
+                st.warning(validation_error)
+            else:
+                status, payload = create_custom_agent(body)
+                if status == 201:
+                    st.success("Custom agent created.")
+                    st.rerun()
+                else:
+                    st.error(_extract_api_error_message(status, payload))
+
+
+def _custom_agent_value(tool: dict[str, Any], snake: str, camel: str | None = None) -> Any:
+    return tool.get(snake) if snake in tool else tool.get(camel or snake)
+
+
+def _custom_agent_tool_option_key(tool: dict[str, Any]) -> str:
+    tool_type = str(_custom_agent_value(tool, "type") or "")
+    qualified_id = str(
+        _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId") or ""
+    )
+    if tool_type == "client":
+        device_id = _custom_agent_value(tool, "device_id", "deviceId") or ""
+        session_id = _custom_agent_value(tool, "session_id", "sessionId") or ""
+        instance_id = _custom_agent_value(tool, "tool_instance_id", "toolInstanceId") or ""
+        return f"client::{device_id}::{session_id}::{instance_id}::{qualified_id}"
+    return f"server::{tool_type or 'server_mcp'}::{qualified_id}"
+
+
+def _custom_agent_tool_label(tool: dict[str, Any]) -> str:
+    tool_type = str(_custom_agent_value(tool, "type") or "")
+    qualified_id = str(
+        _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId") or ""
+    )
+    tool_name = _custom_agent_value(tool, "tool_name", "toolName")
+    server_name = _custom_agent_value(tool, "server_name", "serverName")
+    if tool_type == "client":
+        return f"[client] {qualified_id} ({tool_name or server_name or 'tool'})"
+    return f"[server] {qualified_id}"
+
+
+def _custom_agent_skill_key(skill: dict[str, Any]) -> tuple[str, str] | None:
+    source = _custom_agent_value(skill, "source")
+    lookup_name = _custom_agent_value(skill, "lookup_name", "lookupName")
+    if not source or not lookup_name:
+        return None
+    return (str(source), str(lookup_name))
+
+
+def _custom_agent_selected_tool_keys(
+    tool_refs: list[dict[str, Any]],
+    server_tools: list[dict[str, Any]],
+    client_tools: list[dict[str, Any]],
+) -> list[str]:
+    server_key_by_qid = {
+        str(_custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId")): (
+            _custom_agent_tool_option_key(tool)
+        )
+        for tool in server_tools
+        if _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId")
+    }
+    client_keys = {_custom_agent_tool_option_key(tool) for tool in client_tools}
+    selected: list[str] = []
+
+    for ref in tool_refs or []:
+        ref_type = str(_custom_agent_value(ref, "type") or "")
+        if ref_type == "client":
+            key = _custom_agent_tool_option_key(ref)
+            if key in client_keys and key not in selected:
+                selected.append(key)
+            continue
+
+        qid = _custom_agent_value(ref, "qualified_tool_id", "qualifiedToolId")
+        key = server_key_by_qid.get(str(qid))
+        if key and key not in selected:
+            selected.append(key)
+
+    return selected
+
+
+def _custom_agent_tool_refs_available(
+    tool_refs: list[dict[str, Any]],
+    server_tools: list[dict[str, Any]],
+    client_tools: list[dict[str, Any]],
+) -> bool:
+    server_qids = {
+        str(_custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId"))
+        for tool in server_tools
+        if _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId")
+    }
+    client_keys = {_custom_agent_tool_option_key(tool) for tool in client_tools}
+
+    for ref in tool_refs or []:
+        ref_type = str(_custom_agent_value(ref, "type") or "")
+        if ref_type == "client":
+            if _custom_agent_tool_option_key(ref) not in client_keys:
+                return False
+            continue
+
+        qid = _custom_agent_value(ref, "qualified_tool_id", "qualifiedToolId")
+        if str(qid) not in server_qids:
+            return False
+
+    return True
+
+
+def _custom_agent_selected_skill_keys(
+    skill_refs: list[dict[str, Any]],
+    skills: list[dict[str, Any]],
+) -> list[tuple[str, str]]:
+    available = {
+        key
+        for key in (_custom_agent_skill_key(skill) for skill in skills)
+        if key is not None
+    }
+    selected: list[tuple[str, str]] = []
+    for ref in skill_refs or []:
+        key = _custom_agent_skill_key(ref)
+        if key in available and key not in selected:
+            selected.append(key)
+    return selected
+
+
+def _custom_agent_skill_refs_available(
+    skill_refs: list[dict[str, Any]],
+    skills: list[dict[str, Any]],
+) -> bool:
+    available = {
+        key
+        for key in (_custom_agent_skill_key(skill) for skill in skills)
+        if key is not None
+    }
+    return all(_custom_agent_skill_key(ref) in available for ref in (skill_refs or []))
+
+
+def _validate_custom_agent_create_body(body: dict[str, Any]) -> str | None:
+    if not str(body.get("name") or "").strip():
+        return "Name is required."
+    if not str(body.get("prompt") or "").strip():
+        return "System prompt is required."
+    if not str(body.get("model") or "").strip():
+        return "Model is required."
+    return None
+
+
+def _build_tool_refs(
+    selected_tool_ids: list[str],
+    server_default_tools: list[dict[str, Any]],
+    client_tools: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_key_server = {_custom_agent_tool_option_key(t): t for t in server_default_tools}
+    by_key_client = {_custom_agent_tool_option_key(t): t for t in client_tools}
+    refs: list[dict[str, Any]] = []
+    for key in selected_tool_ids:
+        if key in by_key_server:
+            tool = by_key_server[key]
+            qid = _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId")
+            server_name = _custom_agent_value(tool, "server_name", "serverName")
+            tool_name = _custom_agent_value(tool, "tool_name", "toolName")
+            if qid and server_name and tool_name:
+                refs.append(
+                    {
+                        "type": "server_mcp",
+                        "server_name": server_name,
+                        "tool_name": tool_name,
+                        "qualified_tool_id": qid,
+                    }
+                )
+        elif key in by_key_client:
+            tool = by_key_client[key]
+            qid = _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId")
+            refs.append(
+                {
+                    "type": "client",
+                    "device_id": _custom_agent_value(tool, "device_id", "deviceId"),
+                    "session_id": _custom_agent_value(tool, "session_id", "sessionId"),
+                    "catalog_version": str(
+                        _custom_agent_value(tool, "catalog_version", "catalogVersion") or ""
+                    ),
+                    "tool_instance_id": _custom_agent_value(
+                        tool, "tool_instance_id", "toolInstanceId"
+                    ),
+                    "server_name": _custom_agent_value(tool, "server_name", "serverName"),
+                    "qualified_tool_id": qid,
+                    "tool_name": _custom_agent_value(tool, "tool_name", "toolName"),
+                }
+            )
+    return refs
+
+
+def _build_skill_refs(
+    selected_skill_keys: list[tuple[str, str]],
+    skills: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_key = {
+        key: skill
+        for skill in skills
+        if (key := _custom_agent_skill_key(skill)) is not None
+    }
+    return [by_key[key] for key in selected_skill_keys if key in by_key]
+
+
+def render_conversation_custom_agents_panel(conversation_id: str) -> None:
+    """Attach/detach custom agents for the active conversation."""
+    if not conversation_id or conversation_id == "pending_new":
+        return
+    all_agents = list_custom_agents()
+    if not all_agents:
+        return
+    attached = get_conversation_custom_agents(conversation_id)
+    attached_ids = [a.get("id") for a in attached]
+    label_by_id = {a["id"]: a.get("name", a["id"]) for a in all_agents}
+    selected = st.multiselect(
+        "Attached custom agents",
+        list(label_by_id.keys()),
+        default=[i for i in attached_ids if i in label_by_id],
+        format_func=lambda i: label_by_id.get(i, i),
+        key=f"ca_attach_{conversation_id}",
+    )
+    if st.button("Save attachments", key=f"ca_attach_save_{conversation_id}"):
+        status, payload = set_conversation_custom_agents(conversation_id, selected)
+        if status == 200:
+            st.success("Attachments updated.")
+            st.rerun()
+        elif status == 409:
+            st.warning("A custom agent is active or paused — cannot change attachments now.")
+        else:
+            st.error(_extract_api_error_message(status, payload))
 
 
 def render_conversation_button(
@@ -9518,6 +10051,7 @@ def main():
         tab_docs,
         tab_instructions,
         tab_models,
+        tab_custom_agents,
         tab_mcp,
         tab_skills,
     ) = st.tabs(
@@ -9527,6 +10061,7 @@ def main():
             ":material/description: Documents",
             ":material/settings: Instructions",
             ":material/smart_toy: Models",
+            ":material/robot_2: Custom Agents",
             ":material/extension: MCP Config",
             ":material/psychology: Skills",
         ]
@@ -9546,6 +10081,9 @@ def main():
 
     with tab_models:
         render_models_view()
+
+    with tab_custom_agents:
+        render_custom_agents_view()
 
     with tab_mcp:
         render_tools_tab()

@@ -1,4 +1,10 @@
 from .auth import AuthenticationException, AuthorizationException, TokenExpiredException
+from .custom_agent import (
+    CustomAgentForbiddenError,
+    CustomAgentInUseError,
+    CustomAgentNotFoundError,
+    CustomAgentValidationError,
+)
 from .http import CustomHTTPException, DocumentProcessingError
 from .mcp import (
     MCPException,
@@ -29,4 +35,8 @@ __all__ = [
     "PlanExecutionPausedException",
     "PauseReason",
     "SkillNotFoundError",
+    "CustomAgentValidationError",
+    "CustomAgentForbiddenError",
+    "CustomAgentNotFoundError",
+    "CustomAgentInUseError",
 ]

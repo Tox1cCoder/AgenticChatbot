@@ -33,6 +33,7 @@ from .tool_scope import is_client_only_scope
 from .tool_search_scoring import build_query_tokens
 
 logger = logging.getLogger(__name__)
+_ALLOWLIST_UNSET = object()
 
 
 def _search_results_refer_to_same_capability(
@@ -157,6 +158,8 @@ async def _execute_tool_search(
     top_k: int | None = None,
     server_name: str | None = None,
     allowlist: list[str] | None = None,
+    server_allowlist: list[str] | None | object = _ALLOWLIST_UNSET,
+    client_allowlist: list[str] | None | object = _ALLOWLIST_UNSET,
 ) -> dict[str, Any]:
     """
     Core implementation of tool search logic.
@@ -168,12 +171,26 @@ async def _execute_tool_search(
         query: Search query (None for list all)
         top_k: Max results to return
         server_name: Optional server filter
-        allowlist: Optional per-agent allowlist filter
+        allowlist: Optional per-agent allowlist filter applied to both origins
+        server_allowlist: Optional server-only allowlist; ``None`` allows all
+        client_allowlist: Optional client-only allowlist; ``None`` allows all
 
     Returns:
         Dict with search results and metadata
     """
     start_time = time.time()
+    effective_server_allowlist = (
+        allowlist if server_allowlist is _ALLOWLIST_UNSET else server_allowlist
+    )
+    effective_client_allowlist = (
+        allowlist if client_allowlist is _ALLOWLIST_UNSET else client_allowlist
+    )
+    # Catalogs treat an empty allowlist as "no filter". For explicit per-origin
+    # scoping an empty list must mean "no tools from this origin".
+    if server_allowlist is not _ALLOWLIST_UNSET and effective_server_allowlist == []:
+        effective_server_allowlist = ["__custom_agent_no_server_tools__"]
+    if client_allowlist is not _ALLOWLIST_UNSET and effective_client_allowlist == []:
+        effective_client_allowlist = ["__custom_agent_no_client_tools__"]
     # Get tool context for conversation-scoped loading
     ctx = get_tool_context()
     conversation_id = ctx.conversation_id
@@ -252,7 +269,7 @@ async def _execute_tool_search(
 
             # Global inventory mode: return server summaries without searching tools
             if is_inventory_mode and not is_per_server_inventory:
-                inventory = catalog.get_server_inventory(allowlist=allowlist)
+                inventory = catalog.get_server_inventory(allowlist=effective_server_allowlist)
                 latency_ms = (time.time() - start_time) * 1000
                 if settings.mcp_tool_search_log_queries:
                     logger.info(
@@ -277,14 +294,14 @@ async def _execute_tool_search(
                     query=query,
                     top_k=effective_top_k * 2,
                     server_name=server_name,
-                    allowlist=allowlist,
+                    allowlist=effective_server_allowlist,
                 )
             else:
                 server_results = catalog.search(
                     query=query,
                     top_k=effective_top_k * 2,
                     server_name=server_name,
-                    allowlist=allowlist,
+                    allowlist=effective_server_allowlist,
                 )
         except Exception as e:
             logger.error("Failed to get server tool catalog: %s", e)
@@ -303,7 +320,9 @@ async def _execute_tool_search(
                     server_name = resolved_client_server_name
             if client_catalog.tool_count > 0:
                 if client_only_scope and is_inventory_mode and not is_per_server_inventory:
-                    inventory = client_catalog.get_server_inventory(allowlist=allowlist)
+                    inventory = client_catalog.get_server_inventory(
+                        allowlist=effective_client_allowlist
+                    )
                     return {
                         "query": None,
                         "mode": "inventory",
@@ -317,7 +336,7 @@ async def _execute_tool_search(
                     query=query,
                     top_k=effective_top_k * 2,  # Request extra for merging
                     server_name=server_name,
-                    allowlist=allowlist,
+                    allowlist=effective_client_allowlist,
                 )
                 logger.debug(
                     "tool_search: found %d client tools from device %s",
@@ -607,7 +626,12 @@ async def tool_search(
     return json.dumps(result, indent=2)
 
 
-def create_tool_search_tool(allowlist: list[str] | None = None):
+def create_tool_search_tool(
+    allowlist: list[str] | None = None,
+    *,
+    server_allowlist: list[str] | None | object = _ALLOWLIST_UNSET,
+    client_allowlist: list[str] | None | object = _ALLOWLIST_UNSET,
+):
     """
     Create a tool_search tool with a specific allowlist baked in.
 
@@ -616,6 +640,8 @@ def create_tool_search_tool(allowlist: list[str] | None = None):
 
     Args:
         allowlist: List of allowed tool names or server names
+        server_allowlist: Optional server-only allowlist; ``None`` allows all
+        client_allowlist: Optional client-only allowlist; ``None`` allows all
 
     Returns:
         A LangChain tool configured for tool search
@@ -656,16 +682,32 @@ def create_tool_search_tool(allowlist: list[str] | None = None):
             top_k=top_k,
             server_name=server_name,
             allowlist=allowlist,
+            server_allowlist=server_allowlist,
+            client_allowlist=client_allowlist,
         )
         return json.dumps(result, indent=2)
 
     return tool_search_impl
 
 
+def create_tool_search_tool_for_custom_agent(spec: Any):
+    """Restricted tool_search for a custom agent.
+
+    Discovery includes the backend MCP server catalog and only the exact client
+    tool instances selected by the agent, so sidecar-local tools from another
+    session cannot be surfaced as substitutes.
+    """
+    return create_tool_search_tool(
+        server_allowlist=spec.server_tool_search_allowlist(),
+        client_allowlist=spec.client_tool_search_allowlist(),
+    )
+
+
 # Export the default tool
 __all__ = [
     "tool_search",
     "create_tool_search_tool",
+    "create_tool_search_tool_for_custom_agent",
     "ToolSearchInput",
     "ToolSearchOutput",
 ]

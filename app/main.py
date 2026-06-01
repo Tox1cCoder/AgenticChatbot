@@ -18,6 +18,8 @@ from app.api import (
     auth_router,
     client_devices_router,
     conversations_router,
+    custom_agents_conversation_router,
+    custom_agents_router,
     device_runtime_router,
     documents_router,
     feedback_router,
@@ -237,6 +239,11 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(users_router)
     app.include_router(conversations_router)
+    app.include_router(custom_agents_router)
+    app.include_router(custom_agents_conversation_router)
+    # AI SDK aliases: same handlers re-mounted under /ai.
+    app.include_router(custom_agents_router, prefix="/ai")
+    app.include_router(custom_agents_conversation_router, prefix="/ai")
     app.include_router(messages_router)
     app.include_router(feedback_router)
     app.include_router(documents_router)

@@ -25,6 +25,7 @@ from app.repositories.message import MessageRepository
 from app.repositories.task_plan import TaskPlanRepository
 from app.repositories.user import UserRepository
 from app.services.ai_service import AIService
+from app.services.custom_agent_service import CustomAgentService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.jwt_service import JwtService
 from app.services.mcp_service import MCPService
@@ -131,6 +132,7 @@ class AppAutoInjector(AutoInjector):
             AIService: container_ref.ai_service,
             ProviderService: container_ref.provider_service,
             ModelConfigService: container_ref.model_config_service,
+            CustomAgentService: container_ref.custom_agent_service,
         }
 
     @classmethod

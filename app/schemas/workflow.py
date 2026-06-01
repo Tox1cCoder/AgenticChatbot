@@ -83,6 +83,13 @@ class WorkflowExecutionRequest(BaseModel):
     attachments: list[Any] | None = None
     model_request: dict[str, Any] | None = None
     planning: WorkflowPlanningContext = Field(default_factory=WorkflowPlanningContext)
+    # Custom agents attached to this conversation, keyed by runtime id
+    # ("custom_agent:<uuid>"). Empty when no custom agents are attached, which
+    # preserves all existing behavior for conversations without them.
+    custom_agents: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Resolved per-conversation custom agents keyed by runtime id",
+    )
     # Stable database message identifiers that flow through the graph so the
     # current user turn can be excluded by ID rather than by tail position,
     # and the final assistant reply can be persisted with a known ID.

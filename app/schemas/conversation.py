@@ -4,6 +4,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import PlanLifecycle
+from app.schemas.custom_agent import CustomAgentRead
 from app.schemas.message import MessageRead
 from app.utils.case_conversion import to_camel_case as to_camel
 
@@ -65,6 +66,10 @@ class ConversationRead(BaseModel):
     )
     messages: list["MessageRead"] | None = Field(
         default=None, description="Recent messages in the conversation (when requested)"
+    )
+    custom_agents: list["CustomAgentRead"] | None = Field(
+        default=None,
+        description="Custom agents attached to this conversation (when requested)",
     )
 
 
