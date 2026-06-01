@@ -197,7 +197,7 @@ def build_custom_agent_runtime_spec(
         allowed_server_tool_refs=server_refs,
         allowed_client_tool_refs=client_refs,
         allowed_skill_refs=list(state_entry.get("skill_refs") or []),
-        allow_all_server_tools=True,
+        allow_all_server_tools=False,
     )
 
 
@@ -239,15 +239,19 @@ def filter_tools_for_custom_agent(
 
     Client tools are kept only when an allowed client-tool ref matches every
     exact-identity field AND (when supplied) the request device matches the
-    stored device. Custom-agent server tools come from the backend MCP catalog
-    and are allowed by default; when ``allow_all_server_tools`` is false, server
-    tools are kept only by exact qualified id. Returns ``(tools, warnings)``; a
-    warning is emitted for each selected client tool that is unavailable.
+    stored device. Server tools are kept only by exact qualified id unless
+    ``allow_all_server_tools`` is explicitly true. Returns ``(tools, warnings)``;
+    a warning is emitted for each selected client tool that is unavailable.
     """
     server_ids = {
         str(r.get("qualified_tool_id"))
         for r in spec.allowed_server_tool_refs
         if r.get("qualified_tool_id")
+    }
+    server_ref_keys = {
+        (str(r.get("server_name") or ""), str(r.get("tool_name") or ""))
+        for r in spec.allowed_server_tool_refs
+        if r.get("server_name") and r.get("tool_name")
     }
     allowed: list[Any] = []
     matched_ref_indexes: set[int] = set()
@@ -263,8 +267,18 @@ def filter_tools_for_custom_agent(
                 allowed.append(tool)
                 matched_ref_indexes.add(index)
                 break
-        elif spec.allow_all_server_tools or _server_qualified_tool_id(tool, meta) in server_ids:
-            allowed.append(tool)
+        else:
+            server_qualified_id = _server_qualified_tool_id(tool, meta)
+            server_name = str(meta.get("server_name") or "").strip()
+            tool_name = str(
+                meta.get("aliased_from_tool_name") or getattr(tool, "name", "") or ""
+            ).strip()
+            if (
+                spec.allow_all_server_tools
+                or server_qualified_id in server_ids
+                or (server_name, tool_name) in server_ref_keys
+            ):
+                allowed.append(tool)
 
     warnings: list[str] = [
         f"Selected client tool '{ref.get('qualified_tool_id')}' is unavailable "

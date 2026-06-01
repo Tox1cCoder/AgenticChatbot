@@ -9,6 +9,7 @@ Verifies that TOOL_EXPLORATION_SUFFIX:
 from __future__ import annotations
 
 from app.ai.prompts import TOOL_EXPLORATION_SUFFIX
+from app.ai.tool_search_tool import create_tool_search_tool, tool_search
 
 # ---------------------------------------------------------------------------
 # Generic prompt invariants
@@ -76,6 +77,32 @@ def test_tool_exploration_suffix_encourages_capability_exploration_before_text_f
     lower_suffix = TOOL_EXPLORATION_SUFFIX.lower()
     assert "before giving a text-only or locally generated answer" in lower_suffix
     assert "explore your available capabilities" in lower_suffix
+
+
+def test_tool_exploration_suffix_requires_discovery_for_real_environment_actions():
+    """Real-environment work should explicitly push discovery unless the needed
+    tool is already bound, so auto tool-choice models do not answer directly."""
+    lower_suffix = TOOL_EXPLORATION_SUFFIX.lower()
+    assert "inspect, search, create, edit, run, fetch, browse" in lower_suffix
+    assert "unless the exact required tool is already bound" in lower_suffix
+    assert "do not answer from general knowledge" in lower_suffix
+
+
+def test_tool_search_description_discourages_skipping_deferred_discovery():
+    """The exposed tool description is part of model selection, so it should
+    discourage skipping discovery for common real-environment actions."""
+    description = f"{tool_search.description} {create_tool_search_tool().description}".lower()
+    assert "no specialized tool for that action is already bound" in description
+    assert "do not skip discovery" in description
+
+
+def test_tool_exploration_suffix_uses_recommended_tool_without_synonym_search():
+    lower = TOOL_EXPLORATION_SUFFIX.lower()
+
+    assert "recommended_tool" in lower
+    assert "do not issue another" in lower
+    assert "synonym" in lower
+    assert "requires_refinement" in lower
 
 
 def test_tool_exploration_suffix_scopes_discovery_to_current_runtime_context():

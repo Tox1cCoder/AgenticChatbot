@@ -24,7 +24,13 @@ from .client_runtime_tools import (
     TOOL_ORIGIN_CLIENT_MCP,
 )
 from .text_normalization import sanitize_identifier, tokenize_text
-from .tool_search_scoring import build_query_tokens, rank_and_filter, score_tool
+from .tool_search_scoring import (
+    ToolSearchScore,
+    build_query_tokens,
+    rank_and_filter,
+    rank_tool_candidates,
+    score_tool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -442,9 +448,42 @@ class ClientToolCatalog:
         if not query or not query.strip():
             return candidates[:top_k]
 
-        # Score and rank
-        scored = self._rank_candidates(query, candidates)
-        return [t for t, _ in scored[:top_k]]
+        # Score and rank via the shared intent-aware scorer, unwrapping tools.
+        return [item.tool for item in self.search_scored(query, top_k, server_name, allowlist)]
+
+    def search_scored(
+        self,
+        query: str,
+        top_k: int = 5,
+        server_name: str | None = None,
+        allowlist: list[str] | None = None,
+    ) -> list[ToolSearchScore]:
+        """Like search(), but returns ToolSearchScore objects.
+
+        Mirrors McpToolCatalog.search_scored so client and server results share
+        the same scored contract and can be merged on comparable scores instead
+        of synthetic fallback scores.
+        """
+        canonical_server = self.resolve_server_name(server_name) if server_name else None
+        if server_name and canonical_server is None:
+            return []
+
+        candidates = (
+            self._tools_by_server.get(canonical_server, []) if canonical_server else self._tools
+        )
+
+        if allowlist:
+            allowlist_set = set(allowlist)
+            candidates = [
+                tool
+                for tool in candidates
+                if self._descriptor_matches_allowlist(tool, allowlist_set)
+            ]
+
+        if not query or not query.strip():
+            return []
+
+        return rank_tool_candidates(query=query, candidates=candidates)[:top_k]
 
     def _rank_candidates(
         self,

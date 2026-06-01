@@ -617,3 +617,94 @@ async def test_execute_agent_tool_calls_persists_deferred_snapshot_to_state_cont
         device_id=str(device_id),
         session_id="session-a",
     ) == ["brave__search", "client__desktop_commander__start_process"]
+
+
+def test_deferred_binding_exposes_alias_name_for_ambiguous_server_tool(monkeypatch):
+    from app.ai.deferred_tool_binding import get_deferred_tools_for_binding
+    from app.ai.deferred_tool_state import get_deferred_tool_state, reset_deferred_tool_state
+    from app.ai.mcp_tool_catalog import ToolReference
+
+    reset_deferred_tool_state()
+
+    brave_tool = SimpleNamespace(name="search", description="Brave search")
+    tavily_tool = SimpleNamespace(name="search", description="Tavily search")
+
+    class FakeManager:
+        _tool_index = {"search": [tavily_tool, brave_tool]}
+        _server_tools = {"tavily": [tavily_tool], "brave": [brave_tool]}
+
+        def get_server_for_tool(self, tool):
+            return "brave" if tool is brave_tool else "tavily"
+
+    try:
+        get_deferred_tool_state().autoload(
+            "conv-1",
+            "chat",
+            [ToolReference(tool_name="search", server_name="brave", call_name="brave__search")],
+        )
+
+        tools = get_deferred_tools_for_binding("conv-1", "chat", FakeManager(), [])
+
+        assert [tool.name for tool in tools] == ["brave__search"]
+    finally:
+        reset_deferred_tool_state()
+
+
+@pytest.mark.asyncio
+async def test_refresh_tool_map_uses_tool_state_key_for_custom_agent(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.ai.deferred_tool_state import get_deferred_tool_state, reset_deferred_tool_state
+    from app.ai.mcp_tool_catalog import ToolReference
+    from app.ai.tool_execution import _refresh_tool_map_after_search
+
+    reset_deferred_tool_state()
+    brave_tool = SimpleNamespace(name="search", description="Brave search")
+
+    class FakeManager:
+        _tool_index = {"search": [brave_tool]}
+        _server_tools = {"brave": [brave_tool]}
+
+        async def get_tools(self):
+            return [brave_tool]
+
+        def get_server_for_tool(self, tool):
+            return "brave"
+
+    async def fake_get_global_mcp_manager():
+        return FakeManager()
+
+    try:
+        get_deferred_tool_state().autoload(
+            conversation_id="conv-1",
+            agent_key="custom_agent:abc",
+            references=[
+                ToolReference(
+                    tool_name="search",
+                    server_name="brave",
+                    call_name="brave__search",
+                )
+            ],
+        )
+
+        monkeypatch.setattr(
+            "app.ai.mcp_registry.get_global_mcp_manager",
+            fake_get_global_mcp_manager,
+        )
+        tool_map: dict[str, object] = {}
+
+        await _refresh_tool_map_after_search(
+            tool_map=tool_map,
+            agent=SimpleNamespace(
+                agent_config_key="custom",
+                tool_state_key="custom_agent:abc",
+            ),
+            conversation_id="conv-1",
+            user_id="user-1",
+            device_id=None,
+        )
+
+        assert "brave__search" in tool_map
+        assert "search" not in tool_map
+    finally:
+        reset_deferred_tool_state()

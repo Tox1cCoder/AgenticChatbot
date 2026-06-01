@@ -1628,7 +1628,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         user_id = state_view.user_id()
         device_id = state_view.device_id()
         agent_key = (
-            getattr(agent, "agent_config_key", None)
+            getattr(agent, "tool_state_key", None)
+            or getattr(agent, "agent_config_key", None)
             or getattr(agent, "agent_id", None)
             or "unknown"
         )
@@ -1691,7 +1692,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             return
 
         agent_key = (
-            getattr(agent, "agent_config_key", None)
+            getattr(agent, "tool_state_key", None)
+            or getattr(agent, "agent_config_key", None)
             or getattr(agent, "agent_id", None)
             or "unknown"
         )
@@ -1736,7 +1738,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             return False
 
         agent_key = (
-            getattr(agent, "agent_config_key", None)
+            getattr(agent, "tool_state_key", None)
+            or getattr(agent, "agent_config_key", None)
             or getattr(agent, "agent_id", None)
             or "unknown"
         )
@@ -2209,9 +2212,17 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     else {}
                 )
 
-                # Extract context for tool execution
+                # Extract context for tool execution. Use the deferred-state key
+                # (tool_state_key) so custom agents resolve their own loaded tools.
                 user_id = state.get("user_id")
-                agent_key = getattr(agent, "agent_config_key", None) if agent else "rag"
+                if agent:
+                    agent_key = (
+                        getattr(agent, "tool_state_key", None)
+                        or getattr(agent, "agent_config_key", None)
+                        or "rag"
+                    )
+                else:
+                    agent_key = "rag"
                 device_id = state.get("device_id")
 
                 # Execute tools with context set for deferred tool loading support
@@ -2529,6 +2540,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         device_id = parent_state.get("device_id")
         persona = parent_state.get("persona")
         agent_key = getattr(agent, "agent_config_key", None) or agent_name
+        # Deferred tool state is keyed by tool_state_key (custom agents use their
+        # runtime id). Keep agent_key for model routing only.
+        tool_state_key = getattr(agent, "tool_state_key", None) or agent_key
         model_request = build_worker_model_request(
             parent_model_request=parent_state.get("model_request"),
             agent_key=agent_key,
@@ -2645,7 +2659,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                             user_id=user_id,
                             device_id=device_id,
                         )
-                    with tool_execution_context(conversation_id, user_id, agent_key, device_id):
+                    with tool_execution_context(
+                        conversation_id, user_id, tool_state_key, device_id
+                    ):
                         outputs, artifacts, _images = await execute_tool_calls(
                             tool_calls=[tool_call_data],
                             tool_map=rag_tool_map,
@@ -2717,7 +2733,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     user_id=user_id,
                     device_id=device_id,
                 )
-            with tool_execution_context(conversation_id, user_id, agent_key, device_id):
+            with tool_execution_context(conversation_id, user_id, tool_state_key, device_id):
                 outputs, artifacts, _images = await execute_tool_calls(
                     tool_calls=tool_calls,
                     tool_map=tool_map,

@@ -1230,7 +1230,10 @@ def render_custom_agents_view() -> None:
     st.divider()
     st.subheader("Attach to the current conversation")
     current_conv = st.session_state.get("current_conversation_id")
-    if current_conv and current_conv != "pending_new":
+    if current_conv:
+        # ``current_conv`` may be the "pending_new" sentinel for a freshly
+        # started chat; the panel buffers the selection until the conversation
+        # is created on first send.
         render_conversation_custom_agents_panel(current_conv)
     else:
         st.caption("Open or start a conversation (Chat tab) to attach custom agents to it.")
@@ -1604,22 +1607,49 @@ def _build_skill_refs(
 
 
 def render_conversation_custom_agents_panel(conversation_id: str) -> None:
-    """Attach/detach custom agents for the active conversation."""
-    if not conversation_id or conversation_id == "pending_new":
+    """Attach/detach custom agents for the active conversation.
+
+    For a not-yet-created chat (``pending_new``) the selection is buffered in
+    ``pending_custom_agent_ids`` and applied to the conversation right after it
+    is created on the first message send. This mirrors the pending
+    persona-prompt flow so users can configure a new chat before sending.
+    """
+    if not conversation_id:
         return
     all_agents = list_custom_agents()
     if not all_agents:
         return
-    attached = get_conversation_custom_agents(conversation_id)
-    attached_ids = [a.get("id") for a in attached]
     label_by_id = {a["id"]: a.get("name", a["id"]) for a in all_agents}
+
+    is_pending = conversation_id == "pending_new"
+    if is_pending:
+        default_ids = [
+            i
+            for i in st.session_state.get("pending_custom_agent_ids", [])
+            if i in label_by_id
+        ]
+    else:
+        attached_ids = [a.get("id") for a in get_conversation_custom_agents(conversation_id)]
+        default_ids = [i for i in attached_ids if i in label_by_id]
+
     selected = st.multiselect(
         "Attached custom agents",
         list(label_by_id.keys()),
-        default=[i for i in attached_ids if i in label_by_id],
+        default=default_ids,
         format_func=lambda i: label_by_id.get(i, i),
         key=f"ca_attach_{conversation_id}",
     )
+
+    if is_pending:
+        # Buffer the selection; it is attached when the conversation is created
+        # on the first message send (see the send handler).
+        st.session_state.pending_custom_agent_ids = list(selected)
+        st.caption(
+            "These custom agents will be attached to your new chat once you send "
+            "the first message."
+        )
+        return
+
     if st.button("Save attachments", key=f"ca_attach_save_{conversation_id}"):
         status, payload = set_conversation_custom_agents(conversation_id, selected)
         if status == 200:
@@ -2156,6 +2186,7 @@ def reset_conversation_state() -> None:
     st.session_state.pending_persona_prompt = ""
     st.session_state.persona_editor_origin = None
     st.session_state.persona_editor_value = ""
+    st.session_state.pending_custom_agent_ids = []
     st.session_state.pending_image_attachments = []
     st.session_state.show_attachment_uploader = False
     st.session_state.message_image_thumbnails = {}
@@ -8459,6 +8490,20 @@ def render_chat_view():
                             st.session_state.current_conversation_id = new_conversation["id"]
                             upsert_conversation_in_state(new_conversation)
                             st.session_state.conversations_loaded = True
+                            # Apply custom agents queued while the chat was
+                            # pending_new, BEFORE reset clears the buffer.
+                            queued_custom_agent_ids = list(
+                                st.session_state.get("pending_custom_agent_ids", [])
+                            )
+                            if queued_custom_agent_ids:
+                                ca_status, _ca_payload = set_conversation_custom_agents(
+                                    new_conversation["id"], queued_custom_agent_ids
+                                )
+                                if ca_status != 200:
+                                    st.toast(
+                                        "Failed to attach custom agents to the new chat",
+                                        icon=":material/warning:",
+                                    )
                             reset_conversation_state()
                             st.session_state.pending_image_attachments = saved_attachments
                             conversation_id = st.session_state.current_conversation_id

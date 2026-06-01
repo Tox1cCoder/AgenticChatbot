@@ -24,7 +24,13 @@ from typing import Any
 
 from .mcp_registry import get_mcp_tools_generation
 from .text_normalization import sanitize_identifier, tokenize_text
-from .tool_search_scoring import build_query_tokens, rank_and_filter, score_tool
+from .tool_search_scoring import (
+    ToolSearchScore,
+    build_query_tokens,
+    rank_and_filter,
+    rank_tool_candidates,
+    score_tool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -565,11 +571,8 @@ class McpToolCatalog:
         if not query or not query.strip():
             return candidates[:top_k]
 
-        # Score and rank candidates
-        scored = self._rank_candidates(query, candidates)
-
-        # Return top_k results
-        return [t for t, _ in scored[:top_k]]
+        # Score and rank candidates via the intent-aware scorer, unwrapping tools.
+        return [item.tool for item in self.search_scored(query, top_k, server_name, allowlist)]
 
     def search_scored(
         self,
@@ -577,17 +580,18 @@ class McpToolCatalog:
         top_k: int = 5,
         server_name: str | None = None,
         allowlist: list[str] | None = None,
-    ) -> list[tuple["ToolDescriptor", float]]:
-        """Like search(), but returns (ToolDescriptor, score) pairs.
+    ) -> list[ToolSearchScore]:
+        """Like search(), but returns ToolSearchScore objects.
 
-        Used by tool_search_tool to gate autoloading on the actual score.
+        Each result carries the descriptor (``.tool``), the numeric score,
+        confidence band, match reasons, capability profile, and autoload
+        eligibility, so tool_search can build compact model-facing results and
+        gate autoloading on a single high-confidence recommendation.
         """
         # Canonicalize server_name case-insensitively
-        canonical_server = None
-        if server_name:
-            canonical_server = self.resolve_server_name(server_name)
-            if canonical_server is None:
-                return []
+        canonical_server = self.resolve_server_name(server_name) if server_name else None
+        if server_name and canonical_server is None:
+            return []
 
         candidates = (
             self._tools_by_server.get(canonical_server, []) if canonical_server else self._tools
@@ -596,14 +600,15 @@ class McpToolCatalog:
         if allowlist:
             allowlist_set = set(allowlist)
             candidates = [
-                t for t in candidates if self._descriptor_matches_allowlist(t, allowlist_set)
+                tool
+                for tool in candidates
+                if self._descriptor_matches_allowlist(tool, allowlist_set)
             ]
 
-        if not candidates or not query or not query.strip():
+        if not query or not query.strip():
             return []
 
-        scored = self._rank_candidates(query, candidates)
-        return scored[:top_k]
+        return rank_tool_candidates(query=query, candidates=candidates)[:top_k]
 
     def _rank_candidates(
         self,

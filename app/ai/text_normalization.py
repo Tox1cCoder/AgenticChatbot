@@ -31,6 +31,27 @@ def tokenize_text(text: str, *, preserve_underscore: bool = False) -> list[str]:
     return tokens
 
 
+def split_identifier_tokens(value: str | None) -> list[str]:
+    """Split snake/camel/kebab identifiers into normalized tokens."""
+    raw = str(value or "").replace("-", "_")
+    expanded: list[str] = []
+    current = ""
+    for char in raw:
+        if char == "_":
+            if current:
+                expanded.append(current)
+                current = ""
+            continue
+        if current and char.isupper() and current[-1].islower():
+            expanded.append(current)
+            current = char
+            continue
+        current += char
+    if current:
+        expanded.append(current)
+    return tokenize_text(" ".join(expanded))
+
+
 def sanitize_identifier(value: str | None, *, fallback: str = "tool") -> str:
     """Normalize a string into a safe lowercase identifier."""
     raw_value = str(value or "").strip().lower()

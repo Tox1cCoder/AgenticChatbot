@@ -69,11 +69,18 @@ def test_runtime_id_helpers():
 def test_spec_does_not_inject_example_time_tool():
     spec = _spec(tool_refs=[])
     assert spec.allowed_server_tool_refs == []
-    assert spec.allow_all_server_tools is True
+    assert spec.allow_all_server_tools is False
 
 
-def test_custom_agent_receives_all_backend_server_tools_and_selected_client_tools():
-    spec = _spec(tool_refs=[CLIENT_TOOL_REF])
+def test_custom_agent_server_tool_refs_are_exact_allowlist():
+    spec = _spec(tool_refs=[SERVER_MCP_TOOL_REF])
+
+    assert spec.allow_all_server_tools is False
+    assert spec.server_tool_search_allowlist() == ["calculator::calculate"]
+
+
+def test_custom_agent_receives_only_selected_backend_server_and_client_tools():
+    spec = _spec(tool_refs=[SERVER_MCP_TOOL_REF, CLIENT_TOOL_REF])
     calculator_tool = _FakeTool(
         "calculate",
         {
@@ -122,7 +129,9 @@ def test_custom_agent_receives_all_backend_server_tools_and_selected_client_tool
         request_device_id="desktop-1",
     )
     names = {t.name for t in allowed}
-    assert names == {"calculate", "read_sheet", "search_web", "client__csv__profile"}
+    assert names == {"calculate", "client__csv__profile"}
+    assert "read_sheet" not in names
+    assert "search_web" not in names
     assert "client__fs__delete" not in names
     assert warnings == []
 
@@ -260,13 +269,190 @@ def test_two_custom_agents_do_not_share_deferred_tool_state():
     assert agent_a.agent_config_key == agent_b.agent_config_key == "custom"
 
 
+def test_custom_agent_initial_binding_defers_selected_server_tools():
+    from app.ai.agents.custom_agent import CustomAgent
+    from app.ai.deferred_tool_state import reset_deferred_tool_state
+
+    reset_deferred_tool_state()
+    spec = _spec(tool_refs=[SERVER_MCP_TOOL_REF])
+    agent = CustomAgent(spec)
+    agent.tools = [
+        _FakeTool(
+            "calculate",
+            {
+                "tool_origin": "server_mcp",
+                "server_name": "calculator",
+                "qualified_tool_id": "calculator::calculate",
+            },
+        ),
+        _FakeTool(
+            "search_web",
+            {
+                "tool_origin": "server_mcp",
+                "server_name": "search",
+                "qualified_tool_id": "search::search_web",
+            },
+        ),
+    ]
+
+    try:
+        tools = agent._get_tools_for_binding(conversation_id="conv-1")
+        names = {tool.name for tool in tools}
+
+        assert "tool_search" in names
+        assert "calculate" not in names
+        assert "search_web" not in names
+    finally:
+        reset_deferred_tool_state()
+
+
+def test_custom_agent_binding_includes_only_loaded_selected_server_tool():
+    from app.ai.agents.custom_agent import CustomAgent
+    from app.ai.deferred_tool_state import get_deferred_tool_state, reset_deferred_tool_state
+    from app.ai.mcp_tool_catalog import ToolReference
+
+    reset_deferred_tool_state()
+    spec = _spec(tool_refs=[SERVER_MCP_TOOL_REF])
+    agent = CustomAgent(spec)
+    selected_server = _FakeTool(
+        "calculate",
+        {
+            "tool_origin": "server_mcp",
+            "server_name": "calculator",
+            "qualified_tool_id": "calculator::calculate",
+        },
+    )
+    unselected_server = _FakeTool(
+        "search_web",
+        {
+            "tool_origin": "server_mcp",
+            "server_name": "search",
+            "qualified_tool_id": "search::search_web",
+        },
+    )
+
+    class FakeManager:
+        _tool_index = {
+            "calculate": [selected_server],
+            "search_web": [unselected_server],
+        }
+        _server_tools = {
+            "calculator": [selected_server],
+            "search": [unselected_server],
+        }
+
+        def get_server_for_tool(self, tool):
+            return "calculator" if tool is selected_server else "search"
+
+    agent.tools = [selected_server, unselected_server]
+    agent.mcp_manager = FakeManager()
+
+    try:
+        get_deferred_tool_state().autoload(
+            "conv-1",
+            spec.runtime_agent_id,
+            [
+                ToolReference("calculate", "calculator"),
+                ToolReference("search_web", "search"),
+            ],
+        )
+
+        tools = agent._get_tools_for_binding(conversation_id="conv-1")
+        names = {tool.name for tool in tools}
+
+        assert "tool_search" in names
+        assert "calculate" in names
+        assert "search_web" not in names
+    finally:
+        reset_deferred_tool_state()
+
+
+@pytest.mark.asyncio
+async def test_custom_agent_tool_search_refresh_uses_restricted_binding(monkeypatch):
+    from app.ai.agents.custom_agent import CustomAgent
+    from app.ai.deferred_tool_state import get_deferred_tool_state, reset_deferred_tool_state
+    from app.ai.mcp_tool_catalog import ToolReference
+    from app.ai.tool_execution import _refresh_tool_map_after_search
+
+    reset_deferred_tool_state()
+    spec = _spec(tool_refs=[SERVER_MCP_TOOL_REF])
+    agent = CustomAgent(spec)
+    selected_server = _FakeTool(
+        "calculate",
+        {
+            "tool_origin": "server_mcp",
+            "server_name": "calculator",
+            "qualified_tool_id": "calculator::calculate",
+        },
+    )
+    unselected_server = _FakeTool(
+        "search_web",
+        {
+            "tool_origin": "server_mcp",
+            "server_name": "search",
+            "qualified_tool_id": "search::search_web",
+        },
+    )
+
+    class FakeManager:
+        _tool_index = {
+            "calculate": [selected_server],
+            "search_web": [unselected_server],
+        }
+        _server_tools = {
+            "calculator": [selected_server],
+            "search": [unselected_server],
+        }
+
+        async def get_tools(self):
+            return [selected_server, unselected_server]
+
+        def get_server_for_tool(self, tool):
+            return "calculator" if tool is selected_server else "search"
+
+    async def fake_get_global_mcp_manager():
+        return FakeManager()
+
+    agent.tools = [selected_server, unselected_server]
+    agent.mcp_manager = FakeManager()
+
+    try:
+        get_deferred_tool_state().autoload(
+            "conv-1",
+            spec.runtime_agent_id,
+            [
+                ToolReference("calculate", "calculator"),
+                ToolReference("search_web", "search"),
+            ],
+        )
+        monkeypatch.setattr(
+            "app.ai.mcp_registry.get_global_mcp_manager",
+            fake_get_global_mcp_manager,
+        )
+
+        tool_map = {"tool_search": object()}
+        await _refresh_tool_map_after_search(
+            tool_map=tool_map,
+            agent=agent,
+            conversation_id="conv-1",
+            user_id="user-1",
+            device_id=None,
+        )
+
+        assert "calculate" in tool_map
+        assert "search_web" not in tool_map
+    finally:
+        reset_deferred_tool_state()
+
+
 def test_tool_search_allowlist_scopes_to_selected():
     spec = _spec(
         tool_refs=[
+            SERVER_MCP_TOOL_REF,
             CLIENT_TOOL_REF,
         ]
     )
-    assert spec.server_tool_search_allowlist() is None
+    assert spec.server_tool_search_allowlist() == ["calculator::calculate"]
     client_allowlist = set(spec.client_tool_search_allowlist())
     assert "csv-profile-instance" in client_allowlist
     assert "client__csv__profile" not in client_allowlist

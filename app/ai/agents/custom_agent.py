@@ -15,10 +15,17 @@ from langchain_core.tools import BaseTool
 
 from ...core.config import settings
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
+from ..client_runtime_tools import get_active_client_runtime_session
 from ..custom_agent_runtime import AgentRuntimeSpec, filter_tools_for_custom_agent
+from ..deferred_tool_binding import (
+    get_deferred_tools_for_binding,
+    should_use_deferred_loading,
+)
+from ..deferred_tool_state import get_deferred_tool_state
 from ..hand_off_tool import create_hand_off_tool
 from ..schemas import AgentType
 from ..skills_tool import create_activate_skill_tool
+from ..tool_scope import is_client_only_scope
 from ..tool_search_tool import create_tool_search_tool_for_custom_agent
 from .base_agent import BaseAgent
 
@@ -113,19 +120,68 @@ class CustomAgent(BaseAgent):
     ) -> list[BaseTool]:
         """Bind exactly the restricted toolset (same set used for execution).
 
-        Candidates = initialized MCP tools + active client runtime tools, then
-        filtered to this agent's runtime policy (backend MCP tools by default
-        plus exactly the selected client tools). Restricted internal tools
-        (tool_search, activate_skill) are always included. Unavailable selected
-        tools surface as response-metadata warnings.
+        In deferred mode, selected external tools are only bound after
+        ``tool_search`` loads them for this conversation. The persisted
+        ``tool_refs`` remain an allowlist, not a direct binding list.
+        Restricted internal tools (tool_search, activate_skill, handoff) are
+        always included. Unavailable selected client tools surface as
+        response-metadata warnings.
         """
-        candidates: list[BaseTool] = list(self.tools or [])
+        server_candidates: list[BaseTool] = [] if is_client_only_scope(
+            device_id=device_id, tool_scope=tool_scope
+        ) else list(self.tools or [])
         if not (settings.enable_client_runtime_bridge and not device_id):
-            candidates.extend(self._get_client_runtime_tools(user_id=user_id, device_id=device_id))
+            remote_tools = self._get_client_runtime_tools(user_id=user_id, device_id=device_id)
+        else:
+            remote_tools = []
 
-        external, warnings = filter_tools_for_custom_agent(
-            candidates, self._spec, request_device_id=device_id
+        _, availability_warnings = filter_tools_for_custom_agent(
+            [*server_candidates, *remote_tools],
+            self._spec,
+            request_device_id=device_id,
         )
+
+        if should_use_deferred_loading(self.agent_config_key):
+            external_candidates: list[BaseTool] = []
+            if conversation_id and server_candidates and self.mcp_manager:
+                external_candidates.extend(
+                    get_deferred_tools_for_binding(
+                        conversation_id=conversation_id,
+                        agent_key=self.tool_state_key,
+                        mcp_manager=self.mcp_manager,
+                        all_tools=server_candidates,
+                    )
+                )
+
+            if conversation_id and remote_tools:
+                active_session = get_active_client_runtime_session(
+                    user_id=user_id,
+                    device_id=device_id,
+                )
+                loaded_client_tools = get_deferred_tool_state().get_loaded_client_tools(
+                    conversation_id,
+                    self.tool_state_key,
+                    device_id=str(device_id) if device_id else None,
+                    session_id=(active_session.session_id if active_session is not None else None),
+                )
+                loaded_client_names = {loaded.tool_name for loaded in loaded_client_tools}
+                external_candidates.extend(
+                    tool
+                    for tool in remote_tools
+                    if getattr(tool, "name", None) in loaded_client_names
+                )
+            external, _ = filter_tools_for_custom_agent(
+                external_candidates,
+                self._spec,
+                request_device_id=device_id,
+            )
+            warnings = availability_warnings
+        else:
+            external, warnings = filter_tools_for_custom_agent(
+                [*server_candidates, *remote_tools],
+                self._spec,
+                request_device_id=device_id,
+            )
         self.set_runtime_warnings(warnings)
 
         tools: list[BaseTool] = list(

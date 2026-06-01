@@ -3,6 +3,7 @@ import pytest
 from app.ai.client_tool_catalog import ClientToolDescriptor
 from app.ai.mcp_tool_catalog import McpToolCatalog, ToolDescriptor
 from app.ai.tool_context import ToolContext
+from app.ai.tool_search_scoring import rank_tool_candidates
 from app.ai.tool_search_tool import (
     _execute_tool_search,
     _merge_search_results,
@@ -599,3 +600,82 @@ def test_merge_search_results_keeps_distinct_tools_when_qualified_ids_differ():
         "edit_block",
         "client__desktop_commander__edit_block",
     ]
+
+
+def test_tool_search_result_description_is_compact_purpose():
+    desc = ToolDescriptor(
+        tool_name="start_process",
+        server_name="desktop_commander",
+        description="Start a new terminal process with intelligent state detection.\n\n"
+        "PRIMARY TOOL FOR FILE ANALYSIS AND DATA PROCESSING\n" + "x" * 500,
+        arg_names=["command", "timeout_ms", "shell"],
+        required_arg_names=["command"],
+        schema_fingerprint="fp-start-process",
+    )
+
+    ranked = rank_tool_candidates(query="run shell command", candidates=[desc])
+    public, _ = _merge_search_results(
+        server_results=ranked,
+        client_results=[],
+        query="run shell command",
+        top_k=3,
+    )
+
+    assert public[0]["description"] == "Start a shell command or local process."
+    assert len(public[0]["description"]) <= 120
+    assert public[0]["confidence"] == "high"
+    assert len(public[0]["match_reasons"]) <= 2
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_autoloads_only_start_process(monkeypatch):
+    from app.ai.tool_context import ToolContext
+    from app.ai.tool_search_scoring import rank_tool_candidates
+    from tests.test_tool_search_accuracy import _desktop_tools
+
+    class FakeCatalog:
+        def search_scored(self, query=None, top_k=5, server_name=None, allowlist=None):
+            return rank_tool_candidates(query=query, candidates=_desktop_tools())[:top_k]
+
+        def search(self, query=None, top_k=5, server_name=None, allowlist=None):
+            return [item.tool for item in self.search_scored(query, top_k, server_name, allowlist)]
+
+        def is_ambiguous(self, tool_name):
+            return False
+
+        def get_server_inventory(self, allowlist=None):
+            return []
+
+    class DeferredStateStub:
+        def __init__(self):
+            self.refs = []
+
+        def autoload(self, **kwargs):
+            self.refs.extend(kwargs["references"])
+            return kwargs["references"]
+
+        def autoload_client_tools(self, **kwargs):
+            return []
+
+    state = DeferredStateStub()
+
+    async def fake_get_global_mcp_manager():
+        return object()
+
+    async def fake_get_tool_catalog(_manager):
+        return FakeCatalog()
+
+    monkeypatch.setattr("app.ai.tool_search_tool.get_global_mcp_manager", fake_get_global_mcp_manager)
+    monkeypatch.setattr("app.ai.tool_search_tool.get_tool_catalog", fake_get_tool_catalog)
+    monkeypatch.setattr("app.ai.tool_search_tool.get_deferred_tool_state", lambda: state)
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_tool_context",
+        lambda: ToolContext(conversation_id="conv-1", agent_key="chat"),
+    )
+
+    result = await _execute_tool_search(query="run shell command")
+
+    assert result["recommended_tool"]["tool_name"] == "start_process"
+    assert result["recommended_tool"]["is_loaded"] is True
+    assert [ref.tool_name for ref in state.refs] == ["start_process"]
+    assert {ref.tool_name for ref in state.refs}.isdisjoint({"start_search", "get_config"})

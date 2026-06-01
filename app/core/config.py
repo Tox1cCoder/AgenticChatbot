@@ -856,16 +856,31 @@ class Settings(BaseSettings):
         description="Enable deferred MCP tool loading via tool_search. When enabled, only tool_search + pinned tools are bound by default.",
     )
     mcp_tool_search_default_top_k: int = Field(
-        default=5,
-        description="Default number of tools to return from tool_search queries.",
+        default=3,
+        description="Default public candidates returned for tool_search discovery queries.",
     )
     mcp_tool_search_max_top_k: int = Field(
         default=100,
-        description="Maximum allowed top_k value for tool_search (clamped to this).",
+        description=(
+            "Maximum explicit top_k accepted for tool_search discovery queries. "
+            "Keep high for compatibility; default output stays compact."
+        ),
+    )
+    mcp_tool_search_description_max_chars: int = Field(
+        default=120,
+        description="Maximum characters in model-facing tool_search descriptions.",
+    )
+    mcp_tool_search_match_reasons_max: int = Field(
+        default=2,
+        description="Maximum match reasons exposed per search result.",
+    )
+    mcp_tool_search_debug_scores: bool = Field(
+        default=False,
+        description="Include explicit tool_search score diagnostics in discovery output.",
     )
     mcp_tool_search_autoload_top_k: int = Field(
-        default=3,
-        description="Number of top-ranked tools to automatically load/bind after tool_search. Reduced to 3 to limit aggressive autoloading.",
+        default=1,
+        description="Maximum high-confidence recommended tools to automatically load after tool_search.",
     )
     mcp_tool_search_inventory_default_top_k: int = Field(
         default=20,
@@ -1013,6 +1028,8 @@ class Settings(BaseSettings):
         "summarization_timeout_seconds",
         "mcp_tool_search_default_top_k",
         "mcp_tool_search_max_top_k",
+        "mcp_tool_search_description_max_chars",
+        "mcp_tool_search_match_reasons_max",
         "mcp_tool_search_autoload_top_k",
         "mcp_tool_search_inventory_default_top_k",
         "mcp_tool_search_inventory_max_top_k",

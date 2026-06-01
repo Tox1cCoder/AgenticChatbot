@@ -120,11 +120,25 @@ class ToolSearchResult(BaseModel):
     """Individual tool result from search."""
 
     tool_name: str = Field(description="The exact name to use when calling this tool")
-    description: str = Field(description="What the tool does")
+    description: str = Field(description="Compact purpose of the tool")
     arg_hints: str = Field(description="Summary of arguments (* = required)")
     is_loaded: bool = Field(
         default=False, description="True if this tool was autoloaded and is ready for immediate use"
     )
+    confidence: str = Field(
+        default="low", description="Match confidence band: high, medium, or low"
+    )
+    match_reasons: list[str] = Field(
+        default_factory=list, description="At most two short reasons this tool matched"
+    )
+
+
+class RecommendedTool(BaseModel):
+    """Response-level recommendation pointing at the single best loaded tool."""
+
+    tool_name: str = Field(description="The exact name to call")
+    confidence: str = Field(description="Match confidence band: high, medium, or low")
+    is_loaded: bool = Field(description="True when the recommended tool is callable this turn")
 
 
 class ToolSearchOutput(BaseModel):
@@ -146,7 +160,20 @@ class ToolSearchOutput(BaseModel):
             "server_name, description, and tool_count."
         ),
     )
+    recommended_tool: RecommendedTool | None = Field(
+        default=None,
+        description=(
+            "The single high-confidence loaded tool to call next, or null when the "
+            "search should be refined."
+        ),
+    )
     results: list[ToolSearchResult] = Field(description="List of matching tools")
+    requires_refinement: bool = Field(
+        description="True when no loaded high-confidence recommendation is available"
+    )
+    next_action: str = Field(
+        description="call_recommended_tool, refine_search, or inspect_inventory"
+    )
     loaded_count: int = Field(
         description="Number of tools that were autoloaded and ready for immediate use"
     )
@@ -256,7 +283,8 @@ async def _execute_tool_search(
                     else "discovery"
                 )
                 logger.info(
-                    "tool_search: mode=%s query=%r top_k=%d server=%s resolved_server=%s conversation=%s agent=%s device=%s",
+                    "tool_search: mode=%s query=%r top_k=%d server=%s "
+                    "resolved_server=%s conversation=%s agent=%s device=%s",
                     mode_label,
                     query,
                     effective_top_k,
@@ -282,7 +310,10 @@ async def _execute_tool_search(
                     "mode": "inventory",
                     "resolved_server_name": resolved_server_name,
                     "inventory": inventory,
+                    "recommended_tool": None,
                     "results": [],
+                    "requires_refinement": False,
+                    "next_action": "inspect_inventory",
                     "loaded_count": 0,
                     "more_available": False,
                 }
@@ -328,16 +359,27 @@ async def _execute_tool_search(
                         "mode": "inventory",
                         "resolved_server_name": resolved_server_name,
                         "inventory": inventory,
+                        "recommended_tool": None,
                         "results": [],
+                        "requires_refinement": False,
+                        "next_action": "inspect_inventory",
                         "loaded_count": 0,
                         "more_available": False,
                     }
-                client_results = client_catalog.search(
-                    query=query,
-                    top_k=effective_top_k * 2,  # Request extra for merging
-                    server_name=server_name,
-                    allowlist=effective_client_allowlist,
-                )
+                if query and hasattr(client_catalog, "search_scored"):
+                    client_results = client_catalog.search_scored(
+                        query=query,
+                        top_k=effective_top_k * 2,  # Request extra for merging
+                        server_name=server_name,
+                        allowlist=effective_client_allowlist,
+                    )
+                else:
+                    client_results = client_catalog.search(
+                        query=query,
+                        top_k=effective_top_k * 2,  # Request extra for merging
+                        server_name=server_name,
+                        allowlist=effective_client_allowlist,
+                    )
                 logger.debug(
                     "tool_search: found %d client tools from device %s",
                     len(client_results),
@@ -372,7 +414,8 @@ async def _execute_tool_search(
         srv_name = internal.get("server_name", "")
         tool_score = float(internal.get("_score", 0.0))
 
-        # Gate autoloading on the stricter autoload threshold
+        # Gate autoloading on the stricter autoload threshold (secondary safety
+        # floor for backward compatibility with unscored/legacy results).
         if tool_score < autoload_min_score:
             if settings.mcp_tool_search_log_queries:
                 logger.debug(
@@ -381,6 +424,13 @@ async def _execute_tool_search(
                     tool_score,
                     autoload_min_score,
                 )
+            continue
+
+        # Scored results carry explicit eligibility: only the single
+        # high-confidence recommended candidate is eligible, so we no longer
+        # broadly autoload the first N candidates. Legacy/plain results have no
+        # eligibility flag (None) and fall back to the score floor above.
+        if internal.get("_autoload_eligible") is False:
             continue
 
         if is_client:
@@ -475,16 +525,132 @@ async def _execute_tool_search(
     # Return clean results for model consumption
     # NO internal metadata like server_name, origin, generation, etc.
     mode = "per_server_inventory" if is_per_server_inventory else "discovery"
+    recommended_tool, requires_refinement, next_action = _build_recommendation(
+        public_results,
+        internal_results,
+    )
     result = {
         "query": query,
         "mode": mode,
+        "recommended_tool": recommended_tool,
         "results": public_results,
+        "requires_refinement": requires_refinement,
+        "next_action": next_action,
         "loaded_count": loaded_count,
         "more_available": truncated,
     }
     if resolved_server_name:
         result["resolved_server_name"] = resolved_server_name
+    if settings.mcp_tool_search_debug_scores:
+        result["debug_scores"] = [
+            {
+                "tool_name": public.get("tool_name"),
+                "score": internal.get("_score"),
+                "confidence": internal.get("_confidence"),
+                "reasons": internal.get("_match_reasons", []),
+            }
+            for public, internal in zip(public_results, internal_results, strict=False)
+        ]
     return result
+
+
+def _public_result_from_scored(item: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build (public, internal) dicts from a ToolSearchScore.
+
+    The public dict uses the compact capability purpose (not a truncated raw MCP
+    prompt) and carries confidence + match reasons. The internal dict carries the
+    numeric score and autoload eligibility for the autoload pass and debug output.
+    """
+    score_meta = item if hasattr(item, "tool") else None
+    tool = score_meta.tool if score_meta is not None else item
+
+    public = tool.to_search_result()
+    if score_meta is not None:
+        public["description"] = score_meta.profile.purpose[
+            : settings.mcp_tool_search_description_max_chars
+        ]
+        public["confidence"] = score_meta.confidence
+        public["match_reasons"] = score_meta.match_reasons[
+            : settings.mcp_tool_search_match_reasons_max
+        ]
+
+    internal = tool._to_internal_result()
+    if score_meta is not None:
+        internal["_score"] = score_meta.score
+        internal["_confidence"] = score_meta.confidence
+        internal["_autoload_eligible"] = score_meta.autoload_eligible
+        internal["_match_reasons"] = list(score_meta.match_reasons)
+        if settings.mcp_tool_search_debug_scores:
+            internal["_debug_score"] = {
+                "score": score_meta.score,
+                "capabilities": sorted(score_meta.profile.capabilities),
+            }
+    return public, internal
+
+
+def _search_item_to_dicts(item: Any, idx: int) -> tuple[float, dict[str, Any], dict[str, Any]]:
+    """Normalize a merge input into (score, public_dict, internal_dict).
+
+    Accepts scored objects (``.tool``), legacy ``(descriptor, score)`` tuples, and
+    plain descriptors. Tuple/plain paths are temporary compatibility for older
+    fakes and external callers during the scored-contract migration.
+    """
+    if hasattr(item, "tool"):
+        public_dict, internal_dict = _public_result_from_scored(item)
+        real_score = float(item.score)
+    elif isinstance(item, tuple) and len(item) == 2:
+        desc, real_score = item
+        real_score = float(real_score)
+        public_dict = desc.to_search_result()
+        internal_dict = desc._to_internal_result()
+    else:
+        desc = item
+        real_score = float(1000 - idx)
+        public_dict = desc.to_search_result()
+        internal_dict = desc._to_internal_result()
+    internal_dict["_score"] = real_score
+    return real_score, public_dict, internal_dict
+
+
+def _build_recommendation(
+    public_results: list[dict[str, Any]],
+    internal_results: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, bool, str]:
+    """Decide the single recommended tool and the response-level next action.
+
+    A recommendation is only emitted when the top public result is loaded
+    (callable this turn) and high confidence, or medium confidence as the lone
+    result. Otherwise the model is told to refine the search.
+    """
+    if not public_results or not internal_results:
+        return None, True, "refine_search"
+
+    top_public = public_results[0]
+    top_internal = internal_results[0]
+    confidence = str(top_public.get("confidence") or top_internal.get("_confidence") or "low")
+    is_loaded = bool(top_public.get("is_loaded"))
+
+    if confidence == "high" and is_loaded:
+        return (
+            {
+                "tool_name": top_public["tool_name"],
+                "confidence": confidence,
+                "is_loaded": is_loaded,
+            },
+            False,
+            "call_recommended_tool",
+        )
+    if confidence == "medium" and is_loaded and len(public_results) == 1:
+        return (
+            {
+                "tool_name": top_public["tool_name"],
+                "confidence": confidence,
+                "is_loaded": is_loaded,
+            },
+            False,
+            "call_recommended_tool",
+        )
+    return None, True, "refine_search"
 
 
 def _merge_search_results(
@@ -517,27 +683,12 @@ def _merge_search_results(
 
     # Process server results (already sorted by relevance)
     for idx, item in enumerate(server_results):
-        # Support both (descriptor, score) tuples and plain descriptors
-        if isinstance(item, tuple):
-            desc, real_score = item
-        else:
-            desc = item
-            real_score = float(1000 - idx)
-        public_dict = desc.to_search_result()
-        internal_dict = desc._to_internal_result()
-        internal_dict["_score"] = real_score
+        real_score, public_dict, internal_dict = _search_item_to_dicts(item, idx)
         merged.append((real_score, 0, public_dict, internal_dict))  # 0 = server (prefer on tie)
 
     # Process client results
     for idx, item in enumerate(client_results):
-        if isinstance(item, tuple):
-            desc, real_score = item
-        else:
-            desc = item
-            real_score = float(1000 - idx)
-        public_dict = desc.to_search_result()
-        internal_dict = desc._to_internal_result()
-        internal_dict["_score"] = real_score
+        real_score, public_dict, internal_dict = _search_item_to_dicts(item, idx)
         merged.append((real_score, 1, public_dict, internal_dict))  # 1 = client
 
     # Sort by score descending, then by source (server first on tie)
@@ -588,6 +739,8 @@ async def tool_search(
     When deferred MCP loading is enabled, do not guess tool names first.
     Use tool_search with a specific query to find and autoload the tool you need,
     then call the discovered tool by name.
+    If no specialized tool for that action is already bound, call tool_search first
+    for real environment actions. Do not skip discovery because the task sounds common.
 
     For named integrations:
     - If you do not yet know the exact server identifier, call tool_search()
@@ -605,8 +758,8 @@ async def tool_search(
     - If resolved_server_name is present, reuse that exact server_name in later calls
     - Prefer task-based queries that include the action and target
     - Refine the query and search again if the results are weak or ambiguous
-    - The top results are automatically loaded; any result with is_loaded=true
-      is ready to call immediately
+    - High-confidence eligible results are automatically loaded; any result
+      with is_loaded=true is ready to call immediately
 
     Examples:
     - Search for web tools: tool_search(query="search the web")
@@ -623,7 +776,7 @@ async def tool_search(
     )
 
     # Format as JSON string for tool output
-    return json.dumps(result, indent=2)
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
 
 def create_tool_search_tool(
@@ -664,6 +817,8 @@ def create_tool_search_tool(
         When deferred MCP loading is enabled, do not guess tool names first.
         Use tool_search with a specific query to find and autoload the tool you need,
         then call the discovered tool by name.
+        If no specialized tool for that action is already bound, call tool_search first
+        for real environment actions. Do not skip discovery because the task sounds common.
 
         For named integrations, identify the exact server first with
         tool_search(), then inspect that server with tool_search(server_name="...")
@@ -675,7 +830,8 @@ def create_tool_search_tool(
         After searching, inspect the descriptions and arg_hints, refine the
         query if needed, and call the best matching tool by name. If
         resolved_server_name is present, reuse that exact server_name in later
-        calls. Results with is_loaded=true are ready to use immediately.
+        calls. High-confidence eligible results with is_loaded=true are ready
+        to use immediately.
         """
         result = await _execute_tool_search(
             query=query,
@@ -685,7 +841,7 @@ def create_tool_search_tool(
             server_allowlist=server_allowlist,
             client_allowlist=client_allowlist,
         )
-        return json.dumps(result, indent=2)
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
     return tool_search_impl
 

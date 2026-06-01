@@ -231,3 +231,35 @@ async def test_is_loaded_false_when_autoload_score_below_threshold(monkeypatch):
     assert result["results"][0]["is_loaded"] is False
     # And deferred state autoload was never called (or called with empty refs)
     assert deferred_state.autoload_calls == 0
+
+
+def test_score_metadata_marks_weak_description_only_matches_low_confidence():
+    from app.ai.tool_search_scoring import rank_tool_candidates
+    from app.ai.mcp_tool_catalog import ToolDescriptor
+
+    tools = [
+        ToolDescriptor(
+            tool_name="get_config",
+            server_name="desktop_commander",
+            description="Configuration includes blocked shell commands.",
+            arg_names=[],
+            required_arg_names=[],
+            schema_fingerprint="fp-config",
+        ),
+        ToolDescriptor(
+            tool_name="start_process",
+            server_name="desktop_commander",
+            description="Start a terminal process.",
+            arg_names=["command", "timeout_ms", "shell"],
+            required_arg_names=["command"],
+            schema_fingerprint="fp-process",
+        ),
+    ]
+
+    ranked = rank_tool_candidates(query="run shell command", candidates=tools)
+
+    assert ranked[0].tool.tool_name == "start_process"
+    assert ranked[0].confidence == "high"
+    assert ranked[1].tool.tool_name == "get_config"
+    assert ranked[1].confidence in {"low", "medium"}
+    assert ranked[1].autoload_eligible is False

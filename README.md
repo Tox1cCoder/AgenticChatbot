@@ -526,7 +526,14 @@ The agent workflow is a **LangGraph state machine** defined in [`app/ai/graph.py
 
 ### Deferred tool search
 
-When `MCP_TOOL_SEARCH_ENABLED=true`, only the lightweight [`tool_search`](app/ai/tool_search_tool.py) tool and `MCP_TOOL_SEARCH_PINNED_TOOLS` are bound at start. The agent discovers further tools semantically, with scoring in [`tool_search_scoring.py`](app/ai/tool_search_scoring.py), automatic autoload of the top-`N` above a stricter relevance threshold, TTL eviction, and a per-conversation loaded-tools cap.
+When `MCP_TOOL_SEARCH_ENABLED=true`, only the lightweight [`tool_search`](app/ai/tool_search_tool.py) tool and `MCP_TOOL_SEARCH_PINNED_TOOLS` are bound at start. The agent discovers further tools semantically, with intent-aware scoring in [`tool_search_scoring.py`](app/ai/tool_search_scoring.py), conservative autoload of the single high-confidence recommended tool, TTL eviction, and a per-conversation loaded-tools cap.
+
+Run the deterministic tool-search accuracy checks before changing ranking:
+
+```bash
+python scripts/evaluate_tool_search_accuracy.py
+python -m pytest tests/test_tool_search_accuracy.py tests/test_unified_tool_search.py -q
+```
 
 ### Confidence & hallucination controls
 

@@ -715,10 +715,36 @@ async def _refresh_tool_map_after_search(
         mcp_manager = await get_global_mcp_manager()
         client_only_scope = is_client_only_scope(device_id=device_id, tool_scope=tool_scope)
 
-        # Get the agent key for looking up loaded tools
+        # Get the agent key for looking up loaded tools. Custom agents bind
+        # loaded tools under tool_state_key, so deferred-state reads must use it
+        # (not the shared agent_config_key) to find the right tools.
         agent_key = "default"
         if agent:
-            agent_key = getattr(agent, "agent_config_key", None) or "default"
+            agent_key = (
+                getattr(agent, "tool_state_key", None)
+                or getattr(agent, "agent_config_key", None)
+                or "default"
+            )
+
+        # Custom agents must refresh from their own restricted binding helper so
+        # stale or previously loaded tools outside the current tool_refs policy
+        # cannot appear in the same-turn execution map.
+        if getattr(agent, "spec", None) is not None and hasattr(agent, "_get_tools_for_binding"):
+            try:
+                refreshed_tools = agent._get_tools_for_binding(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    device_id=device_id,
+                    tool_scope=tool_scope,
+                )
+            except TypeError:
+                refreshed_tools = agent._get_tools_for_binding(conversation_id)
+
+            for tool in refreshed_tools:
+                tool_name = getattr(tool, "name", None)
+                if tool_name and tool_name not in tool_map:
+                    tool_map[tool_name] = tool
+            return
 
         # Get all MCP tools from the manager
         all_mcp_tools = await mcp_manager.get_tools() if mcp_manager else []
@@ -818,6 +844,53 @@ async def _recover_missing_tool(
     if not tool_name.startswith(CLIENT_TOOL_PREFIX):
         if is_client_only_scope(device_id=device_id, tool_scope=tool_scope):
             return None
+
+        # Alias-aware recovery first: the model may call the public alias
+        # (e.g. "brave__search") while the live MCP manager exposes the raw name
+        # ("search"). Resolve the raw name + server from the loaded deferred
+        # state, then rebind under the public alias.
+        try:
+            from .deferred_tool_binding import _tool_with_call_name
+            from .deferred_tool_state import get_deferred_tool_state
+
+            agent_key = (
+                getattr(agent, "tool_state_key", None)
+                or getattr(agent, "agent_config_key", None)
+                or "default"
+            )
+            state = get_deferred_tool_state()
+            server_name = state.get_server_for_loaded_tool(conversation_id, agent_key, tool_name)
+            raw_tool_name = state.get_raw_tool_name_for_loaded_tool(
+                conversation_id, agent_key, tool_name
+            )
+            if raw_tool_name and server_name:
+                from .mcp_registry import get_global_mcp_manager
+
+                manager = await get_global_mcp_manager()
+                if manager is not None:
+                    for server_tool in await manager.get_tools():
+                        if (
+                            getattr(server_tool, "name", None) == raw_tool_name
+                            and manager.get_server_for_tool(server_tool) == server_name
+                        ):
+                            tool_map[tool_name] = _tool_with_call_name(server_tool, tool_name)
+                            logger.debug(
+                                "Recovered aliased server tool '%s' (raw '%s', server '%s')",
+                                tool_name,
+                                raw_tool_name,
+                                server_name,
+                            )
+                            return tool_map[tool_name]
+        except Exception as exc:
+            logger.warning("Failed alias-aware recovery for '%s': %s", tool_name, exc)
+
+        if settings.mcp_tool_search_enabled and conversation_id:
+            logger.debug(
+                "Skipping raw server-tool recovery for unloaded deferred tool '%s'",
+                tool_name,
+            )
+            return None
+
         try:
             from .mcp_registry import get_global_mcp_manager
 

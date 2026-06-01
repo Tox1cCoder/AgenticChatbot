@@ -48,6 +48,9 @@ class LoadedTool:
     loaded_at: float = field(default_factory=time.time)
     last_used: float = field(default_factory=time.time)
     generation: int = 0
+    # Public invokable name. Equals tool_name for non-ambiguous tools; the
+    # deterministic alias (e.g. "brave__search") for ambiguous same-name tools.
+    call_name: str | None = None
 
     def touch(self) -> None:
         """Update the last_used timestamp."""
@@ -65,8 +68,12 @@ class LoadedTool:
         return self.generation != current_generation
 
     def to_reference(self) -> ToolReference:
-        """Convert to a ToolReference."""
-        return ToolReference(tool_name=self.tool_name, server_name=self.server_name)
+        """Convert to a ToolReference, preserving the public call_name alias."""
+        return ToolReference(
+            tool_name=self.tool_name,
+            server_name=self.server_name,
+            call_name=self.call_name if self.call_name != self.tool_name else None,
+        )
 
 
 @dataclass
@@ -222,6 +229,7 @@ class ConversationToolSet:
                 )
             existing.server_name = server_name
             existing.generation = generation
+            existing.call_name = call_name
             existing.touch()
             return existing
 
@@ -241,6 +249,7 @@ class ConversationToolSet:
             tool_name=tool_name,
             server_name=server_name,
             generation=generation,
+            call_name=call_name,
         )
         self.loaded[storage_key] = loaded_tool
         return loaded_tool
@@ -279,9 +288,13 @@ class ConversationToolSet:
             ToolReference(
                 tool_name=tool.tool_name,
                 server_name=tool.server_name,
-                call_name=call_name if call_name != tool.tool_name else None,
+                call_name=(
+                    tool.call_name
+                    if tool.call_name and tool.call_name != tool.tool_name
+                    else None
+                ),
             )
-            for call_name, tool in self.loaded.items()
+            for tool in self.loaded.values()
         ]
 
     def list_all_tool_names(self) -> list[str]:
@@ -792,6 +805,26 @@ class DeferredToolState:
                 return None
             tool = tool_set.get(tool_name)
             return tool.server_name if tool else None
+
+    def get_raw_tool_name_for_loaded_tool(
+        self,
+        conversation_id: str | None,
+        agent_key: str | None,
+        tool_name: str,
+    ) -> str | None:
+        """Return the raw MCP tool name for a loaded tool keyed by call_name.
+
+        ``tool_name`` here is the public call_name (alias for ambiguous tools).
+        Returns the underlying raw tool name used to look the tool up on the MCP
+        manager during same-turn recovery, or None if not loaded.
+        """
+        key = self._get_key(conversation_id, agent_key)
+        with self._lock:
+            tool_set = self._conversation_tools.get(key)
+            if not tool_set:
+                return None
+            tool = tool_set.get(tool_name)
+            return tool.tool_name if tool else None
 
     def clear_conversation(
         self,

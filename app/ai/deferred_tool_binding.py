@@ -11,12 +11,59 @@ agents bind:
 This follows the Claude-style pattern for reducing tool schema token bloat.
 """
 
+import copy
+from typing import Any
+
 from langchain_core.tools import BaseTool
 
 from ..core.config import settings
 from .deferred_tool_state import get_deferred_tool_state
 from .mcp_integration import MCPManager
 from .tool_search_tool import create_tool_search_tool
+
+
+def _tool_with_call_name(tool: BaseTool, call_name: str | None) -> BaseTool:
+    """Return a copy of ``tool`` bound under the public ``call_name`` alias.
+
+    For ambiguous same-name server tools, the execution map must contain the
+    exact public alias (e.g. ``brave__search``) returned by tool_search, not the
+    raw MCP tool name (``search``). When ``call_name`` matches the tool's name
+    (non-ambiguous case) the original tool is returned unchanged.
+    """
+    if not call_name or getattr(tool, "name", None) == call_name:
+        return tool
+
+    metadata: dict[str, Any] = {
+        **(getattr(tool, "metadata", {}) or {}),
+        "aliased_from_tool_name": getattr(tool, "name", ""),
+        "call_name": call_name,
+    }
+    updates = {"name": call_name, "metadata": metadata}
+
+    model_copy = getattr(tool, "model_copy", None)
+    if callable(model_copy):
+        try:
+            return model_copy(update=updates)
+        except Exception:
+            pass
+
+    legacy_copy = getattr(tool, "copy", None)
+    if callable(legacy_copy):
+        try:
+            return legacy_copy(update=updates)
+        except Exception:
+            pass
+
+    alias = copy.copy(tool)
+    try:
+        setattr(alias, "name", call_name)
+    except Exception:
+        object.__setattr__(alias, "name", call_name)
+    try:
+        setattr(alias, "metadata", metadata)
+    except Exception:
+        object.__setattr__(alias, "metadata", metadata)
+    return alias
 
 _WIDGET_PINNED_AGENT_KEYS = {"chat", "rag", "search"}
 _WIDGET_PINNED_SPECS = (
@@ -162,7 +209,9 @@ def get_deferred_tools_for_binding(
                     break
 
         if tool:
-            deferred_tools.append(tool)
+            # Bind under the public call_name alias so ambiguous same-name tools
+            # are callable under the exact name tool_search returned this turn.
+            deferred_tools.append(_tool_with_call_name(tool, loaded.call_name))
         else:
             # Log warning when tool can't be found - this helps debug loading issues
             logger.warning(
