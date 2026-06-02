@@ -92,7 +92,12 @@ class CustomAgent(BaseAgent):
             allowed_skill_refs=self._spec.allowed_skill_refs,
         )
 
-    def _build_delegation_suffix(self) -> str:
+    def _build_delegation_suffix(
+        self, target_descriptions: dict[str, str] | None = None
+    ) -> str:
+        # Custom agents always render targets from their own spec (built by the
+        # graph). ``target_descriptions`` is accepted for signature parity with
+        # the base prompt builder and intentionally ignored.
         if not self._spec.allowed_handoff_targets:
             return ""
 

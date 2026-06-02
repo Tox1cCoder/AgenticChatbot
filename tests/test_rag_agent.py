@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -452,6 +455,40 @@ def test_rag_process_message_refreshes_tools_every_invocation():
     asyncio.run(agent.process_message(message, "conv-1"))
 
     agent._init_tools.assert_awaited_once()
+
+
+def test_rag_reranker_initialization_is_serialized(monkeypatch):
+    """CrossEncoder construction is not safe to run concurrently during cold start."""
+    active_creations = 0
+    max_active_creations = 0
+    counter_lock = threading.Lock()
+    start_barrier = threading.Barrier(6)
+
+    class FakeCrossEncoder:
+        def __init__(self, model_name):
+            nonlocal active_creations, max_active_creations
+            self.model_name = model_name
+            with counter_lock:
+                active_creations += 1
+                max_active_creations = max(max_active_creations, active_creations)
+            time.sleep(0.05)
+            with counter_lock:
+                active_creations -= 1
+
+    monkeypatch.setattr(rag_agent_module, "CrossEncoder", FakeCrossEncoder)
+
+    def initialize_reranker():
+        agent = object.__new__(RAGAgent)
+        agent.settings = SimpleNamespace(reranker_model="fake-cross-encoder")
+        start_barrier.wait(timeout=5)
+        agent._init_reranker()
+        return agent.reranker
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        rerankers = list(executor.map(lambda _idx: initialize_reranker(), range(6)))
+
+    assert len(rerankers) == 6
+    assert max_active_creations == 1
 
 
 # ---------------------------------------------------------------------------

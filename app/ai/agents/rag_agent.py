@@ -1,6 +1,7 @@
 import base64
 import logging
 import re
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,7 @@ from ..utils import coerce_response_text
 from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
+_RERANKER_INIT_LOCK = threading.Lock()
 
 
 class RAGAgent(BaseAgent):
@@ -100,7 +102,8 @@ class RAGAgent(BaseAgent):
         return AGENTIC_RAG_SYSTEM_PROMPT
 
     def _init_reranker(self):
-        self.reranker = CrossEncoder(self.settings.reranker_model)
+        with _RERANKER_INIT_LOCK:
+            self.reranker = CrossEncoder(self.settings.reranker_model)
         logger.debug(f"Re-ranker initialized: {self.settings.reranker_model}")
 
     def _get_full_system_prompt(
@@ -475,7 +478,10 @@ class RAGAgent(BaseAgent):
                 "success": True,
                 "document_id": document_id,
                 "images_deleted": images_deleted,
-                "message": f"Vectors and {images_deleted} images deleted for document {document_id}",
+                "message": (
+                    f"Vectors and {images_deleted} images deleted for document "
+                    f"{document_id}"
+                ),
                 "operation_result": str(result),
             }
         except Exception as e:
@@ -968,7 +974,8 @@ class RAGAgent(BaseAgent):
         context_parts.append(f"\n\nConversation ID: {conversation_id}")
         if not rag_force_final_response:
             context_parts.append(
-                "\nUse the search_documents tool to explore documents and find information to answer the question."
+                "\nUse the search_documents tool to explore documents and find information "
+                "to answer the question."
             )
 
         # Build multimodal content if images are available

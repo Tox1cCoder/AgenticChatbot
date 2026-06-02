@@ -171,6 +171,32 @@ class CheckpointManager:
 
         return self.checkpointer
 
+    async def delete_thread(self, thread_id: str) -> bool:
+        """Delete all persisted checkpoint rows for a LangGraph thread."""
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return False
+
+        if not self._initialized or self.checkpointer is None:
+            await self.setup()
+
+        if self.checkpointer is not None:
+            async_delete_thread = getattr(self.checkpointer, "adelete_thread", None)
+            if callable(async_delete_thread):
+                await async_delete_thread(normalized_thread_id)
+                return True
+
+        if self._pool is None:
+            return False
+
+        async with self._pool.connection() as conn:
+            for table_name in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
+                await conn.execute(
+                    f"DELETE FROM {table_name} WHERE thread_id = %s",
+                    (normalized_thread_id,),
+                )
+        return True
+
     async def cleanup(self) -> None:
         """Cleanup checkpoint manager and close connection pool."""
         try:

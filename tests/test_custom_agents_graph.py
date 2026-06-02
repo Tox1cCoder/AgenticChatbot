@@ -488,3 +488,111 @@ def test_recover_terminal_response_adds_canonical_agent_metadata():
     assert response is not None
     assert response.metadata["agent"]["id"] == rid
     assert response.metadata["agent"]["name"] == "A0"
+
+
+# --------------------------------------------------------------------------- #
+# Issue 1: base agents must be able to hand off to attached custom agents
+# --------------------------------------------------------------------------- #
+
+
+def test_base_agent_multi_agent_kwargs_inject_custom_handoff_tool():
+    """When custom agents are attached, a base agent's invocation must receive a
+    dynamic hand_off tool that lists the attached custom agent as a valid
+    target — otherwise it can only ever delegate to other base agents."""
+    wf = _workflow()
+    rid = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state("chat_agent", [rid])
+    state["custom_agents"][rid]["name"] = "Legal Reviewer"
+    state["custom_agents"][rid]["description"] = "Reviews contract and policy questions."
+
+    kwargs = wf._multi_agent_kwargs(state, "chat_agent")
+
+    internal = kwargs.get("internal_tools") or []
+    handoff = next((t for t in internal if getattr(t, "name", None) == "hand_off"), None)
+    assert handoff is not None, "base agent should get a dynamic hand_off tool"
+    assert rid in handoff.description
+    assert "Legal Reviewer" in handoff.description
+    # The prompt-side target descriptions must also carry the custom target.
+    assert rid in kwargs.get("handoff_target_descriptions", {})
+    # A base agent never offers itself as a target.
+    assert "chat_agent" not in handoff.description.split("Valid targets:", 1)[-1]
+
+
+def test_multi_agent_kwargs_no_injection_without_custom_agents():
+    """No attached custom agents → base agents keep their existing static
+    hand_off behavior (no dynamic tool / descriptions injected)."""
+    wf = _workflow()
+    state = {"selected_agent": "chat_agent", "custom_agents": {}, "context": {}}
+
+    kwargs = wf._multi_agent_kwargs(state, "chat_agent")
+
+    assert "internal_tools" not in kwargs
+    assert "handoff_target_descriptions" not in kwargs
+
+
+def test_custom_node_multi_agent_kwargs_skip_tool_injection():
+    """The custom agent builds its own dynamic hand_off from its spec, so the
+    graph must not also inject one (only the awareness block)."""
+    wf = _workflow()
+    rid = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state(rid, [rid])
+
+    kwargs = wf._multi_agent_kwargs(state, rid)
+
+    assert "internal_tools" not in kwargs
+    assert "multi_agent_activity" in kwargs
+
+
+# --------------------------------------------------------------------------- #
+# Issue 2: agent awareness — identity, roster, and per-turn invocation trail
+# --------------------------------------------------------------------------- #
+
+
+def test_build_multi_agent_activity_block_has_identity_and_roster():
+    wf = _workflow()
+    rid = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state("chat_agent", [rid])
+    state["custom_agents"][rid]["name"] = "Legal Reviewer"
+
+    block = wf._build_multi_agent_activity_block(state, "chat_agent")
+
+    assert block is not None
+    # Identity of the active agent.
+    assert "Chat Agent" in block
+    # Roster includes the attached custom agent and at least one base specialist.
+    assert "Legal Reviewer" in block
+    assert "search_agent" in block
+
+
+def test_agent_trail_records_router_selection_and_handoff():
+    wf = _workflow()
+    rid = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state("chat_agent", [rid])
+    state["custom_agents"][rid]["name"] = "Legal Reviewer"
+
+    # Simulate the router having selected chat_agent for this turn.
+    wf._record_agent_invocation(state, "chat_agent", via="router")
+    # Then chat_agent hands off to the custom agent.
+    wf._apply_hand_off_if_present(state, _handoff_output(rid))
+
+    trail = state["context"]["agents_invoked"]
+    assert [e["id"] for e in trail] == ["chat_agent", rid]
+    assert trail[0]["via"] == "router"
+    assert trail[1]["via"] == "handoff"
+    assert trail[1]["name"] == "Legal Reviewer"
+
+
+def test_activity_block_reflects_handoff_trail():
+    wf = _workflow()
+    rid = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state(rid, [rid])
+    state["custom_agents"][rid]["name"] = "Legal Reviewer"
+    wf._record_agent_invocation(state, "chat_agent", via="router")
+    wf._record_agent_invocation(state, rid, via="handoff", reason="needs legal review")
+
+    block = wf._build_multi_agent_activity_block(state, rid)
+
+    assert block is not None
+    # The active custom agent can now see who was involved this turn.
+    assert "Chat Agent" in block
+    assert "Legal Reviewer" in block

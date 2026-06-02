@@ -422,14 +422,17 @@ class BaseAgent(ABC):
         for tool in skills_tools:
             _add_internal(tool)
 
+        # Caller-provided internal tools are registered first so a graph-injected
+        # dynamic ``hand_off`` (scoped to attached custom agents) takes precedence
+        # over the static base-only ``hand_off`` below (dedup keeps the first).
+        for tool in internal_tools or []:
+            _add_internal(tool)
+
         hand_off_enabled = (
             self._should_include_hand_off_tool() if include_hand_off is None else include_hand_off
         )
         if hand_off_enabled:
             _add_internal(_hand_off_tool)
-
-        for tool in internal_tools or []:
-            _add_internal(tool)
 
         if getattr(settings, "enable_user_memory_tools", False) and user_id:
             try:
@@ -1162,8 +1165,34 @@ class BaseAgent(ABC):
         """
         return None
 
-    def _build_delegation_suffix(self) -> str:
-        return DELEGATION_SUFFIX
+    def _build_delegation_suffix(
+        self, target_descriptions: dict[str, str] | None = None
+    ) -> str:
+        """Delegation prompt suffix.
+
+        With ``target_descriptions`` (graph-injected: base specialists +
+        attached custom agents), render a dynamic, capability-aware target list
+        so the agent can delegate to the right specialist — including custom
+        agents it would otherwise never see. Without it, fall back to the
+        canonical static suffix.
+        """
+        if not target_descriptions:
+            return DELEGATION_SUFFIX
+
+        lines = [
+            f"- {target}" + (f": {description}" if description else "")
+            for target, description in target_descriptions.items()
+        ]
+        return (
+            "\n\nINTER-AGENT DELEGATION:\n"
+            "You have a `hand_off` tool that transfers the conversation to a more "
+            "suitable agent. Hand off when the request — or a distinct part of it — "
+            "is clearly better handled by a listed specialist, especially when it "
+            "needs a capability or tool you do not have. Do not delegate if you can "
+            "handle the request yourself.\n"
+            "Available targets:\n"
+            + "\n".join(lines)
+        )
 
     def _build_system_prompt(
         self,
@@ -1195,7 +1224,17 @@ class BaseAgent(ABC):
             else bool(include_hand_off)
         )
         if hand_off_prompt_enabled:
-            system_prompt = f"{system_prompt}{self._build_delegation_suffix()}"
+            handoff_target_descriptions = _.get("handoff_target_descriptions")
+            system_prompt = (
+                f"{system_prompt}{self._build_delegation_suffix(handoff_target_descriptions)}"
+            )
+
+        # Inject a multi-agent awareness block (active-agent identity, the roster
+        # of reachable agents, and which agents were involved this turn) so the
+        # agent can reason about — and answer questions about — the wider system.
+        multi_agent_activity = _.get("multi_agent_activity")
+        if multi_agent_activity:
+            system_prompt = f"{system_prompt}\n\n{multi_agent_activity}"
 
         # Inject rolling conversation summary as a dedicated memory block
         if history_summary:

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+
 import app.ai.checkpoint as checkpoint_module
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 
@@ -71,3 +75,61 @@ def test_build_checkpoint_serializer_uses_msgpack_allowlist_method_when_construc
     assert isinstance(serializer, FakeSerializer)
     assert list(captured["allowed_json_modules"]) == _expected_json_allowlist()
     assert list(captured["allowed_msgpack_modules"]) == _expected_msgpack_allowlist()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_manager_delete_thread_delegates_to_async_saver():
+    manager = checkpoint_module.CheckpointManager(
+        db_url="postgresql://user:pass@localhost/db",
+        settings=SimpleNamespace(checkpoint_schema="public"),
+    )
+    manager._initialized = True
+    calls: list[str] = []
+
+    class FakeCheckpointer:
+        async def adelete_thread(self, thread_id: str) -> None:
+            calls.append(thread_id)
+
+    manager.checkpointer = FakeCheckpointer()
+
+    deleted = await manager.delete_thread("thread-1")
+
+    assert deleted is True
+    assert calls == ["thread-1"]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_manager_delete_thread_falls_back_to_pool_sql():
+    manager = checkpoint_module.CheckpointManager(
+        db_url="postgresql://user:pass@localhost/db",
+        settings=SimpleNamespace(checkpoint_schema="public"),
+    )
+    manager._initialized = True
+    manager.checkpointer = SimpleNamespace()
+    executed: list[tuple[str, tuple[str]]] = []
+
+    class FakeConnection:
+        async def execute(self, statement: str, params: tuple[str]) -> None:
+            executed.append((statement, params))
+
+    class FakePoolConnection:
+        async def __aenter__(self):
+            return FakeConnection()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakePool:
+        def connection(self):
+            return FakePoolConnection()
+
+    manager._pool = FakePool()
+
+    deleted = await manager.delete_thread("thread-1")
+
+    assert deleted is True
+    assert executed == [
+        ("DELETE FROM checkpoints WHERE thread_id = %s", ("thread-1",)),
+        ("DELETE FROM checkpoint_blobs WHERE thread_id = %s", ("thread-1",)),
+        ("DELETE FROM checkpoint_writes WHERE thread_id = %s", ("thread-1",)),
+    ]

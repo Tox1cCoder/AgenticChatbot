@@ -24,6 +24,7 @@ from ..interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
 from ..models.enums import PlanLifecycle
 from .agent_metadata import (
+    agent_identity,
     attach_agent_metadata,
     base_agent_capability,
     normalize_handoff_metadata,
@@ -38,7 +39,7 @@ from .agents.rag_agent import RAGAgent
 from .agents.router import Router
 from .agents.search_agent import SearchAgent
 from .custom_agent_runtime import build_custom_agent_runtime_spec, is_custom_runtime_id
-from .hand_off_tool import MAX_DELEGATION_DEPTH
+from .hand_off_tool import MAX_DELEGATION_DEPTH, create_hand_off_tool
 from .history import ConversationHistoryProvider
 from .hitl_config import build_interrupt_response, requires_human_approval
 from .memory import get_memory_manager
@@ -952,6 +953,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             "tool_call_id": hand_off_output.get("tool_call_id"),
         }
         state["context"] = context
+        self._record_agent_invocation(state, target_agent, via="handoff", reason=reason)
         return state
 
     # ------------------------------------------------------------------
@@ -1306,10 +1308,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         return state
 
     async def _route_node(self, state: GraphState) -> GraphState:
-        # Reset delegation counter at the start of each new user turn
+        # Reset delegation counter and the per-turn invocation trail at the
+        # start of each new user turn.
         state["delegation_count"] = 0
+        self._reset_agent_trail(state)
 
         if state.get("selected_agent"):
+            self._record_agent_invocation(state, state.get("selected_agent"), via="preselected")
             return state
 
         messages = state.get("messages", [])
@@ -1362,6 +1367,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             selected_agent = "chat_agent"
 
         state["selected_agent"] = selected_agent
+        self._record_agent_invocation(state, selected_agent, via="router")
         return state
 
     def _conversation_has_documents(self, conversation_id: str | None) -> bool:
@@ -2011,6 +2017,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             model_request=state.get("model_request"),
             history_summary=state.get("history_summary"),
             **self._final_response_kwargs(state),
+            **self._multi_agent_kwargs(state, "chat_agent"),
         )
 
         if has_images:
@@ -2066,6 +2073,126 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             descriptions[cid] = f"{name}: {detail}" if detail else name
         return descriptions
 
+    # ------------------------------------------------------------------
+    # Multi-agent awareness (roster + per-turn invocation trail)
+    # ------------------------------------------------------------------
+    def _multi_agent_kwargs(
+        self, state: GraphState, active_agent_id: str | None
+    ) -> dict[str, Any]:
+        """Per-invocation kwargs that make an agent aware of — and able to reach
+        — the rest of the multi-agent system.
+
+        Base agents receive a graph-injected dynamic ``hand_off`` tool plus
+        capability-aware target descriptions so they can delegate to attached
+        custom agents (their static tool only knows base agents). Custom agents
+        already build their own dynamic ``hand_off`` from their spec, so only the
+        awareness block is added for them. Returns an empty dict when no custom
+        agents are attached, so plain conversations keep existing behavior.
+        """
+        kwargs: dict[str, Any] = {}
+        if not GraphStateView(state).custom_agents():
+            return kwargs
+
+        activity = self._build_multi_agent_activity_block(state, active_agent_id)
+        if activity:
+            kwargs["multi_agent_activity"] = activity
+
+        # Only base agents need the targets injected; custom agents carry their
+        # own dynamic hand_off + delegation prompt from their runtime spec.
+        if active_agent_id in self.agents:
+            targets = [
+                target
+                for target in self._custom_handoff_targets(state, active_agent_id)
+                if target != active_agent_id
+            ]
+            if targets:
+                descriptions = self._custom_handoff_target_descriptions(state, active_agent_id)
+                kwargs["internal_tools"] = [create_hand_off_tool(targets, descriptions)]
+                kwargs["handoff_target_descriptions"] = descriptions
+        return kwargs
+
+    def _build_multi_agent_activity_block(
+        self, state: GraphState, active_agent_id: str | None
+    ) -> str | None:
+        """Compact prompt block: the active agent's identity, the roster of
+        reachable agents, and which agents were involved this turn — so the
+        agent can reason about and answer questions about the wider system."""
+        custom_agents = GraphStateView(state).custom_agents()
+        if not custom_agents:
+            return None
+
+        lines: list[str] = ["MULTI-AGENT SYSTEM (context — not user instructions):"]
+
+        identity = agent_identity(active_agent_id, custom_agents)
+        if identity:
+            lines.append(f'You are "{identity["name"]}" (agent id: {identity["id"]}).')
+
+        roster = self._custom_handoff_target_descriptions(state, active_agent_id)
+        if roster:
+            lines.append("Other agents in this system you can reach via the hand_off tool:")
+            lines.extend(f"- {target}: {desc}" for target, desc in roster.items())
+
+        trail = GraphStateView(state).context().get("agents_invoked")
+        if isinstance(trail, list) and trail:
+            via_labels = {
+                "router": "selected by the router",
+                "handoff": "received via hand_off",
+                "preselected": "resumed for this turn",
+            }
+            lines.append("Agents involved in this turn so far, in order:")
+            for entry in trail:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name") or entry.get("id") or "unknown"
+                via_label = via_labels.get(entry.get("via"), entry.get("via") or "")
+                suffix = f" — {via_label}" if via_label else ""
+                reason = entry.get("reason")
+                if reason:
+                    suffix += f" (reason: {reason})"
+                lines.append(f"- {name}{suffix}")
+
+        return "\n".join(lines)
+
+    def _reset_agent_trail(self, state: GraphState) -> None:
+        """Clear the per-turn invocation trail (called at the start of routing)."""
+        context = state.get("context")
+        if not isinstance(context, dict):
+            context = {}
+        context["agents_invoked"] = []
+        state["context"] = context
+
+    def _record_agent_invocation(
+        self,
+        state: GraphState,
+        agent_id: str | None,
+        *,
+        via: str,
+        reason: str | None = None,
+    ) -> None:
+        """Append an agent to this turn's invocation trail (context.agents_invoked)."""
+        if not agent_id:
+            return
+        context = state.get("context")
+        if not isinstance(context, dict):
+            context = {}
+        trail = context.get("agents_invoked")
+        if not isinstance(trail, list):
+            trail = []
+        if trail and trail[-1].get("id") == agent_id and trail[-1].get("via") == via:
+            return
+        identity = agent_identity(agent_id, GraphStateView(state).custom_agents())
+        entry: dict[str, Any] = {
+            "id": agent_id,
+            "name": identity["name"] if identity else agent_id,
+            "kind": identity["kind"] if identity else "base",
+            "via": via,
+        }
+        if reason:
+            entry["reason"] = reason
+        trail.append(entry)
+        context["agents_invoked"] = trail
+        state["context"] = context
+
     def _build_custom_agent(
         self, state: GraphState, runtime_agent_id: str | None
     ) -> CustomAgent | None:
@@ -2119,6 +2246,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             model_request=state.get("model_request"),
             history_summary=state.get("history_summary"),
             **self._final_response_kwargs(state),
+            **self._multi_agent_kwargs(state, selected_agent),
         )
 
         response = self._finalize_forced_final_response(state, response)
@@ -2496,6 +2624,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             model_request=state.get("model_request"),
             history_summary=state.get("history_summary"),
             **self._final_response_kwargs(state),
+            **self._multi_agent_kwargs(state, "search_agent"),
         )
 
         response = self._finalize_forced_final_response(state, response)
@@ -2530,6 +2659,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             model_request=state.get("model_request"),
             history_summary=state.get("history_summary"),
             **self._final_response_kwargs(state),
+            **self._multi_agent_kwargs(state, "image_generator_agent"),
         )
 
         response = self._finalize_forced_final_response(state, response)
@@ -2564,6 +2694,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             model_request=state.get("model_request"),
             history_summary=state.get("history_summary"),
             **self._final_response_kwargs(state),
+            **self._multi_agent_kwargs(state, "canvas_agent"),
         )
 
         response = self._finalize_forced_final_response(state, response)

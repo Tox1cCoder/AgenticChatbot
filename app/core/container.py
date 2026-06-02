@@ -354,7 +354,7 @@ class Container(containers.DeclarativeContainer):
             checkpointer=checkpointer,
         )
 
-    ai_service = providers.Singleton(_create_ai_service)
+    ai_service = providers.ThreadSafeSingleton(_create_ai_service)
 
     conversation_service: providers.Provider[IConversationService] = providers.Factory(
         ConversationService,
