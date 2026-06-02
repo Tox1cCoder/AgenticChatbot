@@ -1162,6 +1162,9 @@ class BaseAgent(ABC):
         """
         return None
 
+    def _build_delegation_suffix(self) -> str:
+        return DELEGATION_SUFFIX
+
     def _build_system_prompt(
         self,
         persona: str | None,
@@ -1192,7 +1195,7 @@ class BaseAgent(ABC):
             else bool(include_hand_off)
         )
         if hand_off_prompt_enabled:
-            system_prompt = f"{system_prompt}{DELEGATION_SUFFIX}"
+            system_prompt = f"{system_prompt}{self._build_delegation_suffix()}"
 
         # Inject rolling conversation summary as a dedicated memory block
         if history_summary:

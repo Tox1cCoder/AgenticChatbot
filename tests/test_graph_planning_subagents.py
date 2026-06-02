@@ -15,6 +15,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -1874,3 +1875,29 @@ def test_delegated_agent_messages_passthrough_when_no_active_handoff():
     delegated = workflow._messages_for_selected_agent(state, "search_agent", messages)
 
     assert delegated == messages[2:]
+
+
+def test_should_continue_planning_routes_handoff_to_custom_agent():
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    rid = f"custom_agent:{uuid4()}"
+    workflow.agents = {
+        "planning_agent": object(),
+        "chat_agent": object(),
+        "search_agent": object(),
+    }
+    state = {
+        "selected_agent": rid,
+        "custom_agents": {
+            rid: {
+                "id": rid.split(":", 1)[1],
+                "runtime_agent_id": rid,
+                "name": "Data Analyst",
+            }
+        },
+        "planning_call_count": 1,
+        "planning_phase": "executing",
+        "context": {},
+        "messages": [],
+    }
+
+    assert workflow._should_continue_planning(state) == "custom_agent"

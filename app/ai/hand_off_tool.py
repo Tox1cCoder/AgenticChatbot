@@ -32,9 +32,9 @@ MAX_DELEGATION_DEPTH = 5
 
 _HAND_OFF_DOC = (
     "Hand the conversation off to a different specialist agent.\n\n"
-    "Use this tool ONLY when the current request clearly falls outside your "
-    "expertise and another agent is better suited. Do NOT delegate if you can "
-    "handle the request yourself.\n\n"
+    "Use this tool when the current request, or a distinct part of the request, "
+    "is better suited to another listed target. Do NOT delegate if no listed "
+    "target is better suited.\n\n"
     "Args:\n"
     "    target_agent: The agent id to delegate to.{targets}\n"
     "    reason: A brief explanation of why delegation is appropriate.\n\n"
@@ -61,10 +61,11 @@ def create_hand_off_tool(
     runtime ids work; the graph re-validates the target at execution time.
     """
     targets = list(allowed_targets) if allowed_targets is not None else list(DELEGATABLE_AGENTS)
+    descriptions = target_descriptions or {}
     if targets:
         lines = []
         for target in targets:
-            desc = (target_descriptions or {}).get(target)
+            desc = descriptions.get(target)
             lines.append(f"      - {target}" + (f": {desc}" if desc else ""))
         targets_block = " Valid targets:\n" + "\n".join(lines)
     else:

@@ -64,7 +64,10 @@ def _normalize_result(entry: Any) -> dict[str, Any] | None:
         return None
 
     worker_id = str(entry.get("id") or entry.get("worker_id") or "").strip()
-    agent = str(entry.get("agent") or "unknown_agent").strip() or "unknown_agent"
+    agent = (
+        str(entry.get("agent") or entry.get("agent_id") or "unknown_agent").strip()
+        or "unknown_agent"
+    )
     status = str(entry.get("status") or "unknown").strip().lower() or "unknown"
     summary = str(entry.get("summary") or "").strip()
 
@@ -79,6 +82,11 @@ def _normalize_result(entry: Any) -> dict[str, Any] | None:
             if str(todo_id).strip()
         ],
     }
+
+    for key in ("agent_name", "agent_kind", "custom_agent_id"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            normalized[key] = value.strip()
 
     elapsed_ms = entry.get("elapsed_ms")
     if isinstance(elapsed_ms, (int, float)) and elapsed_ms >= 0:

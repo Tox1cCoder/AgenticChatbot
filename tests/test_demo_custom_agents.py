@@ -190,3 +190,28 @@ def test_custom_agent_edit_detects_unavailable_existing_refs(monkeypatch):
     )
     assert demo._custom_agent_skill_refs_available([skill], [skill])
     assert not demo._custom_agent_skill_refs_available([skill, stale_skill], [skill])
+
+
+def test_message_agent_label_prefers_canonical_agent_metadata(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    metadata = {
+        "agent": {
+            "id": "custom_agent:abc",
+            "kind": "custom",
+            "name": "Data Analyst",
+            "custom_agent_id": "abc",
+            "source": "response",
+        }
+    }
+
+    assert demo.get_message_agent_label(metadata) == "Data Analyst"
+
+
+def test_message_agent_label_falls_back_to_legacy_custom_fields(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    metadata = {
+        "runtime_agent_id": "custom_agent:abc",
+        "custom_agent_name": "Data Analyst",
+    }
+
+    assert demo.get_message_agent_label(metadata) == "Data Analyst"

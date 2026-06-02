@@ -365,6 +365,18 @@ def build_bot_metadata(
     if live_widgets:
         metadata["live_widgets"] = live_widgets
 
+    # Prefer the canonical ``agent`` field. Once it exists, drop the redundant
+    # custom-agent compatibility fields so persisted messages carry one shape.
+    # ``custom_agent_warnings`` is intentionally preserved (still useful when
+    # selected client tools or skills are unavailable).
+    if "agent" in metadata:
+        for redundant_key in (
+            "runtime_agent_id",
+            "custom_agent_id",
+            "custom_agent_name",
+        ):
+            metadata.pop(redundant_key, None)
+
     if not getattr(settings, "inline_rich_response_enabled", False):
         # Keep legacy attachment/widget metadata readable while rollout is
         # disabled, but never persist the internal candidate handoff field.

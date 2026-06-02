@@ -75,3 +75,5 @@ scripts/
 .pytest_cache
 .ruff_cache
 skills
+.codex_logs
+.conda

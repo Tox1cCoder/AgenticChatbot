@@ -26,6 +26,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..core.config import settings as global_settings
+from .agent_metadata import agent_identity
 from .schemas import AgentResponse
 
 logger = logging.getLogger(__name__)
@@ -223,6 +224,9 @@ class PlanningSubagentResult(BaseModel):
 
     id: str
     agent: str
+    agent_name: str | None = Field(default=None)
+    agent_kind: Literal["base", "custom"] | None = None
+    custom_agent_id: str | None = None
     status: Literal["completed", "failed", "timeout", "requires_approval"]
     elapsed_ms: int
     summary: str
@@ -506,16 +510,24 @@ class PlanningSubagentDispatcher:
 
         requested_model = _summarize_requested_model(task.model_override)
 
+        custom_agents = parent_state.get("custom_agents") if isinstance(parent_state, dict) else {}
+        default_identity = agent_identity(task.agent, custom_agents)
+
         def _result(
             status: Literal["completed", "failed", "timeout", "requires_approval"],
             answer: str,
             error: str | None = None,
             artifacts: list[dict[str, Any]] | None = None,
             resolved_model: dict[str, Any] | None = None,
+            identity: dict[str, Any] | None = None,
         ) -> PlanningSubagentResult:
+            resolved_identity = identity or default_identity or {}
             return PlanningSubagentResult(
                 id=task.id,
                 agent=task.agent,
+                agent_name=resolved_identity.get("name"),
+                agent_kind=resolved_identity.get("kind"),
+                custom_agent_id=resolved_identity.get("custom_agent_id"),
                 status=status,
                 elapsed_ms=int((time.perf_counter() - wall_start) * 1000),
                 summary=_activity_summary_from_answer(answer),
@@ -553,6 +565,22 @@ class PlanningSubagentDispatcher:
         worker_artifacts = list(response.tool_artifacts or [])
         resolved_model = _summarize_resolved_model(response)
 
+        # Prefer the identity reported by the worker response (the agent that
+        # actually answered) over the requested task target.
+        response_metadata = response.metadata or {}
+        response_agent_id = (
+            response_metadata.get("runtime_agent_id") or response.agent_id or task.agent
+        )
+        response_identity = (
+            agent_identity(
+                response_agent_id,
+                custom_agents,
+                fallback_name=response_metadata.get("custom_agent_name"),
+                custom_agent_id=response_metadata.get("custom_agent_id"),
+            )
+            or default_identity
+        )
+
         if response.error:
             return _result(
                 "failed",
@@ -560,6 +588,7 @@ class PlanningSubagentDispatcher:
                 error=response.error,
                 artifacts=worker_artifacts,
                 resolved_model=resolved_model,
+                identity=response_identity,
             )
 
         if _is_requires_approval_response(response):
@@ -570,6 +599,7 @@ class PlanningSubagentDispatcher:
                 error="requires_approval",
                 artifacts=worker_artifacts,
                 resolved_model=resolved_model,
+                identity=response_identity,
             )
 
         return _result(
@@ -577,6 +607,7 @@ class PlanningSubagentDispatcher:
             response.message.content or "",
             artifacts=worker_artifacts,
             resolved_model=resolved_model,
+            identity=response_identity,
         )
 
 

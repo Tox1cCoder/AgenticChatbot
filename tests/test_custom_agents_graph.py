@@ -81,6 +81,7 @@ _BASE_AGENTS = {
 def _workflow():
     wf = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     wf.agents = dict(_BASE_AGENTS)
+    wf._runtime_model_resolver = None
     return wf
 
 
@@ -196,7 +197,7 @@ import json  # noqa: E402
 import pytest  # noqa: E402
 
 from app.ai.agents.router import Router  # noqa: E402
-from app.ai.schemas import AgentMessage, MessageRole  # noqa: E402
+from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole  # noqa: E402
 
 
 def _handoff_output(target, tool_call_id="h1"):
@@ -254,6 +255,8 @@ def test_base_agent_can_handoff_to_custom_agent():
     state = _multi_custom_state("chat_agent", [rid])
     new_state = wf._apply_hand_off_if_present(state, _handoff_output(rid))
     assert new_state["selected_agent"] == rid
+    assert new_state["context"]["handoff"]["source_agent"] == "chat_agent"
+    assert new_state["context"]["handoff"]["target_agent"] == rid
 
 
 def test_custom_agent_can_handoff_to_base_agent():
@@ -262,6 +265,8 @@ def test_custom_agent_can_handoff_to_base_agent():
     state = _multi_custom_state(rid, [rid])
     new_state = wf._apply_hand_off_if_present(state, _handoff_output("search_agent"))
     assert new_state["selected_agent"] == "search_agent"
+    assert new_state["context"]["handoff"]["source_agent"] == rid
+    assert new_state["context"]["handoff"]["target_agent"] == "search_agent"
 
 
 def test_custom_agent_can_handoff_to_another_attached_custom_agent():
@@ -271,6 +276,122 @@ def test_custom_agent_can_handoff_to_another_attached_custom_agent():
     state = _multi_custom_state(rid1, [rid1, rid2])
     new_state = wf._apply_hand_off_if_present(state, _handoff_output(rid2))
     assert new_state["selected_agent"] == rid2
+
+
+def test_custom_agent_handoff_targets_are_dynamic_graph_targets():
+    wf = _workflow()
+    rid = f"custom_agent:{uuid4()}"
+    other = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state(rid, [rid, other])
+
+    assert wf._custom_handoff_targets(state, rid) == [*wf.agents.keys(), other]
+
+
+def test_custom_agent_handoff_tool_describes_attached_custom_targets():
+    wf = _workflow()
+    rid1 = f"custom_agent:{uuid4()}"
+    rid2 = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state(rid1, [rid1, rid2])
+    state["custom_agents"][rid2]["name"] = "Legal Reviewer"
+    state["custom_agents"][rid2]["description"] = "Reviews contract and policy questions."
+
+    agent = wf._build_custom_agent(state, rid1)
+
+    assert agent is not None
+    handoff_tool = next(
+        tool for tool in agent.restricted_internal_tools(user_id=None, device_id=None)
+        if getattr(tool, "name", None) == "hand_off"
+    )
+    description = handoff_tool.description
+    assert rid2 in description
+    assert "Legal Reviewer" in description
+    assert "Reviews contract and policy questions." in description
+    assert "hand off to planning_agent" not in description
+    assert "coordinate the work" not in description
+
+
+def test_custom_handoff_target_descriptions_include_base_agent_capabilities():
+    """A custom agent with a limited toolset cannot pick a suitable delegate
+    unless it knows what each base agent is good at. Base targets must carry
+    capability blurbs, not appear as bare ids."""
+    wf = _workflow()
+    rid = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state(rid, [rid])
+
+    descriptions = wf._custom_handoff_target_descriptions(state, rid)
+
+    # Every base agent (except the delegating agent itself) is described.
+    for base in wf.agents:
+        assert base in descriptions
+        assert descriptions[base].strip()
+    # The blurb is capability-bearing (not just the bare id): search_agent
+    # mentions current/news/web info so the LLM can recognise the fit.
+    search_blurb = descriptions["search_agent"].lower()
+    assert search_blurb != "search_agent"
+    assert "current" in search_blurb or "news" in search_blurb or "web" in search_blurb
+    # The delegating custom agent never describes itself.
+    assert rid not in descriptions
+
+
+def test_custom_agent_handoff_tool_describes_base_agent_capabilities():
+    """The rendered hand_off tool description must surface base-agent
+    capabilities so the LLM can route stuck work to the right specialist."""
+    wf = _workflow()
+    rid = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state(rid, [rid])
+
+    agent = wf._build_custom_agent(state, rid)
+    assert agent is not None
+    handoff_tool = next(
+        tool for tool in agent.restricted_internal_tools(user_id=None, device_id=None)
+        if getattr(tool, "name", None) == "hand_off"
+    )
+    description = handoff_tool.description
+    assert "search_agent" in description
+    # A distinctive capability word (absent from the agent id and the static
+    # tool doc) proves the base-agent blurb actually rendered.
+    low = description.lower()
+    assert "news" in low or "fact-check" in low
+
+
+def test_custom_agent_delegation_prompt_encourages_delegation_on_capability_gap():
+    """The delegation suffix must tell a limited-toolset agent to hand off when
+    it lacks a tool/capability or is not making progress — instead of looping
+    on tool calls it cannot complete."""
+    wf = _workflow()
+    rid = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state(rid, [rid])
+
+    agent = wf._build_custom_agent(state, rid)
+    assert agent is not None
+    suffix = agent._build_delegation_suffix()
+    low = suffix.lower()
+
+    assert "hand_off" in suffix
+    # Encourages delegating on a capability/tool gap rather than grinding.
+    assert "tool" in low
+    assert "retr" in low or "progress" in low or "stuck" in low
+    # Still surfaces capability-bearing base targets.
+    assert "search_agent" in suffix
+
+
+def test_custom_agent_system_prompt_describes_dynamic_handoff_targets():
+    wf = _workflow()
+    rid1 = f"custom_agent:{uuid4()}"
+    rid2 = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state(rid1, [rid1, rid2])
+    state["custom_agents"][rid2]["name"] = "Legal Reviewer"
+    state["custom_agents"][rid2]["description"] = "Reviews contract and policy questions."
+
+    agent = wf._build_custom_agent(state, rid1)
+
+    assert agent is not None
+    prompt = agent._build_system_prompt(None, False)
+    assert rid2 in prompt
+    assert "Legal Reviewer" in prompt
+    assert "Reviews contract and policy questions." in prompt
+    assert "hand off to `planning_agent`" not in prompt
+    assert "coordinate the work" not in prompt
 
 
 def test_no_custom_agents_regression_across_paths():
@@ -308,3 +429,62 @@ def test_handoff_to_unattached_custom_agent_is_refused_with_tool_error():
     last = new_state["messages"][-1]
     assert isinstance(last, ToolMessage)
     assert "not a valid target" in last.content
+
+
+# --------------------------------------------------------------------------- #
+# Canonical agent metadata on final responses (Task 2)
+# --------------------------------------------------------------------------- #
+
+
+def test_finalize_response_adds_canonical_custom_agent_metadata():
+    wf = _workflow()
+    rid = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state(rid, [rid])
+    response = AgentResponse(
+        agent_type=AgentType.CHAT,
+        agent_id=rid,
+        message=AgentMessage(role=MessageRole.ASSISTANT, content="answer"),
+        metadata={"runtime_agent_id": rid, "custom_agent_name": "A0"},
+    )
+
+    wf._attach_final_agent_metadata(state, response)
+
+    assert response.metadata["agent"] == {
+        "id": rid,
+        "kind": "custom",
+        "name": "A0",
+        "custom_agent_id": rid.split(":", 1)[1],
+        "source": "response",
+    }
+
+
+def test_finalize_response_adds_handoff_metadata():
+    wf = _workflow()
+    rid = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state("chat_agent", [rid])
+    wf._apply_hand_off_if_present(state, _handoff_output(rid, tool_call_id="h1"))
+
+    response = AgentResponse(
+        agent_type=AgentType.CHAT,
+        agent_id=rid,
+        message=AgentMessage(role=MessageRole.ASSISTANT, content="answer"),
+        metadata={},
+    )
+
+    wf._attach_final_agent_metadata(state, response)
+
+    assert response.metadata["handoff"]["from_agent_id"] == "chat_agent"
+    assert response.metadata["handoff"]["to_agent_id"] == rid
+
+
+def test_recover_terminal_response_adds_canonical_agent_metadata():
+    wf = _workflow()
+    rid = f"custom_agent:{uuid4()}"
+    state = _multi_custom_state(rid, [rid])
+    state["messages"].append(AIMessage(content="answer"))
+
+    response = wf._recover_terminal_response(state)
+
+    assert response is not None
+    assert response.metadata["agent"]["id"] == rid
+    assert response.metadata["agent"]["name"] == "A0"

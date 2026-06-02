@@ -1108,6 +1108,34 @@ def get_agent_display_name(agent: str) -> str:
     return agent_names.get(agent, agent.replace("_", " ").title())
 
 
+def get_message_agent_label(message_metadata: dict[str, Any] | None) -> str | None:
+    """Resolve a display label for the agent that produced a persisted message.
+
+    Prefers the canonical ``message_metadata["agent"]`` field, falling back to
+    the legacy custom-agent compatibility fields for messages persisted before
+    the canonical field existed.
+    """
+    if not isinstance(message_metadata, dict):
+        return None
+    agent = message_metadata.get("agent")
+    if isinstance(agent, dict):
+        name = agent.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        agent_id = agent.get("id")
+        if isinstance(agent_id, str) and agent_id.strip():
+            return get_agent_display_name(agent_id.strip())
+
+    legacy_name = message_metadata.get("custom_agent_name")
+    if isinstance(legacy_name, str) and legacy_name.strip():
+        return legacy_name.strip()
+
+    legacy_id = message_metadata.get("runtime_agent_id")
+    if isinstance(legacy_id, str) and legacy_id.strip():
+        return get_agent_display_name(legacy_id.strip())
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Custom agents — API helpers + management UI
 # --------------------------------------------------------------------------- #
@@ -3141,7 +3169,9 @@ def _render_subagent_dispatch_tool_result(render: dict[str, Any]) -> bool:
             continue
 
         worker_id = str(item.get("id") or f"worker-{index}")
-        agent_name = str(item.get("agent") or "unknown_agent")
+        agent_name = item.get("agent_name") or get_agent_display_name(
+            str(item.get("agent") or "unknown_agent")
+        )
         worker_status = str(item.get("status") or "unknown").strip().lower()
         elapsed_ms = item.get("elapsed_ms")
         elapsed = ""
@@ -5862,7 +5892,12 @@ def _render_subagent_activity_view(view: dict[str, Any] | None, *, live: bool = 
                 worker_icon = "pending"
 
             worker_id = html.escape(str(item.get("id") or f"worker-{index}"))
-            agent_name = html.escape(str(item.get("agent") or "unknown_agent"))
+            agent_name = html.escape(
+                str(
+                    item.get("agent_name")
+                    or get_agent_display_name(str(item.get("agent") or "unknown_agent"))
+                )
+            )
             duration = _format_subagent_duration(item.get("elapsed_ms"))
             duration_text = f" | {html.escape(duration)}" if duration else ""
             summary = str(item.get("summary") or "").strip()
@@ -6533,6 +6568,10 @@ def render_message_bubble(
 
         # Show thinking summary first for assistant messages
         if not is_user:
+            agent_label = get_message_agent_label(message_metadata)
+            if agent_label:
+                st.caption(f"Worked by {agent_label}")
+
             render_message_trace(message_metadata, expanded=False)
 
             provider = message_metadata.get("provider")
@@ -7967,11 +8006,9 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
             event_type = event.get("type")
 
             if event_type == "agent_selected":
-                agent_name = event.get("agent", "unknown")
-                status.update(
-                    label=f"{agent_name.replace('_', ' ').title()} is processing...",
-                    state="running",
-                )
+                selected_agent = event.get("agent", "unknown")
+                display_name = event.get("agent_name") or get_agent_display_name(selected_agent)
+                status.update(label=f"{display_name} is processing...", state="running")
                 continue
 
             if event_type == "thinking":
@@ -8588,8 +8625,11 @@ def render_chat_view():
                             # Track which agent was selected for processing
                             selected_agent = event.get("agent", "unknown")
                             st.session_state.stream_selected_agent = selected_agent
+                            display_name = event.get("agent_name") or get_agent_display_name(
+                                selected_agent
+                            )
                             status.update(
-                                label=f"{selected_agent.replace('_', ' ').title()} is processing...",
+                                label=f"{display_name} is processing...",
                                 state="running",
                             )
 

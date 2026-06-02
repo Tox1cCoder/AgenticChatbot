@@ -164,3 +164,51 @@ def test_resume_lock_blocks_delete_for_paused_custom_agent(paused_env):
     # Resume resolves the paused run -> lock released -> delete now succeeds.
     service.generation_registry.clear_paused_for_conversation(owner_id, conversation_id)
     service.delete_agent(owner_id, agent.id)
+
+
+def test_agent_selected_event_still_adds_name_for_custom_only():
+    from app.services.message_service import MessageService
+
+    rid = f"custom_agent:{uuid4()}"
+    custom = MessageService._agent_selected_event(rid, {rid: {"name": "Analyst"}})
+
+    assert custom == {
+        "type": "agent_selected",
+        "agent": rid,
+        "agent_name": "Analyst",
+    }
+    assert MessageService._agent_selected_event("chat_agent", {rid: {"name": "Analyst"}}) == {
+        "type": "agent_selected",
+        "agent": "chat_agent",
+    }
+
+
+def test_attach_selected_agent_metadata_adds_canonical_custom_agent():
+    from app.services.message_service import MessageService
+
+    rid = f"custom_agent:{uuid4()}"
+    metadata = {}
+
+    MessageService._attach_selected_agent_metadata(
+        metadata,
+        rid,
+        {rid: {"id": rid.split(":", 1)[1], "runtime_agent_id": rid, "name": "Analyst"}},
+    )
+
+    assert metadata["agent"] == {
+        "id": rid,
+        "kind": "custom",
+        "name": "Analyst",
+        "custom_agent_id": rid.split(":", 1)[1],
+        "source": "response",
+    }
+
+
+def test_attach_selected_agent_metadata_noops_without_selected_agent():
+    from app.services.message_service import MessageService
+
+    metadata = {"stopped": True}
+
+    MessageService._attach_selected_agent_metadata(metadata, None, {})
+
+    assert metadata == {"stopped": True}

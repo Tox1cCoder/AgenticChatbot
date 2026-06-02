@@ -625,6 +625,8 @@ class MessageService(IMessageService):
         user_id: UUID | None = None,
         message_id: UUID | None = None,
         tool_artifacts: list[dict[str, Any]] | None = None,
+        selected_agent: str | None = None,
+        custom_agents: dict[str, Any] | None = None,
     ) -> MessageRead:
         """
         Persist an assistant message that represents a paused workflow awaiting HITL approval.
@@ -674,6 +676,8 @@ class MessageService(IMessageService):
             live_widgets = extract_live_widgets_from_artifacts(tool_artifacts)
             if live_widgets:
                 metadata["live_widgets"] = live_widgets
+
+        self._attach_selected_agent_metadata(metadata, selected_agent, custom_agents)
 
         bot_message = self._create_bot_response_message(
             conversation_id=conversation_id,
@@ -783,6 +787,8 @@ class MessageService(IMessageService):
                             else None
                         ),
                         user_id=resolved_user_id,
+                        selected_agent=bot_response.agent_id if bot_response else None,
+                        custom_agents=workflow_request.custom_agents,
                     )
 
                 return user_message_read
@@ -994,6 +1000,8 @@ class MessageService(IMessageService):
                                 user_id=resolved_user_id,
                                 message_id=bot_message_id,
                                 tool_artifacts=stream_tool_artifacts or None,
+                                selected_agent=inflight.selected_agent,
+                                custom_agents=workflow_request.custom_agents,
                             ).model_dump(mode="json"),
                         }
                         # Workflow is paused - don't create a bot message yet.
@@ -1034,16 +1042,22 @@ class MessageService(IMessageService):
                     partial = inflight.partial_text.strip()
                     if partial:
                         partial = fix_markdown_code_blocks(partial)
+                        metadata = {
+                            "stopped": True,
+                            "partial": True,
+                            "stop_reason": "user_requested",
+                            "persona_used": sanitized_persona,
+                            "reply_to_user_message_id": str(user_message_id),
+                        }
+                        self._attach_selected_agent_metadata(
+                            metadata,
+                            inflight.selected_agent,
+                            workflow_request.custom_agents,
+                        )
                         bot_message = self._create_bot_response_message(
                             conversation_id=message_create_data.conversation_id,
                             content=partial,
-                            metadata={
-                                "stopped": True,
-                                "partial": True,
-                                "stop_reason": "user_requested",
-                                "persona_used": sanitized_persona,
-                                "reply_to_user_message_id": str(user_message_id),
-                            },
+                            metadata=metadata,
                             message_id=bot_message_id,
                         )
                         inflight.resolve(bot_message.model_dump(mode="json"))
@@ -1098,16 +1112,22 @@ class MessageService(IMessageService):
                     partial = inflight.partial_text.strip()
                     if partial:
                         partial = fix_markdown_code_blocks(partial)
+                        metadata = {
+                            "stopped": True,
+                            "partial": True,
+                            "stop_reason": "disconnect",
+                            "persona_used": sanitized_persona,
+                            "reply_to_user_message_id": str(user_message_id),
+                        }
+                        self._attach_selected_agent_metadata(
+                            metadata,
+                            inflight.selected_agent,
+                            workflow_request.custom_agents,
+                        )
                         bot_msg = self._create_bot_response_message(
                             conversation_id=message_create_data.conversation_id,
                             content=partial,
-                            metadata={
-                                "stopped": True,
-                                "partial": True,
-                                "stop_reason": "disconnect",
-                                "persona_used": sanitized_persona,
-                                "reply_to_user_message_id": str(user_message_id),
-                            },
+                            metadata=metadata,
                             message_id=bot_message_id,
                         )
                         inflight.resolve(bot_msg.model_dump(mode="json"))
@@ -1524,6 +1544,8 @@ class MessageService(IMessageService):
         bot_message_persisted = False
         resume_tool_artifacts: list[dict[str, Any]] = []
         resume_tool_args_by_id: dict[str, Any] = {}
+        resume_selected_agent: str | None = None
+        resume_custom_agents = self._resolve_custom_agents_state(user_id, conversation_id)
 
         try:
             async for event in self.ai_service.resume_interrupted_execution_stream(
@@ -1534,9 +1556,10 @@ class MessageService(IMessageService):
                 event_type = event.get("type")
 
                 if event_type == "agent_selected":
+                    resume_selected_agent = event.get("agent")
                     yield self._agent_selected_event(
-                        event.get("agent"),
-                        self._resolve_custom_agents_state(user_id, conversation_id),
+                        resume_selected_agent,
+                        resume_custom_agents,
                     )
 
                 elif event_type == "token":
@@ -1615,6 +1638,8 @@ class MessageService(IMessageService):
                         user_id=user_id,
                         message_id=bot_message_id,
                         tool_artifacts=resume_tool_artifacts or None,
+                        selected_agent=resume_selected_agent,
+                        custom_agents=resume_custom_agents,
                     )
                     self._set_plan_lifecycle(
                         conversation_id,
@@ -2119,6 +2144,24 @@ class MessageService(IMessageService):
                 event["agent_name"] = name
         return event
 
+    @staticmethod
+    def _attach_selected_agent_metadata(
+        metadata: dict[str, Any],
+        selected_agent: str | None,
+        custom_agents: dict[str, Any] | None,
+    ) -> None:
+        if not selected_agent:
+            return
+
+        from app.ai.agent_metadata import attach_agent_metadata
+
+        attach_agent_metadata(
+            metadata,
+            response_agent_id=selected_agent,
+            selected_agent_id=selected_agent,
+            custom_agents=custom_agents,
+        )
+
     def _revalidate_resume_custom_agent(
         self, owner_id: UUID | None, conversation_id: UUID
     ) -> None:
@@ -2179,7 +2222,7 @@ class MessageService(IMessageService):
                 PlanLifecycle.paused,
             )
             return (
-                None,
+                bot_response,
                 bot_response.metadata["interrupt"],
             )
 

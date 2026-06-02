@@ -74,6 +74,7 @@ class AgentRuntimeSpec(BaseModel):
     prompt: str | None = None
     model_request: dict[str, Any] | None = None
     allowed_handoff_targets: list[str] = Field(default_factory=list)
+    handoff_target_descriptions: dict[str, str] = Field(default_factory=dict)
     allowed_server_tool_refs: list[dict[str, Any]] = Field(default_factory=list)
     allowed_client_tool_refs: list[dict[str, Any]] = Field(default_factory=list)
     allowed_skill_refs: list[dict[str, Any]] = Field(default_factory=list)
@@ -175,6 +176,7 @@ def build_custom_agent_runtime_spec(
     state_entry: dict[str, Any],
     *,
     allowed_handoff_targets: list[str] | None = None,
+    handoff_target_descriptions: dict[str, str] | None = None,
 ) -> AgentRuntimeSpec:
     """Build a custom-agent runtime spec from a ``custom_agents`` state entry."""
     tool_refs = state_entry.get("tool_refs") or []
@@ -194,6 +196,7 @@ def build_custom_agent_runtime_spec(
         prompt=state_entry.get("prompt"),
         model_request=state_entry.get("model_request"),
         allowed_handoff_targets=list(allowed_handoff_targets or []),
+        handoff_target_descriptions=dict(handoff_target_descriptions or {}),
         allowed_server_tool_refs=server_refs,
         allowed_client_tool_refs=client_refs,
         allowed_skill_refs=list(state_entry.get("skill_refs") or []),

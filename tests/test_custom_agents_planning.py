@@ -97,3 +97,82 @@ async def test_isolated_context_rejects_unattached_custom_worker():
             task_prompt="x",
             parent_state=_parent_state([]),
         )
+
+
+@pytest.mark.asyncio
+async def test_custom_subagent_result_includes_display_identity():
+    from app.ai.planning_subagents import (
+        DispatchSubagentsInput,
+        PlanningSubagentDispatcher,
+        PlanningSubagentTask,
+    )
+    from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+
+    rid = f"custom_agent:{uuid4()}"
+
+    class _Workflow:
+        async def _run_agent_in_isolated_context(self, **kwargs):
+            return AgentResponse(
+                agent_type=AgentType.CHAT,
+                agent_id=rid,
+                message=AgentMessage(role=MessageRole.ASSISTANT, content="worker answer"),
+                metadata={
+                    "runtime_agent_id": rid,
+                    "custom_agent_id": rid.split(":", 1)[1],
+                    "custom_agent_name": "Data Analyst",
+                },
+            )
+
+    dispatcher = PlanningSubagentDispatcher(workflow=_Workflow())
+    result = await dispatcher.dispatch(
+        DispatchSubagentsInput(tasks=[PlanningSubagentTask(id="w1", agent=rid, task="analyze")]),
+        parent_state={
+            "custom_agents": {
+                rid: {
+                    "id": rid.split(":", 1)[1],
+                    "runtime_agent_id": rid,
+                    "name": "Data Analyst",
+                }
+            }
+        },
+    )
+
+    entry = result.results[0]
+    assert entry.agent == rid
+    assert entry.agent_name == "Data Analyst"
+    assert entry.custom_agent_id == rid.split(":", 1)[1]
+
+
+@pytest.mark.asyncio
+async def test_failed_custom_subagent_result_keeps_display_identity():
+    from app.ai.planning_subagents import (
+        DispatchSubagentsInput,
+        PlanningSubagentDispatcher,
+        PlanningSubagentTask,
+    )
+
+    rid = f"custom_agent:{uuid4()}"
+
+    class _Workflow:
+        async def _run_agent_in_isolated_context(self, **kwargs):
+            raise RuntimeError("boom")
+
+    dispatcher = PlanningSubagentDispatcher(workflow=_Workflow())
+    result = await dispatcher.dispatch(
+        DispatchSubagentsInput(tasks=[PlanningSubagentTask(id="w1", agent=rid, task="analyze")]),
+        parent_state={
+            "custom_agents": {
+                rid: {
+                    "id": rid.split(":", 1)[1],
+                    "runtime_agent_id": rid,
+                    "name": "Data Analyst",
+                }
+            }
+        },
+    )
+
+    entry = result.results[0]
+    assert entry.status == "failed"
+    assert entry.agent == rid
+    assert entry.agent_name == "Data Analyst"
+    assert entry.custom_agent_id == rid.split(":", 1)[1]

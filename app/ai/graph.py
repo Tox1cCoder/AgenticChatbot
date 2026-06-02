@@ -23,6 +23,12 @@ from ..core.response_constants import NO_RESPONSE_GENERATED
 from ..interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
 from ..models.enums import PlanLifecycle
+from .agent_metadata import (
+    attach_agent_metadata,
+    base_agent_capability,
+    normalize_handoff_metadata,
+    normalize_subagent_metadata,
+)
 from .agents.canvas_agent import CanvasAgent
 from .agents.chat_agent import ChatAgent
 from .agents.custom_agent import CustomAgent
@@ -408,7 +414,35 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             if rich_candidates:
                 response.metadata["_rich_item_candidates"] = list(rich_candidates)
 
+    def _attach_final_agent_metadata(
+        self,
+        state: GraphState,
+        response: AgentResponse,
+    ) -> None:
+        if response.metadata is None:
+            response.metadata = {}
+
+        custom_agents = GraphStateView(state).custom_agents()
+        attach_agent_metadata(
+            response.metadata,
+            response_agent_id=response.agent_id,
+            selected_agent_id=state.get("selected_agent"),
+            custom_agents=custom_agents,
+        )
+
+        handoff = normalize_handoff_metadata(GraphStateView(state).context())
+        if handoff:
+            response.metadata["handoff"] = handoff
+
+        subagent_results = normalize_subagent_metadata(
+            response.metadata.get("subagent_results"),
+            custom_agents,
+        )
+        if subagent_results:
+            response.metadata["subagent_results"] = subagent_results
+
     def _finalize_agent_response(self, state: GraphState, response: AgentResponse) -> GraphState:
+        self._attach_final_agent_metadata(state, response)
         state["response"] = response
 
         ai_kwargs: dict[str, Any] = {"content": response.message.content}
@@ -1249,7 +1283,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             agent.agent_type if agent and hasattr(agent, "agent_type") else AgentType.SEARCH
         )
 
-        return AgentResponse(
+        response = AgentResponse(
             agent_type=agent_type,
             agent_id=selected_agent or "search_agent",
             message=AgentMessage(
@@ -1258,6 +1292,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             ),
             metadata={"interrupt": interrupt_response},
         )
+        self._attach_final_agent_metadata(values, response)
+        return response
 
     async def _summarization_node(self, state: GraphState) -> GraphState:
         """No-op compatibility node.
@@ -1599,6 +1635,17 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             value = context.get(key)
             if isinstance(value, list) and value:
                 response.metadata[key] = make_json_safe(value)
+
+        # Enrich Planning worker results with display identity (agent_name,
+        # agent_kind, custom_agent_id) against the final custom-agent map while
+        # keeping the existing ``subagent_results`` UI contract.
+        subagent_results = normalize_subagent_metadata(
+            response.metadata.get("subagent_results"),
+            state_view.custom_agents(),
+        )
+        if subagent_results:
+            response.metadata["subagent_results"] = subagent_results
+
         worker_artifacts = context.get("subagent_worker_artifacts")
         if isinstance(worker_artifacts, dict) and worker_artifacts:
             response.metadata["subagent_worker_artifacts"] = make_json_safe(worker_artifacts)
@@ -1990,13 +2037,34 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         self, state: GraphState, runtime_agent_id: str | None
     ) -> list[str]:
         """Valid hand_off targets for a custom agent: base agents + other custom."""
-        targets = [name for name in self.agents if name != "planning_agent"]
+        targets = list(self.agents)
         targets.extend(
             cid
             for cid in GraphStateView(state).custom_agents()
             if cid != runtime_agent_id
         )
         return targets
+
+    def _custom_handoff_target_descriptions(
+        self, state: GraphState, runtime_agent_id: str | None
+    ) -> dict[str, str]:
+        descriptions: dict[str, str] = {}
+        # Base agents: capability blurbs so a limited-toolset agent can recognise
+        # which specialist to delegate to when work falls outside its own tools.
+        for agent_id in self.agents:
+            if agent_id == runtime_agent_id:
+                continue
+            blurb = base_agent_capability(agent_id)
+            if blurb:
+                descriptions[agent_id] = blurb
+        # Other attached custom agents.
+        for cid, entry in GraphStateView(state).custom_agents().items():
+            if cid == runtime_agent_id or not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "Custom Agent").strip() or "Custom Agent"
+            detail = str(entry.get("description") or "").strip()
+            descriptions[cid] = f"{name}: {detail}" if detail else name
+        return descriptions
 
     def _build_custom_agent(
         self, state: GraphState, runtime_agent_id: str | None
@@ -2012,6 +2080,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         spec = build_custom_agent_runtime_spec(
             entry,
             allowed_handoff_targets=self._custom_handoff_targets(state, runtime_agent_id),
+            handoff_target_descriptions=self._custom_handoff_target_descriptions(
+                state, runtime_agent_id
+            ),
         )
         return CustomAgent(spec, runtime_model_resolver=self._runtime_model_resolver)
 
@@ -3117,13 +3188,17 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         # conversation to a different top-level agent. Honor the new
         # selected_agent so the planning loop yields to the target node.
         delegated_agent = state.get("selected_agent")
-        if (
-            isinstance(delegated_agent, str)
-            and delegated_agent != "planning_agent"
-            and delegated_agent in self.agents
-        ):
-            logger.info("Planning hand_off detected: routing planning_tools → %s", delegated_agent)
-            return delegated_agent
+        if isinstance(delegated_agent, str) and delegated_agent != "planning_agent":
+            is_base_agent = delegated_agent in self.agents
+            is_attached_custom = self._is_attached_custom_agent(state, delegated_agent)
+            if is_base_agent or is_attached_custom:
+                delegated_node = self._route_target_for(state, delegated_agent)
+                logger.info(
+                    "Planning hand_off detected: routing planning_tools to %s via %s",
+                    delegated_agent,
+                    delegated_node,
+                )
+                return delegated_node
 
         planning_call_count = state.get("planning_call_count", 0)
         max_iterations = int(getattr(settings, "planning_max_iterations", 0) or 0)
@@ -3348,6 +3423,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         if images:
             response.metadata["images"] = images
 
+        self._attach_final_agent_metadata(state, response)
         return response
 
     def _recover_terminal_response(

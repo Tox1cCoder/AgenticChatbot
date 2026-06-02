@@ -92,6 +92,30 @@ class CustomAgent(BaseAgent):
             allowed_skill_refs=self._spec.allowed_skill_refs,
         )
 
+    def _build_delegation_suffix(self) -> str:
+        if not self._spec.allowed_handoff_targets:
+            return ""
+
+        lines: list[str] = []
+        for target in self._spec.allowed_handoff_targets:
+            description = self._spec.handoff_target_descriptions.get(target)
+            lines.append(f"- {target}" + (f": {description}" if description else ""))
+
+        return (
+            "\n\nINTER-AGENT DELEGATION:\n"
+            "Your toolset is intentionally limited. You also have a `hand_off` tool that "
+            "transfers the conversation to a more capable agent.\n"
+            "Hand off when the request — or a distinct part of it — needs a tool or "
+            "capability you do not have, or when you are not making progress with your "
+            "own tools. Do not keep retrying the same tool calls to force work that is "
+            "outside your toolset; delegate it to the best-suited target instead. "
+            "Choose the target whose capabilities match the work, and explain what is "
+            "needed in `reason`. Do not delegate if no listed target is more capable "
+            "than you for the request.\n"
+            "Available targets:\n"
+            + "\n".join(lines)
+        )
+
     # ------------------------------------------------------------- metadata
 
     def set_runtime_warnings(self, warnings: list[str]) -> None:
@@ -99,6 +123,8 @@ class CustomAgent(BaseAgent):
         self._runtime_warnings = list(warnings or [])
 
     def _augment_response_metadata(self, metadata: dict[str, Any]) -> None:
+        # Compatibility fields consumed by the final metadata normalizer.
+        # Persisted assistant messages should prefer message_metadata["agent"].
         metadata["runtime_agent_id"] = self._spec.runtime_agent_id
         metadata["custom_agent_id"] = (
             str(self._spec.custom_agent_id) if self._spec.custom_agent_id else None
@@ -224,5 +250,10 @@ class CustomAgent(BaseAgent):
         # Dynamic hand_off scoped to this agent's valid targets (base + other
         # attached custom agents). Same tool object the graph re-validates.
         if self._spec.allowed_handoff_targets:
-            tools.append(create_hand_off_tool(self._spec.allowed_handoff_targets))
+            tools.append(
+                create_hand_off_tool(
+                    self._spec.allowed_handoff_targets,
+                    self._spec.handoff_target_descriptions,
+                )
+            )
         return tools
