@@ -233,9 +233,74 @@ async def test_is_loaded_false_when_autoload_score_below_threshold(monkeypatch):
     assert deferred_state.autoload_calls == 0
 
 
-def test_score_metadata_marks_weak_description_only_matches_low_confidence():
-    from app.ai.tool_search_scoring import rank_tool_candidates
+def test_exact_tool_name_query_is_high_confidence_and_autoload_eligible():
+    """Searching a tool by its exact/near-exact name is a high-confidence match.
+
+    Deferred discovery relies on autoload: an agent (notably a custom agent with
+    no pinned tools) can only invoke a server tool after tool_search autoloads
+    it. Autoload only fires for the high-confidence top result, so a query that
+    names the tool must rank ``high`` and be ``autoload_eligible`` — otherwise
+    the tool is never bound and the agent gives up / hands off.
+    """
     from app.ai.mcp_tool_catalog import ToolDescriptor
+    from app.ai.tool_search_scoring import rank_tool_candidates
+
+    tools = [
+        ToolDescriptor(
+            tool_name="tavily_search",
+            server_name="tavily",
+            description="Search the web for current news and information.",
+            arg_names=["query", "max_results"],
+            required_arg_names=["query"],
+            schema_fingerprint="fp-tavily",
+        ),
+        ToolDescriptor(
+            tool_name="vector_store_search",
+            server_name="rag",
+            description="Search an internal vector store of documents.",
+            arg_names=["query"],
+            required_arg_names=["query"],
+            schema_fingerprint="fp-vector",
+        ),
+    ]
+
+    ranked = rank_tool_candidates(query="tavily_search", candidates=tools)
+
+    assert ranked[0].tool.tool_name == "tavily_search"
+    assert ranked[0].confidence == "high"
+    assert ranked[0].autoload_eligible is True
+
+
+def test_single_generic_name_token_match_does_not_reach_autoload():
+    """A one-token generic name match must stay below the autoload bar.
+
+    Covering a single common name token (e.g. query "search" vs a tool literally
+    named "search") is a weaker signal than naming a specific multi-token tool,
+    and must not be auto-bound on its own.
+    """
+    from app.ai.mcp_tool_catalog import ToolDescriptor
+    from app.ai.tool_search_scoring import rank_tool_candidates
+
+    tools = [
+        ToolDescriptor(
+            tool_name="search",
+            server_name="generic",
+            description="A generic search tool.",
+            arg_names=["query"],
+            required_arg_names=["query"],
+            schema_fingerprint="fp-generic-search",
+        ),
+    ]
+
+    ranked = rank_tool_candidates(query="search", candidates=tools)
+
+    assert ranked[0].tool.tool_name == "search"
+    assert ranked[0].autoload_eligible is False
+
+
+def test_score_metadata_marks_weak_description_only_matches_low_confidence():
+    from app.ai.mcp_tool_catalog import ToolDescriptor
+    from app.ai.tool_search_scoring import rank_tool_candidates
 
     tools = [
         ToolDescriptor(

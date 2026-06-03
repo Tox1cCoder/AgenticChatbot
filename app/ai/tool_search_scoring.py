@@ -213,6 +213,19 @@ def _score_candidate(intent: QueryIntent, tool: Any) -> ToolSearchScore:
         score += 14.0 * len(name_overlap)
         reasons.append(f"name match: {', '.join(sorted(name_overlap)[:2])}")
 
+    # Strong signal: the query names the tool. When the query covers EVERY token
+    # of the tool's name (e.g. "tavily_search" -> tavily_search), the model is
+    # effectively asking for that exact tool. Deferred discovery can only bind a
+    # tool after tool_search autoloads it, and autoload fires only for the
+    # high-confidence top result — so without this signal a by-name search of a
+    # multi-token tool stalls at medium and never loads. The +40 boost lifts a
+    # specific (multi-token) name match to "high" while a single generic name
+    # token (14 + 40 = 54) stays below the 60 "high" bar, so generic words like
+    # "search" do not auto-bind on their own.
+    if profile.name_tokens and profile.name_tokens <= intent.tokens:
+        score += 40.0
+        reasons.insert(0, f"exact name match: {profile.tool_name}")
+
     required_arg_overlap = intent.tokens & profile.required_arg_tokens
     if required_arg_overlap:
         score += 12.0 * len(required_arg_overlap)

@@ -69,17 +69,21 @@ def test_runtime_id_helpers():
 def test_spec_does_not_inject_example_time_tool():
     spec = _spec(tool_refs=[])
     assert spec.allowed_server_tool_refs == []
-    assert spec.allow_all_server_tools is False
+    # Full backend catalog is discoverable even with no pre-selected server refs.
+    assert spec.allow_all_server_tools is True
 
 
-def test_custom_agent_server_tool_refs_are_exact_allowlist():
+def test_custom_agent_server_tool_refs_are_recorded_but_not_restrictive():
     spec = _spec(tool_refs=[SERVER_MCP_TOOL_REF])
 
-    assert spec.allow_all_server_tools is False
-    assert spec.server_tool_search_allowlist() == ["calculator::calculate"]
+    # Selected server refs are still recorded (UI hint / future pinning) ...
+    assert spec.allowed_server_tool_refs == [SERVER_MCP_TOOL_REF]
+    # ... but they do NOT restrict discovery: the full backend catalog is searched.
+    assert spec.allow_all_server_tools is True
+    assert spec.server_tool_search_allowlist() is None
 
 
-def test_custom_agent_receives_only_selected_backend_server_and_client_tools():
+def test_custom_agent_receives_all_server_tools_but_only_selected_client_tools():
     spec = _spec(tool_refs=[SERVER_MCP_TOOL_REF, CLIENT_TOOL_REF])
     calculator_tool = _FakeTool(
         "calculate",
@@ -129,9 +133,10 @@ def test_custom_agent_receives_only_selected_backend_server_and_client_tools():
         request_device_id="desktop-1",
     )
     names = {t.name for t in allowed}
-    assert names == {"calculate", "client__csv__profile"}
-    assert "read_sheet" not in names
-    assert "search_web" not in names
+    # Full server catalog: every backend MCP tool passes (selected or not).
+    assert {"calculate", "read_sheet", "search_web"} <= names
+    # Client tools stay strictly scoped: only the exact selected instance binds.
+    assert "client__csv__profile" in names
     assert "client__fs__delete" not in names
     assert warnings == []
 
@@ -306,7 +311,11 @@ def test_custom_agent_initial_binding_defers_selected_server_tools():
         reset_deferred_tool_state()
 
 
-def test_custom_agent_binding_includes_only_loaded_selected_server_tool():
+def test_custom_agent_binds_only_loaded_tools_not_unloaded_catalog():
+    """Deferred discovery still gates binding on LOADING, not selection: a tool
+    the agent has autoloaded binds; a backend catalog tool it has not loaded does
+    not (otherwise the whole catalog would be bound at once, defeating deferral).
+    """
     from app.ai.agents.custom_agent import CustomAgent
     from app.ai.deferred_tool_state import get_deferred_tool_state, reset_deferred_tool_state
     from app.ai.mcp_tool_catalog import ToolReference
@@ -314,7 +323,7 @@ def test_custom_agent_binding_includes_only_loaded_selected_server_tool():
     reset_deferred_tool_state()
     spec = _spec(tool_refs=[SERVER_MCP_TOOL_REF])
     agent = CustomAgent(spec)
-    selected_server = _FakeTool(
+    loaded_server = _FakeTool(
         "calculate",
         {
             "tool_origin": "server_mcp",
@@ -322,7 +331,7 @@ def test_custom_agent_binding_includes_only_loaded_selected_server_tool():
             "qualified_tool_id": "calculator::calculate",
         },
     )
-    unselected_server = _FakeTool(
+    unloaded_server = _FakeTool(
         "search_web",
         {
             "tool_origin": "server_mcp",
@@ -333,28 +342,26 @@ def test_custom_agent_binding_includes_only_loaded_selected_server_tool():
 
     class FakeManager:
         _tool_index = {
-            "calculate": [selected_server],
-            "search_web": [unselected_server],
+            "calculate": [loaded_server],
+            "search_web": [unloaded_server],
         }
         _server_tools = {
-            "calculator": [selected_server],
-            "search": [unselected_server],
+            "calculator": [loaded_server],
+            "search": [unloaded_server],
         }
 
         def get_server_for_tool(self, tool):
-            return "calculator" if tool is selected_server else "search"
+            return "calculator" if tool is loaded_server else "search"
 
-    agent.tools = [selected_server, unselected_server]
+    agent.tools = [loaded_server, unloaded_server]
     agent.mcp_manager = FakeManager()
 
     try:
+        # Only "calculate" is loaded. "search_web" stays in the catalog, unloaded.
         get_deferred_tool_state().autoload(
             "conv-1",
             spec.runtime_agent_id,
-            [
-                ToolReference("calculate", "calculator"),
-                ToolReference("search_web", "search"),
-            ],
+            [ToolReference("calculate", "calculator")],
         )
 
         tools = agent._get_tools_for_binding(conversation_id="conv-1")
@@ -367,8 +374,82 @@ def test_custom_agent_binding_includes_only_loaded_selected_server_tool():
         reset_deferred_tool_state()
 
 
+def test_custom_agent_spec_enables_full_server_catalog_discovery():
+    """Custom agents discover the full backend MCP catalog (not just selected
+    refs). Server discovery is unfiltered; selected refs become an optional hint,
+    not a restriction. Client tools remain strictly scoped (see isolation tests).
+    """
+    spec = _spec(tool_refs=[SERVER_MCP_TOOL_REF])
+
+    assert spec.allow_all_server_tools is True
+    assert spec.server_tool_search_allowlist() is None
+
+
+def test_custom_agent_binds_loaded_server_tool_under_full_catalog_discovery():
+    """Any backend MCP tool that tool_search autoloads is bindable, even when it
+    is NOT in the agent's selected tool_refs and even when the raw MCP tool object
+    carries no server_name/qualified_tool_id metadata (real MCP tools track server
+    identity in the manager's id-map, not on ``tool.metadata``)."""
+    from app.ai.agents.custom_agent import CustomAgent
+    from app.ai.deferred_tool_state import get_deferred_tool_state, reset_deferred_tool_state
+    from app.ai.mcp_tool_catalog import ToolReference
+
+    reset_deferred_tool_state()
+    spec = _spec(tool_refs=[])  # nothing pre-selected
+    agent = CustomAgent(spec)
+    # Real-MCP-like tool: no server_name / qualified_tool_id on the tool object.
+    discovered = _FakeTool("tavily_search", {})
+
+    class FakeManager:
+        _tool_index = {"tavily_search": [discovered]}
+        _server_tools = {"tavily": [discovered]}
+
+        def get_server_for_tool(self, tool):
+            return "tavily"
+
+    agent.tools = [discovered]
+    agent.mcp_manager = FakeManager()
+
+    try:
+        get_deferred_tool_state().autoload(
+            "conv-1",
+            spec.runtime_agent_id,
+            [ToolReference("tavily_search", "tavily")],
+        )
+        tools = agent._get_tools_for_binding(conversation_id="conv-1")
+        names = {tool.name for tool in tools}
+        assert "tavily_search" in names
+    finally:
+        reset_deferred_tool_state()
+
+
+def test_full_server_catalog_does_not_loosen_client_tool_isolation():
+    """Full server-catalog discovery must NOT let a client tool from a different
+    sidecar session be substituted for the selected one. Client tools stay
+    exact-matched on device/session/catalog_version/tool_instance_id."""
+    spec = _spec(tool_refs=[CLIENT_TOOL_REF])  # selected on desktop-1 / session-1
+    foreign_session_client = _FakeTool(
+        "client__csv__profile",
+        {
+            "tool_origin": "client_mcp",
+            "device_id": "desktop-1",
+            "session_id": "session-2",  # different live sidecar session
+            "catalog_version": "v1",
+            "tool_instance_id": "csv-profile-instance-2",
+            "qualified_tool_id": "client__csv__profile",
+        },
+    )
+
+    allowed, warnings = filter_tools_for_custom_agent(
+        [foreign_session_client], spec, request_device_id="desktop-1"
+    )
+
+    assert allowed == []
+    assert warnings  # selected client tool reported unavailable, not substituted
+
+
 @pytest.mark.asyncio
-async def test_custom_agent_tool_search_refresh_uses_restricted_binding(monkeypatch):
+async def test_custom_agent_tool_search_refresh_binds_loaded_tools(monkeypatch):
     from app.ai.agents.custom_agent import CustomAgent
     from app.ai.deferred_tool_state import get_deferred_tool_state, reset_deferred_tool_state
     from app.ai.mcp_tool_catalog import ToolReference
@@ -417,13 +498,11 @@ async def test_custom_agent_tool_search_refresh_uses_restricted_binding(monkeypa
     agent.mcp_manager = FakeManager()
 
     try:
+        # Only "calculate" is loaded; "search_web" stays in the catalog, unloaded.
         get_deferred_tool_state().autoload(
             "conv-1",
             spec.runtime_agent_id,
-            [
-                ToolReference("calculate", "calculator"),
-                ToolReference("search_web", "search"),
-            ],
+            [ToolReference("calculate", "calculator")],
         )
         monkeypatch.setattr(
             "app.ai.mcp_registry.get_global_mcp_manager",
@@ -445,14 +524,17 @@ async def test_custom_agent_tool_search_refresh_uses_restricted_binding(monkeypa
         reset_deferred_tool_state()
 
 
-def test_tool_search_allowlist_scopes_to_selected():
+def test_tool_search_allowlist_full_server_scoped_client():
     spec = _spec(
         tool_refs=[
             SERVER_MCP_TOOL_REF,
             CLIENT_TOOL_REF,
         ]
     )
-    assert spec.server_tool_search_allowlist() == ["calculator::calculate"]
+    # Server discovery spans the full backend catalog (no allowlist filter) ...
+    assert spec.server_tool_search_allowlist() is None
+    # ... while client discovery stays scoped to the exact selected instance id,
+    # never the public tool name (which a foreign sidecar could also expose).
     client_allowlist = set(spec.client_tool_search_allowlist())
     assert "csv-profile-instance" in client_allowlist
     assert "client__csv__profile" not in client_allowlist

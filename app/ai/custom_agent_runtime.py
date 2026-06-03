@@ -200,7 +200,15 @@ def build_custom_agent_runtime_spec(
         allowed_server_tool_refs=server_refs,
         allowed_client_tool_refs=client_refs,
         allowed_skill_refs=list(state_entry.get("skill_refs") or []),
-        allow_all_server_tools=False,
+        # Custom agents discover and use the full backend MCP server catalog via
+        # tool_search (server tools are backend-shared, not client-specific, so
+        # there is no cross-client leakage risk). Selected ``server`` tool_refs
+        # are an optional hint, not a restriction. Client tools, by contrast, stay
+        # strictly scoped to the exact selected instances and the active
+        # device/session (see ``client_tool_search_allowlist`` and the client
+        # branch of ``filter_tools_for_custom_agent``) so no client tool can leak
+        # or be misinvoked across devices, sessions, or simultaneous sidecars.
+        allow_all_server_tools=True,
     )
 
 
