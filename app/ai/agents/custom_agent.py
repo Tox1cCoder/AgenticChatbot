@@ -92,9 +92,7 @@ class CustomAgent(BaseAgent):
             allowed_skill_refs=self._spec.allowed_skill_refs,
         )
 
-    def _build_delegation_suffix(
-        self, target_descriptions: dict[str, str] | None = None
-    ) -> str:
+    def _build_delegation_suffix(self, target_descriptions: dict[str, str] | None = None) -> str:
         # Custom agents always render targets from their own spec (built by the
         # graph). ``target_descriptions`` is accepted for signature parity with
         # the base prompt builder and intentionally ignored.
@@ -117,8 +115,7 @@ class CustomAgent(BaseAgent):
             "Choose the target whose capabilities match the work, and explain what is "
             "needed in `reason`. Do not delegate if no listed target is more capable "
             "than you for the request.\n"
-            "Available targets:\n"
-            + "\n".join(lines)
+            "Available targets:\n" + "\n".join(lines)
         )
 
     # ------------------------------------------------------------- metadata
@@ -158,9 +155,11 @@ class CustomAgent(BaseAgent):
         always included. Unavailable selected client tools surface as
         response-metadata warnings.
         """
-        server_candidates: list[BaseTool] = [] if is_client_only_scope(
-            device_id=device_id, tool_scope=tool_scope
-        ) else list(self.tools or [])
+        server_candidates: list[BaseTool] = (
+            []
+            if is_client_only_scope(device_id=device_id, tool_scope=tool_scope)
+            else list(self.tools or [])
+        )
         if not (settings.enable_client_runtime_bridge and not device_id):
             remote_tools = self._get_client_runtime_tools(user_id=user_id, device_id=device_id)
         else:

@@ -102,9 +102,17 @@ class RAGAgent(BaseAgent):
         return AGENTIC_RAG_SYSTEM_PROMPT
 
     def _init_reranker(self):
+        model_name = (
+            getattr(
+                self.settings,
+                "rag_reranker_model",
+                None,
+            )
+            or self.settings.reranker_model
+        )
         with _RERANKER_INIT_LOCK:
-            self.reranker = CrossEncoder(self.settings.reranker_model)
-        logger.debug(f"Re-ranker initialized: {self.settings.reranker_model}")
+            self.reranker = CrossEncoder(model_name)
+        logger.debug(f"Re-ranker initialized: {model_name}")
 
     def _get_full_system_prompt(
         self,
@@ -294,6 +302,7 @@ class RAGAgent(BaseAgent):
                 content = chunk.content
                 document_id = str(chunk.document_id)
                 chunk_index = chunk.chunk_index
+                chunk_metadata = getattr(chunk, "chunk_metadata", None) or {}
             else:
                 logger.error(
                     "Qdrant returned chunk_id=%s but no SQL document_chunks row exists",
@@ -313,8 +322,14 @@ class RAGAgent(BaseAgent):
                     "conversation_id": payload.get("conversation_id") or None,
                     "chunk_id": str(raw_chunk_id) if raw_chunk_id else None,
                     "chunk_index": chunk_index,
-                    "has_tables": payload.get("has_tables", False),
-                    "table_count": payload.get("table_count", 0),
+                    "has_tables": bool(
+                        chunk_metadata.get("has_tables")
+                        or chunk_metadata.get("contains_table")
+                        or payload.get("has_tables", False)
+                    ),
+                    "table_count": int(
+                        chunk_metadata.get("table_count") or payload.get("table_count", 0) or 0
+                    ),
                     "image_ids": image_ids,
                     "image_paths": image_paths,
                     "image_captions": image_captions,
@@ -479,8 +494,7 @@ class RAGAgent(BaseAgent):
                 "document_id": document_id,
                 "images_deleted": images_deleted,
                 "message": (
-                    f"Vectors and {images_deleted} images deleted for document "
-                    f"{document_id}"
+                    f"Vectors and {images_deleted} images deleted for document {document_id}"
                 ),
                 "operation_result": str(result),
             }

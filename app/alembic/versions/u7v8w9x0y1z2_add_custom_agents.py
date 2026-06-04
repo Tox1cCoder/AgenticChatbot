@@ -73,9 +73,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(op.f("ix_custom_agents_id"), "custom_agents", ["id"], unique=False)
-    op.create_index(
-        op.f("ix_custom_agents_owner_id"), "custom_agents", ["owner_id"], unique=False
-    )
+    op.create_index(op.f("ix_custom_agents_owner_id"), "custom_agents", ["owner_id"], unique=False)
     op.create_index(
         "ix_custom_agents_owner_deleted",
         "custom_agents",

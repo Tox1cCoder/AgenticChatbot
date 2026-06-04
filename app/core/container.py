@@ -443,8 +443,6 @@ class Container(containers.DeclarativeContainer):
         DocumentProcessingService,
         settings=providers.Object(settings),
         celery_app=providers.Object(celery_app),
-        qdrant_client=qdrant_client,
-        embedding_service=rag_embedding_service,
         document_image_repository=document_image_repository,
         document_index_service=document_index_service,
         document_chunk_builder=document_chunk_builder,

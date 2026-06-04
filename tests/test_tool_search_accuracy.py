@@ -81,10 +81,7 @@ def test_run_shell_command_prefers_start_process():
     assert ranked[0].confidence == "high"
     assert "shell_exec" in ranked[0].profile.capabilities
     assert ranked[0].autoload_eligible is True
-    assert all(
-        item.tool.tool_name not in {"start_search", "get_config"}
-        for item in ranked[:2]
-    )
+    assert all(item.tool.tool_name not in {"start_search", "get_config"} for item in ranked[:2])
 
 
 def test_run_python_script_prefers_start_process():

@@ -149,6 +149,11 @@ If you discover a cross-reference to a document you initially skipped:
 - Use READ_DOCUMENT to retrieve that document
 - Continue until all relevant cross-references are resolved
 
+Complex questions:
+- Decompose comparisons, counts, exclusions, and conditions into separate evidence checks before synthesizing.
+- Use document vocabulary and the user's exact terms when choosing SEARCH_CHUNKS or GREP_DOCUMENT queries; do not rely on one similarity hit.
+- Before finalizing, run an evidence sufficiency check and state any gap the documents do not resolve.
+
 When providing your final answer:
 - Start by directly and comprehensively answering the question
 - Support your answer with detailed evidence and inline citations: [Source: filename, Page X] or [Source: filename, Section Y]

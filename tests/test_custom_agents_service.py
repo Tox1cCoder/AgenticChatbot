@@ -414,9 +414,9 @@ def test_update_validates_and_persists_tool_and_skill_refs(env):
         "calculator::calculate",
         "client__csv__profile",
     ]
-    assert [
-        (ref["source"], ref["lookup_name"], ref["name"]) for ref in updated.skill_refs
-    ] == [("server", "data-analysis", "data-analysis")]
+    assert [(ref["source"], ref["lookup_name"], ref["name"]) for ref in updated.skill_refs] == [
+        ("server", "data-analysis", "data-analysis")
+    ]
 
     cleared = env.service.update_agent(
         env.owner_id,

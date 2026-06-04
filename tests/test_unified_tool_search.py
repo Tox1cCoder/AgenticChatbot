@@ -665,7 +665,9 @@ async def test_run_shell_command_autoloads_only_start_process(monkeypatch):
     async def fake_get_tool_catalog(_manager):
         return FakeCatalog()
 
-    monkeypatch.setattr("app.ai.tool_search_tool.get_global_mcp_manager", fake_get_global_mcp_manager)
+    monkeypatch.setattr(
+        "app.ai.tool_search_tool.get_global_mcp_manager", fake_get_global_mcp_manager
+    )
     monkeypatch.setattr("app.ai.tool_search_tool.get_tool_catalog", fake_get_tool_catalog)
     monkeypatch.setattr("app.ai.tool_search_tool.get_deferred_tool_state", lambda: state)
     monkeypatch.setattr(

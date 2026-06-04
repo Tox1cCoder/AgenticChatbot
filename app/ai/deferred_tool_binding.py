@@ -56,14 +56,15 @@ def _tool_with_call_name(tool: BaseTool, call_name: str | None) -> BaseTool:
 
     alias = copy.copy(tool)
     try:
-        setattr(alias, "name", call_name)
+        alias.name = call_name
     except Exception:
         object.__setattr__(alias, "name", call_name)
     try:
-        setattr(alias, "metadata", metadata)
+        alias.metadata = metadata
     except Exception:
         object.__setattr__(alias, "metadata", metadata)
     return alias
+
 
 _WIDGET_PINNED_AGENT_KEYS = {"chat", "rag", "search"}
 _WIDGET_PINNED_SPECS = (

@@ -192,17 +192,14 @@ class ModelConfigService(IRuntimeModelResolver):
         snapshot = self.provider_service.get_cached_provider_status(user_id, provider)
         if not snapshot.get("configured"):
             raise ValueError(
-                f"Provider '{provider}' is not configured. "
-                "Configure it before saving this agent."
+                f"Provider '{provider}' is not configured. Configure it before saving this agent."
             )
 
         if model_id in self._get_catalog_model_lookup(snapshot):
             return
         if allow_custom_model:
             return
-        raise ValueError(
-            f"Model '{model_id}' is not present in the current {provider} catalog."
-        )
+        raise ValueError(f"Model '{model_id}' is not present in the current {provider} catalog.")
 
     def _select_default_provider(self, provider_snapshots: Mapping[str, dict[str, Any]]) -> str:
         gemini_snapshot = provider_snapshots.get("gemini", {})

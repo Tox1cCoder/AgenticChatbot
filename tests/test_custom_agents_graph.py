@@ -299,7 +299,8 @@ def test_custom_agent_handoff_tool_describes_attached_custom_targets():
 
     assert agent is not None
     handoff_tool = next(
-        tool for tool in agent.restricted_internal_tools(user_id=None, device_id=None)
+        tool
+        for tool in agent.restricted_internal_tools(user_id=None, device_id=None)
         if getattr(tool, "name", None) == "hand_off"
     )
     description = handoff_tool.description
@@ -343,7 +344,8 @@ def test_custom_agent_handoff_tool_describes_base_agent_capabilities():
     agent = wf._build_custom_agent(state, rid)
     assert agent is not None
     handoff_tool = next(
-        tool for tool in agent.restricted_internal_tools(user_id=None, device_id=None)
+        tool
+        for tool in agent.restricted_internal_tools(user_id=None, device_id=None)
         if getattr(tool, "name", None) == "hand_off"
     )
     description = handoff_tool.description

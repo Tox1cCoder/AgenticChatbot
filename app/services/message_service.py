@@ -2162,9 +2162,7 @@ class MessageService(IMessageService):
             custom_agents=custom_agents,
         )
 
-    def _revalidate_resume_custom_agent(
-        self, owner_id: UUID | None, conversation_id: UUID
-    ) -> None:
+    def _revalidate_resume_custom_agent(self, owner_id: UUID | None, conversation_id: UUID) -> None:
         """Fail resume if a paused run's selected custom agent is gone.
 
         A paused HITL run carries its selected runtime agent. If that custom
@@ -2180,16 +2178,10 @@ class MessageService(IMessageService):
         paused = [e for e in registry.find_by_conversation(conversation_id) if e.paused]
         if not paused:
             return
-        attached = set(
-            self._resolve_custom_agents_state(owner_id, conversation_id).keys()
-        )
+        attached = set(self._resolve_custom_agents_state(owner_id, conversation_id).keys())
         for entry in paused:
             selected = entry.selected_agent
-            if (
-                selected
-                and is_custom_runtime_id(selected)
-                and selected not in attached
-            ):
+            if selected and is_custom_runtime_id(selected) and selected not in attached:
                 raise CustomHTTPException(
                     status_code=409,
                     detail=(

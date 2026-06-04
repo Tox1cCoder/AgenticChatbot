@@ -1165,9 +1165,7 @@ class BaseAgent(ABC):
         """
         return None
 
-    def _build_delegation_suffix(
-        self, target_descriptions: dict[str, str] | None = None
-    ) -> str:
+    def _build_delegation_suffix(self, target_descriptions: dict[str, str] | None = None) -> str:
         """Delegation prompt suffix.
 
         With ``target_descriptions`` (graph-injected: base specialists +
@@ -1190,8 +1188,7 @@ class BaseAgent(ABC):
             "is clearly better handled by a listed specialist, especially when it "
             "needs a capability or tool you do not have. Do not delegate if you can "
             "handle the request yourself.\n"
-            "Available targets:\n"
-            + "\n".join(lines)
+            "Available targets:\n" + "\n".join(lines)
         )
 
     def _build_system_prompt(

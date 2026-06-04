@@ -50,7 +50,7 @@ def test_build_delegation_suffix_dynamic_lists_custom_targets():
 
 
 def test_build_system_prompt_injects_multi_agent_activity():
-    block = "MULTI-AGENT SYSTEM:\nYou are \"Chat Agent\"."
+    block = 'MULTI-AGENT SYSTEM:\nYou are "Chat Agent".'
     prompt = _agent()._build_system_prompt(
         persona=None,
         has_tool_context=False,

@@ -347,6 +347,56 @@ def test_rag_search_hydrates_sql_chunk_content_and_images_from_lookup_payload():
     chunk_repo.get_by_ids.assert_not_called()
 
 
+def test_rag_search_reads_table_metadata_from_sql_chunk():
+    """Table metadata is canonical SQL chunk metadata, not a trusted Qdrant payload field."""
+    chunk_id = uuid4()
+    document_id = uuid4()
+
+    qdrant_point = MagicMock()
+    qdrant_point.payload = {
+        "chunk_id": str(chunk_id),
+        "document_id": str(document_id),
+        "conversation_id": "conv-1",
+        "user_id": "user-1",
+        "chunk_index": 0,
+    }
+    qdrant_point.score = 0.87
+
+    qdrant = _fake_qdrant(points=[qdrant_point])
+    agent = _build_minimal_rag_agent(qdrant, _fake_embedding())
+
+    sql_chunk = SimpleNamespace(
+        id=chunk_id,
+        document_id=document_id,
+        chunk_index=0,
+        content="| Metric | Value |\n|---|---|\n| Accuracy | 91% |",
+        page_start=1,
+        page_end=1,
+        section_path=["Results"],
+        chunk_metadata={"has_tables": True, "table_count": 2},
+        document=SimpleNamespace(filename="edgevit-results.pdf"),
+    )
+
+    chunk_repo = MagicMock()
+    chunk_repo.get_by_ids_for_scope.return_value = [sql_chunk]
+    image_repo = MagicMock()
+    image_repo.get_by_chunk_id.return_value = []
+
+    with (
+        patch("app.ai.agents.rag_agent.DocumentChunkRepository", create=True) as chunk_repo_cls,
+        patch("app.ai.agents.rag_agent.DocumentImageRepository") as image_repo_cls,
+    ):
+        chunk_repo_cls.return_value = chunk_repo
+        image_repo_cls.return_value = image_repo
+        results = asyncio.run(
+            agent._search(query="accuracy table", conversation_id="conv-1", user_id="user-1")
+        )
+
+    assert len(results) == 1
+    assert results[0]["has_tables"] is True
+    assert results[0]["table_count"] == 2
+
+
 def test_get_document_full_content_reads_sql_chunks_not_qdrant_payloads():
     document_id = uuid4()
     qdrant = _fake_qdrant()

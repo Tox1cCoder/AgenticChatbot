@@ -41,7 +41,9 @@ def infer_query_intent(query: str | None) -> QueryIntent:
     action_verbs: set[str] = set()
     target_terms: set[str] = set(tokens)
 
-    if tokens & _SHELL_TERMS and (tokens & {"run", "execute", "command", "shell", "python", "script"}):
+    if tokens & _SHELL_TERMS and (
+        tokens & {"run", "execute", "command", "shell", "python", "script"}
+    ):
         capabilities.add("shell_exec")
     if tokens & _FILE_SEARCH_TERMS and tokens & {"file", "files", "contents", "content", "pattern"}:
         capabilities.add("file_search")
@@ -52,7 +54,9 @@ def infer_query_intent(query: str | None) -> QueryIntent:
     if tokens & _CONFIG_TERMS:
         capabilities.add("config_read")
 
-    action_verbs.update(tokens & (_SHELL_TERMS | _FILE_SEARCH_TERMS | _FILE_EDIT_TERMS | _FILE_WRITE_TERMS))
+    action_verbs.update(
+        tokens & (_SHELL_TERMS | _FILE_SEARCH_TERMS | _FILE_EDIT_TERMS | _FILE_WRITE_TERMS)
+    )
     return QueryIntent(
         raw_query=raw_query,
         tokens=tokens,

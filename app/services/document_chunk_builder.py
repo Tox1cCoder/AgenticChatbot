@@ -12,6 +12,7 @@ spans across merged blocks.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any
@@ -79,8 +80,36 @@ def _finalize_chunk(
     provenance = [{"block_id": b.block_id, "kind": b.kind, "page": b.page} for b in buffered_blocks]
 
     metadata: dict[str, Any] = {}
-    if any(_is_table(b) for b in buffered_blocks):
+    has_images = False
+    image_count = 0
+    has_tables = False
+    table_count = 0
+    source_chunk_indices: list[Any] = []
+
+    for block in buffered_blocks:
+        block_metadata = block.metadata or {}
+        if block_metadata.get("has_images"):
+            has_images = True
+        if block_metadata.get("image_count") is not None:
+            image_count += int(block_metadata.get("image_count") or 0)
+        if block_metadata.get("has_tables") or _is_table(block):
+            has_tables = True
+        if block_metadata.get("table_count") is not None:
+            table_count += int(block_metadata.get("table_count") or 0)
+        elif _is_table(block):
+            table_count += 1
+        if block_metadata.get("source_chunk_index") is not None:
+            source_chunk_indices.append(block_metadata["source_chunk_index"])
+
+    if has_images:
+        metadata["has_images"] = True
+        metadata["image_count"] = image_count
+    if has_tables:
+        metadata["has_tables"] = True
+        metadata["table_count"] = table_count or 1
         metadata["contains_table"] = True
+    if source_chunk_indices:
+        metadata["source_chunk_indices"] = source_chunk_indices
 
     return BuiltChunk(
         chunk_index=chunk_index,
@@ -126,12 +155,7 @@ def _split_large_table(block: NormalizedBlock, *, target_tokens: int) -> list[st
     return out
 
 
-def _split_long_text(text: str, *, target_tokens: int, overlap_tokens: int) -> list[str]:
-    """Split a very long plain-text block into token-bounded pieces with overlap.
-
-    Uses whitespace segmentation as a cheap approximation — word count
-    correlates with token count closely enough for the first implementation.
-    """
+def _split_by_words(text: str, *, target_tokens: int, overlap_tokens: int) -> list[str]:
     words = text.split()
     if not words:
         return [text]
@@ -151,6 +175,92 @@ def _split_long_text(text: str, *, target_tokens: int, overlap_tokens: int) -> l
         if end >= len(words):
             break
         idx = max(idx + 1, end - overlap_word_count)
+    return chunks
+
+
+def _split_sentence_units(text: str) -> list[str]:
+    units: list[str] = []
+    for paragraph in re.split(r"\n{2,}", text):
+        normalized = " ".join(paragraph.split())
+        if not normalized:
+            continue
+        units.extend(
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", normalized)
+            if sentence.strip()
+        )
+    return units or [text]
+
+
+def _tail_units_for_overlap(units: list[str], overlap_tokens: int) -> list[str]:
+    if overlap_tokens <= 0:
+        return []
+
+    tail: list[str] = []
+    for unit in reversed(units):
+        candidate = [unit, *tail]
+        if estimate_tokens(" ".join(candidate)) > overlap_tokens and tail:
+            break
+        tail = candidate
+    return tail
+
+
+def _split_long_text(
+    text: str,
+    *,
+    target_tokens: int,
+    overlap_tokens: int,
+    max_tokens: int,
+) -> list[str]:
+    """Split long text on sentence boundaries when possible."""
+    sentence_units = _split_sentence_units(text)
+    if len(sentence_units) == 1 and estimate_tokens(sentence_units[0]) > max_tokens:
+        return _split_by_words(
+            sentence_units[0],
+            target_tokens=target_tokens,
+            overlap_tokens=overlap_tokens,
+        )
+
+    chunks: list[str] = []
+    current_units: list[str] = []
+
+    def emit_current() -> None:
+        nonlocal current_units
+        if not current_units:
+            return
+        emitted = current_units
+        chunks.append(" ".join(emitted))
+        current_units = _tail_units_for_overlap(emitted, overlap_tokens)
+
+    for unit in sentence_units:
+        unit_tokens = estimate_tokens(unit)
+        if unit_tokens > max_tokens:
+            emit_current()
+            chunks.extend(
+                _split_by_words(
+                    unit,
+                    target_tokens=target_tokens,
+                    overlap_tokens=overlap_tokens,
+                )
+            )
+            current_units = []
+            continue
+
+        candidate_units = [*current_units, unit]
+        candidate_text = " ".join(candidate_units)
+        if current_units and estimate_tokens(candidate_text) > target_tokens:
+            emit_current()
+            candidate_units = [*current_units, unit]
+            candidate_text = " ".join(candidate_units)
+            if current_units and estimate_tokens(candidate_text) > max_tokens:
+                current_units = []
+                candidate_units = [unit]
+
+        current_units = candidate_units
+
+    if current_units:
+        chunks.append(" ".join(current_units))
+
     return chunks
 
 
@@ -224,6 +334,7 @@ class DocumentChunkBuilder:
                     block.text,
                     target_tokens=self.target_tokens,
                     overlap_tokens=self.overlap_tokens,
+                    max_tokens=self.max_tokens,
                 ):
                     synthetic = NormalizedBlock(
                         block_id=f"{block.block_id}::chunk-{chunk_index}",

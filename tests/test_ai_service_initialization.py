@@ -62,4 +62,3 @@ def test_ai_service_singleton_serializes_concurrent_first_construction(monkeypat
     assert create_calls == 1
     assert max_active_creations == 1
     assert len({id(service) for service in services}) == 1
-

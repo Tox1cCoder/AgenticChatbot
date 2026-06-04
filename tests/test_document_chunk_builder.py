@@ -186,6 +186,26 @@ def test_builder_respects_target_tokens_for_splitting():
     assert len(chunks) >= 2, f"Expected splitting of a long paragraph; got {len(chunks)}"
 
 
+def test_long_text_prefers_sentence_boundaries():
+    sentences = [
+        f"Sentence {i} keeps a complete thought with enough words for chunking."
+        for i in range(1, 30)
+    ]
+    long_text = " ".join(sentences)
+
+    chunks = _build(
+        [_block(block_id="sentences", kind="paragraph", text=long_text)],
+        target=35,
+        overlap=0,
+        max_tokens=55,
+    )
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert chunk.content.endswith("."), f"Chunk split mid-sentence: {chunk.content!r}"
+        assert chunk.token_count <= 55
+
+
 def test_built_chunk_exposes_required_attributes():
     from app.services.document_chunk_builder import BuiltChunk, NormalizedBlock
 

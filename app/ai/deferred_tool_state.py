@@ -289,9 +289,7 @@ class ConversationToolSet:
                 tool_name=tool.tool_name,
                 server_name=tool.server_name,
                 call_name=(
-                    tool.call_name
-                    if tool.call_name and tool.call_name != tool.tool_name
-                    else None
+                    tool.call_name if tool.call_name and tool.call_name != tool.tool_name else None
                 ),
             )
             for tool in self.loaded.values()

@@ -22,8 +22,6 @@ from google.genai import types
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from PIL import Image
-from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct
 
 from app.core.config import Settings
 from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
@@ -39,8 +37,6 @@ class DocumentProcessingService:
         self,
         settings: Settings,
         celery_app,
-        qdrant_client: QdrantClient,
-        embedding_service: Any,
         document_image_repository: DocumentImageRepository,
         document_index_service: Any | None = None,
         document_chunk_builder: DocumentChunkBuilder | None = None,
@@ -48,8 +44,6 @@ class DocumentProcessingService:
     ):
         self.settings = settings
         self.celery_app = celery_app
-        self.qdrant_client = qdrant_client
-        self.embedding_service = embedding_service
         self.document_image_repository = document_image_repository
         self.document_index_service = document_index_service
         self.document_chunk_builder = document_chunk_builder or DocumentChunkBuilder(
@@ -308,61 +302,42 @@ class DocumentProcessingService:
 
         images_stored = 0
         index_service = getattr(self, "document_index_service", None)
-        if index_service is not None:
-            prepared_images = []
-            if hasattr(self, "_extracted_images") and self._extracted_images:
-                prepared_images = await self._prepare_images_for_indexing(
-                    self._extracted_images,
-                    document_id,
-                )
-                self._attach_prepared_images_to_chunks(
-                    chunks_with_metadata,
-                    prepared_images,
-                )
-
-            built_chunks = self._build_chunks_for_indexing(chunks_with_metadata)
-            persisted_chunks = index_service.index_document(
-                document=self._document_ref(document_id, conversation_id, user_id, filename),
-                built_chunks=built_chunks,
-                parse_artifact_id=None,
+        if index_service is None:
+            raise RuntimeError(
+                "DocumentIndexService is required for document processing; "
+                "direct Qdrant chunk persistence has been removed."
             )
 
-            if prepared_images:
-                images_stored = await self._store_prepared_images(
-                    prepared_images,
-                    document_id,
-                    persisted_chunks,
-                )
-
-            store_result = {
-                "chunks_stored": len(persisted_chunks),
-                "chunk_id_mapping": {
-                    chunk.chunk_index: str(chunk.id) for chunk in persisted_chunks
-                },
-            }
-            chunks_created = len(built_chunks)
-        else:
-            store_result = await self._store_chunks(
-                chunks_with_metadata,
-                filename,
+        prepared_images = []
+        if hasattr(self, "_extracted_images") and self._extracted_images:
+            prepared_images = await self._prepare_images_for_indexing(
+                self._extracted_images,
                 document_id,
-                conversation_id,
-                user_id=user_id,
+            )
+            self._attach_prepared_images_to_chunks(
+                chunks_with_metadata,
+                prepared_images,
             )
 
-            # Store images if extracted
-            if hasattr(self, "_extracted_images") and self._extracted_images:
-                images_stored = await self._store_images(
-                    self._extracted_images,
-                    document_id,
-                    store_result.get("chunk_id_mapping", {}),
-                    chunks_with_metadata,
-                )
+        built_chunks = self._build_chunks_for_indexing(chunks_with_metadata)
+        persisted_chunks = index_service.index_document(
+            document=self._document_ref(document_id, conversation_id, user_id, filename),
+            built_chunks=built_chunks,
+            parse_artifact_id=None,
+        )
 
-                # Update chunks with image metadata in Qdrant for the legacy path.
-                await self._update_chunks_with_images(document_id)
+        if prepared_images:
+            images_stored = await self._store_prepared_images(
+                prepared_images,
+                document_id,
+                persisted_chunks,
+            )
 
-            chunks_created = len(chunks_with_metadata)
+        store_result = {
+            "chunks_stored": len(persisted_chunks),
+            "chunk_id_mapping": {chunk.chunk_index: str(chunk.id) for chunk in persisted_chunks},
+        }
+        chunks_created = len(built_chunks)
 
         processing_time = time.time() - start_time
 
@@ -1468,174 +1443,6 @@ class DocumentProcessingService:
             filename=filename,
         )
 
-    async def _store_chunks(
-        self,
-        chunks_with_metadata: list[dict[str, Any]],
-        filename: str,
-        document_id: str,
-        conversation_id: str | None = None,
-        user_id: str | None = None,
-    ) -> dict[str, Any]:
-        points = []
-        chunk_id_mapping = {}
-
-        for i, chunk_data in enumerate(chunks_with_metadata):
-            chunk_text = (
-                chunk_data.get("text", chunk_data) if isinstance(chunk_data, dict) else chunk_data
-            )
-
-            embedding = list(
-                self.embedding_service.embed_documents([chunk_text], titles=[filename])[0]
-            )
-
-            safe_point_id = str(uuid.uuid4())
-            chunk_id_mapping[i] = safe_point_id  # Store mapping
-
-            payload = {
-                "content": chunk_text,
-                "source": filename,
-                "document_id": document_id,
-                "conversation_id": conversation_id,
-                "user_id": user_id,
-                "chunk_index": i,
-                "timestamp": datetime.now().isoformat(),
-                "file_type": (filename.split(".")[-1] if "." in filename else "unknown"),
-            }
-
-            if isinstance(chunk_data, dict):
-                if "has_images" in chunk_data:
-                    payload["has_images"] = bool(chunk_data.get("has_images", False))
-                if "image_count" in chunk_data and chunk_data["image_count"] is not None:
-                    payload["image_count"] = int(chunk_data["image_count"])
-                if chunk_data.get("image_prompts"):
-                    payload["image_prompts"] = chunk_data["image_prompts"]
-
-                # Add table metadata
-                if "has_tables" in chunk_data:
-                    payload["has_tables"] = bool(chunk_data.get("has_tables", False))
-                if "table_count" in chunk_data and chunk_data["table_count"] is not None:
-                    payload["table_count"] = int(chunk_data["table_count"])
-
-                # Add page metadata for citations
-                if "page_start" in chunk_data and chunk_data["page_start"] is not None:
-                    # Convert 0-indexed page_idx to 1-indexed page number for user display
-                    payload["page_start"] = int(chunk_data["page_start"]) + 1
-                if "page_end" in chunk_data and chunk_data["page_end"] is not None:
-                    payload["page_end"] = int(chunk_data["page_end"]) + 1
-                # Also store single page_number for compatibility
-                if (
-                    "page_start" in chunk_data
-                    and chunk_data["page_start"] is not None
-                    and chunk_data.get("page_start") == chunk_data.get("page_end")
-                ):
-                    payload["page_number"] = int(chunk_data["page_start"]) + 1
-
-            point = PointStruct(
-                id=safe_point_id,
-                vector=embedding,
-                payload=payload,
-            )
-            points.append(point)
-
-        # Batch upsert operations
-        batch_size = self.settings.qdrant_upsert_batch_size
-        total_points = len(points)
-
-        for i in range(0, total_points, batch_size):
-            batch = points[i : i + batch_size]
-            self.qdrant_client.upsert(collection_name=self.collection_name, points=batch)
-
-        return {
-            "chunks_stored": total_points,
-            "chunk_id_mapping": chunk_id_mapping,
-        }
-
-    async def _store_images(
-        self,
-        images_data: list[dict[str, Any]],
-        document_id: str,
-        chunk_id_mapping: dict[int, str],
-        chunks_with_metadata: list[dict[str, Any]] = None,
-    ) -> int:
-        stored_count = 0
-
-        try:
-            # Create permanent storage directory
-            storage_path = Path(self.settings.document_images_storage_path)
-            if not storage_path.is_absolute():
-                storage_path = (Path.cwd() / storage_path).resolve()
-
-            doc_storage_path = storage_path / document_id
-            doc_storage_path.mkdir(parents=True, exist_ok=True)
-
-            for img_data in images_data:
-                source_path = Path(img_data["path"])
-                dest_path = doc_storage_path / source_path.name
-                shutil.copy2(source_path, dest_path)
-
-                caption = None
-                if self.gemini_client:
-                    try:
-                        with Image.open(dest_path) as img:
-                            rgb_img = img.convert("RGB")
-                            buffer = io.BytesIO()
-                            rgb_img.save(buffer, format="JPEG")
-                        image_bytes = buffer.getvalue()
-
-                        caption = await self._generate_image_caption_with_retry(
-                            image_bytes=image_bytes,
-                            image_name=dest_path.name,
-                        )
-
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to generate caption for {dest_path.name}: {str(e)}",
-                            exc_info=True,
-                        )
-                        caption = None
-
-                chunk_id = None
-                page_number = img_data.get("page_number")
-
-                if page_number is not None and chunk_id_mapping and chunks_with_metadata:
-                    for chunk_idx, chunk_data in enumerate(chunks_with_metadata):
-                        page_start = chunk_data.get("page_start")
-                        page_end = chunk_data.get("page_end")
-
-                        if (
-                            page_start is not None
-                            and page_end is not None
-                            and page_start <= page_number <= page_end
-                        ):
-                            chunk_id = chunk_id_mapping.get(chunk_idx)
-                            break
-
-                    if chunk_id is None and chunk_id_mapping:
-                        chunk_id = chunk_id_mapping.get(0)
-                elif chunk_id_mapping:
-                    chunk_id = chunk_id_mapping.get(0)
-
-                try:
-                    relative_image_path = dest_path.relative_to(Path.cwd())
-                except ValueError:
-                    relative_image_path = dest_path
-
-                image_record_data = DocumentImageCreate(
-                    document_id=uuid.UUID(document_id),
-                    chunk_id=uuid.UUID(chunk_id) if chunk_id else None,
-                    image_path=str(relative_image_path),
-                    image_caption=caption,
-                    page_number=page_number + 1 if page_number is not None else None,
-                    mime_type=img_data["mime_type"],
-                )
-                self.document_image_repository.create(image_record_data)
-                stored_count += 1
-            return stored_count
-
-        except Exception as e:
-            logger.error(f"Failed to store images: {str(e)}")
-            return 0
-
     async def _generate_image_caption_with_retry(
         self, image_bytes: bytes, image_name: str
     ) -> str | None:
@@ -1779,41 +1586,6 @@ class DocumentProcessingService:
 
         logger.warning(f"No caption text in Gemini response for {image_name}")
         return None
-
-    async def _update_chunks_with_images(self, document_id: str) -> None:
-        try:
-            images = self.document_image_repository.get_by_document_id(UUID(document_id))
-
-            if not images:
-                return
-
-            images_by_chunk = {}
-            for image in images:
-                if image.chunk_id:
-                    chunk_id_str = str(image.chunk_id)
-                    if chunk_id_str not in images_by_chunk:
-                        images_by_chunk[chunk_id_str] = []
-                    images_by_chunk[chunk_id_str].append(image)
-
-            for _, (chunk_id_str, chunk_images) in enumerate(images_by_chunk.items(), start=1):
-                image_ids = [str(img.id) for img in chunk_images]
-                image_paths = [img.image_path for img in chunk_images]
-                image_captions = [img.image_caption or "" for img in chunk_images]
-
-                self.qdrant_client.set_payload(
-                    collection_name=self.collection_name,
-                    payload={
-                        "image_ids": image_ids,
-                        "image_paths": image_paths,
-                        "image_captions": image_captions,
-                    },
-                    points=[chunk_id_str],
-                )
-
-        except Exception as e:
-            logger.error(
-                f"Failed to update chunks with image metadata for document {document_id}: {e}"
-            )
 
     async def cleanup_temp_files(self, older_than_hours: int = 24) -> dict[str, Any]:
         try:

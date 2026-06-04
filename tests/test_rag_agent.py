@@ -491,6 +491,29 @@ def test_rag_reranker_initialization_is_serialized(monkeypatch):
     assert max_active_creations == 1
 
 
+def test_rag_reranker_uses_canonical_rag_setting(monkeypatch):
+    """RAG_RERANKER_MODEL is the documented setting and must win over the legacy alias."""
+    constructed: list[str] = []
+
+    class FakeCrossEncoder:
+        def __init__(self, model_name):
+            constructed.append(model_name)
+            self.model_name = model_name
+
+    monkeypatch.setattr(rag_agent_module, "CrossEncoder", FakeCrossEncoder)
+
+    agent = object.__new__(RAGAgent)
+    agent.settings = SimpleNamespace(
+        rag_reranker_model="canonical-cross-encoder",
+        reranker_model="legacy-cross-encoder",
+    )
+
+    agent._init_reranker()
+
+    assert constructed == ["canonical-cross-encoder"]
+    assert agent.reranker.model_name == "canonical-cross-encoder"
+
+
 # ---------------------------------------------------------------------------
 # Phase 3 / Task 3.3 + 3.4: shared runtime behavior + single agentic
 # invocation method.
@@ -828,3 +851,45 @@ def test_rag_system_prompt_includes_delegation_suffix():
     assert DELEGATION_SUFFIX.strip() in rendered, (
         "RAG system prompt must include DELEGATION_SUFFIX for parity with other agents"
     )
+
+
+def test_rag_system_prompt_has_compact_complex_query_policy_without_hardcoded_phrases():
+    """The model-facing RAG policy should guide hard queries without bloating every turn."""
+    from app.ai.prompts import AGENTIC_RAG_SYSTEM_PROMPT
+
+    section_start = AGENTIC_RAG_SYSTEM_PROMPT.index("Complex questions:")
+    section_end = AGENTIC_RAG_SYSTEM_PROMPT.index(
+        "When providing your final answer:",
+        section_start,
+    )
+    section = AGENTIC_RAG_SYSTEM_PROMPT[section_start:section_end]
+    section_lower = section.lower()
+
+    assert len(section) <= 520
+
+    required_terms = [
+        "decompose",
+        "comparisons",
+        "counts",
+        "exclusions",
+        "conditions",
+        "evidence sufficiency",
+    ]
+    missing = [term for term in required_terms if term not in section_lower]
+    assert not missing, f"RAG prompt missing compact complex-query guidance: {missing}"
+
+    forbidden_literals = [
+        '"not"',
+        '"no"',
+        '"cannot"',
+        '"unsupported"',
+        '"without"',
+        '"fails"',
+        '"less than"',
+        '"greater than"',
+        '"<"',
+        '">"',
+    ]
+    found_literals = [term for term in forbidden_literals if term in section_lower]
+    assert not found_literals, f"RAG prompt contains hardcoded query phrases: {found_literals}"
+    assert "Hard query strategy" not in AGENTIC_RAG_SYSTEM_PROMPT

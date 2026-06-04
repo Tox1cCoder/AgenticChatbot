@@ -19,8 +19,9 @@ Thresholds (configured via Settings):
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from .text_normalization import tokenize_text
 from .tool_search_profiles import (
@@ -275,7 +276,11 @@ def _capability_specific_adjustment(
     if "file_write" in intent.capabilities:
         if "file_write" in profile.capabilities:
             score += 30.0
-        if "file_edit" in profile.capabilities and "edit" not in intent.tokens and "patch" not in intent.tokens:
+        if (
+            "file_edit" in profile.capabilities
+            and "edit" not in intent.tokens
+            and "patch" not in intent.tokens
+        ):
             score -= 10.0
 
     if "file_edit" in intent.capabilities and "file_edit" in profile.capabilities:

@@ -2040,15 +2040,11 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             return self._build_custom_agent(state, selected_agent)
         return None
 
-    def _custom_handoff_targets(
-        self, state: GraphState, runtime_agent_id: str | None
-    ) -> list[str]:
+    def _custom_handoff_targets(self, state: GraphState, runtime_agent_id: str | None) -> list[str]:
         """Valid hand_off targets for a custom agent: base agents + other custom."""
         targets = list(self.agents)
         targets.extend(
-            cid
-            for cid in GraphStateView(state).custom_agents()
-            if cid != runtime_agent_id
+            cid for cid in GraphStateView(state).custom_agents() if cid != runtime_agent_id
         )
         return targets
 
@@ -2076,9 +2072,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     # ------------------------------------------------------------------
     # Multi-agent awareness (roster + per-turn invocation trail)
     # ------------------------------------------------------------------
-    def _multi_agent_kwargs(
-        self, state: GraphState, active_agent_id: str | None
-    ) -> dict[str, Any]:
+    def _multi_agent_kwargs(self, state: GraphState, active_agent_id: str | None) -> dict[str, Any]:
         """Per-invocation kwargs that make an agent aware of — and able to reach
         — the rest of the multi-agent system.
 
@@ -2232,9 +2226,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         conversation_history = await self._get_conversation_history(
             conversation_id, user_id, agent_key="chat", state=state
         )
-        current_turn_messages = self._messages_for_selected_agent(
-            state, selected_agent, messages
-        )
+        current_turn_messages = self._messages_for_selected_agent(state, selected_agent, messages)
 
         response = await agent.invoke_model_with_history(
             current_turn_messages,

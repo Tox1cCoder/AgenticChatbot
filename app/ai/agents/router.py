@@ -168,11 +168,10 @@ class Router:
                 runtime_id = descriptor.get("runtime_agent_id")
                 name = descriptor.get("name") or runtime_id
                 description = (descriptor.get("description") or "").strip()
-                lines.append(f"- {runtime_id} (name: \"{name}\"): {description}")
+                lines.append(f'- {runtime_id} (name: "{name}"): {description}')
             prompt_parts.append(
                 "\nCustom agents attached to this conversation. To select one, "
-                "respond with its exact runtime id (custom_agent:<uuid>):\n"
-                + "\n".join(lines)
+                "respond with its exact runtime id (custom_agent:<uuid>):\n" + "\n".join(lines)
             )
 
         active_skills = get_available_skill_summaries(user_id=user_id, device_id=device_id)
@@ -191,9 +190,7 @@ class Router:
         return "\n".join(prompt_parts)
 
     @staticmethod
-    def _match_explicit_custom_agent(
-        content: str, descriptors: list[dict] | None
-    ) -> str | None:
+    def _match_explicit_custom_agent(content: str, descriptors: list[dict] | None) -> str | None:
         """Return a custom runtime id when the user explicitly names it."""
         if not content or not descriptors:
             return None

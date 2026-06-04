@@ -10,6 +10,7 @@ Assertions:
 from __future__ import annotations
 
 import asyncio
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -21,9 +22,7 @@ from app.schemas.document_image import DocumentImageCreate
 from app.services.document_processing_service import DocumentProcessingService
 
 
-def _build_service(
-    tmp_path: Path, captured_payloads: list[dict] | None = None
-) -> DocumentProcessingService:
+def _build_service(tmp_path: Path) -> DocumentProcessingService:
     service = object.__new__(DocumentProcessingService)
     service.settings = MagicMock()
     service.settings.temp_storage_path = str(tmp_path)
@@ -39,23 +38,6 @@ def _build_service(
     service.collection_name = "documents_gemma"
     service.embedding_dimension = 768
 
-    def _upsert(collection_name: str, points):
-        if captured_payloads is not None:
-            for point in points:
-                captured_payloads.append(point.payload)
-
-    qdrant = MagicMock()
-    qdrant.upsert.side_effect = _upsert
-    service.qdrant_client = qdrant
-
-    embedding = MagicMock()
-    embedding.embed_documents.return_value = [[0.0] * 768]
-    embedding.embed_query.return_value = [0.0] * 768
-    embedding.dimension = 768
-    embedding.model_name = "gemini-embedding-2"
-    embedding.provider = "gemini"
-    service.embedding_service = embedding
-
     service.document_image_repository = MagicMock()
     service.document_index_service = None
     service.celery_app = MagicMock()
@@ -65,44 +47,52 @@ def _build_service(
     return service
 
 
-def test_store_chunks_includes_document_and_conversation_ids(tmp_path):
-    captured: list[dict] = []
-    service = _build_service(tmp_path, captured)
+def test_document_processing_service_requires_index_service_in_constructor():
+    """Processing must not accept dependencies used only by the retired direct-Qdrant path."""
+    params = inspect.signature(DocumentProcessingService.__init__).parameters
+    assert "document_index_service" in params
+    assert "qdrant_client" not in params
+    assert "embedding_service" not in params
 
-    chunks = [{"text": "chunk body"}]
-    asyncio.run(
-        service._store_chunks(
-            chunks_with_metadata=chunks,
-            filename="sample.txt",
-            document_id="doc-1",
-            conversation_id="conv-1",
-            user_id="user-1",
+
+def test_document_processing_service_has_no_direct_qdrant_fallback():
+    """DocumentIndexService is the only owner of chunk persistence and Qdrant writes."""
+    source = inspect.getsource(DocumentProcessingService)
+    forbidden = [
+        "def _store_chunks(",
+        "def _store_images(",
+        "def _update_chunks_with_images(",
+        "PointStruct",
+        "set_payload(",
+        ".upsert(",
+    ]
+    for token in forbidden:
+        assert token not in source
+
+
+def test_process_document_fails_fast_without_index_service(tmp_path):
+    """A missing index service is configuration error, not permission to use legacy indexing."""
+    service = _build_service(tmp_path)
+
+    async def _fake_process_with_mineru(*_args, **_kwargs):
+        return [{"text": "body", "page_start": 0, "page_end": 0}]
+
+    service._process_with_mineru = _fake_process_with_mineru
+
+    try:
+        asyncio.run(
+            service.process_document(
+                file_path=str(tmp_path / "report.pdf"),
+                filename="report.pdf",
+                document_id=str(uuid4()),
+                conversation_id=str(uuid4()),
+                user_id=str(uuid4()),
+            )
         )
-    )
-
-    assert captured, "Expected at least one chunk to be upserted to Qdrant"
-    payload = captured[0]
-    assert payload["document_id"] == "doc-1"
-    assert payload["conversation_id"] == "conv-1"
-
-
-def test_store_chunks_writes_user_id_to_payload(tmp_path):
-    """Server-owned user_id must be written to Qdrant payloads so retrieval can filter by it."""
-    captured: list[dict] = []
-    service = _build_service(tmp_path, captured)
-
-    asyncio.run(
-        service._store_chunks(
-            chunks_with_metadata=[{"text": "chunk"}],
-            filename="a.txt",
-            document_id="doc-1",
-            conversation_id="conv-1",
-            user_id="user-42",
-        )
-    )
-
-    assert captured, "Expected chunk upsert"
-    assert captured[0]["user_id"] == "user-42"
+    except RuntimeError as exc:
+        assert "DocumentIndexService" in str(exc)
+    else:
+        raise AssertionError("process_document must fail when document_index_service is missing")
 
 
 def test_process_document_signature_accepts_user_id():
@@ -219,6 +209,27 @@ def test_process_document_passes_filename_to_index_document_reference(tmp_path):
 
     document_ref = service.document_index_service.index_document.call_args.kwargs["document"]
     assert document_ref.filename == "Blue-whale-A4-fact-sheet.pdf"
+
+
+def test_build_chunks_for_indexing_preserves_table_metadata(tmp_path):
+    """Parsed table flags must survive the token-aware builder into SQL chunk metadata."""
+    service = _build_service(tmp_path)
+
+    built_chunks = service._build_chunks_for_indexing(
+        [
+            {
+                "text": "| Metric | Value |\n|---|---|\n| Accuracy | 91% |",
+                "page_start": 0,
+                "page_end": 0,
+                "has_tables": True,
+                "table_count": 2,
+            }
+        ]
+    )
+
+    assert len(built_chunks) == 1
+    assert built_chunks[0].metadata["has_tables"] is True
+    assert built_chunks[0].metadata["table_count"] == 2
 
 
 def test_process_document_parses_xlsx_without_mineru(tmp_path):

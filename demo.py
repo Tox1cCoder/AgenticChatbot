@@ -1450,9 +1450,7 @@ def _custom_agent_value(tool: dict[str, Any], snake: str, camel: str | None = No
 
 def _custom_agent_tool_option_key(tool: dict[str, Any]) -> str:
     tool_type = str(_custom_agent_value(tool, "type") or "")
-    qualified_id = str(
-        _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId") or ""
-    )
+    qualified_id = str(_custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId") or "")
     if tool_type == "client":
         device_id = _custom_agent_value(tool, "device_id", "deviceId") or ""
         session_id = _custom_agent_value(tool, "session_id", "sessionId") or ""
@@ -1463,9 +1461,7 @@ def _custom_agent_tool_option_key(tool: dict[str, Any]) -> str:
 
 def _custom_agent_tool_label(tool: dict[str, Any]) -> str:
     tool_type = str(_custom_agent_value(tool, "type") or "")
-    qualified_id = str(
-        _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId") or ""
-    )
+    qualified_id = str(_custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId") or "")
     tool_name = _custom_agent_value(tool, "tool_name", "toolName")
     server_name = _custom_agent_value(tool, "server_name", "serverName")
     if tool_type == "client":
@@ -1543,9 +1539,7 @@ def _custom_agent_selected_skill_keys(
     skills: list[dict[str, Any]],
 ) -> list[tuple[str, str]]:
     available = {
-        key
-        for key in (_custom_agent_skill_key(skill) for skill in skills)
-        if key is not None
+        key for key in (_custom_agent_skill_key(skill) for skill in skills) if key is not None
     }
     selected: list[tuple[str, str]] = []
     for ref in skill_refs or []:
@@ -1560,9 +1554,7 @@ def _custom_agent_skill_refs_available(
     skills: list[dict[str, Any]],
 ) -> bool:
     available = {
-        key
-        for key in (_custom_agent_skill_key(skill) for skill in skills)
-        if key is not None
+        key for key in (_custom_agent_skill_key(skill) for skill in skills) if key is not None
     }
     return all(_custom_agent_skill_key(ref) in available for ref in (skill_refs or []))
 
@@ -1626,11 +1618,7 @@ def _build_skill_refs(
     selected_skill_keys: list[tuple[str, str]],
     skills: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    by_key = {
-        key: skill
-        for skill in skills
-        if (key := _custom_agent_skill_key(skill)) is not None
-    }
+    by_key = {key: skill for skill in skills if (key := _custom_agent_skill_key(skill)) is not None}
     return [by_key[key] for key in selected_skill_keys if key in by_key]
 
 
@@ -1652,9 +1640,7 @@ def render_conversation_custom_agents_panel(conversation_id: str) -> None:
     is_pending = conversation_id == "pending_new"
     if is_pending:
         default_ids = [
-            i
-            for i in st.session_state.get("pending_custom_agent_ids", [])
-            if i in label_by_id
+            i for i in st.session_state.get("pending_custom_agent_ids", []) if i in label_by_id
         ]
     else:
         attached_ids = [a.get("id") for a in get_conversation_custom_agents(conversation_id)]
@@ -1673,8 +1659,7 @@ def render_conversation_custom_agents_panel(conversation_id: str) -> None:
         # on the first message send (see the send handler).
         st.session_state.pending_custom_agent_ids = list(selected)
         st.caption(
-            "These custom agents will be attached to your new chat once you send "
-            "the first message."
+            "These custom agents will be attached to your new chat once you send the first message."
         )
         return
 

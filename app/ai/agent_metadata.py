@@ -21,20 +21,16 @@ BASE_AGENT_CAPABILITIES = {
         "tool-backed work in external integrations, accounts, and apps."
     ),
     "rag_agent": (
-        "Questions about uploaded documents: document analysis and summaries of "
-        "uploaded content."
+        "Questions about uploaded documents: document analysis and summaries of uploaded content."
     ),
     "search_agent": (
         "Current events, news, recent and time-sensitive information, web search, "
         "and fact-checking."
     ),
     "image_generator_agent": (
-        "Creating raster/pixel images, drawings, and illustrations (non-code "
-        "visual generation)."
+        "Creating raster/pixel images, drawings, and illustrations (non-code visual generation)."
     ),
-    "planning_agent": (
-        "Creating, editing, viewing, or executing multi-step task plans."
-    ),
+    "planning_agent": ("Creating, editing, viewing, or executing multi-step task plans."),
     "canvas_agent": (
         "Authoring standalone browser artifacts: websites, web apps, interactive "
         "components, games, visualizations, SVG, and HTML/CSS/JS."
