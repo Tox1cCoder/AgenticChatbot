@@ -43,7 +43,7 @@ from .hand_off_tool import MAX_DELEGATION_DEPTH, create_hand_off_tool
 from .history import ConversationHistoryProvider
 from .hitl_config import build_interrupt_response, requires_human_approval
 from .memory import get_memory_manager
-from .rag_tool_actions import execute_search_documents_action
+from .rag_tool_actions import canonicalize_rag_tool_call, execute_search_documents_action
 from .schemas import (
     AgentMessage,
     AgentResponse,
@@ -2348,7 +2348,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         context["agentic_rag_iteration"] = agentic_iteration
 
         normalized_tool_calls = [
-            normalize_tool_call(tool_call) for tool_call in last_message.tool_calls
+            canonicalize_rag_tool_call(normalize_tool_call(tool_call))
+            for tool_call in last_message.tool_calls
         ]
 
         non_search_tool_calls = [
@@ -2798,7 +2799,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                         response.tool_artifacts = existing_artifacts
                     return response
 
-                normalized_calls = [normalize_tool_call(tc) for tc in tool_calls]
+                normalized_calls = [
+                    canonicalize_rag_tool_call(normalize_tool_call(tc)) for tc in tool_calls
+                ]
                 tool_call_names = [tc.get("name") or "" for tc in normalized_calls]
                 if requires_human_approval(tool_call_names):
                     if response.metadata is None:
@@ -4499,7 +4502,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                                 pass  # Content blocks handled
 
                             # Handle content as list (when include_thoughts=True)
-                            # LangChain returns content as list with thinking/reasoning and text parts
+                        # LangChain returns content as a list with thinking/reasoning
+                        # and text parts.
                             elif hasattr(message_chunk, "content") and isinstance(
                                 message_chunk.content, list
                             ):
@@ -4685,7 +4689,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                                                         tool_call
                                                     )
                                                     tool_call_id = normalized_tool_call.get("id")
-                                                    # Only emit if not already emitted from messages mode
+                        # Only emit if messages mode has not already emitted it.
                                                     if (
                                                         tool_call_id
                                                         and tool_call_id

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
+from uuid import UUID
 
 from ..core.rich_response import (
     ALLOWED_IMAGE_MIME_TYPES,
@@ -11,6 +13,108 @@ from ..core.rich_response import (
 from .schemas import DocumentAction
 
 logger = logging.getLogger(__name__)
+
+_RAG_ACTION_TOOL_NAMES = {action.value for action in DocumentAction}
+
+
+def canonicalize_rag_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
+    """Map direct RAG action tool calls onto the real search_documents tool.
+
+    Some providers may emit enum values from the search_documents schema
+    (for example ``grep_document``) as the function name. Those are not
+    standalone tools; they are actions handled by search_documents.
+    """
+    tool_name = str(tool_call.get("name") or "").strip().lower()
+    if tool_name not in _RAG_ACTION_TOOL_NAMES:
+        return tool_call
+
+    canonical = dict(tool_call)
+    args = canonical.get("args")
+    canonical_args = dict(args) if isinstance(args, dict) else {}
+    canonical_args.setdefault("action", tool_name)
+    canonical["name"] = "search_documents"
+    canonical["args"] = canonical_args
+    return canonical
+
+
+def _coerce_uuid_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        return str(UUID(str(value).strip()))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _normalize_document_reference(value: Any) -> str:
+    text = str(value or "").strip().strip("\"'`")
+    text = re.sub(r"^\[\s*\d+\s*/\s*\d+\s*\]\s*", "", text)
+    text = re.sub(r"^\[\s*(\d+)\s*\]\s*$", r"\1", text)
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1].strip()
+    lowered = text.casefold()
+    for prefix in ("document id:", "id:", "filename:", "name:"):
+        if lowered.startswith(prefix):
+            text = text[len(prefix) :].strip()
+            break
+    return " ".join(text.casefold().split())
+
+
+def _filename_stem_reference(value: Any) -> str:
+    text = str(value or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
+    if "." in text:
+        text = text.rsplit(".", 1)[0]
+    return _normalize_document_reference(text)
+
+
+def _tool_document_reference(tool_args: dict[str, Any]) -> Any:
+    for key in ("document_id", "filename", "name", "document"):
+        value = tool_args.get(key)
+        if value:
+            return value
+    return None
+
+
+async def _resolve_document_reference(
+    *,
+    rag_agent: Any,
+    document_ref: Any,
+    conversation_id: str | None,
+    user_id: str | None,
+) -> str | None:
+    uuid_text = _coerce_uuid_text(document_ref)
+    if uuid_text is not None:
+        return uuid_text
+    if not conversation_id:
+        return None
+
+    documents = await rag_agent.list_conversation_documents(conversation_id, user_id=user_id)
+    if not documents:
+        return None
+
+    requested = _normalize_document_reference(document_ref)
+    requested_stem = _filename_stem_reference(document_ref)
+    matches: list[str] = []
+
+    for index, document in enumerate(documents, 1):
+        doc_id = document.get("document_id")
+        if not doc_id:
+            continue
+
+        filename = document.get("filename") or ""
+        candidates = {
+            str(index),
+            _normalize_document_reference(doc_id),
+            _normalize_document_reference(filename),
+            _filename_stem_reference(filename),
+        }
+        if requested in candidates or requested_stem in candidates:
+            matches.append(str(doc_id))
+
+    unique_matches = list(dict.fromkeys(matches))
+    if len(unique_matches) == 1:
+        return unique_matches[0]
+    return None
 
 
 def _build_document_image_candidate(image: dict[str, Any]) -> dict[str, Any] | None:
@@ -155,8 +259,18 @@ async def execute_search_documents_action(
                 result = "Error: No conversation_id available for scan"
 
         elif action == DocumentAction.READ_DOCUMENT.value:
-            document_id = tool_args.get("document_id")
-            if document_id:
+            document_ref = _tool_document_reference(tool_args)
+            if document_ref:
+                document_id = await _resolve_document_reference(
+                    rag_agent=rag_agent,
+                    document_ref=document_ref,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                )
+                if not document_id:
+                    result = f"Document {document_ref} not found or empty"
+                    return result, action, evidence
+
                 content = await rag_agent.get_document_full_content(
                     document_id,
                     user_id=user_id,
@@ -168,6 +282,8 @@ async def execute_search_documents_action(
                         "document_id": document_id,
                         "content": content,
                     }
+                    if str(document_ref) != document_id:
+                        evidence["document"]["requested_reference"] = str(document_ref)
                 else:
                     result = f"Document {document_id} not found or empty"
             else:
@@ -257,7 +373,10 @@ async def execute_search_documents_action(
                     evidence["chunks"] = chunks
                     if attached_count:
                         evidence["images_attached"] = attached_count
-                        result += f"(Attached {attached_count} image(s) from matching chunks for multimodal analysis.)\n"
+                        result += (
+                            f"(Attached {attached_count} image(s) from matching chunks "
+                            "for multimodal analysis.)\n"
+                        )
                 else:
                     result = "No search results found"
             else:

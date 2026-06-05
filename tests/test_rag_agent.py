@@ -396,6 +396,57 @@ def test_search_documents_action_scan_all_passes_server_scope():
     rag_agent.scan_all_documents.assert_awaited_once_with("conv-1", user_id="user-1")
 
 
+def test_search_documents_action_read_document_resolves_filename_reference():
+    from unittest.mock import AsyncMock
+
+    import app.ai.rag_tool_actions as actions_module
+
+    document_id = str(uuid4())
+    rag_agent = MagicMock()
+    rag_agent.list_conversation_documents = AsyncMock(
+        return_value=[
+            {
+                "document_id": document_id,
+                "filename": "02_Huntington_Medication_Tip_Sheet.pdf",
+                "chunk_count": 1,
+            }
+        ]
+    )
+
+    async def fake_full_content(doc_ref, *, user_id=None, conversation_id=None):
+        if doc_ref == document_id:
+            return "resolved document text"
+        return None
+
+    rag_agent.get_document_full_content = AsyncMock(side_effect=fake_full_content)
+
+    result, _, evidence = asyncio.run(
+        actions_module.execute_search_documents_action(
+            rag_agent=rag_agent,
+            conversation_id="conv-1",
+            tool_args={
+                "action": "read_document",
+                "document_id": "[02_Huntington_Medication_Tip_Sheet.pdf]",
+            },
+            context={},
+            max_agentic_images=6,
+            user_id="user-1",
+        )
+    )
+
+    assert result == f"DOCUMENT CONTENT ({document_id}):\n\nresolved document text"
+    assert evidence["document"]["document_id"] == document_id
+    rag_agent.list_conversation_documents.assert_awaited_once_with(
+        "conv-1",
+        user_id="user-1",
+    )
+    rag_agent.get_document_full_content.assert_awaited_once_with(
+        document_id,
+        user_id="user-1",
+        conversation_id="conv-1",
+    )
+
+
 def test_search_documents_action_view_images_passes_server_scope():
     from unittest.mock import AsyncMock
 

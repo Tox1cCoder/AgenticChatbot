@@ -251,3 +251,62 @@ def test_rag_document_tool_results_are_recorded_as_response_artifacts(monkeypatc
     recovered = workflow._recover_terminal_response(state)
     assert recovered is not None
     assert recovered.tool_artifacts == artifacts
+
+
+def test_rag_action_named_tool_call_is_canonicalized_to_search_documents(monkeypatch):
+    workflow = _make_workflow()
+    workflow.rag_agent = object()
+    workflow.agents = {}
+
+    async def fake_execute_search_documents_action(**kwargs):
+        assert kwargs["tool_args"] == {
+            "document_id": "doc-1",
+            "pattern": "gabapentin",
+            "action": "grep_document",
+        }
+        return "MATCHES for 'gabapentin' in document:\n\n1. gabapentin", "grep_document", {}
+
+    async def fail_execute_tool_calls(**_kwargs):
+        raise AssertionError("RAG document actions must not use generic deferred tool execution")
+
+    monkeypatch.setattr(
+        "app.ai.graph.execute_search_documents_action",
+        fake_execute_search_documents_action,
+    )
+    monkeypatch.setattr("app.ai.graph.execute_tool_calls", fail_execute_tool_calls)
+
+    state = {
+        "conversation_id": "conv-1",
+        "user_id": "user-1",
+        "context": {},
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "grep-call",
+                        "name": "grep_document",
+                        "args": {"document_id": "doc-1", "pattern": "gabapentin"},
+                    }
+                ],
+            )
+        ],
+        "response": AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="final"),
+            metadata={},
+        ),
+    }
+
+    asyncio.run(workflow._rag_tools_node(state))
+
+    artifacts = state["context"].get("tool_artifacts")
+    assert artifacts and len(artifacts) == 1
+    assert artifacts[0]["tool"] == "search_documents"
+    assert artifacts[0]["args"]["action"] == "grep_document"
+    assert "gabapentin" in artifacts[0]["output"]
+
+    tool_message = state["messages"][-1]
+    assert isinstance(tool_message, ToolMessage)
+    assert tool_message.name == "search_documents"
