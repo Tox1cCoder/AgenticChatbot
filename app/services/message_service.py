@@ -2037,6 +2037,17 @@ class MessageService(IMessageService):
                         conversation_id, user_id, include_completed=True
                     )
 
+                consume_metadata = getattr(
+                    self.task_plan_service,
+                    "consume_last_planning_runtime_metadata",
+                    None,
+                )
+                if callable(consume_metadata):
+                    runtime_metadata = consume_metadata()
+                    rubric_metadata = runtime_metadata.get("planning_rubric")
+                    if isinstance(rubric_metadata, dict):
+                        result.rubric_metadata = rubric_metadata
+
             if result.has_existing_plan:
                 result.planning_mode_enabled = True
 

@@ -543,6 +543,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         # Persist lifecycle
         initial_state["plan_lifecycle"] = request.planning.plan_lifecycle
 
+        # Seed turn-scoped Planning rubric metadata from service-level plan
+        # creation/modification so the final response can surface it.
+        if request.planning.rubric_metadata:
+            context = dict(initial_state.get("context") or {})
+            context["planning_rubric"] = request.planning.rubric_metadata
+            initial_state["context"] = context
+
         return initial_state
 
     @staticmethod
@@ -1655,6 +1662,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         worker_artifacts = context.get("subagent_worker_artifacts")
         if isinstance(worker_artifacts, dict) and worker_artifacts:
             response.metadata["subagent_worker_artifacts"] = make_json_safe(worker_artifacts)
+
+        planning_rubric = context.get("planning_rubric")
+        if isinstance(planning_rubric, dict) and planning_rubric:
+            response.metadata["planning_rubric"] = make_json_safe(planning_rubric)
 
         pause_reason, planning_budget_reached = cls._get_planning_pause_details(state_values)
         if planning_budget_reached:
@@ -4502,8 +4513,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                                 pass  # Content blocks handled
 
                             # Handle content as list (when include_thoughts=True)
-                        # LangChain returns content as a list with thinking/reasoning
-                        # and text parts.
+                            # LangChain returns content as a list with thinking/reasoning
+                            # and text parts.
                             elif hasattr(message_chunk, "content") and isinstance(
                                 message_chunk.content, list
                             ):
@@ -4689,7 +4700,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                                                         tool_call
                                                     )
                                                     tool_call_id = normalized_tool_call.get("id")
-                        # Only emit if messages mode has not already emitted it.
+                                                    # Only emit if messages mode has not already emitted it.
                                                     if (
                                                         tool_call_id
                                                         and tool_call_id

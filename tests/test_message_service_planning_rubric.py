@@ -38,3 +38,61 @@ async def test_planning_runtime_adapter_preserves_planning_rubric_metadata():
 
     assert result.todos[0]["id"] == "t1"
     assert result.metadata["planning_rubric"]["status"] == "satisfied"
+
+
+@pytest.mark.asyncio
+async def test_prepare_planning_context_carries_created_plan_rubric_metadata():
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from app.services.message_service import MessageService
+
+    conversation_id = uuid4()
+    user_id = uuid4()
+
+    class _TaskPlanService:
+        def __init__(self):
+            self.created = False
+
+        def get_conversation_tasks(self, *_args, **_kwargs):
+            if self.created:
+                return [
+                    SimpleNamespace(
+                        id=uuid4(),
+                        description="Implement native planning rubric evaluator",
+                        status=SimpleNamespace(value="pending"),
+                        task_order=0,
+                    )
+                ]
+            return []
+
+        async def create_task_plan(self, *_args, **_kwargs):
+            self.created = True
+            return [
+                SimpleNamespace(
+                    id=uuid4(),
+                    description="Implement native planning rubric evaluator",
+                    status=SimpleNamespace(value="pending"),
+                    task_order=0,
+                )
+            ]
+
+        def get_active_or_next_task(self, *_args, **_kwargs):
+            return None
+
+        def consume_last_planning_runtime_metadata(self):
+            return {"planning_rubric": {"status": "satisfied", "iterations": 1}}
+
+    service = MessageService.__new__(MessageService)
+    service.task_plan_service = _TaskPlanService()
+
+    result = await MessageService._prepare_planning_context(
+        service,
+        conversation_id=conversation_id,
+        user_id=user_id,
+        message_content="Plan the rubric work",
+        planning_mode_enabled=True,
+        plan_lifecycle=None,
+    )
+
+    assert result.rubric_metadata == {"status": "satisfied", "iterations": 1}

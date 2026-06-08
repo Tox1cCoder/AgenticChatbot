@@ -38,6 +38,15 @@ class TaskPlanService(ITaskPlanService):
         self.task_plan_validation_utils = task_plan_validation_utils
         self.planning_runtime = planning_runtime
         self.conversation_repository = conversation_repository
+        # Planning runtime metadata (e.g. rubric evaluation) from the most recent
+        # generate/modify call, consumed once by the message service.
+        self._last_planning_runtime_metadata: dict[str, Any] = {}
+
+    def consume_last_planning_runtime_metadata(self) -> dict[str, Any]:
+        """Return and clear the planning runtime metadata from the last generate/modify call."""
+        metadata = dict(self._last_planning_runtime_metadata or {})
+        self._last_planning_runtime_metadata = {}
+        return metadata
 
     def _ensure_planning_mode_enabled(self, conversation_id: UUID) -> None:
         conversation = self.conversation_repository.get_by_id(conversation_id)
@@ -330,6 +339,7 @@ class TaskPlanService(ITaskPlanService):
                 user_id=str(user_id),
             )
         )
+        self._last_planning_runtime_metadata = dict(planning_result.metadata or {})
         todos = planning_result.todos
         if not self._normalize_todos(todos):
             raise ValueError("Failed to generate task plan from the request")
@@ -369,6 +379,7 @@ class TaskPlanService(ITaskPlanService):
                 existing_tasks=existing_tasks_dict,
             )
         )
+        self._last_planning_runtime_metadata = dict(planning_result.metadata or {})
         todos = planning_result.todos
         if not self._normalize_todos(todos):
             raise ValueError("Failed to modify task plan from the request")
