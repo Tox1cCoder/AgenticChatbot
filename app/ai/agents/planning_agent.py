@@ -11,6 +11,18 @@ from langchain_core.tools import BaseTool
 from ...core.config import settings
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..model_factory import ModelFactory
+from ..planning_rubric import (
+    FALLBACK_PLANNING_RUBRIC,
+    PlanningRubricAttempt,
+    PlanningRubricContract,
+    PlanningRubricEvaluation,
+    build_planning_rubric_author_prompt,
+    build_planning_rubric_feedback,
+    build_planning_rubric_grader_prompt,
+    build_planning_rubric_revision_prompt,
+    parse_planning_rubric_contract,
+    parse_planning_rubric_evaluation,
+)
 from ..planning_tools import create_write_todos_tool
 from ..prompts import PLANNING_EXECUTION_PROMPT
 from ..schemas import (
@@ -20,7 +32,6 @@ from ..schemas import (
     MessageRole,
     TodoStatus,
 )
-from ..text_normalization import tokenize_text
 from ..todo_actions import apply_write_todos_action
 from ..utils import coerce_response_text, normalize_tool_call
 from .base_agent import BaseAgent
@@ -476,15 +487,21 @@ class PlanningAgent(BaseAgent):
 
         canonical_todos = self._canonicalize_todos(updated_todos)
 
-        # Quality gate: reject plans that contain under-specified task descriptions.
-        quality_issues = self._validate_task_descriptions(canonical_todos)
-        if quality_issues:
-            problem_lines = "; ".join(f"task {i + 1}: {reason}" for i, reason in quality_issues)
-            return self._build_error_response(
-                f"Generated plan contains under-specified tasks ({problem_lines}). "
-                "Please provide a more detailed request so each task can be "
-                "described with a concrete action and sufficient detail.",
-                conversation_id,
+        # Plan-quality judgment is rubric/LLM-driven, not a fixed-length rejection.
+        # The rubric loop enforces only structural invariants in code (valid shape,
+        # unique ids, allowed statuses) and lets the grader revise vague tasks
+        # before persistence. Disabling the rubric skips quality review entirely.
+        rubric_attempt: PlanningRubricAttempt | None = None
+        if getattr(settings, "planning_rubric_enabled", True):
+            canonical_todos, rubric_attempt = await self._run_planning_rubric_loop(
+                llm=llm,
+                write_todos_tool=write_todos_tool,
+                system_prompt=system_prompt,
+                message=message,
+                message_content=message_content,
+                canonical_todos=canonical_todos,
+                existing_todos=todos,
+                plan_modified=plan_modified,
             )
 
         overall_goal = (message_content.strip() or None) if not plan_modified else None
@@ -503,6 +520,8 @@ class PlanningAgent(BaseAgent):
         self._apply_runtime_metadata(metadata, runtime_config)
         if plan_modified:
             metadata["plan_modified"] = True
+        if rubric_attempt is not None:
+            metadata["planning_rubric"] = rubric_attempt.metadata()
 
         return AgentResponse(
             agent_type=self.agent_type,
@@ -588,28 +607,237 @@ class PlanningAgent(BaseAgent):
 
         return canonical
 
-    # ---- Task-description quality ----------------------------------------
+    # ---- Planning rubric grading -----------------------------------------
 
-    # Minimum character length a task description must meet.
-    _MIN_DESC_LEN: int = 20
+    async def _resolve_planning_rubric_contract(
+        self,
+        *,
+        llm: Any,
+        caller_rubric: str | None,
+        user_message: str,
+        candidate_todos: list[dict[str, Any]],
+        existing_todos: list[dict[str, Any]] | None,
+        plan_modified: bool,
+        lifecycle: str | None = None,
+        prior_feedback: str | None = None,
+    ) -> PlanningRubricContract:
+        if isinstance(caller_rubric, str) and caller_rubric.strip():
+            return PlanningRubricContract(
+                rubric=caller_rubric.strip(),
+                source="caller",
+                rationale="Caller supplied the planning rubric.",
+            )
 
-    def _validate_task_descriptions(self, todos: list[dict[str, Any]]) -> list[tuple[int, str]]:
-        """Return (0-based index, reason) for every invalid task description.
+        prompt = build_planning_rubric_author_prompt(
+            user_message=user_message,
+            candidate_todos=candidate_todos,
+            existing_todos=existing_todos,
+            plan_modified=plan_modified,
+            lifecycle=lifecycle,
+            prior_feedback=prior_feedback,
+        )
+        try:
+            raw_response = await self._ainvoke_with_retries(
+                llm,
+                [SystemMessage(content=prompt)],
+            )
+            raw_text = coerce_response_text(getattr(raw_response, "content", ""))
+            return parse_planning_rubric_contract(raw_text)
+        except Exception:
+            return PlanningRubricContract(
+                rubric=FALLBACK_PLANNING_RUBRIC,
+                source="fallback",
+                rationale="Rubric authoring failed; using minimal invariant fallback.",
+            )
 
-        A description is considered invalid if it is shorter than
-        ``_MIN_DESC_LEN`` characters or does not contain enough substance
-        to stand alone as an actionable task.
+    async def _grade_planning_todos(
+        self,
+        *,
+        llm: Any,
+        rubric: str,
+        user_message: str,
+        candidate_todos: list[dict[str, Any]],
+        existing_todos: list[dict[str, Any]] | None,
+        plan_modified: bool,
+        iteration: int,
+    ) -> PlanningRubricEvaluation:
+        prompt = build_planning_rubric_grader_prompt(
+            rubric=rubric,
+            user_message=user_message,
+            candidate_todos=candidate_todos,
+            existing_todos=existing_todos,
+            plan_modified=plan_modified,
+        )
+        try:
+            raw_response = await self._ainvoke_with_retries(
+                llm,
+                [SystemMessage(content=prompt)],
+            )
+            raw_text = coerce_response_text(getattr(raw_response, "content", ""))
+            return parse_planning_rubric_evaluation(raw_text, iteration=iteration)
+        except Exception as exc:
+            return PlanningRubricEvaluation(
+                iteration=iteration,
+                result="grader_error",
+                explanation=f"Planning rubric grader failed: {exc}",
+                criteria=[],
+            )
+
+    async def _revise_todos_from_rubric_feedback(
+        self,
+        *,
+        llm: Any,
+        write_todos_tool: BaseTool,
+        base_system_prompt: str,
+        user_message: str,
+        base_todos: list[dict[str, Any]],
+        candidate_todos: list[dict[str, Any]],
+        feedback: str,
+    ) -> list[dict[str, Any]]:
+        revision_prompt = build_planning_rubric_revision_prompt(
+            feedback=feedback,
+            candidate_todos=candidate_todos,
+        )
+        bound_llm = ModelFactory.bind_tools_to_model(
+            llm,
+            [write_todos_tool],
+            tool_choice="write_todos",
+        )
+        raw_response = await self._ainvoke_with_retries(
+            bound_llm,
+            [
+                SystemMessage(content=base_system_prompt),
+                HumanMessage(content=user_message),
+                HumanMessage(content=revision_prompt),
+            ],
+        )
+        return self._canonicalize_todos(
+            self._apply_write_todos_calls(
+                base_todos=base_todos,
+                tool_calls=getattr(raw_response, "tool_calls", None) or [],
+            )
+        )
+
+    def _build_planning_structural_feedback(
+        self,
+        todos: list[dict[str, Any]],
+    ) -> str | None:
+        if not todos:
+            return "The plan must contain at least one todo."
+        seen_ids: set[str] = set()
+        for index, todo in enumerate(todos, start=1):
+            todo_id = str(todo.get("id") or "").strip()
+            if not todo_id:
+                return f"Task {index} is missing a stable id."
+            if todo_id in seen_ids:
+                return f"Task {index} reuses duplicate id {todo_id}."
+            seen_ids.add(todo_id)
+            status = str(todo.get("status") or "").strip().lower()
+            if status not in {
+                TodoStatus.PENDING.value,
+                TodoStatus.IN_PROGRESS.value,
+                TodoStatus.COMPLETED.value,
+                TodoStatus.SKIPPED.value,
+            }:
+                return f"Task {index} has unsupported status {status!r}."
+        return None
+
+    async def _run_planning_rubric_loop(
+        self,
+        *,
+        llm: Any,
+        write_todos_tool: BaseTool,
+        system_prompt: str,
+        message: AgentMessage,
+        message_content: str,
+        canonical_todos: list[dict[str, Any]],
+        existing_todos: list[dict[str, Any]] | None,
+        plan_modified: bool,
+    ) -> tuple[list[dict[str, Any]], PlanningRubricAttempt]:
+        """Grade candidate todos against a contextual rubric, revising on demand.
+
+        Returns the (possibly revised) canonical todos and the terminal attempt.
+        Structural guardrails stay in code; plan-quality judgment stays LLM-driven.
         """
-        issues: list[tuple[int, str]] = []
-        for i, todo in enumerate(todos):
-            desc = str(todo.get("description", "")).strip()
-            if len(desc) < self._MIN_DESC_LEN:
-                issues.append((i, f"too short ({len(desc)} chars, min {self._MIN_DESC_LEN})"))
-                continue
+        caller_rubric = message.metadata.get("planning_rubric")
+        caller_rubric = caller_rubric if isinstance(caller_rubric, str) else None
+        max_iterations = max(1, int(getattr(settings, "planning_rubric_max_iterations", 3)))
+        evaluations: list[PlanningRubricEvaluation] = []
+        feedback: str | None = None
+        status = "satisfied"
 
-            if len(tokenize_text(desc)) < 3:
-                issues.append((i, "too little detail for an actionable task"))
-        return issues
+        contract = await self._resolve_planning_rubric_contract(
+            llm=llm,
+            caller_rubric=caller_rubric,
+            user_message=message_content,
+            candidate_todos=canonical_todos,
+            existing_todos=existing_todos,
+            plan_modified=plan_modified,
+            lifecycle="planning",
+        )
+
+        for iteration in range(max_iterations):
+            structural_feedback = self._build_planning_structural_feedback(canonical_todos)
+            if structural_feedback:
+                evaluation = PlanningRubricEvaluation(
+                    iteration=iteration,
+                    result="needs_revision",
+                    explanation="Structural planning guardrail requires revision.",
+                    criteria=[
+                        {
+                            "name": "structural_validity",
+                            "passed": False,
+                            "gap": structural_feedback,
+                        }
+                    ],
+                )
+            else:
+                evaluation = await self._grade_planning_todos(
+                    llm=llm,
+                    rubric=contract.rubric,
+                    user_message=message_content,
+                    candidate_todos=canonical_todos,
+                    existing_todos=existing_todos,
+                    plan_modified=plan_modified,
+                    iteration=iteration,
+                )
+            evaluations.append(evaluation)
+
+            if evaluation.result == "satisfied":
+                status = "satisfied"
+                break
+            if evaluation.result in {"failed", "grader_error"}:
+                status = evaluation.result
+                feedback = evaluation.explanation
+                break
+
+            feedback = build_planning_rubric_feedback(evaluation)
+            if iteration >= max_iterations - 1:
+                status = "max_iterations_reached"
+                break
+
+            canonical_todos = await self._revise_todos_from_rubric_feedback(
+                llm=llm,
+                write_todos_tool=write_todos_tool,
+                base_system_prompt=system_prompt,
+                user_message=message_content,
+                base_todos=canonical_todos,
+                candidate_todos=canonical_todos,
+                feedback=feedback,
+            )
+
+        rubric_attempt = PlanningRubricAttempt(
+            status=status,
+            iterations=len(evaluations),
+            source="modify_plan" if plan_modified else "generate_plan",
+            rubric=contract.rubric,
+            rubric_source=contract.source,
+            rubric_rationale=contract.rationale,
+            evaluations=evaluations,
+            feedback=feedback,
+            error=feedback if status == "grader_error" else None,
+        )
+        return canonical_todos, rubric_attempt
 
     def _format_plan_summary(
         self,

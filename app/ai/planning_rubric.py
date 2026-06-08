@@ -111,3 +111,87 @@ def build_planning_rubric_feedback(evaluation: PlanningRubricEvaluation) -> str:
         gap = criterion.gap or "Criterion failed without a specific gap."
         lines.append(f"- {criterion.name}: {gap}")
     return "\n".join(lines)
+
+
+def build_planning_rubric_author_prompt(
+    *,
+    user_message: str,
+    candidate_todos: list[dict[str, Any]],
+    existing_todos: list[dict[str, Any]] | None,
+    plan_modified: bool,
+    lifecycle: str | None = None,
+    prior_feedback: str | None = None,
+) -> str:
+    payload = {
+        "user_message": user_message,
+        "plan_modified": plan_modified,
+        "lifecycle": lifecycle,
+        "existing_todos": existing_todos or [],
+        "candidate_todos": candidate_todos,
+        "prior_feedback": prior_feedback,
+    }
+    return (
+        "You are writing a concise, context-specific grading rubric for a "
+        "Planning-mode todo plan. Do not use fixed global thresholds such as "
+        "minimum character counts or required task counts. Judge what matters "
+        "for this user's request and the current plan state. Return JSON only "
+        "with keys rubric and rationale.\n\n"
+        f"{json.dumps(payload, indent=2, default=str)}"
+    )
+
+
+def parse_planning_rubric_contract(raw_text: str) -> PlanningRubricContract:
+    cleaned = _strip_json_fence(raw_text)
+    try:
+        payload = json.loads(cleaned)
+        if not isinstance(payload, dict):
+            raise ValueError("rubric JSON root must be an object")
+        payload.setdefault("source", "generated")
+        return PlanningRubricContract.model_validate(payload)
+    except (json.JSONDecodeError, ValidationError, ValueError):
+        return PlanningRubricContract(
+            rubric=FALLBACK_PLANNING_RUBRIC,
+            source="fallback",
+            rationale="Rubric authoring failed; using minimal invariant fallback.",
+        )
+
+
+def format_todos_for_rubric(todos: list[dict[str, Any]]) -> str:
+    return json.dumps(todos, indent=2, default=str)
+
+
+def build_planning_rubric_grader_prompt(
+    *,
+    rubric: str,
+    user_message: str,
+    candidate_todos: list[dict[str, Any]],
+    existing_todos: list[dict[str, Any]] | None,
+    plan_modified: bool,
+) -> str:
+    payload = {
+        "user_message": user_message,
+        "plan_modified": plan_modified,
+        "existing_todos": existing_todos or [],
+        "candidate_todos": candidate_todos,
+        "rubric": rubric,
+    }
+    return (
+        "You are a Planning-mode rubric grader. Grade the candidate todo plan "
+        "against the rubric. Return JSON only with keys result, explanation, "
+        "and criteria. result must be one of satisfied, needs_revision, failed.\n\n"
+        f"{json.dumps(payload, indent=2, default=str)}"
+    )
+
+
+def build_planning_rubric_revision_prompt(
+    *,
+    feedback: str,
+    candidate_todos: list[dict[str, Any]],
+) -> str:
+    return (
+        "Revise the task plan by calling write_todos. Keep valid existing task "
+        "ids and statuses. Apply this rubric feedback exactly:\n\n"
+        f"{feedback}\n\n"
+        "Current candidate todos:\n"
+        f"{format_todos_for_rubric(candidate_todos)}"
+    )
