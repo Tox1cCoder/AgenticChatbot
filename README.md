@@ -1207,7 +1207,7 @@ Wheels can be built with `python -m build`.
 | Multiple uploads process one at a time | Check the worker startup banner. On Windows, pool must be `threads` (or another parallel pool); `solo` is single-task debug mode. Set `CELERY_WORKER_POOL=threads` or leave at `auto`. |
 | `consumer: Connection to broker lost` / Redis `WinError 10054` | Redis was restarted or the TCP connection was reset. Confirm `docker ps` shows `sample_chatbot_redis` healthy, then restart the worker. The worker config enables reconnects and cancels late-ack tasks on broker loss to avoid duplicate concurrent document processing after redelivery. |
 | Batch upload returns 207 | Mixed accepted/rejected response. Inspect `data.files` for per-file status and `error_code` (e.g. `DUPLICATE_FILENAME`). Do not treat 207 as a hard failure. |
-| Reranker download slow | First run fetches the HF model. Pin `RERANKER_MODEL` or disable with `ENABLE_RERANKING=false`. |
+| Reranker download slow / `ReadTimeoutError` from `huggingface.co` | The reranker loads offline-first from the local HF cache, so a cached model never blocks on the hub. The error means the model isn't cached yet (first run) or the one-time download timed out. Pre-fetch it with `python scripts/download_reranker.py`, then it loads with no network. Or disable with `ENABLE_RERANKING=false`. |
 | Client-device tool calls fail | Device offline or `CLIENT_RUNTIME_REQUIRE_CONNECTED_DEVICE_FOR_LOCAL_TOOLS=true`. Inspect `GET /device-runtime/connected-devices`. |
 
 ---

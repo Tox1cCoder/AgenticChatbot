@@ -107,3 +107,54 @@ async def test_proxy_conversation_custom_agents(monkeypatch):
     paths = [(m, p) for m, p, _ in server.calls]
     assert ("GET", "/conversations/c1/custom-agents") in paths
     assert ("PUT", "/conversations/c1/custom-agents") in paths
+
+
+@pytest.mark.asyncio
+async def test_proxy_ai_custom_agents_aliases(monkeypatch):
+    server = _fake_server({"ok": True})
+    client, _ = _client(monkeypatch, server)
+    monkeypatch.setattr(
+        "client_backend.api.proxy.get_runtime_bridge",
+        lambda: _runtime_bridge("device-123"),
+    )
+
+    with client:
+        assert client.get("/ai/custom-agents").status_code == 200
+        assert client.post("/ai/custom-agents", json={"name": "x"}).status_code == 200
+        assert client.get("/ai/custom-agents/options").status_code == 200
+        assert client.patch("/ai/custom-agents/abc", json={"name": "y"}).status_code == 200
+        assert client.delete("/ai/custom-agents/abc").status_code == 200
+
+    paths = [(method, path) for method, path, _kwargs in server.calls]
+    assert ("GET", "/ai/custom-agents") in paths
+    assert ("POST", "/ai/custom-agents") in paths
+    assert ("GET", "/ai/custom-agents/options") in paths
+    assert ("PATCH", "/ai/custom-agents/abc") in paths
+    assert ("DELETE", "/ai/custom-agents/abc") in paths
+
+    params_by_call = {(method, path): kwargs["params"] for method, path, kwargs in server.calls}
+    assert ("deviceId", "device-123") in params_by_call[("POST", "/ai/custom-agents")]
+    assert ("deviceId", "device-123") in params_by_call[
+        ("GET", "/ai/custom-agents/options")
+    ]
+    assert ("deviceId", "device-123") in params_by_call[
+        ("PATCH", "/ai/custom-agents/abc")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_proxy_ai_conversation_custom_agents_alias(monkeypatch):
+    server = _fake_server([{"id": "a1"}])
+    client, _ = _client(monkeypatch, server)
+
+    with client:
+        assert client.get("/ai/conversations/c1/custom-agents").status_code == 200
+        assert (
+            client.put("/ai/conversations/c1/custom-agents", json={"customAgentIds": []})
+            .status_code
+            == 200
+        )
+
+    paths = [(method, path) for method, path, _kwargs in server.calls]
+    assert ("GET", "/ai/conversations/c1/custom-agents") in paths
+    assert ("PUT", "/ai/conversations/c1/custom-agents") in paths

@@ -516,9 +516,10 @@ def test_rag_reranker_initialization_is_serialized(monkeypatch):
     start_barrier = threading.Barrier(6)
 
     class FakeCrossEncoder:
-        def __init__(self, model_name):
+        def __init__(self, model_name, *, local_files_only=False, **_kwargs):
             nonlocal active_creations, max_active_creations
             self.model_name = model_name
+            self.local_files_only = local_files_only
             with counter_lock:
                 active_creations += 1
                 max_active_creations = max(max_active_creations, active_creations)
@@ -547,9 +548,10 @@ def test_rag_reranker_uses_canonical_rag_setting(monkeypatch):
     constructed: list[str] = []
 
     class FakeCrossEncoder:
-        def __init__(self, model_name):
+        def __init__(self, model_name, *, local_files_only=False, **_kwargs):
             constructed.append(model_name)
             self.model_name = model_name
+            self.local_files_only = local_files_only
 
     monkeypatch.setattr(rag_agent_module, "CrossEncoder", FakeCrossEncoder)
 
@@ -563,6 +565,55 @@ def test_rag_reranker_uses_canonical_rag_setting(monkeypatch):
 
     assert constructed == ["canonical-cross-encoder"]
     assert agent.reranker.model_name == "canonical-cross-encoder"
+
+
+def test_rag_reranker_loads_from_local_cache_first(monkeypatch):
+    """Cold start must not block on a huggingface.co HEAD request.
+
+    The model is revalidated against the hub on every construction unless
+    local_files_only is set, so a slow/unreachable hub times out even when the
+    model is already cached. The reranker must load offline-first.
+    """
+    calls: list[bool] = []
+
+    class FakeCrossEncoder:
+        def __init__(self, model_name, *, local_files_only=False, **_kwargs):
+            calls.append(local_files_only)
+            self.model_name = model_name
+            self.local_files_only = local_files_only
+
+    monkeypatch.setattr(rag_agent_module, "CrossEncoder", FakeCrossEncoder)
+
+    agent = object.__new__(RAGAgent)
+    agent.settings = SimpleNamespace(reranker_model="fake-cross-encoder")
+
+    agent._init_reranker()
+
+    assert calls == [True]
+    assert agent.reranker.local_files_only is True
+
+
+def test_rag_reranker_downloads_when_not_cached(monkeypatch):
+    """When the model is absent from the local cache, fall back to a download."""
+    calls: list[bool] = []
+
+    class FakeCrossEncoder:
+        def __init__(self, model_name, *, local_files_only=False, **_kwargs):
+            calls.append(local_files_only)
+            if local_files_only:
+                raise OSError("not in local cache")
+            self.model_name = model_name
+            self.local_files_only = local_files_only
+
+    monkeypatch.setattr(rag_agent_module, "CrossEncoder", FakeCrossEncoder)
+
+    agent = object.__new__(RAGAgent)
+    agent.settings = SimpleNamespace(reranker_model="fake-cross-encoder")
+
+    agent._init_reranker()
+
+    assert calls == [True, False]
+    assert agent.reranker.local_files_only is False
 
 
 # ---------------------------------------------------------------------------

@@ -134,6 +134,43 @@ async def proxy_custom_agent(
     )
 
 
+@router.api_route("/ai/custom-agents", methods=["GET", "POST"])
+async def proxy_ai_custom_agents(
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(
+        request,
+        upstream_path="/ai/custom-agents",
+        params_override=_params_with_active_device(request),
+    )
+
+
+@router.get("/ai/custom-agents/options")
+async def proxy_ai_custom_agents_options(
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(
+        request,
+        upstream_path="/ai/custom-agents/options",
+        params_override=_params_with_active_device(request),
+    )
+
+
+@router.api_route("/ai/custom-agents/{custom_agent_id}", methods=["GET", "PATCH", "DELETE"])
+async def proxy_ai_custom_agent(
+    custom_agent_id: str,
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(
+        request,
+        upstream_path=f"/ai/custom-agents/{custom_agent_id}",
+        params_override=_params_with_active_device(request),
+    )
+
+
 @router.api_route("/conversations/{conversation_id}/custom-agents", methods=["GET", "PUT"])
 async def proxy_conversation_custom_agents(
     conversation_id: str,
@@ -143,6 +180,18 @@ async def proxy_conversation_custom_agents(
     return await proxy_server_request(
         request,
         upstream_path=f"/conversations/{conversation_id}/custom-agents",
+    )
+
+
+@router.api_route("/ai/conversations/{conversation_id}/custom-agents", methods=["GET", "PUT"])
+async def proxy_ai_conversation_custom_agents(
+    conversation_id: str,
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    return await proxy_server_request(
+        request,
+        upstream_path=f"/ai/conversations/{conversation_id}/custom-agents",
     )
 
 

@@ -45,6 +45,28 @@ logger = logging.getLogger(__name__)
 _RERANKER_INIT_LOCK = threading.Lock()
 
 
+def _load_cross_encoder(model_name: str) -> CrossEncoder:
+    """Load a cross-encoder, preferring the local cache over the network.
+
+    sentence-transformers revalidates the cached config against huggingface.co
+    on every construction unless ``local_files_only`` is set. A slow or
+    unreachable hub then times out on that HEAD request (ReadTimeoutError) and
+    blocks cold start even though the model is fully cached. Load offline first;
+    only reach the network when the model is genuinely missing. Pre-fetch with
+    ``scripts/download_reranker.py`` to avoid the one-time download at runtime.
+    """
+    try:
+        return CrossEncoder(model_name, local_files_only=True)
+    except OSError:
+        logger.info(
+            "Reranker '%s' not in local cache; downloading from HuggingFace "
+            "(one-time). Pre-fetch with scripts/download_reranker.py to avoid "
+            "this at runtime.",
+            model_name,
+        )
+        return CrossEncoder(model_name)
+
+
 class RAGAgent(BaseAgent):
     def __init__(
         self,
@@ -111,7 +133,7 @@ class RAGAgent(BaseAgent):
             or self.settings.reranker_model
         )
         with _RERANKER_INIT_LOCK:
-            self.reranker = CrossEncoder(model_name)
+            self.reranker = _load_cross_encoder(model_name)
         logger.debug(f"Re-ranker initialized: {model_name}")
 
     def _get_full_system_prompt(

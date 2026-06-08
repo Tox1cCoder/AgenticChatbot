@@ -140,7 +140,17 @@ class Container(containers.DeclarativeContainer):
                 device = "cuda" if torch.cuda.is_available() else "cpu"
             except Exception:
                 device = "cpu"
-            model = SentenceTransformer(settings.rag_embedding_model, device=device)
+            # Load offline-first: a cached model is revalidated against
+            # huggingface.co on every construction unless local_files_only is
+            # set, so a slow/unreachable hub times out even when cached.
+            try:
+                model = SentenceTransformer(
+                    settings.rag_embedding_model,
+                    device=device,
+                    local_files_only=True,
+                )
+            except OSError:
+                model = SentenceTransformer(settings.rag_embedding_model, device=device)
             return SentenceTransformerRAGEmbeddingService(
                 model=model,
                 model_name=settings.rag_embedding_model,
