@@ -96,3 +96,28 @@ async def test_prepare_planning_context_carries_created_plan_rubric_metadata():
     )
 
     assert result.rubric_metadata == {"status": "satisfied", "iterations": 1}
+
+
+def test_bot_metadata_preserves_planning_rubric():
+    from app.core.response_constants import build_bot_metadata
+
+    response = type(
+        "Response",
+        (),
+        {
+            "metadata": {
+                "planning_rubric": {
+                    "status": "satisfied",
+                    "iterations": 1,
+                    "evaluations": [],
+                }
+            },
+            "tool_artifacts": None,
+            "suggested_questions": None,
+            "agent_id": "planning_agent",
+        },
+    )()
+
+    metadata = build_bot_metadata(response, persona=None)
+
+    assert metadata["planning_rubric"]["status"] == "satisfied"
