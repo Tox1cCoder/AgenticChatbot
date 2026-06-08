@@ -706,6 +706,35 @@ Conversations can be put into **planning mode** (`planning_mode_enabled`) to mat
 
 Plan lifecycle: `draft` → `ready` → `executing` → `paused` / `completed`. The planning agent's execution-call budget is capped by `EXECUTION_CALL_BUDGET` and max tasks by `MAX_AUTO_PLAN_TASKS`.
 
+### Planning Rubric Grading
+
+Planning mode includes a native rubric grader for generated and modified task plans.
+For each planning attempt, the runtime resolves a context-specific rubric from the
+user request, existing plan state, candidate todos, and optional caller-supplied
+rubric metadata. The grader evaluates candidate `write_todos` output against that
+rubric and returns actionable feedback. If the grader returns `needs_revision`,
+the Planning Agent receives the feedback and revises the plan until it is satisfied
+or `planning_rubric_max_iterations` is reached.
+
+Rubric results are exposed on assistant message metadata under `planning_rubric`:
+
+    {
+      "status": "satisfied",
+      "iterations": 1,
+      "evaluations": [
+        {
+          "iteration": 0,
+          "result": "satisfied",
+          "explanation": "All criteria passed.",
+          "criteria": [{"name": "request_fit", "passed": true}]
+        }
+      ]
+    }
+
+Toggle with `planning_rubric_enabled` (default on); cap grader passes with
+`planning_rubric_max_iterations` (default 3, minimum 1). The rubric pass cap is
+independent of the `planning_max_iterations` graph-loop budget.
+
 ---
 
 ## Human-in-the-Loop (HITL)
