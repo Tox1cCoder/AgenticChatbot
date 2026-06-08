@@ -838,6 +838,21 @@ class Settings(BaseSettings):
         default=3,
         description="Maximum consecutive planning tool errors before stopping",
     )
+    planning_rubric_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable native Planning rubric grading. When enabled, generated or "
+            "modified todo plans are evaluated against a planning-quality rubric "
+            "and revised before persistence or final response when possible."
+        ),
+    )
+    planning_rubric_max_iterations: int = Field(
+        default=3,
+        description=(
+            "Maximum Planning rubric grading passes per attempt. Minimum 1. "
+            "Set planning_rubric_enabled=False to disable grading."
+        ),
+    )
 
     # Planning-mode subagent dispatcher configuration
     planning_subagents_enabled: bool = Field(
@@ -987,6 +1002,7 @@ class Settings(BaseSettings):
     @field_validator(
         "react_agent_max_iterations",
         "react_agent_recursion_limit",
+        "planning_rubric_max_iterations",
         "agentic_max_iterations",
         "auto_continue_max_rounds",
         "auto_continue_max_total_iterations",

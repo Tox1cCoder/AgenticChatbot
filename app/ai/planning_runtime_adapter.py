@@ -41,7 +41,10 @@ class PlanningRuntimeAdapter(IPlanningRuntimeService):
         )
         if response.error:
             raise ValueError(response.error)
-        return PlanningRuntimeResult(todos=self._extract_todos(response))
+        return PlanningRuntimeResult(
+            todos=self._extract_todos(response),
+            metadata=dict(getattr(response, "metadata", None) or {}),
+        )
 
     async def modify_plan(self, request: PlanningRuntimeRequest) -> PlanningRuntimeResult:
         response = await self.planning_agent.modify_plan(
@@ -51,4 +54,7 @@ class PlanningRuntimeAdapter(IPlanningRuntimeService):
         )
         if response.error:
             raise ValueError(response.error)
-        return PlanningRuntimeResult(todos=self._extract_todos(response))
+        return PlanningRuntimeResult(
+            todos=self._extract_todos(response),
+            metadata=dict(getattr(response, "metadata", None) or {}),
+        )

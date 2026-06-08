@@ -149,3 +149,7 @@ class PlanningRuntimeResult(BaseModel):
         default_factory=list,
         description="Canonical todo payload returned by the planning runtime",
     )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Planning runtime metadata such as rubric evaluation status",
+    )

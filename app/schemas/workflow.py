@@ -69,6 +69,7 @@ class WorkflowPlanningContext(BaseModel):
     current_task: dict[str, Any] | None = None
     tasks: list[dict[str, Any]] = Field(default_factory=list)
     plan_lifecycle: PlanLifecycle | None = None
+    rubric_metadata: dict[str, Any] | None = None
 
 
 class WorkflowExecutionRequest(BaseModel):

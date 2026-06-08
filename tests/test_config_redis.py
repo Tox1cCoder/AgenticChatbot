@@ -78,3 +78,24 @@ def test_subagent_specific_limit_settings_are_not_exposed():
     assert not hasattr(settings, "planning_subagents_worker_timeout_seconds")
     assert not hasattr(settings, "planning_subagents_max_iterations")
     assert not hasattr(settings, "planning_subagents_result_max_chars")
+
+
+def test_planning_rubric_defaults_enabled():
+    from app.core.config import Settings
+
+    settings = Settings(secret_key="test-secret", environment="development")
+
+    assert settings.planning_rubric_enabled is True
+    assert settings.planning_rubric_max_iterations == 3
+
+
+def test_planning_rubric_max_iterations_accepts_one_as_minimum_cap():
+    from app.core.config import Settings
+
+    settings = Settings(
+        secret_key="test-secret",
+        environment="development",
+        planning_rubric_max_iterations=1,
+    )
+
+    assert settings.planning_rubric_max_iterations == 1
