@@ -2170,7 +2170,15 @@ git commit -m "docs: document planning rubric grading"
 
 - No code changes unless failures identify a regression.
 
-- [ ] **Step 1: Run focused rubric suites**
+> **STATUS: COMPLETE**. Verification matrix results:
+> - Step 1 focused rubric suites (`test_planning_rubric` + `test_planning_agent_rubric` + `test_graph_planning_rubric` + `test_message_service_planning_rubric`): **16 passed**.
+> - Step 2 planning regression (fallback set: `test_planning_subagents` + `test_graph_planning_subagents` + `test_custom_agents_planning` + `test_take100_api`; `test_task_plan_service.py` does not exist): **106 passed**.
+> - Step 3 message-service + API regression (`test_message_service_subagent_streaming` + `test_custom_agents_message_service` + `test_take100_api`): **14 passed**.
+> - Step 4 full suite (`python -m pytest -q`): **1010 passed, 1 failed**.
+>
+> **Documented pre-existing failure (unrelated):** `tests/client_backend/test_live_server_integration.py::test_live_document_upload_list_get_task_and_delete_flow` fails with `KeyError: 'document'` at line 472 — the live `/documents/upload` response payload's `data` dict lacks a `document` key. This is a live-server document-upload integration test in the documents domain. `git diff --name-only 9453eeb..HEAD` confirms none of the 7 rubric commits touched any documents/upload/rag file (only planning-domain modules, tests, and docs), so this failure is not a regression from this work. The other 6 tests in that live-integration file pass; the failure is environment/live-server dependent.
+
+- [x] **Step 1: Run focused rubric suites**
 
 Run:
 
@@ -2180,7 +2188,7 @@ python -m pytest tests/test_planning_rubric.py tests/test_planning_agent_rubric.
 
 Expected: all focused rubric tests pass.
 
-- [ ] **Step 2: Run existing Planning regression suites**
+- [x] **Step 2: Run existing Planning regression suites**
 
 Run:
 
@@ -2194,7 +2202,7 @@ Expected: all tests pass. If `tests/test_task_plan_service.py` does not exist, r
 python -m pytest tests/test_take100_api.py tests/test_custom_agents_planning.py -q
 ```
 
-- [ ] **Step 3: Run message-service and API regression suites**
+- [x] **Step 3: Run message-service and API regression suites**
 
 Run:
 
@@ -2204,7 +2212,7 @@ python -m pytest tests/test_message_service_subagent_streaming.py tests/test_cus
 
 Expected: all tests pass.
 
-- [ ] **Step 4: Run full test suite**
+- [x] **Step 4: Run full test suite**
 
 Run:
 
@@ -2214,7 +2222,7 @@ python -m pytest -q
 
 Expected: all tests pass, or any pre-existing unrelated failure is documented with the failing test name and reason.
 
-- [ ] **Step 5: Final commit**
+- [x] **Step 5: Final commit**
 
 Run:
 
