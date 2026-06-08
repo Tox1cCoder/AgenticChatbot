@@ -3073,6 +3073,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             should_describe_plan=should_generate_plan_response,
             internal_tools=internal_tools or None,
             custom_workers=custom_workers or None,
+            planning_rubric_feedback=context.get("planning_rubric_feedback"),
             **self._final_response_kwargs(state),
         )
 
@@ -3091,6 +3092,70 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response)
         return self._finalize_agent_response(state, response)
+
+    @staticmethod
+    def _latest_user_text(state: GraphState) -> str:
+        for message in reversed(state.get("messages", []) or []):
+            if isinstance(message, HumanMessage):
+                return str(message.content or "")
+        return ""
+
+    async def _review_planning_todos_with_rubric(
+        self,
+        *,
+        state: GraphState,
+        todos: list[dict[str, Any]],
+        source: str = "planning_tools",
+    ) -> Any:
+        if not getattr(settings, "planning_rubric_enabled", True):
+            from .planning_rubric import FALLBACK_PLANNING_RUBRIC, PlanningRubricAttempt
+
+            return PlanningRubricAttempt(
+                status="disabled",
+                iterations=0,
+                source=source,
+                rubric=FALLBACK_PLANNING_RUBRIC,
+                rubric_source="fallback",
+                evaluations=[],
+            )
+
+        # Reuse PlanningAgent's grader method so provider/model behavior stays centralized.
+        context = GraphStateView(state).context_copy()
+        previous = context.get("planning_rubric")
+        previous_iterations = 0
+        if (
+            isinstance(previous, dict)
+            and previous.get("source") == source
+            and previous.get("status") == "needs_revision"
+        ):
+            try:
+                previous_iterations = int(previous.get("iterations") or 0)
+            except (TypeError, ValueError):
+                previous_iterations = 0
+        try:
+            return await self.planning_agent.review_todos_with_planning_rubric(
+                user_message=self._latest_user_text(state),
+                candidate_todos=todos,
+                existing_todos=state.get("all_tasks") or [],
+                plan_modified=bool(state.get("has_existing_plan")),
+                source=source,
+                start_iteration=previous_iterations,
+                user_id=state.get("user_id"),
+                model_request=state.get("model_request"),
+            )
+        except Exception as exc:
+            from .planning_rubric import FALLBACK_PLANNING_RUBRIC, PlanningRubricAttempt
+
+            return PlanningRubricAttempt(
+                status="grader_error",
+                iterations=previous_iterations,
+                source=source,
+                rubric=FALLBACK_PLANNING_RUBRIC,
+                rubric_source="fallback",
+                evaluations=[],
+                feedback=f"Planning rubric review failed: {exc}",
+                error=f"Planning rubric review failed: {exc}",
+            )
 
     async def _planning_tools_node(self, state: GraphState) -> GraphState:
         messages = state.get("messages", [])
@@ -3276,6 +3341,27 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 state["planning_phase"] = "executing"
                 logger.debug(f"Switched to executing phase due to {action} action")
         state["context"] = context
+
+        # Grade plan-mutating write_todos output against the planning rubric.
+        # On needs_revision, store actionable feedback and route back to the
+        # planning agent instead of emitting the normal plan-summary pass.
+        if any(action in plan_modifying_actions for action in write_todos_actions):
+            rubric_attempt = await self._review_planning_todos_with_rubric(
+                state=state,
+                todos=todos,
+                source="planning_tools",
+            )
+            rubric_status = getattr(rubric_attempt, "status", None)
+            if rubric_status != "disabled":
+                context["planning_rubric"] = rubric_attempt.metadata()
+            if rubric_status == "needs_revision" and getattr(rubric_attempt, "feedback", None):
+                context["planning_rubric_feedback"] = rubric_attempt.feedback
+                context["plan_just_modified"] = False
+                context.pop("generate_plan_response", None)
+            elif rubric_status in {"satisfied", "max_iterations_reached"}:
+                context.pop("planning_rubric_feedback", None)
+            state["context"] = context
+
         self._apply_tool_outputs_to_state(
             state,
             tool_outputs=tool_outputs,
@@ -3343,6 +3429,12 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         context = GraphStateView(state).context_copy()
         planning_phase = state.get("planning_phase", "planning")
         last_message_is_tool_output = self._last_message_is_tool_output(state)
+
+        # Planning rubric feedback wins over the normal prose summary pass: the
+        # plan needs a forced write_todos revision before any user-facing reply.
+        if context.get("planning_rubric_feedback"):
+            logger.debug("[Should Continue Planning] Decision: planning_agent (rubric feedback)")
+            return "planning_agent"
 
         # If plan state was just mutated, always give the Planning Agent one
         # response pass so the user does not get an empty tool-calling message.

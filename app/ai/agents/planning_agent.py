@@ -311,6 +311,15 @@ class PlanningAgent(BaseAgent):
                 + "\n".join(worker_lines)
             )
 
+        planning_rubric_feedback = kwargs.get("planning_rubric_feedback")
+        if isinstance(planning_rubric_feedback, str) and planning_rubric_feedback.strip():
+            prompt += (
+                "\n\n# PLANNING RUBRIC FEEDBACK\n"
+                "Revise the plan by calling write_todos. Do not answer in prose until "
+                "the rubric feedback is resolved.\n"
+                + planning_rubric_feedback.strip()
+            )
+
         return prompt
 
     def _format_todos_context(
@@ -838,6 +847,91 @@ class PlanningAgent(BaseAgent):
             error=feedback if status == "grader_error" else None,
         )
         return canonical_todos, rubric_attempt
+
+    async def review_todos_with_planning_rubric(
+        self,
+        *,
+        user_message: str,
+        candidate_todos: list[dict[str, Any]],
+        existing_todos: list[dict[str, Any]] | None,
+        plan_modified: bool,
+        source: str = "planning_tools",
+        start_iteration: int = 0,
+        user_id: str | None = None,
+        model_request: dict[str, Any] | None = None,
+    ) -> PlanningRubricAttempt:
+        """Grade a single graph-level candidate plan (one pass per call).
+
+        The graph drives revision by routing back to the planning agent, so this
+        method grades once and reports ``needs_revision``/``satisfied`` with the
+        running ``start_iteration`` counter rather than looping internally.
+        """
+        runtime_config = self._resolve_runtime_model_config(user_id, model_request)
+        llm, _ = self._create_langchain_model_from_runtime(
+            runtime_config,
+            user_id=user_id,
+            enable_reasoning_summary=False,
+        )
+        max_iterations = max(1, int(getattr(settings, "planning_rubric_max_iterations", 3)))
+        evaluations: list[PlanningRubricEvaluation] = []
+        feedback: str | None = None
+        status = "satisfied"
+
+        iteration = max(0, int(start_iteration or 0))
+        if iteration >= max_iterations:
+            return PlanningRubricAttempt(
+                status="max_iterations_reached",
+                iterations=iteration,
+                source=source,
+                rubric=FALLBACK_PLANNING_RUBRIC,
+                rubric_source="fallback",
+                rubric_rationale="Graph-level rubric pass cap was already reached.",
+                evaluations=[],
+                feedback=None,
+            )
+
+        contract = await self._resolve_planning_rubric_contract(
+            llm=llm,
+            caller_rubric=None,
+            user_message=user_message,
+            candidate_todos=candidate_todos,
+            existing_todos=existing_todos,
+            plan_modified=plan_modified,
+            lifecycle="planning_tools",
+        )
+        evaluation = await self._grade_planning_todos(
+            llm=llm,
+            rubric=contract.rubric,
+            user_message=user_message,
+            candidate_todos=candidate_todos,
+            existing_todos=existing_todos,
+            plan_modified=plan_modified,
+            iteration=iteration,
+        )
+        evaluations.append(evaluation)
+        if evaluation.result == "satisfied":
+            status = "satisfied"
+        elif evaluation.result in {"failed", "grader_error"}:
+            status = evaluation.result
+            feedback = evaluation.explanation
+        else:
+            feedback = build_planning_rubric_feedback(evaluation)
+            if iteration >= max_iterations - 1:
+                status = "max_iterations_reached"
+            else:
+                status = "needs_revision"
+
+        return PlanningRubricAttempt(
+            status=status,
+            iterations=iteration + 1,
+            source=source,
+            rubric=contract.rubric,
+            rubric_source=contract.source,
+            rubric_rationale=contract.rationale,
+            evaluations=evaluations,
+            feedback=feedback,
+            error=feedback if status == "grader_error" else None,
+        )
 
     def _format_plan_summary(
         self,
