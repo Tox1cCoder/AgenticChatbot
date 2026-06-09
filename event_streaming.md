@@ -191,9 +191,12 @@ Canonical mapping used by the v3 normalizer: text-delta→`message_delta`, reaso
 
 ## Implementation Tasks
 
-> **Task status:** Task 1 ✅ · Task 2 ✅ · Tasks 3–10 pending.
+> **Task status:** Task 1 ✅ · Task 2 ✅ · Task 3 ✅ · Tasks 4–10 pending.
 > - Task 1: probe rewritten for the real v3 contract; deps upgraded + pinned; 26 existing streaming tests still green.
 > - Task 2: canonical `V3StreamEvent` + `SubagentRef` + `make_event` created under `app/services/event_streaming/`; 2 model tests pass. No deviations.
+> - Task 3 (FULL v3 SWITCH, user-approved): `langchain_v3.py` holds the v1/v2 tuple-fallback helpers (`LangGraphV3Normalizer.from_message_chunk`, `normalize_update_chunk` — plan verbatim) **plus** a real `V3ProtocolTranslator` that parses the experimental `{type,method,params,seq}` protocol. `iter_v3_events_from_graph` prefers the v3 protocol for real `CompiledGraph`s (awaits the v3 awaitable) and falls back to `astream(stream_mode=[messages,updates])` for runnables without `astream_events` (test doubles). graph.py: both ~470-line inline streaming blocks replaced by one `iter_v3_events_from_graph` + new `_map_v3_stream_event` mapper (canonical→legacy public dicts); shared accumulator state moved into a `_StreamMapCtx` dataclass. Handoff/`node_complete`/tool-end are derived from full `values` snapshots since v3 lacks the `updates` channel (`node_complete` is best-effort on the v3 path). Interrupt detection stays post-stream via `aget_state` (unchanged).
+>   - **Design decision / bug caught by integration smoke:** LangGraph emits messages-channel `params.data` as a **tuple** `(message_event, metadata)` (serializes to a JSON array), not a list. The first translator cut only accepted `list`, so real message deltas were silently dropped while unit tests (which used a list) passed. Fixed `_message_event_and_metadata` to accept tuples/Mappings and updated the unit test to use a tuple. Lesson recorded: synthetic fixtures must match the real wire types.
+>   - Verified: 49 focused streaming/normalizer tests + 38 demo/client-backend tests green; end-to-end smoke against a real compiled graph yields correct `message_delta`/`tool_call_available`/`tool_execution_end`/`state_snapshot` with node attribution.
 
 ### Task 1: Add Dependency Probe and Align LangChain Pins — ✅ COMPLETE
 

@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 from uuid import UUID
 
@@ -23,6 +24,7 @@ from ..core.response_constants import NO_RESPONSE_GENERATED
 from ..interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
 from ..models.enums import PlanLifecycle
+from ..services.event_streaming.langchain_v3 import iter_v3_events_from_graph
 from .agent_metadata import (
     agent_identity,
     attach_agent_metadata,
@@ -110,6 +112,26 @@ def _build_inline_rich_inventory_for_state(context: dict[str, Any] | None) -> st
         enabled=True,
         capability=True,
     )
+
+
+@dataclass
+class _StreamMapCtx:
+    """Mutable per-stream accumulator state shared across continuation rounds.
+
+    Holds everything the legacy public-event mapping needs while consuming
+    canonical ``V3StreamEvent``s from ``iter_v3_events_from_graph``. Read back
+    after the stream loop for terminal-response recovery.
+    """
+
+    last_emitted_agent: str | None = None
+    suppress_tokens: bool = False
+    internal_content_only: bool = True
+    accumulated_content: str = ""
+    accumulated_thinking: str = ""
+    last_state_values: dict[str, Any] | None = None
+    current_tool_calls: dict[Any, dict[str, Any]] = field(default_factory=dict)
+    emitted_tool_call_ids: set[str] = field(default_factory=set)
+    emitted_tool_result_ids: set[str] = field(default_factory=set)
 
 
 class MultiAgentWorkflow(IWorkflowRuntime):
@@ -3955,6 +3977,334 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         return response
 
+    # ============================================================
+    # Canonical v3 stream → legacy public-event mapping
+    # ============================================================
+
+    def _map_v3_stream_event(self, event: Any, ctx: _StreamMapCtx):
+        """Map one canonical ``V3StreamEvent`` to legacy public stream dicts.
+
+        ``iter_v3_events_from_graph`` yields canonical events from either the
+        experimental v3 protocol (clean ``message_delta`` / ``tool_call_available``
+        / ``tool_execution_end`` / ``state_snapshot[kind=values]``) or the v1/v2
+        tuple fallback (``state_snapshot[kind=messages_tuple|updates_tuple]``
+        carrying raw chunks). Both converge here onto the legacy vocabulary that
+        the service/adapter layers currently consume.
+        """
+        etype = event.type
+        data = event.data or {}
+
+        if etype == "message_delta":
+            ctx.internal_content_only = False
+            ctx.accumulated_content, delta = self._consume_stream_text_chunk(
+                ctx.accumulated_content, data.get("text", "")
+            )
+            if delta and not ctx.suppress_tokens:
+                yield {"type": "token", "content": delta}
+            return
+
+        if etype == "reasoning_delta":
+            ctx.internal_content_only = False
+            text = data.get("text", "")
+            if text:
+                ctx.accumulated_thinking += text
+                yield {"type": "thinking", "content": text}
+            return
+
+        if etype == "tool_call_available":
+            yield from self._emit_tool_start_from_canonical(
+                tool_call_id=event.tool_call_id,
+                tool_name=event.tool_name,
+                args=data.get("args", {}),
+                ctx=ctx,
+            )
+            return
+
+        if etype == "tool_execution_end":
+            tool_call_id = event.tool_call_id
+            dedupe_key = str(tool_call_id) if tool_call_id else None
+            if dedupe_key and dedupe_key in ctx.emitted_tool_result_ids:
+                return
+            if dedupe_key:
+                ctx.emitted_tool_result_ids.add(dedupe_key)
+            payload = {
+                "type": "tool_end",
+                "name": event.tool_name or "unknown",
+                "tool_call_id": tool_call_id,
+                "result": make_json_safe(data.get("output")),
+            }
+            if data.get("render"):
+                payload["render"] = data["render"]
+            yield payload
+            return
+
+        if etype == "state_snapshot":
+            kind = data.get("kind")
+            if kind == "messages_tuple":
+                yield from self._map_legacy_message_chunk(
+                    data.get("chunk"), data.get("metadata"), ctx
+                )
+            elif kind == "updates_tuple":
+                yield from self._map_legacy_update_node(
+                    event.node, data.get("node_state"), ctx
+                )
+            elif kind == "values":
+                yield from self._map_v3_values_snapshot(data, ctx)
+            return
+
+        # message_start/end, reasoning_start/end, tool_call_delta, subagent_*
+        # carry no legacy public projection in this bridge.
+
+    def _emit_tool_start_from_canonical(
+        self,
+        *,
+        tool_call_id: str | None,
+        tool_name: str | None,
+        args: Any,
+        ctx: _StreamMapCtx,
+    ):
+        if tool_call_id and tool_call_id in ctx.emitted_tool_call_ids:
+            return
+        if tool_call_id:
+            ctx.emitted_tool_call_ids.add(tool_call_id)
+        yield {
+            "type": "tool_start",
+            "name": tool_name or "unknown",
+            "tool_call_id": tool_call_id,
+            "args": make_json_safe(args or {}),
+        }
+
+    def _map_legacy_message_chunk(self, message_chunk: Any, metadata: Any, ctx: _StreamMapCtx):
+        """Reproduce the legacy ``stream_mode="messages"`` chunk handling."""
+        if isinstance(message_chunk, ToolMessage):
+            return
+        if settings.suppress_internal_stream_chunks and self._is_internal_stream_chunk(metadata):
+            return
+
+        ctx.internal_content_only = False
+
+        if hasattr(message_chunk, "content_blocks") and message_chunk.content_blocks:
+            for block in message_chunk.content_blocks:
+                block_type = block.get("type")
+                if block_type == "text":
+                    ctx.accumulated_content, delta = self._consume_stream_text_chunk(
+                        ctx.accumulated_content, block.get("text", "")
+                    )
+                    if delta and not ctx.suppress_tokens:
+                        yield {"type": "token", "content": delta}
+                elif block_type == "thinking":
+                    thinking_content = block.get("thinking", "") or block.get("text", "")
+                    if thinking_content:
+                        ctx.accumulated_thinking += thinking_content
+                        yield {"type": "thinking", "content": thinking_content}
+                elif block_type == "reasoning":
+                    reasoning_content = block.get("reasoning", "") or block.get("text", "")
+                    if reasoning_content:
+                        ctx.accumulated_thinking += reasoning_content
+                        yield {"type": "thinking", "content": reasoning_content}
+                elif block_type == "tool_call_chunk":
+                    tool_index = block.get("index", 0)
+                    tool_id = block.get("id")
+                    tool_name = block.get("name")
+                    tool_args = block.get("args", "")
+                    if tool_index not in ctx.current_tool_calls:
+                        ctx.current_tool_calls[tool_index] = {
+                            "id": tool_id,
+                            "name": tool_name,
+                            "args": "",
+                        }
+                    if tool_args:
+                        ctx.current_tool_calls[tool_index]["args"] += tool_args
+                    if tool_name and not ctx.current_tool_calls[tool_index]["name"]:
+                        ctx.current_tool_calls[tool_index]["name"] = tool_name
+                    if tool_id and not ctx.current_tool_calls[tool_index]["id"]:
+                        ctx.current_tool_calls[tool_index]["id"] = tool_id
+
+        elif hasattr(message_chunk, "content") and isinstance(message_chunk.content, list):
+            for part in message_chunk.content:
+                if isinstance(part, dict):
+                    part_type = part.get("type", "")
+                    if part_type == "thinking":
+                        thinking_content = part.get("thinking", "") or part.get("text", "")
+                        if thinking_content:
+                            ctx.accumulated_thinking += thinking_content
+                            yield {"type": "thinking", "content": thinking_content}
+                    elif part_type == "reasoning":
+                        reasoning_content = part.get("reasoning", "") or part.get("text", "")
+                        if reasoning_content:
+                            ctx.accumulated_thinking += reasoning_content
+                            yield {"type": "thinking", "content": reasoning_content}
+                    elif part_type == "text":
+                        ctx.accumulated_content, delta = self._consume_stream_text_chunk(
+                            ctx.accumulated_content, part.get("text", "")
+                        )
+                        if delta and not ctx.suppress_tokens:
+                            yield {"type": "token", "content": delta}
+                elif isinstance(part, str) and part:
+                    ctx.accumulated_content, delta = self._consume_stream_text_chunk(
+                        ctx.accumulated_content, part
+                    )
+                    if delta and not ctx.suppress_tokens:
+                        yield {"type": "token", "content": delta}
+
+        elif (
+            hasattr(message_chunk, "content")
+            and message_chunk.content
+            and isinstance(message_chunk.content, str)
+        ):
+            content = coerce_response_text(message_chunk.content)
+            ctx.accumulated_content, delta = self._consume_stream_text_chunk(
+                ctx.accumulated_content, content
+            )
+            if delta and not ctx.suppress_tokens:
+                yield {"type": "token", "content": delta}
+
+        if hasattr(message_chunk, "chunk_position") and message_chunk.chunk_position == "last":
+            for tool_call in ctx.current_tool_calls.values():
+                if tool_call["name"]:
+                    tool_call_id = tool_call["id"]
+                    if tool_call_id and tool_call_id in ctx.emitted_tool_call_ids:
+                        continue
+                    if tool_call_id:
+                        ctx.emitted_tool_call_ids.add(tool_call_id)
+                    try:
+                        args = json.loads(tool_call["args"]) if tool_call["args"] else {}
+                    except Exception:
+                        args = tool_call["args"]
+                    yield {
+                        "type": "tool_start",
+                        "name": tool_call["name"],
+                        "tool_call_id": tool_call_id,
+                        "args": make_json_safe(args),
+                    }
+            ctx.current_tool_calls = {}
+
+    def _map_legacy_update_node(self, node_name: Any, node_state: Any, ctx: _StreamMapCtx):
+        """Reproduce the legacy ``stream_mode="updates"`` per-node handling."""
+        if isinstance(node_state, dict):
+            if ctx.last_state_values is None:
+                ctx.last_state_values = {}
+            ctx.last_state_values.update(node_state)
+
+            new_agent = node_state.get("selected_agent")
+            if isinstance(new_agent, str) and new_agent != ctx.last_emitted_agent:
+                ctx.last_emitted_agent = new_agent
+                yield {"type": "agent_selected", "agent": new_agent, "reason": "handoff"}
+
+        if node_name in ("planning_agent", "planning_tools") and isinstance(node_state, dict):
+            node_info: dict[str, Any] = {"node": node_name}
+            if node_name == "planning_agent" and "messages" in node_state:
+                messages = node_state.get("messages", [])
+                if messages:
+                    last_msg = messages[-1] if isinstance(messages, list) else messages
+                    if (
+                        isinstance(last_msg, AIMessage)
+                        and hasattr(last_msg, "tool_calls")
+                        and last_msg.tool_calls
+                    ):
+                        node_info["tool_calls"] = [
+                            {
+                                "name": normalized_tc.get("name"),
+                                "id": normalized_tc.get("id"),
+                                "args": make_json_safe(normalized_tc.get("args", {})),
+                            }
+                            for normalized_tc in (
+                                normalize_tool_call(tc) for tc in last_msg.tool_calls
+                            )
+                        ]
+            if node_name == "planning_tools":
+                todos = node_state.get("todos", [])
+                if todos:
+                    node_info["todos_count"] = len(todos)
+                    node_info["current_task_index"] = node_state.get("current_task_index")
+            yield {"type": "node_complete", **node_info}
+
+        if isinstance(node_state, dict) and "messages" in node_state:
+            messages = node_state["messages"]
+            if messages:
+                last_msg = messages[-1] if isinstance(messages, list) else messages
+                if isinstance(last_msg, AIMessage):
+                    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                        for tool_call in last_msg.tool_calls:
+                            normalized_tool_call = normalize_tool_call(tool_call)
+                            tool_call_id = normalized_tool_call.get("id")
+                            if tool_call_id and tool_call_id not in ctx.emitted_tool_call_ids:
+                                ctx.emitted_tool_call_ids.add(tool_call_id)
+                                yield {
+                                    "type": "tool_start",
+                                    "name": normalized_tool_call.get("name", "unknown"),
+                                    "tool_call_id": tool_call_id,
+                                    "args": make_json_safe(normalized_tool_call.get("args", {})),
+                                }
+                elif isinstance(last_msg, ToolMessage):
+                    yield from self._tool_end_events_from_node_state(
+                        node_state=node_state,
+                        last_state_values=ctx.last_state_values,
+                        emitted_tool_result_ids=ctx.emitted_tool_result_ids,
+                    )
+
+    def _map_v3_values_snapshot(self, data: dict[str, Any], ctx: _StreamMapCtx):
+        """Derive handoff / planning node_complete / tool_start from a v3 full-state
+        ``values`` snapshot, since the v3 protocol has no per-node ``updates`` channel.
+
+        Tool execution end and the per-token text are emitted from the dedicated
+        canonical events (``tool_execution_end`` / ``message_delta``); only the
+        state-derived signals are produced here.
+        """
+        values = data.get("values")
+        new_messages = data.get("new_messages") or []
+        selected_agent = data.get("selected_agent")
+
+        if isinstance(values, dict):
+            if ctx.last_state_values is None:
+                ctx.last_state_values = {}
+            ctx.last_state_values.update(values)
+
+        if isinstance(selected_agent, str) and selected_agent != ctx.last_emitted_agent:
+            ctx.last_emitted_agent = selected_agent
+            yield {"type": "agent_selected", "agent": selected_agent, "reason": "handoff"}
+
+        # Best-effort planning node_complete derived from the newly added messages.
+        if selected_agent in ("planning_agent", "planning_tools"):
+            planning_ai = next(
+                (
+                    msg
+                    for msg in reversed(new_messages)
+                    if isinstance(msg, AIMessage)
+                    and getattr(msg, "tool_calls", None)
+                ),
+                None,
+            )
+            if planning_ai is not None:
+                node_info: dict[str, Any] = {"node": "planning_agent"}
+                node_info["tool_calls"] = [
+                    {
+                        "name": normalized_tc.get("name"),
+                        "id": normalized_tc.get("id"),
+                        "args": make_json_safe(normalized_tc.get("args", {})),
+                    }
+                    for normalized_tc in (
+                        normalize_tool_call(tc) for tc in planning_ai.tool_calls
+                    )
+                ]
+                yield {"type": "node_complete", **node_info}
+
+        # Tool-call availability also surfaces via the messages channel; dedupe
+        # guards against double emission when both paths see the same call.
+        for msg in new_messages:
+            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                for tool_call in msg.tool_calls:
+                    normalized_tool_call = normalize_tool_call(tool_call)
+                    tool_call_id = normalized_tool_call.get("id")
+                    if tool_call_id and tool_call_id not in ctx.emitted_tool_call_ids:
+                        ctx.emitted_tool_call_ids.add(tool_call_id)
+                        yield {
+                            "type": "tool_start",
+                            "name": normalized_tool_call.get("name", "unknown"),
+                            "tool_call_id": tool_call_id,
+                            "args": make_json_safe(normalized_tool_call.get("args", {})),
+                        }
+
     async def resume_with_decisions_stream(
         self,
         thread_id: str,
@@ -3981,17 +4331,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         conversation_id = state_snapshot.values.get("conversation_id")
 
         yield {"type": "agent_selected", "agent": selected_agent}
-        last_emitted_agent = selected_agent
-
-        accumulated_content = ""
-        accumulated_thinking = ""
-        current_tool_calls = {}
-        emitted_tool_call_ids = set()
-        emitted_tool_result_ids = set()
 
         suppressed_nodes: set = {"image_generator_agent"}
         suppress_tokens = selected_agent in suppressed_nodes
-        _internal_content_only: bool = True
+        ctx = _StreamMapCtx(
+            last_emitted_agent=selected_agent,
+            suppress_tokens=suppress_tokens,
+        )
 
         max_rounds = settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
         round_num = 1
@@ -3999,7 +4345,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         total_iterations = 0
         start_time = time.monotonic()
         current_state: Any = Command(resume=resume_data)
-        last_state_values: dict[str, Any] | None = None
 
         while round_num <= max_rounds:
             if (
@@ -4021,279 +4366,11 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             continue_reason = None
 
             try:
-                async for chunk in self.graph.astream(
-                    current_state, config=config, stream_mode=["messages", "updates"]
+                async for event in iter_v3_events_from_graph(
+                    self.graph, current_state, config=config
                 ):
-                    if isinstance(chunk, tuple) and len(chunk) == 2:
-                        mode, data = chunk
-
-                        if mode == "messages":
-                            message_chunk, metadata = data
-
-                            if isinstance(message_chunk, ToolMessage):
-                                continue
-
-                            if (
-                                settings.suppress_internal_stream_chunks
-                                and self._is_internal_stream_chunk(metadata)
-                            ):
-                                continue
-
-                            _internal_content_only = False
-
-                            if (
-                                hasattr(message_chunk, "content_blocks")
-                                and message_chunk.content_blocks
-                            ):
-                                for block in message_chunk.content_blocks:
-                                    block_type = block.get("type")
-
-                                    if block_type == "text":
-                                        text_content = block.get("text", "")
-                                        accumulated_content, delta = (
-                                            self._consume_stream_text_chunk(
-                                                accumulated_content, text_content
-                                            )
-                                        )
-                                        if delta and not suppress_tokens:
-                                            yield {"type": "token", "content": delta}
-
-                                    elif block_type == "thinking":
-                                        thinking_content = block.get("thinking", "") or block.get(
-                                            "text", ""
-                                        )
-                                        if thinking_content:
-                                            accumulated_thinking += thinking_content
-                                            yield {
-                                                "type": "thinking",
-                                                "content": thinking_content,
-                                            }
-
-                                    elif block_type == "reasoning":
-                                        reasoning_content = block.get("reasoning", "") or block.get(
-                                            "text", ""
-                                        )
-                                        if reasoning_content:
-                                            accumulated_thinking += reasoning_content
-                                            yield {
-                                                "type": "thinking",
-                                                "content": reasoning_content,
-                                            }
-
-                                    elif block_type == "tool_call_chunk":
-                                        tool_index = block.get("index", 0)
-                                        tool_id = block.get("id")
-                                        tool_name = block.get("name")
-                                        tool_args = block.get("args", "")
-
-                                        if tool_index not in current_tool_calls:
-                                            current_tool_calls[tool_index] = {
-                                                "id": tool_id,
-                                                "name": tool_name,
-                                                "args": "",
-                                            }
-
-                                        if tool_args:
-                                            current_tool_calls[tool_index]["args"] += tool_args
-
-                                        if tool_name and not current_tool_calls[tool_index]["name"]:
-                                            current_tool_calls[tool_index]["name"] = tool_name
-                                        if tool_id and not current_tool_calls[tool_index]["id"]:
-                                            current_tool_calls[tool_index]["id"] = tool_id
-
-                            elif hasattr(message_chunk, "content") and isinstance(
-                                message_chunk.content, list
-                            ):
-                                for part in message_chunk.content:
-                                    if isinstance(part, dict):
-                                        part_type = part.get("type", "")
-
-                                        if part_type == "thinking":
-                                            thinking_content = part.get("thinking", "") or part.get(
-                                                "text", ""
-                                            )
-                                            if thinking_content:
-                                                accumulated_thinking += thinking_content
-                                                yield {
-                                                    "type": "thinking",
-                                                    "content": thinking_content,
-                                                }
-                                        elif part_type == "reasoning":
-                                            reasoning_content = part.get(
-                                                "reasoning", ""
-                                            ) or part.get("text", "")
-                                            if reasoning_content:
-                                                accumulated_thinking += reasoning_content
-                                                yield {
-                                                    "type": "thinking",
-                                                    "content": reasoning_content,
-                                                }
-                                        elif part_type == "text":
-                                            text_content = part.get("text", "")
-                                            accumulated_content, delta = (
-                                                self._consume_stream_text_chunk(
-                                                    accumulated_content, text_content
-                                                )
-                                            )
-                                            if delta and not suppress_tokens:
-                                                yield {
-                                                    "type": "token",
-                                                    "content": delta,
-                                                }
-                                    elif isinstance(part, str) and part:
-                                        accumulated_content, delta = (
-                                            self._consume_stream_text_chunk(
-                                                accumulated_content, part
-                                            )
-                                        )
-                                        if delta and not suppress_tokens:
-                                            yield {"type": "token", "content": delta}
-
-                            elif (
-                                hasattr(message_chunk, "content")
-                                and message_chunk.content
-                                and isinstance(message_chunk.content, str)
-                            ):
-                                content = coerce_response_text(message_chunk.content)
-                                accumulated_content, delta = self._consume_stream_text_chunk(
-                                    accumulated_content, content
-                                )
-                                if delta and not suppress_tokens:
-                                    yield {"type": "token", "content": delta}
-
-                            if (
-                                hasattr(message_chunk, "chunk_position")
-                                and message_chunk.chunk_position == "last"
-                            ):
-                                for tool_call in current_tool_calls.values():
-                                    if tool_call["name"]:
-                                        tool_call_id = tool_call["id"]
-                                        if tool_call_id and tool_call_id in emitted_tool_call_ids:
-                                            continue
-                                        if tool_call_id:
-                                            emitted_tool_call_ids.add(tool_call_id)
-
-                                        try:
-                                            args = (
-                                                json.loads(tool_call["args"])
-                                                if tool_call["args"]
-                                                else {}
-                                            )
-                                        except Exception:
-                                            args = tool_call["args"]
-
-                                        yield {
-                                            "type": "tool_start",
-                                            "name": tool_call["name"],
-                                            "tool_call_id": tool_call_id,
-                                            "args": make_json_safe(args),
-                                        }
-                                current_tool_calls = {}
-
-                        elif mode == "updates":
-                            for node_name, node_state in data.items():
-                                if isinstance(node_state, dict):
-                                    if last_state_values is None:
-                                        last_state_values = {}
-                                    last_state_values.update(node_state)
-
-                                    new_agent = node_state.get("selected_agent")
-                                    if (
-                                        isinstance(new_agent, str)
-                                        and new_agent != last_emitted_agent
-                                    ):
-                                        last_emitted_agent = new_agent
-                                        yield {
-                                            "type": "agent_selected",
-                                            "agent": new_agent,
-                                            "reason": "handoff",
-                                        }
-
-                                if node_name in ("planning_agent", "planning_tools"):
-                                    node_info = {"node": node_name}
-
-                                    if node_name == "planning_agent" and "messages" in node_state:
-                                        messages = node_state.get("messages", [])
-                                        if messages:
-                                            last_msg = (
-                                                messages[-1]
-                                                if isinstance(messages, list)
-                                                else messages
-                                            )
-                                            if (
-                                                isinstance(last_msg, AIMessage)
-                                                and hasattr(last_msg, "tool_calls")
-                                                and last_msg.tool_calls
-                                            ):
-                                                node_info["tool_calls"] = [
-                                                    {
-                                                        "name": normalized_tc.get("name"),
-                                                        "id": normalized_tc.get("id"),
-                                                        "args": make_json_safe(
-                                                            normalized_tc.get("args", {})
-                                                        ),
-                                                    }
-                                                    for normalized_tc in (
-                                                        normalize_tool_call(tc)
-                                                        for tc in last_msg.tool_calls
-                                                    )
-                                                ]
-
-                                    if node_name == "planning_tools":
-                                        todos = node_state.get("todos", [])
-                                        if todos:
-                                            node_info["todos_count"] = len(todos)
-                                            node_info["current_task_index"] = node_state.get(
-                                                "current_task_index"
-                                            )
-
-                                    yield {"type": "node_complete", **node_info}
-
-                                if "messages" in node_state:
-                                    messages = node_state["messages"]
-                                    if messages:
-                                        last_msg = (
-                                            messages[-1] if isinstance(messages, list) else messages
-                                        )
-
-                                        if isinstance(last_msg, AIMessage):
-                                            if (
-                                                hasattr(last_msg, "tool_calls")
-                                                and last_msg.tool_calls
-                                            ):
-                                                for tool_call in last_msg.tool_calls:
-                                                    normalized_tool_call = normalize_tool_call(
-                                                        tool_call
-                                                    )
-                                                    tool_call_id = normalized_tool_call.get("id")
-                                                    if (
-                                                        tool_call_id
-                                                        and tool_call_id
-                                                        not in emitted_tool_call_ids
-                                                    ):
-                                                        emitted_tool_call_ids.add(tool_call_id)
-                                                        yield {
-                                                            "type": "tool_start",
-                                                            "name": normalized_tool_call.get(
-                                                                "name", "unknown"
-                                                            ),
-                                                            "tool_call_id": tool_call_id,
-                                                            "args": make_json_safe(
-                                                                normalized_tool_call.get("args", {})
-                                                            ),
-                                                        }
-
-                                        elif isinstance(last_msg, ToolMessage):
-                                            for (
-                                                event_payload
-                                            ) in self._tool_end_events_from_node_state(
-                                                node_state=node_state,
-                                                last_state_values=last_state_values,
-                                                emitted_tool_result_ids=emitted_tool_result_ids,
-                                            ):
-                                                yield event_payload
-                    else:
-                        logger.debug(f"Unexpected stream chunk format: {type(chunk)}")
+                    for public_event in self._map_v3_stream_event(event, ctx):
+                        yield public_event
 
             except GraphRecursionError:
                 logger.warning(
@@ -4307,8 +4384,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 yield {"type": "error", "error": str(e)}
                 return
 
-            if not should_continue and last_state_values:
-                continue_reason = self._get_requested_continuation_reason(last_state_values)
+            if not should_continue and ctx.last_state_values:
+                continue_reason = self._get_requested_continuation_reason(ctx.last_state_values)
                 if continue_reason:
                     should_continue = True
 
@@ -4318,7 +4395,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             captured = await self._capture_state_for_continuation(
                 config=config,
                 thread_id=thread_id,
-                fallback_state=last_state_values,
+                fallback_state=ctx.last_state_values,
             )
             round_iterations = int(
                 (captured.get("iteration_count") or 0) + (captured.get("planning_call_count") or 0)
@@ -4350,7 +4427,12 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 total_iterations,
             )
             round_num += 1
-            current_tool_calls = {}
+            ctx.current_tool_calls = {}
+
+        accumulated_content = ctx.accumulated_content
+        accumulated_thinking = ctx.accumulated_thinking
+        _internal_content_only = ctx.internal_content_only
+        last_state_values = ctx.last_state_values
 
         try:
             snapshot = await self.graph.aget_state(config)
@@ -4451,15 +4533,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             return
 
         yield {"type": "agent_selected", "agent": selected_agent}
-        last_emitted_agent = selected_agent
-
-        # Agentic RAG is the only path. Document-aware chat streams through the
-        # LangGraph pipeline so the search_documents tool loop can execute.
-        accumulated_content = ""
-        accumulated_thinking = ""  # Track thinking content for non-RAG agents
-        current_tool_calls = {}  # Track tool call chunks by index
-        emitted_tool_call_ids = set()  # Track which tool calls have had tool_start emitted
-        emitted_tool_result_ids = set()
 
         # For image_generator_agent the streamed LLM tokens are the internal
         # enhanced prompt — not meant for the user.  Suppress token events and
@@ -4469,11 +4542,12 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         suppressed_nodes: set = {"image_generator_agent"}
         suppress_tokens = selected_agent in suppressed_nodes
 
-        # Track whether *every* content chunk received so far has been internal.
-        # When True the accumulated_content / accumulated_thinking fallbacks remain
-        # empty (no internal content should leak into them) and we guard the
-        # post-stream fallback branch accordingly.
-        _internal_content_only: bool = True
+        # Per-stream accumulator state shared across continuation rounds and the
+        # canonical event mapper.
+        ctx = _StreamMapCtx(
+            last_emitted_agent=selected_agent,
+            suppress_tokens=suppress_tokens,
+        )
 
         # ── Auto-Continue outer loop ──────────────────────────────────
         max_rounds = settings.auto_continue_max_rounds if settings.auto_continue_enabled else 1
@@ -4482,7 +4556,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         total_iterations = 0
         start_time = time.monotonic()
         current_state = initial_state
-        last_state_values: dict[str, Any] | None = None
 
         while round_num <= max_rounds:
             # Safety: wall-clock timeout across all rounds
@@ -4508,321 +4581,11 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             try:
                 # - "messages": Stream LLM tokens with metadata (includes tool_call_chunks)
                 # - "updates": Stream state updates after each node (includes completed messages)
-                async for chunk in self.graph.astream(
-                    current_state, config=config, stream_mode=["messages", "updates"]
+                async for event in iter_v3_events_from_graph(
+                    self.graph, current_state, config=config
                 ):
-                    # Handle tuple format from multiple stream modes
-                    if isinstance(chunk, tuple) and len(chunk) == 2:
-                        mode, data = chunk
-
-                        if mode == "messages":
-                            # LLM token streaming - data is (message_chunk, metadata)
-                            message_chunk, metadata = data
-
-                            # Skip ToolMessage - tool results are handled in updates mode
-                            if isinstance(message_chunk, ToolMessage):
-                                continue
-
-                            # Drop output from internal LLM runs (e.g. summarization node)
-                            # so that internal summaries, reasoning, and tool-call chunks
-                            # from those nodes never reach the client or pollute accumulators.
-                            if (
-                                settings.suppress_internal_stream_chunks
-                                and self._is_internal_stream_chunk(metadata)
-                            ):
-                                continue
-
-                            # Mark that at least one non-internal chunk has arrived.
-                            _internal_content_only = False
-
-                            # Handle text content using content_blocks (latest pattern)
-                            if (
-                                hasattr(message_chunk, "content_blocks")
-                                and message_chunk.content_blocks
-                            ):
-                                for block in message_chunk.content_blocks:
-                                    block_type = block.get("type")
-
-                                    if block_type == "text":
-                                        text_content = block.get("text", "")
-                                        accumulated_content, delta = (
-                                            self._consume_stream_text_chunk(
-                                                accumulated_content, text_content
-                                            )
-                                        )
-                                        if delta and not suppress_tokens:
-                                            yield {"type": "token", "content": delta}
-
-                                    # Handle thinking block type
-                                    elif block_type == "thinking":
-                                        thinking_content = block.get("thinking", "") or block.get(
-                                            "text", ""
-                                        )
-                                        if thinking_content:
-                                            accumulated_thinking += thinking_content
-                                            yield {
-                                                "type": "thinking",
-                                                "content": thinking_content,
-                                            }
-
-                                    # Handle reasoning block type (LangChain Google GenAI)
-                                    elif block_type == "reasoning":
-                                        reasoning_content = block.get("reasoning", "") or block.get(
-                                            "text", ""
-                                        )
-                                        if reasoning_content:
-                                            accumulated_thinking += reasoning_content
-                                            yield {
-                                                "type": "thinking",
-                                                "content": reasoning_content,
-                                            }
-
-                                    elif block_type == "tool_call_chunk":
-                                        # Stream tool call chunks as they arrive
-                                        tool_index = block.get("index", 0)
-                                        tool_id = block.get("id")
-                                        tool_name = block.get("name")
-                                        tool_args = block.get("args", "")
-
-                                        # Initialize or update tool call tracking
-                                        if tool_index not in current_tool_calls:
-                                            current_tool_calls[tool_index] = {
-                                                "id": tool_id,
-                                                "name": tool_name,
-                                                "args": "",
-                                            }
-
-                                        # Accumulate args
-                                        if tool_args:
-                                            current_tool_calls[tool_index]["args"] += tool_args
-
-                                        # Update name/id if present
-                                        if tool_name and not current_tool_calls[tool_index]["name"]:
-                                            current_tool_calls[tool_index]["name"] = tool_name
-                                        if tool_id and not current_tool_calls[tool_index]["id"]:
-                                            current_tool_calls[tool_index]["id"] = tool_id
-
-                                pass  # Content blocks handled
-
-                            # Handle content as list (when include_thoughts=True)
-                            # LangChain returns content as a list with thinking/reasoning
-                            # and text parts.
-                            elif hasattr(message_chunk, "content") and isinstance(
-                                message_chunk.content, list
-                            ):
-                                for part in message_chunk.content:
-                                    if isinstance(part, dict):
-                                        part_type = part.get("type", "")
-
-                                        if part_type == "thinking":
-                                            thinking_content = part.get("thinking", "") or part.get(
-                                                "text", ""
-                                            )
-                                            if thinking_content:
-                                                accumulated_thinking += thinking_content
-                                                yield {
-                                                    "type": "thinking",
-                                                    "content": thinking_content,
-                                                }
-                                        elif part_type == "reasoning":
-                                            reasoning_content = part.get(
-                                                "reasoning", ""
-                                            ) or part.get("text", "")
-                                            if reasoning_content:
-                                                accumulated_thinking += reasoning_content
-                                                yield {
-                                                    "type": "thinking",
-                                                    "content": reasoning_content,
-                                                }
-                                        elif part_type == "text":
-                                            text_content = part.get("text", "")
-                                            accumulated_content, delta = (
-                                                self._consume_stream_text_chunk(
-                                                    accumulated_content, text_content
-                                                )
-                                            )
-                                            if delta and not suppress_tokens:
-                                                yield {
-                                                    "type": "token",
-                                                    "content": delta,
-                                                }
-                                    elif isinstance(part, str) and part:
-                                        accumulated_content, delta = (
-                                            self._consume_stream_text_chunk(
-                                                accumulated_content, part
-                                            )
-                                        )
-                                        if delta and not suppress_tokens:
-                                            yield {"type": "token", "content": delta}
-
-                            # Fallback: Handle legacy string content attribute
-                            elif (
-                                hasattr(message_chunk, "content")
-                                and message_chunk.content
-                                and isinstance(message_chunk.content, str)
-                            ):
-                                content = coerce_response_text(message_chunk.content)
-                                accumulated_content, delta = self._consume_stream_text_chunk(
-                                    accumulated_content, content
-                                )
-                                if delta and not suppress_tokens:
-                                    yield {"type": "token", "content": delta}
-
-                            # Check for chunk completion and emit complete tool calls
-                            if (
-                                hasattr(message_chunk, "chunk_position")
-                                and message_chunk.chunk_position == "last"
-                            ):
-                                # Emit accumulated tool calls
-                                for tool_call in current_tool_calls.values():
-                                    if tool_call["name"]:  # Only emit if we have a name
-                                        tool_call_id = tool_call["id"]
-                                        # Skip if already emitted
-                                        if tool_call_id and tool_call_id in emitted_tool_call_ids:
-                                            continue
-                                        if tool_call_id:
-                                            emitted_tool_call_ids.add(tool_call_id)
-
-                                        try:
-                                            # Parse args if it's a JSON string
-                                            args = (
-                                                json.loads(tool_call["args"])
-                                                if tool_call["args"]
-                                                else {}
-                                            )
-                                        except Exception:
-                                            args = tool_call["args"]
-
-                                        yield {
-                                            "type": "tool_start",
-                                            "name": tool_call["name"],
-                                            "tool_call_id": tool_call_id,
-                                            "args": make_json_safe(args),
-                                        }
-                                # Clear for next message
-                                current_tool_calls = {}
-
-                        elif mode == "updates":
-                            # State updates - check for completed messages with thinking/tools
-                            for node_name, node_state in data.items():
-                                # Track latest state values for continuation fallback
-                                if isinstance(node_state, dict):
-                                    if last_state_values is None:
-                                        last_state_values = {}
-                                    last_state_values.update(node_state)
-
-                                    # Emit a second ``agent_selected`` event when
-                                    # this node update changed the active agent
-                                    # (e.g. ``hand_off`` rerouted from planning_agent
-                                    # to search_agent). This lets the UI swap its
-                                    # status indicator to the delegated agent before
-                                    # the next set of tokens arrives.
-                                    new_agent = node_state.get("selected_agent")
-                                    if (
-                                        isinstance(new_agent, str)
-                                        and new_agent != last_emitted_agent
-                                    ):
-                                        last_emitted_agent = new_agent
-                                        yield {
-                                            "type": "agent_selected",
-                                            "agent": new_agent,
-                                            "reason": "handoff",
-                                        }
-
-                                # Emit node completion event for planning nodes
-                                if node_name in ("planning_agent", "planning_tools"):
-                                    # Extract relevant info from the node state
-                                    node_info = {"node": node_name}
-
-                                    # For planning_agent, include tool call info
-                                    if node_name == "planning_agent" and "messages" in node_state:
-                                        messages = node_state.get("messages", [])
-                                        if messages:
-                                            last_msg = (
-                                                messages[-1]
-                                                if isinstance(messages, list)
-                                                else messages
-                                            )
-                                            if (
-                                                isinstance(last_msg, AIMessage)
-                                                and hasattr(last_msg, "tool_calls")
-                                                and last_msg.tool_calls
-                                            ):
-                                                node_info["tool_calls"] = [
-                                                    {
-                                                        "name": normalized_tc.get("name"),
-                                                        "id": normalized_tc.get("id"),
-                                                        "args": make_json_safe(
-                                                            normalized_tc.get("args", {})
-                                                        ),
-                                                    }
-                                                    for normalized_tc in (
-                                                        normalize_tool_call(tc)
-                                                        for tc in last_msg.tool_calls
-                                                    )
-                                                ]
-
-                                    # For planning_tools, include execution results
-                                    if node_name == "planning_tools":
-                                        todos = node_state.get("todos", [])
-                                        if todos:
-                                            node_info["todos_count"] = len(todos)
-                                            node_info["current_task_index"] = node_state.get(
-                                                "current_task_index"
-                                            )
-
-                                    yield {"type": "node_complete", **node_info}
-
-                                if "messages" in node_state:
-                                    messages = node_state["messages"]
-                                    if messages:
-                                        last_msg = (
-                                            messages[-1] if isinstance(messages, list) else messages
-                                        )
-
-                                        # Handle AIMessage - extract tool_calls only
-                                        if isinstance(last_msg, AIMessage):
-                                            # Handle tool calls
-                                            if (
-                                                hasattr(last_msg, "tool_calls")
-                                                and last_msg.tool_calls
-                                            ):
-                                                for tool_call in last_msg.tool_calls:
-                                                    normalized_tool_call = normalize_tool_call(
-                                                        tool_call
-                                                    )
-                                                    tool_call_id = normalized_tool_call.get("id")
-                                                    # Only emit if messages mode has not already emitted it.
-                                                    if (
-                                                        tool_call_id
-                                                        and tool_call_id
-                                                        not in emitted_tool_call_ids
-                                                    ):
-                                                        emitted_tool_call_ids.add(tool_call_id)
-                                                        yield {
-                                                            "type": "tool_start",
-                                                            "name": normalized_tool_call.get(
-                                                                "name", "unknown"
-                                                            ),
-                                                            "tool_call_id": tool_call_id,
-                                                            "args": make_json_safe(
-                                                                normalized_tool_call.get("args", {})
-                                                            ),
-                                                        }
-
-                                        # Handle ToolMessage (result)
-                                        elif isinstance(last_msg, ToolMessage):
-                                            for (
-                                                event_payload
-                                            ) in self._tool_end_events_from_node_state(
-                                                node_state=node_state,
-                                                last_state_values=last_state_values,
-                                                emitted_tool_result_ids=emitted_tool_result_ids,
-                                            ):
-                                                yield event_payload
-                    else:
-                        # Single mode or legacy format - try to handle gracefully
-                        logger.debug(f"Unexpected stream chunk format: {type(chunk)}")
+                    for public_event in self._map_v3_stream_event(event, ctx):
+                        yield public_event
 
             except GraphRecursionError:
                 logger.warning(
@@ -4837,8 +4600,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 return
 
             # ── Check if graph ended because we *want* to continue ─────
-            if not should_continue and last_state_values:
-                continue_reason = self._get_requested_continuation_reason(last_state_values)
+            if not should_continue and ctx.last_state_values:
+                continue_reason = self._get_requested_continuation_reason(ctx.last_state_values)
                 if continue_reason:
                     should_continue = True
 
@@ -4849,7 +4612,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             captured = await self._capture_state_for_continuation(
                 config=config,
                 thread_id=thread_id,
-                fallback_state=last_state_values,
+                fallback_state=ctx.last_state_values,
             )
             round_iterations = int(
                 (captured.get("iteration_count") or 0) + (captured.get("planning_call_count") or 0)
@@ -4883,7 +4646,12 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             )
             round_num += 1
             # Reset per-round tool call tracking (accumulators persist)
-            current_tool_calls = {}
+            ctx.current_tool_calls = {}
+
+        accumulated_content = ctx.accumulated_content
+        accumulated_thinking = ctx.accumulated_thinking
+        _internal_content_only = ctx.internal_content_only
+        last_state_values = ctx.last_state_values
 
         # ── Post-stream: finalize response ─────────────────────────────
         if self.checkpointer and thread_id:
