@@ -19,6 +19,8 @@ from app.schemas.message import (
 from app.schemas.pagination import MessagePaginationParams
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
+from app.services.event_streaming.events import V3StreamEvent
+from app.services.event_streaming.internal_sse import legacy_event_from_v3
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,17 @@ logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_SECONDS = 1.0
 
 router = APIRouter(prefix="/messages", tags=["messages"])
+
+
+def _to_internal_sse_event(event: dict | V3StreamEvent) -> dict | None:
+    """Project a service-layer event to the legacy Streamlit JSON SSE shape.
+
+    Canonical ``V3StreamEvent`` is mapped via ``legacy_event_from_v3``; legacy
+    dicts (pre-migration) pass through unchanged.
+    """
+    if isinstance(event, V3StreamEvent):
+        return legacy_event_from_v3(event)
+    return event
 
 
 def _internal_event_stream_response(
@@ -62,8 +75,12 @@ def _internal_event_stream_response(
                 if event is None:
                     break
 
-                event_type = event.get("type")
-                yield f"data: {json.dumps(event)}\n\n"
+                public_event = _to_internal_sse_event(event)
+                if public_event is None:
+                    continue
+
+                event_type = public_event.get("type")
+                yield f"data: {json.dumps(public_event)}\n\n"
 
                 if event_type in ("complete", "error", "interrupt"):
                     break

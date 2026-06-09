@@ -1088,21 +1088,27 @@ class MessageService(IMessageService):
                 inflight.resolve(bot_message.model_dump(mode="json"))
                 registry.remove(user_message_id)
 
+                # Emit the title update BEFORE the terminal completion so the
+                # Streamlit SSE client (which stops reading after `complete`)
+                # still receives it.
+                title_event = None
+                if title_task:
+                    generated_title = await title_task
+                    if generated_title:
+                        title_event = {
+                            "type": "title_updated",
+                            "title": generated_title,
+                            "conversation_id": str(message_create_data.conversation_id),
+                        }
+
+                if title_event:
+                    yield title_event
+
                 # Yield final completion event with full message
                 yield {
                     "type": "complete",
                     "message": bot_message.model_dump(mode="json"),
                 }
-
-                # Yield title update event if title was generated in parallel
-                if title_task:
-                    generated_title = await title_task
-                    if generated_title:
-                        yield {
-                            "type": "title_updated",
-                            "title": generated_title,
-                            "conversation_id": str(message_create_data.conversation_id),
-                        }
 
             except (asyncio.CancelledError, GeneratorExit):
                 # Cancellation / disconnect: persist partial text if available,
