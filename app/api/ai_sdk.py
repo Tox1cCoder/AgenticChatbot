@@ -25,6 +25,7 @@ from app.schemas.message import InterruptResumeRequest, MessageCreate
 from app.schemas.pagination import ConversationPaginationParams
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
+from app.services.event_streaming.ai_sdk_v6 import AISDKV6StreamAdapter
 from app.services.stream_events import normalize_tool_phase
 
 router = APIRouter(tags=["ai-sdk"])
@@ -1018,81 +1019,13 @@ def _build_ui_message_stream_response(
     event_source_factory: Callable[[], AsyncGenerator[dict[str, Any], None]],
     state: StreamState,
 ) -> StreamingResponse:
-    async def events_with_heartbeats() -> AsyncGenerator[dict[str, Any], None]:
-        source = event_source_factory()
-        pending_next: asyncio.Task | None = None
-        try:
-            while True:
-                if pending_next is None:
-                    pending_next = asyncio.create_task(anext(source))
-
-                done, _ = await asyncio.wait(
-                    {pending_next},
-                    timeout=_AI_SDK_HEARTBEAT_INTERVAL_SECONDS,
-                )
-                if not done:
-                    yield {"type": "heartbeat"}
-                    continue
-
-                try:
-                    event = pending_next.result()
-                except StopAsyncIteration:
-                    break
-                pending_next = None
-                yield event
-        finally:
-            if pending_next is not None and not pending_next.done():
-                pending_next.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await pending_next
-            aclose = getattr(source, "aclose", None)
-            if callable(aclose):
-                with contextlib.suppress(Exception):
-                    await aclose()
-
-    async def event_generator():
-        try:
-            yield _sse({"type": "start", "messageId": state.message_id})
-            yield _sse({"type": "start-step"})
-            yield _sse({"type": "text-start", "id": state.text_id})
-            state.text_started = True
-
-            async for event in events_with_heartbeats():
-                event_type = event.get("type")
-                handler = EventHandlerFactory.get_handler(event_type)
-
-                if handler:
-                    async for msg in handler.handle(event, state):
-                        yield msg
-
-                    if event_type in ("interrupt", "error"):
-                        return
-
-                    if event_type == "complete":
-                        break
-
-            if state.text_started:
-                yield _sse({"type": "text-end", "id": state.text_id})
-            if state.reasoning_started:
-                yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
-            yield _sse({"type": "finish-step"})
-            yield _sse({"type": "finish"})
-            yield "data: [DONE]\n\n"
-
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            yield _sse({"type": "error", "errorText": str(exc)})
-            if state.text_started:
-                yield _sse({"type": "text-end", "id": state.text_id})
-            if state.reasoning_started:
-                yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
-            yield _sse({"type": "finish-step"})
-            yield _sse({"type": "finish"})
-            yield "data: [DONE]\n\n"
-
+    adapter = AISDKV6StreamAdapter(
+        event_source_factory,
+        state,
+        heartbeat_interval_seconds=_AI_SDK_HEARTBEAT_INTERVAL_SECONDS,
+    )
     return StreamingResponse(
-        event_generator(),
+        adapter.iter_sse(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
