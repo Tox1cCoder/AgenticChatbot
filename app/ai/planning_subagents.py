@@ -484,9 +484,11 @@ class PlanningSubagentDispatcher:
         *,
         workflow: _IsolatedAgentRunner,
         settings: Any | None = None,
+        event_sink: Any | None = None,
     ) -> None:
         self._workflow = workflow
         self._settings = settings or global_settings
+        self._event_sink = event_sink
 
     async def dispatch(
         self,
@@ -539,6 +541,37 @@ class PlanningSubagentDispatcher:
                 resolved_model=resolved_model,
             )
 
+        async def _emit_end(result: PlanningSubagentResult) -> PlanningSubagentResult:
+            if self._event_sink is not None:
+                await self._event_sink.emit(
+                    "subagent_end",
+                    task_id=result.id,
+                    agent_name=result.agent,
+                    status=result.status,
+                    data={
+                        "output": result.answer,
+                        "summary": result.summary,
+                        "elapsed_ms": result.elapsed_ms,
+                        "error": result.error,
+                        "requested_model": result.requested_model,
+                        "resolved_model": result.resolved_model,
+                    },
+                )
+            return result
+
+        if self._event_sink is not None:
+            await self._event_sink.emit(
+                "subagent_start",
+                task_id=task.id,
+                agent_name=task.agent,
+                status="running",
+                data={
+                    "task": task.task,
+                    "related_todo_ids": list(task.related_todo_ids),
+                    "expected_output": task.expected_output,
+                },
+            )
+
         prompt = _build_task_prompt(task)
         try:
             response = await self._workflow._run_agent_in_isolated_context(
@@ -549,21 +582,44 @@ class PlanningSubagentDispatcher:
                 model_override=task.model_override,
             )
         except asyncio.TimeoutError:
-            return _result(
-                "timeout",
-                f"Worker {task.id} ({task.agent}) timed out in an underlying operation.",
-                error="timeout",
+            return await _emit_end(
+                _result(
+                    "timeout",
+                    f"Worker {task.id} ({task.agent}) timed out in an underlying operation.",
+                    error="timeout",
+                )
             )
         except Exception as exc:  # pragma: no cover - sanity net
             logger.warning("Subagent worker %s raised: %s", task.id, exc)
-            return _result(
-                "failed",
-                f"Worker {task.id} ({task.agent}) failed: {exc}",
-                error=str(exc),
+            return await _emit_end(
+                _result(
+                    "failed",
+                    f"Worker {task.id} ({task.agent}) failed: {exc}",
+                    error=str(exc),
+                )
             )
 
         worker_artifacts = list(response.tool_artifacts or [])
         resolved_model = _summarize_resolved_model(response)
+
+        if self._event_sink is not None:
+            for artifact in worker_artifacts:
+                await self._event_sink.emit(
+                    "subagent_tool_execution_end",
+                    task_id=task.id,
+                    agent_name=task.agent,
+                    status="running",
+                    tool_call_id=str(artifact.get("tool_call_id"))
+                    if artifact.get("tool_call_id")
+                    else None,
+                    tool_name=artifact.get("tool"),
+                    data={
+                        "output": artifact.get("output"),
+                        "error": artifact.get("error"),
+                        "render": artifact.get("render"),
+                        "status": artifact.get("status"),
+                    },
+                )
 
         # Prefer the identity reported by the worker response (the agent that
         # actually answered) over the requested task target.
@@ -582,32 +638,38 @@ class PlanningSubagentDispatcher:
         )
 
         if response.error:
-            return _result(
-                "failed",
-                response.message.content or response.error or "(no output)",
-                error=response.error,
-                artifacts=worker_artifacts,
-                resolved_model=resolved_model,
-                identity=response_identity,
+            return await _emit_end(
+                _result(
+                    "failed",
+                    response.message.content or response.error or "(no output)",
+                    error=response.error,
+                    artifacts=worker_artifacts,
+                    resolved_model=resolved_model,
+                    identity=response_identity,
+                )
             )
 
         if _is_requires_approval_response(response):
-            return _result(
-                "requires_approval",
-                response.message.content
-                or "Worker stopped awaiting human approval; supervisor must handle directly.",
-                error="requires_approval",
+            return await _emit_end(
+                _result(
+                    "requires_approval",
+                    response.message.content
+                    or "Worker stopped awaiting human approval; supervisor must handle directly.",
+                    error="requires_approval",
+                    artifacts=worker_artifacts,
+                    resolved_model=resolved_model,
+                    identity=response_identity,
+                )
+            )
+
+        return await _emit_end(
+            _result(
+                "completed",
+                response.message.content or "",
                 artifacts=worker_artifacts,
                 resolved_model=resolved_model,
                 identity=response_identity,
             )
-
-        return _result(
-            "completed",
-            response.message.content or "",
-            artifacts=worker_artifacts,
-            resolved_model=resolved_model,
-            identity=response_identity,
         )
 
 

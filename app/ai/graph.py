@@ -25,6 +25,7 @@ from ..interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
 from ..models.enums import PlanLifecycle
 from ..services.event_streaming.langchain_v3 import iter_v3_events_from_graph
+from ..services.event_streaming.subagents import SubagentEventSink
 from .agent_metadata import (
     agent_identity,
     attach_agent_metadata,
@@ -3009,8 +3010,16 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             create_dispatch_subagents_tool,
         )
 
+        context = state.get("context") if isinstance(state.get("context"), dict) else {}
+        event_sink = context.get("subagent_event_sink")
         dispatcher = (
-            PlanningSubagentDispatcher(workflow=self, settings=settings) if executable else None
+            PlanningSubagentDispatcher(
+                workflow=self,
+                settings=settings,
+                event_sink=event_sink,
+            )
+            if executable
+            else None
         )
         dispatch_tool = create_dispatch_subagents_tool(
             dispatcher=dispatcher,
@@ -4052,8 +4061,26 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 yield from self._map_v3_values_snapshot(data, ctx)
             return
 
-        # message_start/end, reasoning_start/end, tool_call_delta, subagent_*
-        # carry no legacy public projection in this bridge.
+        if etype in (
+            "subagent_start",
+            "subagent_end",
+            "subagent_message_delta",
+            "subagent_tool_call_available",
+            "subagent_tool_execution_start",
+            "subagent_tool_execution_end",
+        ):
+            payload: dict[str, Any] = {"type": etype, "data": dict(data)}
+            if event.subagent is not None:
+                payload["subagent"] = event.subagent.model_dump(mode="json")
+            if event.tool_call_id:
+                payload["tool_call_id"] = event.tool_call_id
+            if event.tool_name:
+                payload["tool_name"] = event.tool_name
+            yield payload
+            return
+
+        # message_start/end, reasoning_start/end, tool_call_delta carry no
+        # legacy public projection in this bridge.
 
     def _emit_tool_start_from_canonical(
         self,
@@ -4509,6 +4536,15 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
     async def execute_request_stream(self, request: WorkflowExecutionRequest):
         initial_state = self._build_initial_state_from_request(request)
+        # Custom subagents (dispatch_subagents) emit lifecycle events into this
+        # sink; it is drained between graph supersteps below. Stored in graph
+        # state context so _build_planning_internal_tools can hand it to the
+        # dispatcher.
+        subagent_event_sink = SubagentEventSink()
+        if isinstance(initial_state, dict):
+            context = initial_state.setdefault("context", {})
+            if isinstance(context, dict):
+                context["subagent_event_sink"] = subagent_event_sink
         conversation_id = request.conversation_id
         thread_id = self._resolve_thread_id(request.thread_id, conversation_id)
         config = self._build_graph_config(thread_id)
@@ -4579,13 +4615,16 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             continue_reason = None
 
             try:
-                # - "messages": Stream LLM tokens with metadata (includes tool_call_chunks)
-                # - "updates": Stream state updates after each node (includes completed messages)
                 async for event in iter_v3_events_from_graph(
                     self.graph, current_state, config=config
                 ):
                     for public_event in self._map_v3_stream_event(event, ctx):
                         yield public_event
+                    # Surface any custom-subagent lifecycle events emitted while
+                    # the just-completed superstep ran (dispatch_subagents).
+                    for sub_event in await subagent_event_sink.drain():
+                        for public_sub in self._map_v3_stream_event(sub_event, ctx):
+                            yield public_sub
 
             except GraphRecursionError:
                 logger.warning(
