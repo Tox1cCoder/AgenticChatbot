@@ -191,7 +191,9 @@ Canonical mapping used by the v3 normalizer: text-delta→`message_delta`, reaso
 
 ## Implementation Tasks
 
-> **Task status:** Task 1 ✅ complete (probe rewritten for the real v3 contract; deps upgraded + pinned; 26 existing streaming tests still green).
+> **Task status:** Task 1 ✅ · Task 2 ✅ · Tasks 3–10 pending.
+> - Task 1: probe rewritten for the real v3 contract; deps upgraded + pinned; 26 existing streaming tests still green.
+> - Task 2: canonical `V3StreamEvent` + `SubagentRef` + `make_event` created under `app/services/event_streaming/`; 2 model tests pass. No deviations.
 
 ### Task 1: Add Dependency Probe and Align LangChain Pins — ✅ COMPLETE
 
