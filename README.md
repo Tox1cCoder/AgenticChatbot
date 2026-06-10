@@ -985,15 +985,14 @@ In addition to proxying most server routes under both `/...` and `/api/...`, the
 
 ## Streaming, SSE & WebSocket Endpoints
 
-| Transport | Endpoint | Notes |
-|---|---|---|
-| SSE | `POST /messages/stream` | `token`, `reasoning`, `tool_call`, `tool_result`, `interrupt`, `heartbeat`, `complete`, `error`, `rich_items` |
-| SSE | `POST /messages/resume-interrupt` | Same event vocabulary; resumes a suspended graph |
-| SSE | `POST /api/chat/{conversation_id}` | Vercel AI SDK wire format (`text`, `tool-call`, `tool-result`, `finish`, `error`, optional `data-rich-items`) |
-| SSE | `POST /ai/chat/{conversation_id}` | As above |
-| SSE | `POST /ai/resume-interrupt` | As above |
-| WS  | `/device-runtime/{device_id}/connect` | Tool dispatch + results |
-| WS  | `/widgets/{widget_id}/connect` | Widget state streaming |
+| API namespace | Endpoint | Stream protocol | Primary events |
+| --- | --- | --- | --- |
+| assistant-ui / AI SDK v6 | `POST /api/chat/{conversation_id}` and `POST /ai/chat/{conversation_id}` | Vercel AI SDK UI Message Stream over SSE | `start`, `start-step`, `text-start`, `text-delta`, `reasoning-start`, `reasoning-delta`, `tool-input-start`, `tool-input-available`, `tool-output-available`, `data-interrupt`, `data-rich-items`, `finish-step`, `finish`, `[DONE]` |
+| assistant-ui / AI SDK v6 | `POST /ai/resume-interrupt` | As above | As above |
+| Streamlit internal client | `POST /messages/stream` and `POST /messages/resume-interrupt` | Backend JSON SSE compatibility stream | `user_message_created`, `agent_selected`, `token`, `thinking`, `tool`, `rich_items`, `interrupt`, `title_updated`, `complete`, `error`, `heartbeat` |
+| Backend internal | service layer | Canonical v3 event model (`V3StreamEvent`, `schema_version="v3"`) | `message_delta`, `reasoning_delta`, `tool_call_available`, `tool_execution_end`, `subagent_start`, `subagent_end`, `interrupt`, `complete`, `error` |
+| Device runtime | WS `/device-runtime/{device_id}/connect` | WebSocket | Tool dispatch + results |
+| Live widgets | WS `/widgets/{widget_id}/connect` | WebSocket | Widget state streaming |
 
 Heartbeat interval for SSE: **1 s**. `SUPPRESS_INTERNAL_STREAM_CHUNKS=true` drops internal events (e.g. summarisation output) before they reach clients.
 
