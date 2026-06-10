@@ -25,7 +25,7 @@ from app.ai.skills_snapshot import (
     list_repo_skills_for_demo,
     reload_repo_skills_for_demo,
 )
-from app.services.stream_events import infer_tool_state, normalize_tool_phase
+from app.services.event_streaming.compat import infer_tool_state, normalize_tool_phase
 from app.ui.rag_artifacts import (
     RAGArtifactView,
     RAGChunkView,

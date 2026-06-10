@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.ai.graph import MultiAgentWorkflow
 from app.ai.tool_execution import execute_tool_calls
 
 
@@ -120,9 +121,6 @@ async def test_execute_tool_calls_preserves_error_render_artifact():
     assert images == []
 
 
-from app.ai.graph import MultiAgentWorkflow
-
-
 def test_lookup_tool_render_payload_from_state_context():
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
     state_values = {
@@ -142,24 +140,3 @@ def test_lookup_tool_render_payload_from_state_context():
     assert render["type"] == "mcp_app"
     assert render["template_uri"] == "ui://canva/presentation-viewer.html"
 
-
-from app.services.stream_events import build_canonical_tool_event
-
-
-def test_canonical_tool_event_preserves_render_payload():
-    render = {
-        "version": 1,
-        "type": "mcp_app",
-        "template_uri": "ui://canva/presentation-viewer.html",
-    }
-
-    event = build_canonical_tool_event(
-        phase="end",
-        name="canva_create_presentation",
-        tool_call_id="tool-call-1",
-        result="Created presentation",
-        render=render,
-    )
-
-    assert event["result"] == "Created presentation"
-    assert event["render"] == render

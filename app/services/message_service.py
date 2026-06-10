@@ -46,7 +46,6 @@ from app.schemas.workflow import (
 )
 from app.services.ai_service import AIService
 from app.services.client_device_service import ClientDeviceService
-from app.services.event_streaming.compat import coerce_legacy_event_to_v3
 from app.services.event_streaming.events import V3StreamEvent, make_event
 from app.services.generation_registry import get_generation_registry
 from app.utils.text_processing import fix_markdown_code_blocks, sanitize_persona
@@ -98,20 +97,18 @@ def _merge_stream_tool_artifacts_into_response(
 
 
 def _service_event_from_ai_event(
-    event: dict | V3StreamEvent,
+    event: V3StreamEvent,
     *,
     sequence: int,
 ) -> V3StreamEvent:
-    """Coerce an AI-service event to canonical and re-stamp its sequence.
+    """Re-stamp a canonical AI-service event with the service-level sequence.
 
     The service interleaves its own events (``user_message_created``,
     ``title_updated``, terminal ``complete``/``error``/``interrupt``) with
     forwarded AI events, so sequence numbers are re-assigned here to keep the
     public stream strictly monotonic.
     """
-    if isinstance(event, V3StreamEvent):
-        return event.model_copy(update={"sequence": sequence})
-    return coerce_legacy_event_to_v3(event, sequence=sequence)
+    return event.model_copy(update={"sequence": sequence})
 
 
 class MessageService(IMessageService):

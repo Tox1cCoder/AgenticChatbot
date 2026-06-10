@@ -30,8 +30,9 @@ from app.schemas.workflow import (
     WorkflowResponseMessage,
 )
 from app.services.ai_service import AIService
+from app.services.event_streaming.events import make_event
+from app.services.event_streaming.internal_sse import legacy_event_from_v3
 from app.services.message_service import MessageService
-from app.services.stream_events import build_canonical_rich_items_event
 
 SAFE_WIDGET_ITEM = {
     "id": "widget:w-1",
@@ -48,8 +49,16 @@ SAFE_WIDGET_ITEM = {
 }
 
 
-def test_canonical_rich_items_event_contains_safe_upserts():
-    event = build_canonical_rich_items_event(items=[SAFE_WIDGET_ITEM])
+def _rich_items_event(*, sequence: int = 1):
+    return make_event(
+        "rich_items",
+        sequence=sequence,
+        data={"operation": "upsert", "items": [SAFE_WIDGET_ITEM]},
+    )
+
+
+def test_canonical_rich_items_event_projects_safe_upserts_to_legacy_sse():
+    event = legacy_event_from_v3(_rich_items_event())
     assert event["type"] == "rich_items"
     assert event["operation"] == "upsert"
     assert event["items"][0]["id"] == "widget:w-1"
@@ -164,14 +173,17 @@ async def test_ai_service_suppresses_resume_rich_items_without_capability(monkey
 @pytest.mark.asyncio
 async def test_ai_sdk_maps_rich_items_to_transient_data_event():
     async def source() -> Any:
-        yield build_canonical_rich_items_event(items=[SAFE_WIDGET_ITEM])
-        yield {
-            "type": "complete",
-            "message": {
-                "content": "Result\n\n<!--rich:widget:w-1-->",
-                "message_metadata": {"rich_items": [SAFE_WIDGET_ITEM]},
+        yield _rich_items_event()
+        yield make_event(
+            "complete",
+            sequence=2,
+            data={
+                "message": {
+                    "content": "Result\n\n<!--rich:widget:w-1-->",
+                    "message_metadata": {"rich_items": [SAFE_WIDGET_ITEM]},
+                }
             },
-        }
+        )
 
     state = StreamState(
         message_id="m-1",
@@ -196,17 +208,22 @@ async def test_ai_sdk_maps_rich_items_to_transient_data_event():
 @pytest.mark.asyncio
 async def test_ai_sdk_complete_does_not_emit_unselected_image_file_parts():
     async def source() -> Any:
-        yield {
-            "type": "complete",
-            "message": {
-                "content": "No relevant image selected.",
-                "message_metadata": {
-                    "rich_items_version": 1,
-                    "images": [{"url": "https://img.test/hidden.png", "mime": "image/png"}],
-                    "rich_items": [],
-                },
+        yield make_event(
+            "complete",
+            sequence=1,
+            data={
+                "message": {
+                    "content": "No relevant image selected.",
+                    "message_metadata": {
+                        "rich_items_version": 1,
+                        "images": [
+                            {"url": "https://img.test/hidden.png", "mime": "image/png"}
+                        ],
+                        "rich_items": [],
+                    },
+                }
             },
-        }
+        )
 
     state = StreamState(
         message_id="m-2",
@@ -252,8 +269,12 @@ def test_capable_projection_preserves_markers():
 @pytest.mark.asyncio
 async def test_non_capable_stream_does_not_receive_rich_data_parts():
     async def source() -> Any:
-        yield build_canonical_rich_items_event(items=[SAFE_WIDGET_ITEM])
-        yield {"type": "complete", "message": {"content": "Answer", "message_metadata": {}}}
+        yield _rich_items_event()
+        yield make_event(
+            "complete",
+            sequence=2,
+            data={"message": {"content": "Answer", "message_metadata": {}}},
+        )
 
     state = StreamState(
         message_id="m-3",
@@ -301,14 +322,17 @@ async def test_message_service_forwards_rich_items_during_new_message_stream():
     )
 
     async def source(_request):
-        yield build_canonical_rich_items_event(items=[SAFE_WIDGET_ITEM])
-        yield {
-            "type": "complete",
-            "response": WorkflowResponse(
-                message=WorkflowResponseMessage(content="done"),
-                metadata={},
-            ),
-        }
+        yield _rich_items_event()
+        yield make_event(
+            "complete",
+            sequence=2,
+            data={
+                "response": WorkflowResponse(
+                    message=WorkflowResponseMessage(content="done"),
+                    metadata={},
+                )
+            },
+        )
 
     service.ai_service = SimpleNamespace(
         invalidate_history_cache=lambda *_args: None,
@@ -360,8 +384,8 @@ async def test_message_service_forwards_rich_items_during_resume_stream():
     )
 
     async def source(*_args, **_kwargs):
-        yield build_canonical_rich_items_event(items=[SAFE_WIDGET_ITEM])
-        yield {"type": "error", "error": "terminal"}
+        yield _rich_items_event()
+        yield make_event("error", sequence=2, data={"error": "terminal"})
 
     service.ai_service = SimpleNamespace(resume_interrupted_execution_stream=source)
 

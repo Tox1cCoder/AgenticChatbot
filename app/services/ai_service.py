@@ -35,9 +35,8 @@ from ..schemas.workflow import (
     WorkflowResponseMessage,
 )
 from ..utils.text_processing import sanitize_persona
-from .event_streaming.compat import coerce_legacy_event_to_v3
+from .event_streaming.compat import coerce_legacy_event_to_v3, infer_tool_state
 from .event_streaming.events import V3StreamEvent, make_event
-from .stream_events import infer_tool_state
 
 
 class AIService:

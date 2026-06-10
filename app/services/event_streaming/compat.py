@@ -1,9 +1,10 @@
-"""Temporary legacy-dict → canonical V3 coercion used during migration.
+"""Legacy-dict → canonical V3 coercion for the graph boundary.
 
-Producers (the graph mapper, message_service) still emit legacy public dicts
-(``token``/``thinking``/``tool``/``complete``/...). The public adapters consume
-canonical :class:`V3StreamEvent`, so this bridge converts dicts on the way in.
-Delete once all producers emit ``V3StreamEvent`` directly (plan Task 9).
+The graph mapper (``app/ai/graph.py::_map_v3_stream_event``) still emits legacy
+public dicts (``token``/``thinking``/``tool_start``/``complete``/...). The
+service layer and public adapters consume canonical :class:`V3StreamEvent`, so
+this bridge converts dicts on the way in at the AI-service boundary. Delete
+once the graph emits ``V3StreamEvent`` directly.
 """
 
 from __future__ import annotations
@@ -16,6 +17,49 @@ from app.services.event_streaming.events import (
     V3StreamEvent,
     make_event,
 )
+
+TOOL_PHASE_START = "start"
+TOOL_PHASE_END = "end"
+
+_ERROR_PREFIXES = (
+    "error:",
+    "error executing tool:",
+    "tool not found:",
+)
+
+
+def normalize_tool_phase(value: Any) -> str | None:
+    phase = str(value or "").strip().lower()
+    if phase in {TOOL_PHASE_START, TOOL_PHASE_END}:
+        return phase
+    return None
+
+
+def _looks_like_tool_error(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key in ("error", "errors", "exception"):
+            candidate = value.get(key)
+            if candidate not in (None, "", [], {}):
+                return True
+
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        return any(stripped.startswith(prefix) for prefix in _ERROR_PREFIXES)
+
+    return False
+
+
+def infer_tool_state(
+    *,
+    phase: Any,
+    result: Any = None,
+) -> str:
+    normalized_phase = normalize_tool_phase(phase)
+    if normalized_phase == TOOL_PHASE_START:
+        return "running"
+    if normalized_phase != TOOL_PHASE_END:
+        return "unknown"
+    return "error" if _looks_like_tool_error(result) else "completed"
 
 _DIRECT_EVENT_TYPES: set[str] = {
     "agent_selected",

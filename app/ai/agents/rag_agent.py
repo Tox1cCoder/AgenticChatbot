@@ -2,7 +2,6 @@ import base64
 import logging
 import re
 import threading
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -194,42 +193,6 @@ class RAGAgent(BaseAgent):
         """Agentic RAG is the only execution path."""
         await self._init_tools()
         return await self._process_message_agentic(message, conversation_id)
-
-    async def stream_message(
-        self,
-        message: AgentMessage,
-        conversation_id: str | None = None,
-    ) -> AsyncIterator[dict[str, Any]]:
-        response = await self.process_message(message, conversation_id)
-
-        for artifact in response.tool_artifacts or []:
-            tool_name = artifact.get("tool_name") or artifact.get("tool") or "unknown_tool"
-            tool_args = artifact.get("tool_input") or artifact.get("args")
-            tool_output = artifact.get("tool_output")
-            if tool_output is None:
-                tool_output = artifact.get("result")
-            if tool_output is None and artifact.get("error"):
-                tool_output = artifact["error"]
-
-            yield {
-                "type": "tool_start",
-                "name": tool_name,
-                "tool_call_id": None,
-                "args": tool_args,
-            }
-            yield {
-                "type": "tool_end",
-                "name": tool_name,
-                "tool_call_id": None,
-                "result": tool_output,
-            }
-
-        thinking_summary = str(response.metadata.get("thinking_summary") or "").strip()
-        if thinking_summary:
-            yield {"type": "thinking", "content": thinking_summary}
-
-        yield {"type": "token", "content": response.message.content or ""}
-        yield {"type": "complete", "response": response}
 
     async def _search(
         self,

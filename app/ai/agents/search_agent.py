@@ -1,13 +1,10 @@
 import logging
-from collections.abc import AsyncIterator
-from typing import Any
 
 from langchain_core.messages import HumanMessage
 
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..prompts import SEARCH_SYSTEM_PROMPT, build_search_prompt
 from ..schemas import AgentMessage, AgentResponse, AgentType
-from ..utils import normalize_tool_call
 from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -83,29 +80,6 @@ class SearchAgent(BaseAgent):
         conversation_id: str | None = None,
     ) -> AgentResponse:
         return await self.invoke_model(message, conversation_id)
-
-    async def stream_message(
-        self,
-        message: AgentMessage,
-        conversation_id: str | None = None,
-    ) -> AsyncIterator[dict[str, Any]]:
-        response = await self.invoke_model(message, conversation_id)
-
-        for tool_call in response.message.tool_calls or []:
-            normalized_tool_call = normalize_tool_call(tool_call)
-            yield {
-                "type": "tool_start",
-                "name": normalized_tool_call.get("name", "unknown"),
-                "tool_call_id": normalized_tool_call.get("id"),
-                "args": normalized_tool_call.get("args"),
-            }
-
-        thinking_summary = str(response.metadata.get("thinking_summary") or "").strip()
-        if thinking_summary:
-            yield {"type": "thinking", "content": thinking_summary}
-
-        yield {"type": "token", "content": response.message.content or ""}
-        yield {"type": "complete", "response": response}
 
     async def cleanup(self):
         await super().cleanup()

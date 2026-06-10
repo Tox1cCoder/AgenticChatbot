@@ -1,7 +1,6 @@
 """Canonical v3 → Vercel AI SDK UI Message Stream adapter.
 
-Consumes canonical :class:`V3StreamEvent` events (legacy dicts are coerced via
-:func:`coerce_legacy_event_to_v3` as a migration bridge) and emits the AI SDK
+Consumes canonical :class:`V3StreamEvent` events and emits the AI SDK
 UI Message Stream SSE chunks assistant-ui expects. The response header
 ``x-vercel-ai-ui-message-stream: v1`` is set by the endpoint that wraps this.
 """
@@ -16,8 +15,7 @@ from typing import Any
 
 from app.core.config import settings
 
-from .compat import coerce_legacy_event_to_v3
-from .events import V3StreamEvent
+from .events import V3StreamEvent, make_event
 
 _AI_SDK_HEARTBEAT_INTERVAL_SECONDS = float(
     getattr(settings, "ai_sdk_heartbeat_interval_seconds", 15.0) or 15.0
@@ -53,9 +51,7 @@ class AISDKV6StreamState:
 class AISDKV6StreamAdapter:
     def __init__(
         self,
-        event_source_factory: Callable[
-            [], AsyncGenerator[dict[str, Any] | V3StreamEvent, None]
-        ],
+        event_source_factory: Callable[[], AsyncGenerator[V3StreamEvent, None]],
         state: AISDKV6StreamState,
         *,
         heartbeat_interval_seconds: float | None = None,
@@ -78,10 +74,7 @@ class AISDKV6StreamAdapter:
             yield _sse({"type": "text-start", "id": state.text_id})
             state.text_started = True
 
-            sequence = 0
-            async for raw_event in self._events_with_heartbeats():
-                sequence += 1
-                event = coerce_legacy_event_to_v3(raw_event, sequence=sequence)
+            async for event in self._events_with_heartbeats():
                 async for chunk in self._map_event(event):
                     yield chunk
                 if event.type in {"interrupt", "error"}:
@@ -114,7 +107,7 @@ class AISDKV6StreamAdapter:
 
     async def _events_with_heartbeats(
         self,
-    ) -> AsyncGenerator[dict[str, Any] | V3StreamEvent, None]:
+    ) -> AsyncGenerator[V3StreamEvent, None]:
         source = self._event_source_factory()
         pending_next: asyncio.Task | None = None
         try:
@@ -125,7 +118,7 @@ class AISDKV6StreamAdapter:
                     {pending_next}, timeout=self._heartbeat_interval
                 )
                 if not done:
-                    yield {"type": "heartbeat"}
+                    yield make_event("heartbeat", sequence=0)
                     continue
                 try:
                     event = pending_next.result()

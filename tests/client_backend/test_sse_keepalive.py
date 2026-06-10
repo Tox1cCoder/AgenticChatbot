@@ -23,6 +23,7 @@ try:
         StreamState,
         _build_ui_message_stream_response,
     )
+    from app.services.event_streaming.events import make_event
 except Exception:
     _server_deps_available = False
 
@@ -45,8 +46,8 @@ async def test_ai_sdk_stream_emits_heartbeats_during_slow_source():
     async def slow_event_source():
         await asyncio.sleep(0.05)
         slow_event_emitted.set()
-        yield {"type": "token", "content": "hello"}
-        yield {"type": "complete", "response": {"content": "hello"}}
+        yield make_event("message_delta", sequence=1, data={"text": "hello"})
+        yield make_event("complete", sequence=2)
 
     state = StreamState(message_id="msg-1", text_id="txt-1", reasoning_id="rsn-1")
 
@@ -81,8 +82,8 @@ async def test_ai_sdk_stream_completes_normally_without_heartbeat_when_fast():
     """When the source is fast, the stream should complete with no heartbeats."""
 
     async def fast_event_source():
-        yield {"type": "token", "content": "fast"}
-        yield {"type": "complete", "response": {"content": "fast"}}
+        yield make_event("message_delta", sequence=1, data={"text": "fast"})
+        yield make_event("complete", sequence=2)
 
     state = StreamState(message_id="msg-2", text_id="txt-2", reasoning_id="rsn-2")
 
@@ -105,15 +106,18 @@ async def test_ai_sdk_stream_handles_interrupt_event_with_heartbeat_enabled():
     """Interrupt events should still terminate the stream correctly."""
 
     async def interrupt_source():
-        yield {
-            "type": "interrupt",
-            "thread_id": "t1",
-            "next": ["approval"],
-            "pending_tool_calls": [],
-            "interrupt": {"interrupt_id": "int-1"},
-            "message": "Approval needed",
-        }
-        yield {"type": "complete", "response": {"content": "unreachable"}}
+        yield make_event(
+            "interrupt",
+            sequence=1,
+            data={
+                "thread_id": "t1",
+                "next": ["approval"],
+                "pending_tool_calls": [],
+                "interrupt": {"interrupt_id": "int-1"},
+                "message": "Approval needed",
+            },
+        )
+        yield make_event("complete", sequence=2, data={"message": {"content": "unreachable"}})
 
     state = StreamState(message_id="msg-3", text_id="txt-3", reasoning_id="rsn-3")
 
@@ -222,32 +226,28 @@ def test_stream_sse_uses_extended_read_timeout():
 @pytest.mark.asyncio
 async def test_ai_sdk_tool_output_event_preserves_render_payload():
     async def tool_event_source():
-        yield {
-            "type": "tool",
-            "phase": "start",
-            "name": "canva_create_presentation",
-            "tool_call_id": "tool-call-1",
-            "args": {"prompt": "roadmap"},
-        }
-        yield {
-            "type": "tool",
-            "phase": "end",
-            "name": "canva_create_presentation",
-            "tool_call_id": "tool-call-1",
-            "result": "Created presentation",
-            "render": {
-                "version": 1,
-                "type": "mcp_app",
-                "template_uri": "ui://canva/presentation-viewer.html",
+        yield make_event(
+            "tool_call_available",
+            sequence=1,
+            tool_call_id="tool-call-1",
+            tool_name="canva_create_presentation",
+            data={"args": {"prompt": "roadmap"}},
+        )
+        yield make_event(
+            "tool_execution_end",
+            sequence=2,
+            tool_call_id="tool-call-1",
+            tool_name="canva_create_presentation",
+            data={
+                "output": "Created presentation",
+                "render": {
+                    "version": 1,
+                    "type": "mcp_app",
+                    "template_uri": "ui://canva/presentation-viewer.html",
+                },
             },
-        }
-        yield {
-            "type": "complete",
-            "response": {
-                "content": "Created presentation",
-                "message_metadata": {},
-            },
-        }
+        )
+        yield make_event("complete", sequence=3)
 
     state = StreamState(message_id="msg-render", text_id="txt-render", reasoning_id="rsn-render")
 
@@ -281,24 +281,23 @@ async def test_ai_sdk_render_payload_preserves_structure_and_text_type():
     text-typed render stays a dict; content arrays stay arrays."""
 
     async def tool_event_source():
-        yield {
-            "type": "tool",
-            "phase": "end",
-            "name": "answer_tool",
-            "tool_call_id": "tool-call-text",
-            "result": "The answer is 42.",
-            "render": {
-                "version": 1,
-                "type": "text",
-                "text": "The answer is 42.",
-                "model_content": "The answer is 42.",
-                "content": [{"type": "text", "text": "The answer is 42."}],
+        yield make_event(
+            "tool_execution_end",
+            sequence=1,
+            tool_call_id="tool-call-text",
+            tool_name="answer_tool",
+            data={
+                "output": "The answer is 42.",
+                "render": {
+                    "version": 1,
+                    "type": "text",
+                    "text": "The answer is 42.",
+                    "model_content": "The answer is 42.",
+                    "content": [{"type": "text", "text": "The answer is 42."}],
+                },
             },
-        }
-        yield {
-            "type": "complete",
-            "response": {"content": "The answer is 42.", "message_metadata": {}},
-        }
+        )
+        yield make_event("complete", sequence=2)
 
     state = StreamState(message_id="msg-x", text_id="txt-x", reasoning_id="rsn-x")
 
