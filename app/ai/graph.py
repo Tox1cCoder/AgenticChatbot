@@ -25,7 +25,11 @@ from ..interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..interfaces.workflow_runtime_interface import IWorkflowRuntime
 from ..models.enums import PlanLifecycle
 from ..services.event_streaming.langchain_v3 import iter_v3_events_from_graph
-from ..services.event_streaming.subagents import SubagentEventSink
+from ..services.event_streaming.subagents import (
+    SubagentEventSink,
+    register_subagent_event_sink,
+    resolve_subagent_event_sink,
+)
 from .agent_metadata import (
     agent_identity,
     attach_agent_metadata,
@@ -3011,7 +3015,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         )
 
         context = state.get("context") if isinstance(state.get("context"), dict) else {}
-        event_sink = context.get("subagent_event_sink")
+        event_sink = resolve_subagent_event_sink(context.get("subagent_event_sink_token"))
         dispatcher = (
             PlanningSubagentDispatcher(
                 workflow=self,
@@ -4537,14 +4541,16 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     async def execute_request_stream(self, request: WorkflowExecutionRequest):
         initial_state = self._build_initial_state_from_request(request)
         # Custom subagents (dispatch_subagents) emit lifecycle events into this
-        # sink; it is drained between graph supersteps below. Stored in graph
-        # state context so _build_planning_internal_tools can hand it to the
-        # dispatcher.
+        # sink; it is drained between graph supersteps below. Only a weakref
+        # token enters graph state (state must stay msgpack-serializable for
+        # checkpointing); _build_planning_internal_tools resolves it back.
         subagent_event_sink = SubagentEventSink()
         if isinstance(initial_state, dict):
             context = initial_state.setdefault("context", {})
             if isinstance(context, dict):
-                context["subagent_event_sink"] = subagent_event_sink
+                context["subagent_event_sink_token"] = register_subagent_event_sink(
+                    subagent_event_sink
+                )
         conversation_id = request.conversation_id
         thread_id = self._resolve_thread_id(request.thread_id, conversation_id)
         config = self._build_graph_config(thread_id)

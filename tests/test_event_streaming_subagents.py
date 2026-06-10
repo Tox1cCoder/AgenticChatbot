@@ -8,7 +8,11 @@ from app.ai.planning_subagents import (
     PlanningSubagentTask,
 )
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
-from app.services.event_streaming.subagents import SubagentEventSink
+from app.services.event_streaming.subagents import (
+    SubagentEventSink,
+    register_subagent_event_sink,
+    resolve_subagent_event_sink,
+)
 
 
 class FakeWorkflow:
@@ -57,3 +61,27 @@ async def test_dispatcher_emits_subagent_start_and_end_events():
     assert events[0].subagent.path == ["planning_agent", "worker-a"]
     assert events[-1].subagent.status == "completed"
     assert events[-1].data["output"] == "worker answer"
+
+
+def test_sink_token_keeps_graph_state_checkpoint_serializable():
+    """HITL interrupts persist graph state via msgpack — the sink itself must
+    never enter state, only the registry token (regression: 'Type is not
+    msgpack serializable: SubagentEventSink' broke every interrupt)."""
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+    sink = SubagentEventSink()
+    token = register_subagent_event_sink(sink)
+
+    state_fragment = {"context": {"subagent_event_sink_token": token}}
+    JsonPlusSerializer().dumps_typed(("state", state_fragment))
+
+    assert resolve_subagent_event_sink(token) is sink
+
+
+def test_resolve_sink_returns_none_for_dead_or_unknown_tokens():
+    assert resolve_subagent_event_sink(None) is None
+    assert resolve_subagent_event_sink("unknown") is None
+
+    token = register_subagent_event_sink(SubagentEventSink())
+    # The only strong reference was the local above — entry dies with it.
+    assert resolve_subagent_event_sink(token) is None

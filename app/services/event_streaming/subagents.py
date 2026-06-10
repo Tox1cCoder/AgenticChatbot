@@ -11,7 +11,9 @@ subagents.
 from __future__ import annotations
 
 import asyncio
+import weakref
 from typing import Any
+from uuid import uuid4
 
 from .events import SubagentRef, V3StreamEvent, make_event
 
@@ -57,3 +59,27 @@ class SubagentEventSink:
         while not self._queue.empty():
             events.append(await self._queue.get())
         return events
+
+
+# Graph state must stay msgpack-serializable for LangGraph checkpointing (HITL
+# interrupts persist the full state). The sink itself therefore never enters
+# state — only an opaque string token does. The registry holds weak references:
+# the streaming generator owns the only strong reference, so a sink (and its
+# registry entry) dies with its stream and resumed runs simply resolve to None.
+_SINK_REGISTRY: weakref.WeakValueDictionary[str, SubagentEventSink] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def register_subagent_event_sink(sink: SubagentEventSink) -> str:
+    """Register a sink and return the serializable token to store in state."""
+    token = uuid4().hex
+    _SINK_REGISTRY[token] = sink
+    return token
+
+
+def resolve_subagent_event_sink(token: Any) -> SubagentEventSink | None:
+    """Resolve a state-carried token back to its live sink, if any."""
+    if not isinstance(token, str):
+        return None
+    return _SINK_REGISTRY.get(token)
