@@ -2306,3 +2306,679 @@ git commit --allow-empty -m "test: verify event streaming refactor"
 8. Endpoint compatibility and README update.
 9. Legacy cleanup.
 10. Full regression verification.
+
+---
+
+# Follow-up Plan: Live Subagent Progress (2026-06-10)
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Surface live, per-worker subagent progress on **both** public stream protocols (AI SDK v6 for assistant-ui, internal JSON SSE for Streamlit), interleaved in real time rather than buffered until `dispatch_subagents` returns.
+
+**Architecture:** The canonical `subagent_*` events already flow through the service to both adapters (graph emits legacy dicts → `ai_service._map_workflow_stream` else-branch → `compat.coerce_legacy_event_to_v3` rebuilds `SubagentRef`). Two gaps remain: (1) the graph drains the `SubagentEventSink` only *between* graph events, so events buffer until the blocking `dispatch_subagents` superstep ends; (2) both adapters drop `subagent_*` at their fall-through. This plan adds a concurrent merge at the graph layer and `subagent` projections in both adapters, plus a per-worker incremental renderer in the Streamlit demo.
+
+**Tech Stack:** Python, asyncio, FastAPI `StreamingResponse`, Vercel AI SDK UI Message Stream protocol, Streamlit, pytest (`asyncio_mode=auto`).
+
+### Background facts (verified 2026-06-10)
+
+- `PlanningSubagentDispatcher.dispatch` runs workers concurrently via `asyncio.gather` ([planning_subagents.py:501](app/ai/planning_subagents.py#L501)); each `run_one` emits `subagent_start` → per-artifact `subagent_tool_execution_end` → `subagent_end` into the sink.
+- `SubagentEventSink` is queue-backed; the live sink is resolved from a weakref registry via a state-carried token ([subagents.py](app/services/event_streaming/subagents.py)). The streaming generator owns the only strong reference.
+- `execute_request_stream` creates+registers the sink and currently drains it between graph events ([graph.py:4624-4633](app/ai/graph.py#L4624-L4633)). `resume_with_decisions_stream` uses no sink ([graph.py:4399-4404](app/ai/graph.py#L4399-L4404)).
+- `_map_v3_stream_event` already maps canonical `subagent_*` events to legacy public dicts ([graph.py:4068-4084](app/ai/graph.py#L4068-L4084)).
+- AI SDK adapter drops `subagent_*` ([ai_sdk_v6.py:241-242](app/services/event_streaming/ai_sdk_v6.py#L241-L242)); internal SSE adapter drops them at `return None` ([internal_sse.py:106](app/services/event_streaming/internal_sse.py#L106)).
+- The Streamlit demo's live view is currently driven by the `dispatch_subagents` **tool** start/end ([subagent_activity.py:305-371](app/ui/subagent_activity.py#L305-L371)), so it jumps from "N pending" to "N done" with no per-worker progress. The demo already calls `_upsert_stream_subagent_activity(event)` for `node_complete` events ([demo.py:8017-8021](demo.py#L8017-L8021), [demo.py:8650-8653](demo.py#L8650-L8653)).
+
+### Scope decisions
+
+- **Wire shape:** one part/event type per protocol with a `phase` discriminator (`start` / `tool` / `end`), keyed by the stable `subagent.id` so the FE updates one row in place. AI SDK uses `data-subagent` (transient); Streamlit uses `subagent`.
+- **Always-on, transient, not persisted.** The durable record stays `subagent_results` in message metadata. No DB/persistence changes.
+- **Phase map is shared** (`events.SUBAGENT_PHASE_BY_EVENT`) so both adapters agree.
+- **OUT OF SCOPE (documented, intentional):**
+  - *Resume path live progress.* `resume_with_decisions_stream` keeps `event_sink=None` (consistent with the original Task 4 decision; resume-time `dispatch_subagents` is rare and its state is a `Command`, not a dict, so sink injection needs separate design). Behaviour is unchanged on resume, not silently broken.
+  - *Token-level worker output (`subagent_message_delta`).* Workers run blocking via `_run_agent_in_isolated_context`; streaming their LLM token-by-token is a separate, larger effort. The adapters map `delta`/`tool` phases defensively for forward-compat, but the dispatcher does not emit them today.
+
+### File Structure
+
+- Modify `app/services/event_streaming/events.py`: add the shared `SUBAGENT_PHASE_BY_EVENT` map.
+- Modify `app/services/event_streaming/subagents.py`: add `SubagentEventSink.stream()` / `close()` and the `stream_with_subagent_events()` merge helper.
+- Modify `app/ai/graph.py`: in `execute_request_stream`, replace the between-events drain with the concurrent merge.
+- Modify `app/services/event_streaming/ai_sdk_v6.py`: project `subagent_*` → `data-subagent`.
+- Modify `app/services/event_streaming/internal_sse.py`: project `subagent_*` → `subagent`.
+- Modify `app/ui/subagent_activity.py`: incremental per-worker view from `subagent` events.
+- Modify `demo.py`: route `subagent` events into the live trace panel (both stream loops).
+- Modify `AI_SDK_FE_CONTRACT.md`: document the `data-subagent` part.
+- Tests: `tests/test_event_streaming_subagents.py`, `tests/test_ai_sdk_v6_stream_contract.py`, `tests/test_internal_sse_stream_contract.py`, `tests/test_subagent_activity_live.py` (new).
+
+---
+
+### Task 11: Concurrent merge so subagent events stream live
+
+**Files:**
+- Modify: `app/services/event_streaming/subagents.py`
+- Modify: `app/ai/graph.py` (`execute_request_stream`)
+- Test: `tests/test_event_streaming_subagents.py`
+
+- [ ] **Step 1: Write the failing liveness test**
+
+Add to `tests/test_event_streaming_subagents.py`:
+
+```python
+import asyncio
+
+from app.services.event_streaming.events import make_event
+from app.services.event_streaming.subagents import (
+    SubagentEventSink,
+    stream_with_subagent_events,
+)
+
+
+@pytest.mark.asyncio
+async def test_stream_with_subagent_events_yields_sink_event_while_primary_blocked():
+    sink = SubagentEventSink()
+    gate = asyncio.Event()
+
+    async def primary():
+        yield make_event("message_delta", sequence=1, data={"text": "a"})
+        await gate.wait()  # primary is blocked here while the subagent runs
+        yield make_event("message_delta", sequence=2, data={"text": "b"})
+
+    merged = stream_with_subagent_events(primary(), sink)
+    first = await merged.__anext__()
+    await sink.emit(
+        "subagent_start", task_id="w1", agent_name="search_agent", status="running"
+    )
+    second = await merged.__anext__()  # must be the subagent event, not "b"
+    gate.set()
+    rest = [event async for event in merged]
+
+    assert first.type == "message_delta"
+    assert second.type == "subagent_start"
+    assert [event.type for event in rest] == ["message_delta"]
+```
+
+- [ ] **Step 2: Run it and verify it fails**
+
+Run: `python -m pytest tests/test_event_streaming_subagents.py::test_stream_with_subagent_events_yields_sink_event_while_primary_blocked -q`
+Expected: FAIL with `ImportError: cannot import name 'stream_with_subagent_events'`.
+
+- [ ] **Step 3: Add `stream()` / `close()` to the sink and the merge helper**
+
+In `app/services/event_streaming/subagents.py`, update the imports and the queue type, and append the new members + helper:
+
+```python
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import weakref
+from collections.abc import AsyncGenerator
+from typing import Any
+from uuid import uuid4
+
+from .events import SubagentRef, V3StreamEvent, make_event
+
+_SINK_CLOSED = object()
+```
+
+Change the queue annotation in `__init__` to hold the sentinel too:
+
+```python
+        self._queue: asyncio.Queue[Any] = asyncio.Queue()
+```
+
+Add these methods to `SubagentEventSink` (after `drain`):
+
+```python
+    async def stream(self) -> AsyncGenerator[V3StreamEvent, None]:
+        """Yield events as they are emitted, until :meth:`close` is called."""
+        while True:
+            event = await self._queue.get()
+            if event is _SINK_CLOSED:
+                return
+            yield event
+
+    def close(self) -> None:
+        """Signal :meth:`stream` to stop after already-queued events drain."""
+        self._queue.put_nowait(_SINK_CLOSED)
+```
+
+Append the merge helper at module end:
+
+```python
+async def stream_with_subagent_events(
+    primary: AsyncGenerator[V3StreamEvent, None],
+    sink: SubagentEventSink,
+) -> AsyncGenerator[V3StreamEvent, None]:
+    """Interleave ``primary`` graph events with ``sink`` subagent events live.
+
+    Both sources feed one FIFO queue, so a subagent event surfaces the instant
+    it is emitted instead of buffering until ``primary`` produces its next
+    event. Ends when ``primary`` is exhausted; sink events already enqueued are
+    flushed first. Feeder tasks are cancelled on early exit (client disconnect).
+    """
+    out: asyncio.Queue[Any] = asyncio.Queue()
+    primary_done = object()
+
+    async def _pump_primary() -> None:
+        try:
+            async for event in primary:
+                await out.put(event)
+        finally:
+            await out.put(primary_done)
+
+    async def _pump_sink() -> None:
+        async for event in sink.stream():
+            await out.put(event)
+
+    primary_task = asyncio.ensure_future(_pump_primary())
+    sink_task = asyncio.ensure_future(_pump_sink())
+    try:
+        while True:
+            item = await out.get()
+            if item is primary_done:
+                break
+            yield item
+        sink.close()
+        await sink_task
+        while not out.empty():
+            item = out.get_nowait()
+            if item is not primary_done:
+                yield item
+    finally:
+        sink.close()
+        for task in (primary_task, sink_task):
+            if not task.done():
+                task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.gather(primary_task, sink_task, return_exceptions=True)
+```
+
+- [ ] **Step 4: Run the test and verify it passes**
+
+Run: `python -m pytest tests/test_event_streaming_subagents.py::test_stream_with_subagent_events_yields_sink_event_while_primary_blocked -q`
+Expected: PASS.
+
+- [ ] **Step 5: Wire the merge into `execute_request_stream`**
+
+In `app/ai/graph.py`, extend the existing import (it already imports `SubagentEventSink`, `register_subagent_event_sink`, `resolve_subagent_event_sink`):
+
+```python
+from ..services.event_streaming.subagents import (
+    SubagentEventSink,
+    register_subagent_event_sink,
+    resolve_subagent_event_sink,
+    stream_with_subagent_events,
+)
+```
+
+Replace the drain loop at [graph.py:4624-4633](app/ai/graph.py#L4624-L4633):
+
+```python
+                async for event in iter_v3_events_from_graph(
+                    self.graph, current_state, config=config
+                ):
+                    for public_event in self._map_v3_stream_event(event, ctx):
+                        yield public_event
+                    # Surface any custom-subagent lifecycle events emitted while
+                    # the just-completed superstep ran (dispatch_subagents).
+                    for sub_event in await subagent_event_sink.drain():
+                        for public_sub in self._map_v3_stream_event(sub_event, ctx):
+                            yield public_sub
+```
+
+with the live merge:
+
+```python
+                merged = stream_with_subagent_events(
+                    iter_v3_events_from_graph(self.graph, current_state, config=config),
+                    subagent_event_sink,
+                )
+                async for event in merged:
+                    for public_event in self._map_v3_stream_event(event, ctx):
+                        yield public_event
+```
+
+- [ ] **Step 6: Run subagent + graph streaming regression**
+
+Run: `python -m pytest tests/test_event_streaming_subagents.py tests/test_graph_planning_subagents.py tests/test_message_service_subagent_streaming.py tests/test_graph_streaming_tool_events.py -q`
+Expected: PASS.
+
+- [ ] **Step 7: Commit**
+
+```powershell
+git add app/services/event_streaming/subagents.py app/ai/graph.py tests/test_event_streaming_subagents.py
+git commit -m "feat: stream subagent events live via concurrent sink merge"
+```
+
+---
+
+### Task 12: Shared phase map + AI SDK `data-subagent` projection
+
+**Files:**
+- Modify: `app/services/event_streaming/events.py`
+- Modify: `app/services/event_streaming/ai_sdk_v6.py`
+- Test: `tests/test_ai_sdk_v6_stream_contract.py`
+
+- [ ] **Step 1: Write the failing contract test**
+
+Add to `tests/test_ai_sdk_v6_stream_contract.py` (reuses the file's existing `_collect_payloads` helper):
+
+```python
+from app.services.event_streaming.events import SubagentRef
+
+
+@pytest.mark.asyncio
+async def test_subagent_events_map_to_data_subagent_chunks():
+    async def source():
+        yield make_event(
+            "subagent_start",
+            sequence=1,
+            subagent=SubagentRef(
+                id="w1", name="search_agent", path=["planning_agent", "w1"], status="running"
+            ),
+            data={"task": "Find sources"},
+        )
+        yield make_event(
+            "subagent_tool_execution_end",
+            sequence=2,
+            subagent=SubagentRef(
+                id="w1", name="search_agent", path=["planning_agent", "w1"], status="running"
+            ),
+            tool_call_id="sub-call-1",
+            tool_name="search_documents",
+            data={"output": "hit", "status": "success"},
+        )
+        yield make_event(
+            "subagent_end",
+            sequence=3,
+            subagent=SubagentRef(
+                id="w1", name="search_agent", path=["planning_agent", "w1"], status="completed"
+            ),
+            data={"output": "answer", "summary": "done", "elapsed_ms": 12},
+        )
+        yield make_event("complete", sequence=4, data={"message": {"id": "m-1"}})
+
+    payloads = await _collect_payloads(source)
+    subagent = [p for p in payloads if p != "[DONE]" and p.get("type") == "data-subagent"]
+
+    assert [p["data"]["phase"] for p in subagent] == ["start", "tool", "end"]
+    assert all(p["transient"] is True for p in subagent)
+    assert subagent[0]["data"]["subagent"]["id"] == "w1"
+    assert subagent[1]["data"]["toolName"] == "search_documents"
+    assert subagent[2]["data"]["subagent"]["status"] == "completed"
+    assert subagent[2]["data"]["elapsedMs"] == 12
+```
+
+- [ ] **Step 2: Run it and verify it fails**
+
+Run: `python -m pytest tests/test_ai_sdk_v6_stream_contract.py::test_subagent_events_map_to_data_subagent_chunks -q`
+Expected: FAIL — no `data-subagent` chunks are emitted (adapter drops `subagent_*`).
+
+- [ ] **Step 3: Add the shared phase map**
+
+In `app/services/event_streaming/events.py`, append:
+
+```python
+SUBAGENT_PHASE_BY_EVENT: dict[str, str] = {
+    "subagent_start": "start",
+    "subagent_end": "end",
+    "subagent_tool_call_available": "tool",
+    "subagent_tool_execution_start": "tool",
+    "subagent_tool_execution_end": "tool",
+    "subagent_message_delta": "delta",
+}
+```
+
+- [ ] **Step 4: Project subagent events in the AI SDK adapter**
+
+In `app/services/event_streaming/ai_sdk_v6.py`, update the import:
+
+```python
+from .events import SUBAGENT_PHASE_BY_EVENT, V3StreamEvent, make_event
+```
+
+In `_map_event`, add a dispatch branch before the trailing comment (after the `user_message_created` block):
+
+```python
+        if etype in SUBAGENT_PHASE_BY_EVENT:
+            async for chunk in self._subagent(event):
+                yield chunk
+            return
+```
+
+Add the handler method (next to the other `_…` handlers):
+
+```python
+    async def _subagent(self, event: V3StreamEvent) -> AsyncGenerator[str, None]:
+        data = event.data or {}
+        payload_data: dict[str, Any] = {
+            "phase": SUBAGENT_PHASE_BY_EVENT.get(event.type, "update"),
+            "subagent": event.subagent.model_dump(mode="json") if event.subagent else None,
+        }
+        if event.tool_call_id:
+            payload_data["toolCallId"] = event.tool_call_id
+        if event.tool_name:
+            payload_data["toolName"] = event.tool_name
+        for src_key, out_key in (
+            ("task", "task"),
+            ("output", "output"),
+            ("summary", "summary"),
+            ("status", "status"),
+            ("error", "error"),
+            ("render", "render"),
+            ("text", "text"),
+            ("elapsed_ms", "elapsedMs"),
+        ):
+            value = data.get(src_key)
+            if value is not None:
+                payload_data[out_key] = value
+        yield _sse({"type": "data-subagent", "data": payload_data, "transient": True})
+```
+
+- [ ] **Step 5: Run the test and verify it passes**
+
+Run: `python -m pytest tests/test_ai_sdk_v6_stream_contract.py -q`
+Expected: PASS (the new test plus all existing contract tests).
+
+- [ ] **Step 6: Commit**
+
+```powershell
+git add app/services/event_streaming/events.py app/services/event_streaming/ai_sdk_v6.py tests/test_ai_sdk_v6_stream_contract.py
+git commit -m "feat: surface subagent progress on the ai-sdk stream"
+```
+
+---
+
+### Task 13: Streamlit internal SSE `subagent` projection
+
+**Files:**
+- Modify: `app/services/event_streaming/internal_sse.py`
+- Test: `tests/test_internal_sse_stream_contract.py`
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `tests/test_internal_sse_stream_contract.py`:
+
+```python
+from app.services.event_streaming.events import SubagentRef, make_event
+from app.services.event_streaming.internal_sse import legacy_event_from_v3
+
+
+def test_subagent_start_projects_to_subagent_event():
+    event = make_event(
+        "subagent_start",
+        sequence=1,
+        subagent=SubagentRef(
+            id="w1", name="search_agent", path=["planning_agent", "w1"], status="running"
+        ),
+        data={"task": "Find sources"},
+    )
+    payload = legacy_event_from_v3(event)
+    assert payload["type"] == "subagent"
+    assert payload["phase"] == "start"
+    assert payload["subagent"]["id"] == "w1"
+    assert payload["task"] == "Find sources"
+
+
+def test_subagent_end_projects_status_and_summary():
+    event = make_event(
+        "subagent_end",
+        sequence=2,
+        subagent=SubagentRef(
+            id="w1", name="search_agent", path=["planning_agent", "w1"], status="completed"
+        ),
+        data={"summary": "done", "elapsed_ms": 12},
+    )
+    payload = legacy_event_from_v3(event)
+    assert payload["phase"] == "end"
+    assert payload["subagent"]["status"] == "completed"
+    assert payload["summary"] == "done"
+    assert payload["elapsed_ms"] == 12
+```
+
+- [ ] **Step 2: Run it and verify it fails**
+
+Run: `python -m pytest tests/test_internal_sse_stream_contract.py::test_subagent_start_projects_to_subagent_event -q`
+Expected: FAIL — `legacy_event_from_v3` returns `None` for `subagent_*` (`assert payload["type"]` raises `TypeError`).
+
+- [ ] **Step 3: Project subagent events in the internal SSE adapter**
+
+In `app/services/event_streaming/internal_sse.py`, update the import and add a branch before the final `return None`:
+
+```python
+from .events import SUBAGENT_PHASE_BY_EVENT, V3StreamEvent
+```
+
+```python
+    if event.type in SUBAGENT_PHASE_BY_EVENT:
+        payload: dict[str, Any] = {
+            "type": "subagent",
+            "phase": SUBAGENT_PHASE_BY_EVENT[event.type],
+            "subagent": event.subagent.model_dump(mode="json") if event.subagent else None,
+        }
+        if event.tool_call_id:
+            payload["tool_call_id"] = event.tool_call_id
+        if event.tool_name:
+            payload["tool_name"] = event.tool_name
+        for key in ("task", "output", "summary", "status", "error", "render", "text", "elapsed_ms"):
+            value = event.data.get(key)
+            if value is not None:
+                payload[key] = value
+        return payload
+    return None
+```
+
+- [ ] **Step 4: Run the test and verify it passes**
+
+Run: `python -m pytest tests/test_internal_sse_stream_contract.py -q`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```powershell
+git add app/services/event_streaming/internal_sse.py tests/test_internal_sse_stream_contract.py
+git commit -m "feat: surface subagent progress on the streamlit sse stream"
+```
+
+---
+
+### Task 14: Streamlit demo per-worker live rendering
+
+**Files:**
+- Modify: `app/ui/subagent_activity.py` (`build_live_subagent_activity_view`)
+- Modify: `demo.py` (two stream loops)
+- Test: `tests/test_subagent_activity_live.py` (new)
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_subagent_activity_live.py`:
+
+```python
+from __future__ import annotations
+
+from app.ui.subagent_activity import build_live_subagent_activity_view
+
+
+def _subagent_event(phase, *, worker_id, agent, status, **extra):
+    return {
+        "type": "subagent",
+        "phase": phase,
+        "subagent": {"id": worker_id, "name": agent, "path": ["planning_agent", worker_id], "status": status},
+        **extra,
+    }
+
+
+def test_live_view_tracks_each_worker_independently():
+    view = build_live_subagent_activity_view(
+        _subagent_event("start", worker_id="w1", agent="search_agent", status="running", task="Search"),
+        previous=None,
+    )
+    view = build_live_subagent_activity_view(
+        _subagent_event("start", worker_id="w2", agent="rag_agent", status="running", task="Read"),
+        previous=view,
+    )
+    assert view["total"] == 2
+    assert view["running"] == 2
+    assert view["status"] == "running"
+
+    view = build_live_subagent_activity_view(
+        _subagent_event("end", worker_id="w1", agent="search_agent", status="completed", summary="found"),
+        previous=view,
+    )
+    assert view["completed"] == 1
+    assert view["running"] == 1
+    by_id = {row["id"]: row for row in view["results"]}
+    assert by_id["w1"]["status"] == "completed"
+    assert by_id["w1"]["summary"] == "found"
+    assert by_id["w2"]["status"] == "running"
+
+    view = build_live_subagent_activity_view(
+        _subagent_event("end", worker_id="w2", agent="rag_agent", status="completed", summary="read"),
+        previous=view,
+    )
+    assert view["status"] == "completed"
+    assert view["completed"] == 2
+```
+
+- [ ] **Step 2: Run it and verify it fails**
+
+Run: `python -m pytest tests/test_subagent_activity_live.py -q`
+Expected: FAIL — `build_live_subagent_activity_view` ignores `{"type": "subagent"}` events and returns `previous` (the first call returns `None`, so `view["total"]` raises `TypeError`).
+
+- [ ] **Step 3: Handle `subagent` events in the view builder**
+
+In `app/ui/subagent_activity.py`, add a branch at the top of `build_live_subagent_activity_view` (right after the `if not isinstance(tool_event, dict): return previous` guard):
+
+```python
+    if tool_event.get("type") == "subagent":
+        return _merge_live_subagent_event(tool_event, previous)
+```
+
+Add the helper above `build_live_subagent_activity_view`:
+
+```python
+def _merge_live_subagent_event(
+    event: dict[str, Any], previous: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    sub = event.get("subagent")
+    if not isinstance(sub, dict):
+        return previous
+    worker_id = str(sub.get("id") or "").strip()
+    if not worker_id:
+        return previous
+
+    order: list[str] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in _as_list((previous or {}).get("results")):
+        if isinstance(row, dict):
+            row_id = str(row.get("id") or "")
+            by_id[row_id] = dict(row)
+            order.append(row_id)
+
+    entry = by_id.get(worker_id)
+    if entry is None:
+        entry = {"id": worker_id, "agent": str(sub.get("name") or "unknown_agent")}
+        by_id[worker_id] = entry
+        order.append(worker_id)
+
+    entry["status"] = str(sub.get("status") or entry.get("status") or "running").strip().lower()
+
+    phase = str(event.get("phase") or "").strip().lower()
+    if phase == "start":
+        task_text = event.get("task")
+        if isinstance(task_text, str) and task_text.strip() and not entry.get("summary"):
+            entry["summary"] = task_text.strip()
+    elif phase == "tool":
+        artifacts = _as_list(entry.get("artifacts"))
+        artifacts.append(
+            {
+                "tool_call_id": event.get("tool_call_id"),
+                "tool": event.get("tool_name"),
+                "output": event.get("output"),
+                "status": event.get("status"),
+            }
+        )
+        entry["artifacts"] = artifacts
+    elif phase == "end":
+        for key in ("summary", "elapsed_ms", "requested_model", "resolved_model", "error"):
+            value = event.get(key)
+            if value is not None:
+                entry[key] = value
+
+    rebuilt = [by_id[row_id] for row_id in order]
+    dispatch_status = "running" if any(r.get("status") == "running" for r in rebuilt) else "completed"
+    return _build_activity_view(
+        results=rebuilt,
+        rationales=_as_list((previous or {}).get("rationales")),
+        dispatch_statuses=[dispatch_status],
+    )
+```
+
+- [ ] **Step 4: Run the test and verify it passes**
+
+Run: `python -m pytest tests/test_subagent_activity_live.py -q`
+Expected: PASS.
+
+- [ ] **Step 5: Route `subagent` events into both demo stream loops**
+
+In `demo.py`, add a branch immediately after the streaming-loop `node_complete` handler at [demo.py:8017-8021](demo.py#L8017-L8021):
+
+```python
+            if event_type == "subagent":
+                if _upsert_stream_subagent_activity(event):
+                    render_live_trace_panel(trace_placeholder)
+                    status.update(label="Subagents: working...", state="running")
+                continue
+```
+
+And after the resume-loop `node_complete` handler at [demo.py:8650-8653](demo.py#L8650-L8653):
+
+```python
+                        elif event_type == "subagent":
+                            if _upsert_stream_subagent_activity(event):
+                                render_live_trace_panel(trace_placeholder)
+                                status.update(label="Subagents: working...", state="running")
+```
+
+- [ ] **Step 6: Verify the demo still imports and the activity suite is green**
+
+Run: `python -m pytest tests/test_subagent_activity_live.py tests/test_demo_subagent_activity.py -q`
+Run: `python -c "import ast; ast.parse(open('demo.py', encoding='utf-8').read())"`
+Expected: tests PASS; `demo.py` parses with no output.
+
+- [ ] **Step 7: Commit**
+
+```powershell
+git add app/ui/subagent_activity.py demo.py tests/test_subagent_activity_live.py
+git commit -m "feat: render live per-worker subagent progress in the streamlit demo"
+```
+
+---
+
+### Task 15: Update the AI SDK frontend contract
+
+**Files:**
+- Modify: `AI_SDK_FE_CONTRACT.md`
+
+- [ ] **Step 1: Document the `data-subagent` part**
+
+Add a "Subagent Progress" subsection after the "Other data events" block in `AI_SDK_FE_CONTRACT.md` describing: the `data-subagent` transient part, the `phase` values (`start` / `tool` / `end`), the stable `data.subagent.id` key for in-place row updates, the phase-specific fields (`task`, `toolName`/`toolCallId`, `output`, `summary`, `status`, `elapsedMs`, `error`), and the note that the durable record is `backendMeta.subagent_results`. (Exact content is applied in this plan's companion edit; keep it in sync with `ai_sdk_v6.py::_subagent`.)
+
+- [ ] **Step 2: Commit**
+
+```powershell
+git add AI_SDK_FE_CONTRACT.md
+git commit -m "docs: document data-subagent progress events for the frontend"
+```
+
+---
+
+## Follow-up Plan Acceptance Criteria
+
+- Subagent events interleave with parent events in real time on the AI SDK path (`data-subagent`, transient) and the Streamlit path (`subagent`), proven by the liveness test in Task 11.
+- Both adapters emit one event/part per phase (`start` / `tool` / `end`), keyed by `subagent.id`.
+- The Streamlit demo updates each worker row independently as workers start, run tools, and finish.
+- The AI SDK wire contract is preserved for all existing chunks; `data-subagent` is purely additive and transient.
+- Resume path and token-level worker streaming remain out of scope and are documented as such.
+- `AI_SDK_FE_CONTRACT.md` documents the new part.
+- Focused suites green: `tests/test_event_streaming_subagents.py`, `tests/test_ai_sdk_v6_stream_contract.py`, `tests/test_internal_sse_stream_contract.py`, `tests/test_subagent_activity_live.py`, plus the subagent/graph regression set.

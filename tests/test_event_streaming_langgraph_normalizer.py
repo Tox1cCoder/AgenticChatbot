@@ -12,7 +12,6 @@ from app.services.event_streaming.langchain_v3 import (
     normalize_update_chunk,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fallback (v1/v2 tuple) helpers — these back the non-graph / FakeGraph path.
 # ---------------------------------------------------------------------------
@@ -142,7 +141,11 @@ def test_translator_text_delta_becomes_message_delta():
     events = list(
         t.translate(
             _messages_event(
-                {"event": "content-block-delta", "index": 0, "delta": {"type": "text-delta", "text": "hi"}}
+                {
+                    "event": "content-block-delta",
+                    "index": 0,
+                    "delta": {"type": "text-delta", "text": "hi"},
+                }
             )
         )
     )
@@ -222,7 +225,9 @@ def test_translator_content_block_finish_tool_call_becomes_tool_call_available()
 
 def test_translator_new_tool_message_in_values_becomes_tool_execution_end():
     t = V3ProtocolTranslator()
-    ai = AIMessage(content="", tool_calls=[{"id": "call-1", "name": "search_documents", "args": {}}])
+    ai = AIMessage(
+        content="", tool_calls=[{"id": "call-1", "name": "search_documents", "args": {}}]
+    )
     tool_msg = ToolMessage(content="results", tool_call_id="call-1", name="search_documents")
     # First snapshot: just the AI message (tool call available).
     list(t.translate(_v3("values", {"messages": [ai]}, seq=1)))
@@ -292,12 +297,42 @@ class _FakeTupleGraph:
             yield chunk
 
 
+class _FakeLazyVersionErrorGraph:
+    """Mirrors langchain-core <1.4 / langgraph <1.2.4.
+
+    ``astream_events(version="v3")`` returns a *non-awaitable* async generator
+    whose version check raises ``NotImplementedError`` only on the first
+    iteration (not at call time), exactly like the installed base ``Runnable``.
+    It also implements ``astream()`` so the tuple fallback can run.
+    """
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    def astream_events(self, _input, *, config=None, version="v2", **kwargs):
+        async def _gen():
+            raise NotImplementedError(
+                'Only versions "v1" and "v2" of the schema is currently supported.'
+            )
+            yield  # pragma: no cover - marks _gen as an async generator
+
+        return _gen()
+
+    async def astream(self, _input, *, config=None, stream_mode=None, **kwargs):
+        for chunk in self._chunks:
+            yield chunk
+
+
 @pytest.mark.asyncio
 async def test_iter_v3_uses_protocol_path_for_v3_graph():
     graph = _FakeV3Graph(
         [
             _messages_event(
-                {"event": "content-block-delta", "index": 0, "delta": {"type": "text-delta", "text": "hi"}}
+                {
+                    "event": "content-block-delta",
+                    "index": 0,
+                    "delta": {"type": "text-delta", "text": "hi"},
+                }
             ),
         ]
     )
@@ -315,6 +350,24 @@ async def test_iter_v3_falls_back_to_tuple_path_when_no_astream_events():
     )
     events = [e async for e in iter_v3_events_from_graph(graph, {"messages": []}, config={})]
     # Fallback wraps both message chunks and node updates as state_snapshot carriers.
+    assert events
+    assert all(e.type == "state_snapshot" for e in events)
+    assert events[0].data["kind"] == "messages_tuple"
+    assert events[1].data["kind"] == "updates_tuple"
+
+
+@pytest.mark.asyncio
+async def test_iter_v3_falls_back_when_v3_version_check_raises_on_iteration():
+    """Old langchain raises the v3 version error lazily on first iteration, not
+    at open time. The dispatcher must still fall back to the tuple path instead
+    of letting that NotImplementedError surface to the stream."""
+    graph = _FakeLazyVersionErrorGraph(
+        [
+            ("messages", (AIMessageChunk(content="hello"), {"langgraph_node": "chat_agent"})),
+            ("updates", {"chat_agent": {"messages": [AIMessage(content="done")]}}),
+        ]
+    )
+    events = [e async for e in iter_v3_events_from_graph(graph, {"messages": []}, config={})]
     assert events
     assert all(e.type == "state_snapshot" for e in events)
     assert events[0].data["kind"] == "messages_tuple"

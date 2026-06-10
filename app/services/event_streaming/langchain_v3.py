@@ -22,6 +22,7 @@ canonical :class:`V3StreamEvent` objects.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 from collections.abc import AsyncGenerator, Iterable
 from typing import Any
@@ -433,6 +434,16 @@ async def _open_v3_stream(graph: Any, state: Any, *, config: dict[str, Any] | No
     return stream
 
 
+async def _aclose_quietly(stream: Any) -> None:
+    """Finalize a partially-consumed async stream, ignoring shutdown errors."""
+    aclose = getattr(stream, "aclose", None)
+    if aclose is None:
+        return
+    # Best-effort cleanup of an already-dead stream; close failures are not actionable.
+    with contextlib.suppress(Exception):
+        await aclose()
+
+
 async def _iter_tuple_fallback(
     graph: Any,
     state: Any,
@@ -495,10 +506,24 @@ async def iter_v3_events_from_graph(
 
     if v3_stream is not None:
         translator = V3ProtocolTranslator()
-        async for raw in v3_stream:
-            for event in translator.translate(raw):
+        iterator = v3_stream.__aiter__()
+        # langchain-core <1.4 / langgraph <1.2.4 return a *non-awaitable* async
+        # generator whose v3 version check raises only once iteration starts, not
+        # at open time above. Probe the first event so that case still falls back
+        # to the v1/v2 tuple path instead of surfacing the version error.
+        try:
+            first = await iterator.__anext__()
+        except StopAsyncIteration:
+            return
+        except (NotImplementedError, AttributeError, TypeError, ValueError):
+            await _aclose_quietly(v3_stream)
+        else:
+            for event in translator.translate(first):
                 yield event
-        return
+            async for raw in iterator:
+                for event in translator.translate(raw):
+                    yield event
+            return
 
     async for event in _iter_tuple_fallback(graph, state, config=config):
         yield event
