@@ -109,15 +109,24 @@ def test_resolve_custom_agents_state_uses_service():
 
 
 def test_agent_selected_event_adds_name_for_custom_only():
+    from app.services.event_streaming.internal_sse import legacy_event_from_v3
     from app.services.message_service import MessageService
 
     rid = f"custom_agent:{uuid4()}"
-    custom = MessageService._agent_selected_event(rid, {rid: {"name": "Analyst"}})
-    assert custom["agent"] == rid
-    assert custom["agent_name"] == "Analyst"
+    custom = MessageService._agent_selected_event(rid, {rid: {"name": "Analyst"}}, sequence=1)
+    assert custom.type == "agent_selected"
+    assert custom.agent == rid
+    assert custom.data["agent_name"] == "Analyst"
+    assert legacy_event_from_v3(custom) == {
+        "type": "agent_selected",
+        "agent": rid,
+        "agent_name": "Analyst",
+    }
     # Base agents are emitted unchanged (no agent_name key).
-    base = MessageService._agent_selected_event("chat_agent", {rid: {"name": "Analyst"}})
-    assert base == {"type": "agent_selected", "agent": "chat_agent"}
+    base = MessageService._agent_selected_event(
+        "chat_agent", {rid: {"name": "Analyst"}}, sequence=2
+    )
+    assert legacy_event_from_v3(base) == {"type": "agent_selected", "agent": "chat_agent"}
 
 
 def test_resume_revalidation_conflicts_when_custom_agent_detached():
@@ -167,17 +176,21 @@ def test_resume_lock_blocks_delete_for_paused_custom_agent(paused_env):
 
 
 def test_agent_selected_event_still_adds_name_for_custom_only():
+    from app.services.event_streaming.internal_sse import legacy_event_from_v3
     from app.services.message_service import MessageService
 
     rid = f"custom_agent:{uuid4()}"
-    custom = MessageService._agent_selected_event(rid, {rid: {"name": "Analyst"}})
+    custom = MessageService._agent_selected_event(rid, {rid: {"name": "Analyst"}}, sequence=1)
 
-    assert custom == {
+    assert legacy_event_from_v3(custom) == {
         "type": "agent_selected",
         "agent": rid,
         "agent_name": "Analyst",
     }
-    assert MessageService._agent_selected_event("chat_agent", {rid: {"name": "Analyst"}}) == {
+    base = MessageService._agent_selected_event(
+        "chat_agent", {rid: {"name": "Analyst"}}, sequence=2
+    )
+    assert legacy_event_from_v3(base) == {
         "type": "agent_selected",
         "agent": "chat_agent",
     }

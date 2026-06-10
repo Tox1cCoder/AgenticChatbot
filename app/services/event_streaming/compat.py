@@ -12,6 +12,7 @@ from typing import Any, cast
 
 from app.services.event_streaming.events import (
     StreamEventType,
+    SubagentRef,
     V3StreamEvent,
     make_event,
 )
@@ -27,6 +28,15 @@ _DIRECT_EVENT_TYPES: set[str] = {
     "title_updated",
 }
 
+_SUBAGENT_EVENT_TYPES: set[str] = {
+    "subagent_start",
+    "subagent_message_delta",
+    "subagent_tool_call_available",
+    "subagent_tool_execution_start",
+    "subagent_tool_execution_end",
+    "subagent_end",
+}
+
 
 def coerce_legacy_event_to_v3(
     event: dict[str, Any] | V3StreamEvent,
@@ -38,9 +48,13 @@ def coerce_legacy_event_to_v3(
 
     event_type = event.get("type")
     if event_type == "token":
-        return make_event("message_delta", sequence=sequence, data={"text": event.get("content", "")})
+        return make_event(
+            "message_delta", sequence=sequence, data={"text": event.get("content", "")}
+        )
     if event_type == "thinking":
-        return make_event("reasoning_delta", sequence=sequence, data={"text": event.get("content", "")})
+        return make_event(
+            "reasoning_delta", sequence=sequence, data={"text": event.get("content", "")}
+        )
     if event_type in {"tool", "tool_start"}:
         phase = event.get("phase")
         if event_type == "tool_start" or phase == "start":
@@ -82,6 +96,22 @@ def coerce_legacy_event_to_v3(
             sequence=sequence,
             node=event.get("node"),
             data=payload,
+        )
+    if event_type in _SUBAGENT_EVENT_TYPES:
+        subagent_payload = event.get("subagent")
+        subagent = (
+            SubagentRef.model_validate(subagent_payload)
+            if isinstance(subagent_payload, dict)
+            else None
+        )
+        data = event.get("data")
+        return make_event(
+            cast(StreamEventType, event_type),
+            sequence=sequence,
+            subagent=subagent,
+            tool_call_id=event.get("tool_call_id"),
+            tool_name=event.get("tool_name"),
+            data=dict(data) if isinstance(data, dict) else {},
         )
     if event_type in _DIRECT_EVENT_TYPES:
         return make_event(cast(StreamEventType, event_type), sequence=sequence, data=dict(event))

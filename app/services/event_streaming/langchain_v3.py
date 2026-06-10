@@ -30,7 +30,6 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from .events import SubagentRef, V3StreamEvent, make_event
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -368,7 +367,10 @@ class V3ProtocolTranslator:
             sequence=self._next(),
             namespace=namespace,
             node=str(node) if node else None,
-            data={"kind": "updates_tuple", "node_state": values if isinstance(values, dict) else {}},
+            data={
+                "kind": "updates_tuple",
+                "node_state": values if isinstance(values, dict) else {},
+            },
         )
 
     def _translate_lifecycle(

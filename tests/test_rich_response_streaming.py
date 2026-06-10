@@ -114,7 +114,7 @@ async def test_ai_service_suppresses_rich_items_without_capable_request(monkeypa
         )
     ]
 
-    assert all(event.get("type") != "rich_items" for event in events)
+    assert all(event.type != "rich_items" for event in events)
 
 
 @pytest.mark.asyncio
@@ -136,7 +136,7 @@ async def test_ai_service_suppresses_rich_items_while_rollout_disabled(monkeypat
         )
     ]
 
-    assert all(event.get("type") != "rich_items" for event in events)
+    assert all(event.type != "rich_items" for event in events)
 
 
 @pytest.mark.asyncio
@@ -158,7 +158,7 @@ async def test_ai_service_suppresses_resume_rich_items_without_capability(monkey
         )
     ]
 
-    assert all(event.get("type") != "rich_items" for event in events)
+    assert all(event.type != "rich_items" for event in events)
 
 
 @pytest.mark.asyncio
@@ -340,7 +340,7 @@ async def test_message_service_forwards_rich_items_during_new_message_stream():
         )
     ]
 
-    assert any(event.get("type") == "rich_items" for event in events)
+    assert any(event.type == "rich_items" for event in events)
 
 
 @pytest.mark.asyncio
@@ -375,7 +375,7 @@ async def test_message_service_forwards_rich_items_during_resume_stream():
         )
     ]
 
-    assert any(event.get("type") == "rich_items" for event in events)
+    assert any(event.type == "rich_items" for event in events)
 
 
 def test_live_widget_rich_item_does_not_embed_state():

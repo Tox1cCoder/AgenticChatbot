@@ -46,6 +46,8 @@ from app.schemas.workflow import (
 )
 from app.services.ai_service import AIService
 from app.services.client_device_service import ClientDeviceService
+from app.services.event_streaming.compat import coerce_legacy_event_to_v3
+from app.services.event_streaming.events import V3StreamEvent, make_event
 from app.services.generation_registry import get_generation_registry
 from app.utils.text_processing import fix_markdown_code_blocks, sanitize_persona
 from app.utils.validation.conversation_validation import ConversationValidationUtils
@@ -93,6 +95,23 @@ def _merge_stream_tool_artifacts_into_response(
         existing_by_key[key] = artifact
 
     response.tool_artifacts = existing or None
+
+
+def _service_event_from_ai_event(
+    event: dict | V3StreamEvent,
+    *,
+    sequence: int,
+) -> V3StreamEvent:
+    """Coerce an AI-service event to canonical and re-stamp its sequence.
+
+    The service interleaves its own events (``user_message_created``,
+    ``title_updated``, terminal ``complete``/``error``/``interrupt``) with
+    forwarded AI events, so sequence numbers are re-assigned here to keep the
+    public stream strictly monotonic.
+    """
+    if isinstance(event, V3StreamEvent):
+        return event.model_copy(update={"sequence": sequence})
+    return coerce_legacy_event_to_v3(event, sequence=sequence)
 
 
 class MessageService(IMessageService):
@@ -848,11 +867,23 @@ class MessageService(IMessageService):
             user_id=user_id,
         )
 
+        sequence = 0
+
+        def _next_sequence() -> int:
+            nonlocal sequence
+            sequence += 1
+            return sequence
+
         # Yield user message creation event
-        yield {
-            "type": "user_message_created",
-            "message": MessageRead.model_validate(created_message).model_dump(mode="json"),
-        }
+        yield make_event(
+            "user_message_created",
+            sequence=_next_sequence(),
+            conversation_id=str(message_create_data.conversation_id),
+            message_id=str(user_message_id),
+            data={
+                "message": MessageRead.model_validate(created_message).model_dump(mode="json")
+            },
+        )
 
         # Start async title generation only if this is a user message and the first one
         title_task = None
@@ -898,7 +929,7 @@ class MessageService(IMessageService):
             stream_tool_args_by_id: dict[str, Any] = {}
 
             try:
-                async for event in self.ai_service.execute_request_stream(workflow_request):
+                async for raw_event in self.ai_service.execute_request_stream(workflow_request):
                     # ---- Check cancellation before processing each event ----
                     if inflight.is_cancelled:
                         logging.info(
@@ -907,67 +938,73 @@ class MessageService(IMessageService):
                         )
                         break
 
-                    event_type = event.get("type")
+                    event = _service_event_from_ai_event(
+                        raw_event, sequence=_next_sequence()
+                    )
+                    event_type = event.type
 
                     if event_type == "agent_selected":
-                        inflight.selected_agent = event.get("agent")
+                        selected_agent = event.agent or event.data.get("agent")
+                        inflight.selected_agent = selected_agent
                         inflight.touch()
                         yield self._agent_selected_event(
-                            event.get("agent"), workflow_request.custom_agents
+                            selected_agent,
+                            workflow_request.custom_agents,
+                            sequence=event.sequence,
                         )
 
-                    elif event_type == "token":
-                        token_content = event.get("content", "")
-                        inflight.partial_text += token_content
+                    elif event_type == "message_delta":
+                        inflight.partial_text += event.data.get("text", "")
                         inflight.touch()
-                        yield {"type": "token", "content": token_content}
+                        yield event
 
-                    elif event_type == "thinking":
-                        thinking_content = event.get("content", "")
-                        inflight.partial_thinking += thinking_content
+                    elif event_type == "reasoning_delta":
+                        inflight.partial_thinking += event.data.get("text", "")
                         inflight.touch()
-                        yield {"type": "thinking", "content": thinking_content}
+                        yield event
 
-                    elif event_type == "tool":
+                    elif event_type == "tool_call_available":
                         inflight.touch()
-                        tool_call_id = event.get("tool_call_id")
-                        if event.get("phase") == "start" and tool_call_id is not None:
-                            stream_tool_args_by_id[str(tool_call_id)] = event.get("args")
+                        if event.tool_call_id is not None:
+                            stream_tool_args_by_id[str(event.tool_call_id)] = event.data.get(
+                                "args"
+                            )
+                        yield event
+
+                    elif event_type == "tool_execution_end":
+                        inflight.touch()
                         # Accumulate artifacts from completed tool calls so we
                         # can derive live_widgets on interrupt messages.
-                        if event.get("phase") == "end" and event.get("name"):
+                        if event.tool_name:
                             from app.ai.tool_execution import build_tool_artifact
 
-                            tool_args = event.get("args")
-                            if tool_args is None and tool_call_id is not None:
-                                tool_args = stream_tool_args_by_id.get(str(tool_call_id))
+                            output = event.data.get("output")
+                            error = event.data.get("error")
                             stream_tool_artifacts.append(
                                 build_tool_artifact(
-                                    tool_call_id=tool_call_id,
-                                    tool_name=event.get("name", "unknown"),
-                                    tool_args=tool_args,
-                                    output_text=(
-                                        str(event["result"])
-                                        if event.get("result") is not None
+                                    tool_call_id=event.tool_call_id,
+                                    tool_name=event.tool_name or "unknown",
+                                    tool_args=(
+                                        stream_tool_args_by_id.get(str(event.tool_call_id))
+                                        if event.tool_call_id is not None
                                         else None
                                     ),
-                                    error=None
-                                    if event.get("state") != "error"
-                                    else str(event.get("result", "")),
-                                    render=event.get("render"),
+                                    output_text=str(output) if output is not None else None,
+                                    error=str(error) if error else None,
+                                    render=event.data.get("render"),
                                 )
                             )
-                        yield dict(event)
+                        yield event
 
                     elif event_type == "rich_items":
                         # Preserve safe progressive rich-item upserts for
                         # clients that render marker-positioned output live.
                         inflight.touch()
-                        yield dict(event)
+                        yield event
 
                     elif event_type == "interrupt":
                         # Yield interrupt event - workflow paused for human approval
-                        interrupt_response = event.get("interrupt")
+                        interrupt_response = event.data.get("interrupt")
                         interrupt_id = (
                             interrupt_response.get("interrupt_id") if interrupt_response else None
                         )
@@ -982,28 +1019,34 @@ class MessageService(IMessageService):
                             PlanLifecycle.paused,
                         )
 
-                        yield {
-                            "type": "interrupt",
-                            "thread_id": event.get("thread_id")
-                            or str(message_create_data.conversation_id),
-                            "next": event.get("next"),
-                            "pending_tool_calls": event.get("pending_tool_calls"),
-                            "interrupt": interrupt_response,
-                            "message": self._persist_interrupt_bot_message(
-                                conversation_id=message_create_data.conversation_id,
-                                interrupt_payload=interrupt_response,
-                                sanitized_persona=sanitized_persona,
-                                pending_tool_calls=event.get("pending_tool_calls"),
-                                thread_id=event.get("thread_id")
-                                or str(message_create_data.conversation_id),
-                                next_nodes=event.get("next"),
-                                user_id=resolved_user_id,
-                                message_id=bot_message_id,
-                                tool_artifacts=stream_tool_artifacts or None,
-                                selected_agent=inflight.selected_agent,
-                                custom_agents=workflow_request.custom_agents,
-                            ).model_dump(mode="json"),
-                        }
+                        interrupt_thread_id = event.data.get("thread_id") or str(
+                            message_create_data.conversation_id
+                        )
+                        yield make_event(
+                            "interrupt",
+                            sequence=event.sequence,
+                            conversation_id=str(message_create_data.conversation_id),
+                            message_id=str(bot_message_id),
+                            data={
+                                "thread_id": interrupt_thread_id,
+                                "next": event.data.get("next"),
+                                "pending_tool_calls": event.data.get("pending_tool_calls"),
+                                "interrupt": interrupt_response,
+                                "message": self._persist_interrupt_bot_message(
+                                    conversation_id=message_create_data.conversation_id,
+                                    interrupt_payload=interrupt_response,
+                                    sanitized_persona=sanitized_persona,
+                                    pending_tool_calls=event.data.get("pending_tool_calls"),
+                                    thread_id=interrupt_thread_id,
+                                    next_nodes=event.data.get("next"),
+                                    user_id=resolved_user_id,
+                                    message_id=bot_message_id,
+                                    tool_artifacts=stream_tool_artifacts or None,
+                                    selected_agent=inflight.selected_agent,
+                                    custom_agents=workflow_request.custom_agents,
+                                ).model_dump(mode="json"),
+                            },
+                        )
                         # Workflow is paused - don't create a bot message yet.
                         # Keep the entry as a paused lock token (carrying the
                         # resolved selected_agent) so a custom agent cannot be
@@ -1013,28 +1056,22 @@ class MessageService(IMessageService):
                         registry.mark_paused(user_message_id)
                         return
 
-                    elif event_type == "continuation_start":
-                        # Auto-continue round marker — pass through without breaking
-                        inflight.touch()
-                        yield event
-
-                    elif event_type == "node_complete":
-                        # Node completion event — pass through without breaking
-                        inflight.touch()
-                        yield event
-
                     elif event_type == "complete":
                         # Store final response
-                        bot_response = event.get("response")
-                        extract_response_content(bot_response, NO_RESPONSE_GENERATED)
+                        bot_response = event.data.get("response")
                         break
 
                     elif event_type == "error":
                         # Handle error
-                        bot_response = event.get("response")
-                        error_msg = event.get("error", UNKNOWN_ERROR)
-                        extract_response_content(bot_response, f"Error: {error_msg}")
+                        bot_response = event.data.get("response")
                         break
+
+                    else:
+                        # state_snapshot (legacy node_complete / continuation
+                        # markers), subagent lifecycle, and other canonical
+                        # events pass through without breaking.
+                        inflight.touch()
+                        yield event
 
                 # ---- Handle cancellation after the loop exits ----
                 if inflight.is_cancelled:
@@ -1095,20 +1132,27 @@ class MessageService(IMessageService):
                 if title_task:
                     generated_title = await title_task
                     if generated_title:
-                        title_event = {
-                            "type": "title_updated",
-                            "title": generated_title,
-                            "conversation_id": str(message_create_data.conversation_id),
-                        }
+                        title_event = make_event(
+                            "title_updated",
+                            sequence=_next_sequence(),
+                            conversation_id=str(message_create_data.conversation_id),
+                            data={
+                                "title": generated_title,
+                                "conversation_id": str(message_create_data.conversation_id),
+                            },
+                        )
 
                 if title_event:
                     yield title_event
 
                 # Yield final completion event with full message
-                yield {
-                    "type": "complete",
-                    "message": bot_message.model_dump(mode="json"),
-                }
+                yield make_event(
+                    "complete",
+                    sequence=_next_sequence(),
+                    conversation_id=str(message_create_data.conversation_id),
+                    message_id=str(bot_message.id),
+                    data={"message": bot_message.model_dump(mode="json")},
+                )
 
             except (asyncio.CancelledError, GeneratorExit):
                 # Cancellation / disconnect: persist partial text if available,
@@ -1159,11 +1203,16 @@ class MessageService(IMessageService):
                 inflight.resolve(error_message.model_dump(mode="json"))
                 registry.remove(user_message_id)
 
-                yield {
-                    "type": "error",
-                    "error": str(exc),
-                    "message": error_message.model_dump(mode="json"),
-                }
+                yield make_event(
+                    "error",
+                    sequence=_next_sequence(),
+                    conversation_id=str(message_create_data.conversation_id),
+                    message_id=str(bot_message_id),
+                    data={
+                        "error": str(exc),
+                        "message": error_message.model_dump(mode="json"),
+                    },
+                )
                 _cancel_title_task()
 
     def _validate_and_claim_interrupt_resume(
@@ -1553,63 +1602,67 @@ class MessageService(IMessageService):
         resume_selected_agent: str | None = None
         resume_custom_agents = self._resolve_custom_agents_state(user_id, conversation_id)
 
+        sequence = 0
+
+        def _next_sequence() -> int:
+            nonlocal sequence
+            sequence += 1
+            return sequence
+
         try:
-            async for event in self.ai_service.resume_interrupted_execution_stream(
+            async for raw_event in self.ai_service.resume_interrupted_execution_stream(
                 thread_id=thread_id,
                 decisions=decisions,
                 inline_rich_response_v1=inline_rich_response_v1,
             ):
-                event_type = event.get("type")
+                event = _service_event_from_ai_event(raw_event, sequence=_next_sequence())
+                event_type = event.type
 
                 if event_type == "agent_selected":
-                    resume_selected_agent = event.get("agent")
+                    resume_selected_agent = event.agent or event.data.get("agent")
                     yield self._agent_selected_event(
                         resume_selected_agent,
                         resume_custom_agents,
+                        sequence=event.sequence,
                     )
 
-                elif event_type == "token":
-                    token_content = event.get("content", "")
-                    partial_text += token_content
-                    yield {"type": "token", "content": token_content}
+                elif event_type == "message_delta":
+                    partial_text += event.data.get("text", "")
+                    yield event
 
-                elif event_type == "thinking":
-                    yield {"type": "thinking", "content": event.get("content", "")}
+                elif event_type == "reasoning_delta":
+                    yield event
 
-                elif event_type == "tool":
-                    tool_call_id = event.get("tool_call_id")
-                    if event.get("phase") == "start" and tool_call_id is not None:
-                        resume_tool_args_by_id[str(tool_call_id)] = event.get("args")
-                    if event.get("phase") == "end" and event.get("name"):
+                elif event_type == "tool_call_available":
+                    if event.tool_call_id is not None:
+                        resume_tool_args_by_id[str(event.tool_call_id)] = event.data.get("args")
+                    yield event
+
+                elif event_type == "tool_execution_end":
+                    if event.tool_name:
                         from app.ai.tool_execution import build_tool_artifact
 
-                        tool_args = event.get("args")
-                        if tool_args is None and tool_call_id is not None:
-                            tool_args = resume_tool_args_by_id.get(str(tool_call_id))
+                        output = event.data.get("output")
+                        error = event.data.get("error")
                         resume_tool_artifacts.append(
                             build_tool_artifact(
-                                tool_call_id=tool_call_id,
-                                tool_name=event.get("name", "unknown"),
-                                tool_args=tool_args,
-                                output_text=(
-                                    str(event["result"])
-                                    if event.get("result") is not None
+                                tool_call_id=event.tool_call_id,
+                                tool_name=event.tool_name or "unknown",
+                                tool_args=(
+                                    resume_tool_args_by_id.get(str(event.tool_call_id))
+                                    if event.tool_call_id is not None
                                     else None
                                 ),
-                                error=None
-                                if event.get("state") != "error"
-                                else str(event.get("result", "")),
-                                render=event.get("render"),
+                                output_text=str(output) if output is not None else None,
+                                error=str(error) if error else None,
+                                render=event.data.get("render"),
                             )
                         )
-                    yield dict(event)
+                    yield event
 
                 elif event_type == "rich_items":
                     # Resume streams use the same progressive rich-response
                     # contract as first-pass response generation.
-                    yield dict(event)
-
-                elif event_type == "continuation_start" or event_type == "node_complete":
                     yield event
 
                 elif event_type == "interrupt":
@@ -1619,7 +1672,7 @@ class MessageService(IMessageService):
                         with contextlib.suppress(Exception):
                             self.hitl_interrupt_repository.mark_resolved(interrupt_id)
 
-                    interrupt_response = event.get("interrupt")
+                    interrupt_response = event.data.get("interrupt")
                     normalized_interrupt = self._normalize_nested_interrupt_payload(
                         interrupt_response
                     )
@@ -1638,9 +1691,9 @@ class MessageService(IMessageService):
                         conversation_id=conversation_id,
                         interrupt_payload=normalized_interrupt,
                         sanitized_persona=sanitized_persona,
-                        pending_tool_calls=event.get("pending_tool_calls"),
-                        thread_id=event.get("thread_id") or thread_id,
-                        next_nodes=event.get("next"),
+                        pending_tool_calls=event.data.get("pending_tool_calls"),
+                        thread_id=event.data.get("thread_id") or thread_id,
+                        next_nodes=event.data.get("next"),
                         user_id=user_id,
                         message_id=bot_message_id,
                         tool_artifacts=resume_tool_artifacts or None,
@@ -1654,22 +1707,27 @@ class MessageService(IMessageService):
                     )
                     bot_message_persisted = True
 
-                    yield {
-                        "type": "interrupt",
-                        "thread_id": event.get("thread_id") or thread_id,
-                        "next": event.get("next"),
-                        "pending_tool_calls": event.get("pending_tool_calls"),
-                        "interrupt": (
-                            normalized_interrupt.model_dump(mode="json")
-                            if isinstance(normalized_interrupt, InterruptResponse)
-                            else normalized_interrupt
-                        ),
-                        "message": persisted.model_dump(mode="json"),
-                    }
+                    yield make_event(
+                        "interrupt",
+                        sequence=event.sequence,
+                        conversation_id=str(conversation_id),
+                        message_id=str(bot_message_id) if bot_message_id else None,
+                        data={
+                            "thread_id": event.data.get("thread_id") or thread_id,
+                            "next": event.data.get("next"),
+                            "pending_tool_calls": event.data.get("pending_tool_calls"),
+                            "interrupt": (
+                                normalized_interrupt.model_dump(mode="json")
+                                if isinstance(normalized_interrupt, InterruptResponse)
+                                else normalized_interrupt
+                            ),
+                            "message": persisted.model_dump(mode="json"),
+                        },
+                    )
                     return
 
                 elif event_type == "complete":
-                    bot_response = event.get("response")
+                    bot_response = event.data.get("response")
                     _merge_stream_tool_artifacts_into_response(
                         bot_response,
                         resume_tool_artifacts,
@@ -1680,24 +1738,14 @@ class MessageService(IMessageService):
                         with contextlib.suppress(Exception):
                             self.hitl_interrupt_repository.mark_resolved(interrupt_id)
 
-                    bot_response_content = extract_response_content(
-                        bot_response, ERROR_RESPONSE_AFTER_RESUME
-                    )
-                    bot_response_content = fix_markdown_code_blocks(bot_response_content)
-
-                    bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
-                    if self._sync_response_plan_state(
+                    bot_message = await self._persist_completed_workflow_response(
                         conversation_id=conversation_id,
                         user_id=user_id,
                         bot_response=bot_response,
-                        current_lifecycle=None,
-                    ):
-                        bot_metadata["todos_synced"] = True
-                    bot_message = self._create_bot_response_message(
-                        conversation_id=conversation_id,
-                        content=bot_response_content,
-                        metadata=bot_metadata,
+                        sanitized_persona=sanitized_persona,
+                        workflow_request=None,
                         message_id=bot_message_id,
+                        fallback_content=ERROR_RESPONSE_AFTER_RESUME,
                     )
                     bot_message_persisted = True
                     await self._compact_checkpoint_after_persist(thread_id=thread_id)
@@ -1707,10 +1755,13 @@ class MessageService(IMessageService):
                         user_id, conversation_id
                     )
 
-                    yield {
-                        "type": "complete",
-                        "message": bot_message.model_dump(mode="json"),
-                    }
+                    yield make_event(
+                        "complete",
+                        sequence=_next_sequence(),
+                        conversation_id=str(conversation_id),
+                        message_id=str(bot_message.id),
+                        data={"message": bot_message.model_dump(mode="json")},
+                    )
                     return
 
                 elif event_type == "error":
@@ -1719,7 +1770,7 @@ class MessageService(IMessageService):
                         user_id, conversation_id
                     )
 
-                    error_msg = event.get("error", UNKNOWN_ERROR)
+                    error_msg = event.data.get("error", UNKNOWN_ERROR)
                     error_message = self._create_bot_response_message(
                         conversation_id=conversation_id,
                         content=f"Error generating response: {error_msg}",
@@ -1728,12 +1779,23 @@ class MessageService(IMessageService):
                     )
                     bot_message_persisted = True
 
-                    yield {
-                        "type": "error",
-                        "error": error_msg,
-                        "message": error_message.model_dump(mode="json"),
-                    }
+                    yield make_event(
+                        "error",
+                        sequence=_next_sequence(),
+                        conversation_id=str(conversation_id),
+                        message_id=str(bot_message_id) if bot_message_id else None,
+                        data={
+                            "error": error_msg,
+                            "message": error_message.model_dump(mode="json"),
+                        },
+                    )
                     return
+
+                else:
+                    # state_snapshot (legacy node_complete / continuation
+                    # markers), subagent lifecycle, and other canonical
+                    # events pass through without breaking.
+                    yield event
 
             self._clear_redis_interrupt(conversation_id, interrupt_id)
 
@@ -1744,11 +1806,16 @@ class MessageService(IMessageService):
                     metadata={"error": ERROR_RESPONSE_AFTER_RESUME},
                     message_id=bot_message_id,
                 )
-                yield {
-                    "type": "error",
-                    "error": ERROR_RESPONSE_AFTER_RESUME,
-                    "message": fallback_message.model_dump(mode="json"),
-                }
+                yield make_event(
+                    "error",
+                    sequence=_next_sequence(),
+                    conversation_id=str(conversation_id),
+                    message_id=str(bot_message_id) if bot_message_id else None,
+                    data={
+                        "error": ERROR_RESPONSE_AFTER_RESUME,
+                        "message": fallback_message.model_dump(mode="json"),
+                    },
+                )
 
         except (asyncio.CancelledError, GeneratorExit):
             if bot_message_persisted:
@@ -1782,11 +1849,16 @@ class MessageService(IMessageService):
                 message_id=bot_message_id,
             )
 
-            yield {
-                "type": "error",
-                "error": str(exc),
-                "message": error_message.model_dump(mode="json"),
-            }
+            yield make_event(
+                "error",
+                sequence=_next_sequence(),
+                conversation_id=str(conversation_id),
+                message_id=str(bot_message_id) if bot_message_id else None,
+                data={
+                    "error": str(exc),
+                    "message": error_message.model_dump(mode="json"),
+                },
+            )
 
     async def stop_message_generation(
         self,
@@ -2147,19 +2219,22 @@ class MessageService(IMessageService):
 
     @staticmethod
     def _agent_selected_event(
-        agent: str | None, custom_agents: dict[str, Any] | None
-    ) -> dict[str, Any]:
-        """Build an agent_selected event, adding ``agent_name`` for custom agents.
+        agent: str | None,
+        custom_agents: dict[str, Any] | None,
+        *,
+        sequence: int,
+    ) -> V3StreamEvent:
+        """Build a canonical agent_selected event, adding ``agent_name`` for custom agents.
 
         Consumers that only read the raw ``agent`` field are unaffected.
         """
-        event: dict[str, Any] = {"type": "agent_selected", "agent": agent}
+        data: dict[str, Any] = {"agent": agent}
         if isinstance(custom_agents, dict) and agent in custom_agents:
             entry = custom_agents.get(agent)
             name = entry.get("name") if isinstance(entry, dict) else None
             if name:
-                event["agent_name"] = name
-        return event
+                data["agent_name"] = name
+        return make_event("agent_selected", sequence=sequence, agent=agent, data=data)
 
     @staticmethod
     def _attach_selected_agent_metadata(
@@ -2244,13 +2319,19 @@ class MessageService(IMessageService):
         user_id: UUID | None,
         bot_response: WorkflowResponse | None,
         sanitized_persona: str | None,
-        workflow_request: WorkflowExecutionRequest,
+        workflow_request: WorkflowExecutionRequest | None,
         message_id: UUID | None = None,
         reply_to_user_message_id: UUID | None = None,
         suggestion_source_message: str | None = None,
+        fallback_content: str = NO_RESPONSE_GENERATED,
     ) -> MessageRead:
+        """Persist the assistant message for a completed workflow turn.
+
+        ``workflow_request`` is None on the resume path, which has no original
+        request object — planning-context enrichment is skipped there.
+        """
         bot_response_content = fix_markdown_code_blocks(
-            extract_response_content(bot_response, NO_RESPONSE_GENERATED)
+            extract_response_content(bot_response, fallback_content)
         )
         bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
         if reply_to_user_message_id:
@@ -2260,7 +2341,9 @@ class MessageService(IMessageService):
             conversation_id=conversation_id,
             user_id=user_id,
             bot_response=bot_response,
-            current_lifecycle=workflow_request.planning.plan_lifecycle,
+            current_lifecycle=(
+                workflow_request.planning.plan_lifecycle if workflow_request else None
+            ),
         ):
             bot_metadata["todos_synced"] = True
 
@@ -2271,7 +2354,12 @@ class MessageService(IMessageService):
                 "Completed a planning iteration. Send a message to continue."
             )
 
-        if workflow_request.planning.planning_mode_enabled and self.task_plan_service and user_id:
+        if (
+            workflow_request is not None
+            and workflow_request.planning.planning_mode_enabled
+            and self.task_plan_service
+            and user_id
+        ):
             try:
                 next_task = self.task_plan_service.get_active_or_next_task(conversation_id, user_id)
                 if next_task:

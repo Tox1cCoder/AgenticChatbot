@@ -31,7 +31,7 @@ def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
         }
     if event.type == "tool_execution_end":
         error = event.data.get("error")
-        return {
+        payload = {
             "type": "tool",
             "phase": "end",
             "status": "end",
@@ -41,6 +41,10 @@ def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
             "result": event.data.get("output"),
             "render": event.data.get("render"),
         }
+        duration_ms = event.data.get("duration_ms")
+        if duration_ms is not None:
+            payload["duration_ms"] = duration_ms
+        return payload
     if event.type == "rich_items":
         return {
             "type": "rich_items",
@@ -48,11 +52,17 @@ def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
             "items": list(event.data.get("items") or []),
         }
     if event.type == "agent_selected":
-        return {
+        payload = {
             "type": "agent_selected",
             "agent": event.agent or event.data.get("agent"),
-            "reason": event.data.get("reason"),
         }
+        reason = event.data.get("reason")
+        if reason is not None:
+            payload["reason"] = reason
+        agent_name = event.data.get("agent_name")
+        if agent_name:
+            payload["agent_name"] = agent_name
+        return payload
     if event.type == "interrupt":
         payload = dict(event.data)
         payload["type"] = "interrupt"
@@ -73,7 +83,16 @@ def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
             return payload
         return None
     if event.type == "error":
-        return {"type": "error", "error": event.data.get("error") or event.data.get("message")}
+        message = event.data.get("message")
+        payload = {
+            "type": "error",
+            "error": event.data.get("error")
+            or (message if isinstance(message, str) else None),
+        }
+        if isinstance(message, dict):
+            # Streamlit renders the persisted error bot message directly.
+            payload["message"] = message
+        return payload
     if event.type == "title_updated":
         return {
             "type": "title_updated",

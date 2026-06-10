@@ -4,12 +4,12 @@ Message service interface definition
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
-from typing import Any
 from uuid import UUID
 
 from app.repositories.utils.pagination import Paginator
 from app.schemas.message import MessageCreate, MessageRead, MessageUpdate
 from app.schemas.workflow import InterruptDecision
+from app.services.event_streaming.events import V3StreamEvent
 
 
 class IMessageService(ABC):
@@ -28,8 +28,8 @@ class IMessageService(ABC):
         message_create_data: MessageCreate,
         user_id: UUID,
         bot_message_id: UUID | None = None,
-    ) -> AsyncGenerator[dict[str, Any], None]:
-        """Create a new message and stream the assistant response"""
+    ) -> AsyncGenerator[V3StreamEvent, None]:
+        """Create a new message and stream the assistant response as canonical v3 events"""
         pass
 
     @abstractmethod
@@ -94,8 +94,8 @@ class IMessageService(ABC):
         device_id: UUID | None = None,
         bot_message_id: UUID | None = None,
         inline_rich_response_v1: bool = False,
-    ) -> AsyncGenerator[dict[str, Any], None]:
-        """Resume an interrupted workflow and stream the assistant response"""
+    ) -> AsyncGenerator[V3StreamEvent, None]:
+        """Resume an interrupted workflow and stream canonical v3 assistant events"""
         pass
 
     @abstractmethod

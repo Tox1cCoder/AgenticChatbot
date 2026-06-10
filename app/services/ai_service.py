@@ -35,7 +35,9 @@ from ..schemas.workflow import (
     WorkflowResponseMessage,
 )
 from ..utils.text_processing import sanitize_persona
-from .stream_events import build_canonical_rich_items_event, build_canonical_tool_event
+from .event_streaming.compat import coerce_legacy_event_to_v3
+from .event_streaming.events import V3StreamEvent, make_event
+from .stream_events import infer_tool_state
 
 
 class AIService:
@@ -229,39 +231,62 @@ class AIService:
         return self._build_error_response(ERROR_NO_RESPONSE_RESUME)
 
     async def _map_workflow_stream(self, workflow_stream, *, emit_rich_items: bool = False):
+        """Map graph public dict events to canonical ``V3StreamEvent``s.
+
+        This is the boundary where the stream becomes canonical: the graph
+        still emits legacy public dicts, every event leaving this method is a
+        ``V3StreamEvent``. Capability filtering for transient rich items stays
+        here.
+        """
         final_response = None
         tool_started_at: dict[str, float] = {}
+        sequence = 0
+
+        def _next_sequence() -> int:
+            nonlocal sequence
+            sequence += 1
+            return sequence
 
         async for event in workflow_stream:
+            if isinstance(event, V3StreamEvent):
+                yield event.model_copy(update={"sequence": _next_sequence()})
+                continue
+
             event_type = event.get("type")
 
             if event_type == "agent_selected":
                 agent_name = event.get("agent", "unknown")
-                yield {"type": "agent_selected", "agent": agent_name}
-
-            elif event_type == "node":
-                node_name = event.get("node")
-                yield {"type": "node", "node": node_name}
+                yield make_event(
+                    "agent_selected",
+                    sequence=_next_sequence(),
+                    agent=agent_name,
+                    data={"agent": agent_name},
+                )
 
             elif event_type == "thinking":
-                content = event.get("content", "")
-                yield {"type": "thinking", "content": content}
+                yield make_event(
+                    "reasoning_delta",
+                    sequence=_next_sequence(),
+                    data={"text": event.get("content", "")},
+                )
 
             elif event_type == "token":
-                content = event.get("content", "")
-                yield {"type": "token", "content": content}
+                yield make_event(
+                    "message_delta",
+                    sequence=_next_sequence(),
+                    data={"text": event.get("content", "")},
+                )
 
             elif event_type == "tool_start":
-                tool_name = event.get("name", "unknown")
                 tool_call_id = event.get("tool_call_id")
-                tool_args = event.get("args")
                 if tool_call_id is not None:
                     tool_started_at[str(tool_call_id)] = perf_counter()
-                yield build_canonical_tool_event(
-                    phase="start",
-                    name=tool_name,
-                    tool_call_id=tool_call_id,
-                    args=make_json_safe(tool_args),
+                yield make_event(
+                    "tool_call_available",
+                    sequence=_next_sequence(),
+                    tool_call_id=str(tool_call_id) if tool_call_id is not None else None,
+                    tool_name=event.get("name", "unknown"),
+                    data={"args": make_json_safe(event.get("args"))},
                 )
 
             elif event_type == "tool_end":
@@ -274,13 +299,17 @@ class AIService:
                     if started_at is not None:
                         duration_ms = int((perf_counter() - started_at) * 1000)
                 render_payload = make_json_safe(event.get("render"))
-                yield build_canonical_tool_event(
-                    phase="end",
-                    name=tool_name,
-                    tool_call_id=tool_call_id,
-                    result=result,
-                    duration_ms=duration_ms,
-                    render=render_payload,
+                tool_data: dict[str, Any] = {"output": result, "render": render_payload}
+                if duration_ms is not None:
+                    tool_data["duration_ms"] = duration_ms
+                if infer_tool_state(phase="end", result=result) == "error":
+                    tool_data["error"] = str(result)
+                yield make_event(
+                    "tool_execution_end",
+                    sequence=_next_sequence(),
+                    tool_call_id=str(tool_call_id) if tool_call_id is not None else None,
+                    tool_name=tool_name,
+                    data=tool_data,
                 )
                 # Emit a `rich_items` upsert for safe non-image candidates as
                 # soon as the tool result exists. Image records are never
@@ -293,7 +322,11 @@ class AIService:
                         tool_name=tool_name,
                     )
                     if rich_items:
-                        yield build_canonical_rich_items_event(items=rich_items)
+                        yield make_event(
+                            "rich_items",
+                            sequence=_next_sequence(),
+                            data={"operation": "upsert", "items": rich_items},
+                        )
 
             elif event_type == "complete":
                 final_response = self._to_service_response(event.get("response"))
@@ -303,14 +336,24 @@ class AIService:
                 display_error = str(error_msg).strip() or UNKNOWN_ERROR
                 if not display_error.lower().startswith("error:"):
                     display_error = f"Error: {display_error}"
-                yield {
-                    "type": "error",
-                    "error": str(error_msg),
-                    "response": self._build_error_response(display_error),
-                }
+                yield make_event(
+                    "error",
+                    sequence=_next_sequence(),
+                    data={
+                        "error": str(error_msg),
+                        "response": self._build_error_response(display_error),
+                    },
+                )
 
             elif event_type == "continuation_start" or event_type == "node_complete":
-                yield event
+                payload = dict(event)
+                payload["legacy_type"] = event_type
+                yield make_event(
+                    "state_snapshot",
+                    sequence=_next_sequence(),
+                    node=event.get("node"),
+                    data=payload,
+                )
 
             elif event_type == "interrupt":
                 interrupt_payload = event.get("interrupt")
@@ -324,20 +367,33 @@ class AIService:
                         )
                         if isinstance(message_value, str) and message_value.strip():
                             interrupt_message = message_value.strip()
-                yield {
-                    "type": "interrupt",
-                    "next": event.get("next", []),
-                    "thread_id": event.get("thread_id"),
-                    "pending_tool_calls": event.get("pending_tool_calls"),
-                    "interrupt": normalized_interrupt,
-                    "message": interrupt_message,
-                }
+                yield make_event(
+                    "interrupt",
+                    sequence=_next_sequence(),
+                    data={
+                        "next": event.get("next", []),
+                        "thread_id": event.get("thread_id"),
+                        "pending_tool_calls": event.get("pending_tool_calls"),
+                        "interrupt": normalized_interrupt,
+                        "message": interrupt_message,
+                    },
+                )
+
+            else:
+                # Subagent lifecycle dicts and any forward-compatible payloads
+                # are coerced to canonical events instead of being dropped.
+                yield coerce_legacy_event_to_v3(event, sequence=_next_sequence())
 
         if final_response:
-            yield {"type": "complete", "response": final_response}
+            yield make_event(
+                "complete", sequence=_next_sequence(), data={"response": final_response}
+            )
         else:
-            error_response = self._build_error_response()
-            yield {"type": "complete", "response": error_response}
+            yield make_event(
+                "complete",
+                sequence=_next_sequence(),
+                data={"response": self._build_error_response()},
+            )
 
     async def resume_interrupted_execution_stream(
         self,
@@ -347,7 +403,11 @@ class AIService:
         inline_rich_response_v1: bool = False,
     ):
         if not self.checkpointer:
-            yield {"type": "error", "error": "Cannot resume: Checkpointing not enabled"}
+            yield make_event(
+                "error",
+                sequence=1,
+                data={"error": "Cannot resume: Checkpointing not enabled"},
+            )
             return
 
         async for mapped_event in self._map_workflow_stream(
