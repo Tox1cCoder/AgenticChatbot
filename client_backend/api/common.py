@@ -103,11 +103,13 @@ async def proxy_server_request(
     request: Request,
     *,
     upstream_path: str,
-    inject_device_context: bool = False,
     params_override: Any = None,
 ) -> Response:
     """
     Forward a request to the canonical server while preserving its response body.
+
+    Chat/streaming routes that need device context call ``add_device_context``
+    explicitly before forwarding; this generic proxy never injects it.
     """
     try:
         kwargs: dict[str, Any] = {
@@ -124,10 +126,7 @@ async def proxy_server_request(
 
         if body:
             if "application/json" in content_type:
-                payload = json.loads(body.decode("utf-8"))
-                if inject_device_context and isinstance(payload, dict):
-                    payload = add_device_context(payload)
-                kwargs["json"] = payload
+                kwargs["json"] = json.loads(body.decode("utf-8"))
             else:
                 kwargs["content"] = body
                 if content_type:

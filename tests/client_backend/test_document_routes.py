@@ -42,7 +42,6 @@ def test_document_routes_use_proxy_server_request(monkeypatch):
         request: Request,
         *,
         upstream_path: str,
-        inject_device_context: bool = False,
         params_override=None,
     ):
         calls.append(
@@ -50,7 +49,6 @@ def test_document_routes_use_proxy_server_request(monkeypatch):
                 "method": request.method,
                 "path": upstream_path,
                 "params": params_override,
-                "inject_device_context": inject_device_context,
             }
         )
         return JSONResponse({"path": upstream_path})
@@ -74,31 +72,26 @@ def test_document_routes_use_proxy_server_request(monkeypatch):
             "method": "GET",
             "path": "/documents/task/task-1",
             "params": None,
-            "inject_device_context": False,
         },
         {
             "method": "GET",
             "path": "/documents/doc-1",
             "params": None,
-            "inject_device_context": False,
         },
         {
             "method": "GET",
             "path": "/documents/conversation/conv-1",
             "params": {"page": 1, "page_size": 20},
-            "inject_device_context": False,
         },
         {
             "method": "PUT",
             "path": "/documents/doc-1",
             "params": None,
-            "inject_device_context": False,
         },
         {
             "method": "DELETE",
             "path": "/documents/doc-1",
             "params": None,
-            "inject_device_context": False,
         },
     ]
 

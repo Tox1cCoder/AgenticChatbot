@@ -359,12 +359,14 @@ class TestReconnectInvalidatesInstanceId:
         app.include_router(device_runtime.router)
         app.dependency_overrides[device_runtime.get_db] = lambda: fake_db
 
-        with caplog.at_level("WARNING", logger="app.api.device_runtime"):
-            with TestClient(app) as client:
-                with client.websocket_connect(
-                    f"/device-runtime/{device_id}/connect?session_id={session_id}"
-                ) as websocket:
-                    assert websocket.receive_json() == {"type": "ack"}
+        with (
+            caplog.at_level("WARNING", logger="app.api.device_runtime"),
+            TestClient(app) as client,
+            client.websocket_connect(
+                f"/device-runtime/{device_id}/connect?session_id={session_id}"
+            ) as websocket,
+        ):
+            assert websocket.receive_json() == {"type": "ack"}
 
         assert len(expired_calls) == 1
         assert expired_calls[0]["device_id"] == device_id

@@ -112,10 +112,10 @@ def verify_local_session_token(token: str) -> LocalSessionPayload:
             exp=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
             iat=datetime.fromtimestamp(payload["iat"], tz=timezone.utc),
         )
-    except jwt.ExpiredSignatureError:
-        raise LocalSessionError("Local session has expired")
+    except jwt.ExpiredSignatureError as e:
+        raise LocalSessionError("Local session has expired") from e
     except jwt.InvalidTokenError as e:
-        raise LocalSessionError(f"Invalid local session token: {e}")
+        raise LocalSessionError(f"Invalid local session token: {e}") from e
 
 
 DEVICE_IDENTITY_FILENAME = "device_identity.json"

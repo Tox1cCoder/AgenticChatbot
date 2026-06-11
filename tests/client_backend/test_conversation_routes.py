@@ -19,7 +19,6 @@ def test_conversation_routes_use_proxy_server_request(monkeypatch):
         request: Request,
         *,
         upstream_path: str,
-        inject_device_context: bool = False,
         params_override=None,
     ):
         calls.append(
@@ -27,7 +26,6 @@ def test_conversation_routes_use_proxy_server_request(monkeypatch):
                 "method": request.method,
                 "path": upstream_path,
                 "params": params_override,
-                "inject_device_context": inject_device_context,
             }
         )
         return JSONResponse(
@@ -57,42 +55,35 @@ def test_conversation_routes_use_proxy_server_request(monkeypatch):
             "method": "GET",
             "path": "/conversations/",
             "params": {"page": 1, "limit": 20, "include": [], "latestMessages": 3},
-            "inject_device_context": False,
         },
         {
             "method": "GET",
             "path": "/conversations/conv-1/messages",
             "params": {"page": 1, "limit": 50, "include": []},
-            "inject_device_context": False,
         },
         {
             "method": "POST",
             "path": "/conversations/generate-title",
             "params": None,
-            "inject_device_context": False,
         },
         {
             "method": "POST",
             "path": "/conversations/",
             "params": None,
-            "inject_device_context": False,
         },
         {
             "method": "GET",
             "path": "/conversations/conv-1",
             "params": None,
-            "inject_device_context": False,
         },
         {
             "method": "PATCH",
             "path": "/conversations/conv-1",
             "params": None,
-            "inject_device_context": False,
         },
         {
             "method": "DELETE",
             "path": "/conversations/conv-1",
             "params": None,
-            "inject_device_context": False,
         },
     ]

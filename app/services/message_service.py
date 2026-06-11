@@ -1336,8 +1336,8 @@ class MessageService(IMessageService):
                         raise CustomHTTPException(
                             status_code=http_status.HTTP_409_CONFLICT,
                             detail=(
-                                "The client device session changed after this approval was created. "
-                                "Please send a new message from the active device."
+                                "The client device session changed after this approval "
+                                "was created. Please send a new message from the active device."
                             ),
                             error_code="INTERRUPT_SESSION_MISMATCH",
                         )
@@ -1354,8 +1354,8 @@ class MessageService(IMessageService):
                         raise CustomHTTPException(
                             status_code=http_status.HTTP_409_CONFLICT,
                             detail=(
-                                "The client device tool catalog changed after this approval was created. "
-                                "Please search for the tool again and retry."
+                                "The client device tool catalog changed after this approval "
+                                "was created. Please search for the tool again and retry."
                             ),
                             error_code="INTERRUPT_CATALOG_MISMATCH",
                         )
@@ -1374,8 +1374,9 @@ class MessageService(IMessageService):
                             raise CustomHTTPException(
                                 status_code=http_status.HTTP_409_CONFLICT,
                                 detail=(
-                                    "A client-local tool in this approval is no longer available on the "
-                                    "active device. Please search again and retry."
+                                    "A client-local tool in this approval is no longer "
+                                    "available on the active device. Please search again "
+                                    "and retry."
                                 ),
                                 error_code="INTERRUPT_TOOL_UNAVAILABLE",
                             )
@@ -1395,8 +1396,9 @@ class MessageService(IMessageService):
                             raise CustomHTTPException(
                                 status_code=http_status.HTTP_409_CONFLICT,
                                 detail=(
-                                    "A client-local tool capability changed after this approval was created. "
-                                    "Please search for the tool again and retry."
+                                    "A client-local tool capability changed after this "
+                                    "approval was created. Please search for the tool "
+                                    "again and retry."
                                 ),
                                 error_code="INTERRUPT_TOOL_INSTANCE_MISMATCH",
                             )
@@ -1411,8 +1413,9 @@ class MessageService(IMessageService):
                         raise CustomHTTPException(
                             status_code=http_status.HTTP_409_CONFLICT,
                             detail=(
-                                "A client-local tool capability changed after this approval was created. "
-                                "Please search for the tool again and retry."
+                                "A client-local tool capability changed after this "
+                                "approval was created. Please search for the tool "
+                                "again and retry."
                             ),
                             error_code="INTERRUPT_TOOL_INSTANCE_MISMATCH",
                         )
