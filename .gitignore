@@ -62,6 +62,10 @@ tasksync
 log.md
 .traycer/
 mcp_config.json
+# The server's MCP config is the tracked global-tool allowlist (FR-3,
+# enforced by tests/test_mcp_global_allowlist.py); machine-local MCP
+# configs (sidecar profiles) stay ignored by the pattern above.
+!app/ai/mcp_config.json
 output/
 boring_servers/
 scripts/
