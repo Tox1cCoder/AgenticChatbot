@@ -20,11 +20,6 @@ from dateutil import parser
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from app.ai.skills_snapshot import (
-    get_repo_skill_detail_for_demo,
-    list_repo_skills_for_demo,
-    reload_repo_skills_for_demo,
-)
 from app.services.event_streaming.compat import infer_tool_state, normalize_tool_phase
 from app.ui.rag_artifacts import (
     RAGArtifactView,
@@ -3271,18 +3266,21 @@ def add_mcp_server_from_url(url_config: dict[str, Any]) -> bool:
 
 
 def get_skills_list() -> dict[str, Any] | None:
-    """Fetch the locally installed server repo skills for the demo."""
-    return list_repo_skills_for_demo()
+    """Fetch the local sidecar's skills."""
+    response = make_api_request("GET", "/skills")
+    return response.get("data") if response else None
 
 
 def get_skill_detail(name: str) -> dict[str, Any] | None:
-    """Fetch full detail for one installed server repo skill."""
-    return get_repo_skill_detail_for_demo(name)
+    """Fetch full detail for one local sidecar skill."""
+    response = make_api_request("GET", f"/skills/{name}")
+    return response.get("data") if response else None
 
 
 def reload_skills() -> dict[str, Any] | None:
-    """Rescan repo skills for this local demo process."""
-    return reload_repo_skills_for_demo()
+    """Rescan the local sidecar's skill roots."""
+    response = make_api_request("POST", "/skills/reload")
+    return response.get("data") if response else None
 
 
 def render_login_page():
