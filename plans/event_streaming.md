@@ -192,7 +192,8 @@ Canonical mapping used by the v3 normalizer: text-delta→`message_delta`, reaso
 ## Implementation Tasks
 
 > **Task status:** Task 1 ✅ · Task 2 ✅ · Task 3 ✅ · Task 4 ✅ · Task 5 ✅ · Task 6 ✅ · Task 7 ✅ · Task 8 ✅ · Task 9 ✅ · Task 10 ✅ — PLAN COMPLETE (2026-06-10).
-> **Follow-up status (Live Subagent Progress):** Task 11 ✅ · Task 12 ✅ · Task 13 ⬜ · Task 14 ⬜ · Task 15 ⬜.
+> **Follow-up status (Live Subagent Progress):** Task 11 ✅ · Task 12 ✅ · Task 13 ✅ · Task 14 ⬜ · Task 15 ⬜.
+> - Task 13: `internal_sse.py::legacy_event_from_v3` projects `subagent_*` → `{"type":"subagent", "phase":…, "subagent":{…}}` using the shared `SUBAGENT_PHASE_BY_EVENT`; field passthrough matches the AI SDK adapter (snake_case on this protocol). Contract suite 9 passed; ruff clean. No deviations.
 > - Task 12: `SUBAGENT_PHASE_BY_EVENT` added to `events.py` (shared by both adapters); `ai_sdk_v6.py` projects `subagent_*` → transient `data-subagent` chunks via the new `_subagent` handler. Contract suite 5 passed; ruff clean. One cosmetic deviation: the dispatch branch sits after the `complete` branch rather than after `user_message_created` (branches are mutually exclusive on `etype`, so ordering is irrelevant); the fall-through comment no longer lists `subagent_*`.
 > - Task 11: `SubagentEventSink.stream()`/`close()` + `stream_with_subagent_events` merge added; graph drain loop replaced by the live merge. Liveness test green; regression set (subagents + graph planning + message-service subagent + graph tool events) 48 passed; ruff clean.
 >   - **Design decisions (deviations from the plan's verbatim helper, both pinned by new tests):** (1) *Exception propagation* — the plan's helper trapped primary exceptions inside `_pump_primary` and `gather(..., return_exceptions=True)` silenced them, so `GraphRecursionError` would no longer trigger auto-continue and graph errors would never become terminal `error` events. Fix: after the flush, `await primary_task` re-raises. (2) *Sink reuse across auto-continue rounds* — `execute_request_stream` creates one sink for all rounds, but the plan's unconditional `sink.close()` in `finally` left a stray sentinel after a clean round, killing round ≥2's live stream. Fix: a `closed` flag so `finally` only closes on early exit (disconnect/teardown). Tests: `test_stream_with_subagent_events_propagates_primary_exception`, `test_sink_remains_usable_for_next_auto_continue_round` (both failed against the verbatim helper, pass after the fix).
@@ -2693,13 +2694,13 @@ git commit -m "feat: surface subagent progress on the ai-sdk stream"
 
 ---
 
-### Task 13: Streamlit internal SSE `subagent` projection
+### Task 13: Streamlit internal SSE `subagent` projection — ✅ COMPLETE
 
 **Files:**
 - Modify: `app/services/event_streaming/internal_sse.py`
 - Test: `tests/test_internal_sse_stream_contract.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/test_internal_sse_stream_contract.py`:
 
@@ -2740,12 +2741,12 @@ def test_subagent_end_projects_status_and_summary():
     assert payload["elapsed_ms"] == 12
 ```
 
-- [ ] **Step 2: Run it and verify it fails**
+- [x] **Step 2: Run it and verify it fails**
 
 Run: `python -m pytest tests/test_internal_sse_stream_contract.py::test_subagent_start_projects_to_subagent_event -q`
 Expected: FAIL — `legacy_event_from_v3` returns `None` for `subagent_*` (`assert payload["type"]` raises `TypeError`).
 
-- [ ] **Step 3: Project subagent events in the internal SSE adapter**
+- [x] **Step 3: Project subagent events in the internal SSE adapter**
 
 In `app/services/event_streaming/internal_sse.py`, update the import and add a branch before the final `return None`:
 
@@ -2772,12 +2773,12 @@ from .events import SUBAGENT_PHASE_BY_EVENT, V3StreamEvent
     return None
 ```
 
-- [ ] **Step 4: Run the test and verify it passes**
+- [x] **Step 4: Run the test and verify it passes**
 
 Run: `python -m pytest tests/test_internal_sse_stream_contract.py -q`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add app/services/event_streaming/internal_sse.py tests/test_internal_sse_stream_contract.py

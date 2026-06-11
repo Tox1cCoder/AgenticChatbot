@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.services.event_streaming.events import make_event
+from app.services.event_streaming.events import SubagentRef, make_event
 from app.services.event_streaming.internal_sse import legacy_event_from_v3
 
 
@@ -113,3 +113,35 @@ def test_state_snapshot_preserves_legacy_continuation_marker():
         "max_rounds": 4,
         "reason": "recursion_limit",
     }
+
+
+def test_subagent_start_projects_to_subagent_event():
+    event = make_event(
+        "subagent_start",
+        sequence=1,
+        subagent=SubagentRef(
+            id="w1", name="search_agent", path=["planning_agent", "w1"], status="running"
+        ),
+        data={"task": "Find sources"},
+    )
+    payload = legacy_event_from_v3(event)
+    assert payload["type"] == "subagent"
+    assert payload["phase"] == "start"
+    assert payload["subagent"]["id"] == "w1"
+    assert payload["task"] == "Find sources"
+
+
+def test_subagent_end_projects_status_and_summary():
+    event = make_event(
+        "subagent_end",
+        sequence=2,
+        subagent=SubagentRef(
+            id="w1", name="search_agent", path=["planning_agent", "w1"], status="completed"
+        ),
+        data={"summary": "done", "elapsed_ms": 12},
+    )
+    payload = legacy_event_from_v3(event)
+    assert payload["phase"] == "end"
+    assert payload["subagent"]["status"] == "completed"
+    assert payload["summary"] == "done"
+    assert payload["elapsed_ms"] == 12

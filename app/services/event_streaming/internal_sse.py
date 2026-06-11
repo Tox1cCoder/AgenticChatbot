@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .events import V3StreamEvent
+from .events import SUBAGENT_PHASE_BY_EVENT, V3StreamEvent
 
 
 def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
@@ -103,4 +103,19 @@ def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
         return {"type": "user_message_created", "message": event.data.get("message")}
     if event.type == "heartbeat":
         return {"type": "heartbeat"}
+    if event.type in SUBAGENT_PHASE_BY_EVENT:
+        payload: dict[str, Any] = {
+            "type": "subagent",
+            "phase": SUBAGENT_PHASE_BY_EVENT[event.type],
+            "subagent": event.subagent.model_dump(mode="json") if event.subagent else None,
+        }
+        if event.tool_call_id:
+            payload["tool_call_id"] = event.tool_call_id
+        if event.tool_name:
+            payload["tool_name"] = event.tool_name
+        for key in ("task", "output", "summary", "status", "error", "render", "text", "elapsed_ms"):
+            value = event.data.get(key)
+            if value is not None:
+                payload[key] = value
+        return payload
     return None
