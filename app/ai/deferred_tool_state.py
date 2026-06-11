@@ -527,37 +527,32 @@ class DeferredToolState:
         """
         Get all loaded client tools for a conversation and execution scope.
 
-        When device_id and session_id are provided, returns tools from
-        that specific execution scope only.
+        Client tool visibility is strictly scoped to one
+        (device_id, session_id) pair. When ``session_id`` is omitted it is
+        resolved from the device's active runtime session; if no full scope
+        can be established the lookup returns nothing — there is no
+        cross-device fallback, so one client's tools can never surface on a
+        turn that belongs to another (or no) client.
         """
         ttl = settings.mcp_tool_search_loaded_tools_ttl_minutes
 
         with self._lock:
             if device_id and not session_id:
                 session_id = self._resolve_active_session_id(device_id)
-            if device_id and session_id:
-                client_key = self._get_client_key(
-                    conversation_id,
-                    agent_key,
-                    device_id,
-                    session_id,
-                )
-                scope = self._client_tool_scopes.get(client_key)
-                if not scope:
-                    return []
-                scope.cleanup_expired(ttl)
-                return scope.list_tools()
+            if not device_id or not session_id:
+                return []
 
-            conv_id = conversation_id or ""
-            agent = agent_key or "default"
-            result: list[LoadedClientTool] = []
-            for key, scope in list(self._client_tool_scopes.items()):
-                if key[0] == conv_id and key[1] == agent:
-                    if device_id and key[2] != str(device_id):
-                        continue
-                    scope.cleanup_expired(ttl)
-                    result.extend(scope.list_tools())
-            return result
+            client_key = self._get_client_key(
+                conversation_id,
+                agent_key,
+                device_id,
+                session_id,
+            )
+            scope = self._client_tool_scopes.get(client_key)
+            if not scope:
+                return []
+            scope.cleanup_expired(ttl)
+            return scope.list_tools()
 
     def get_all_loaded_tool_names(
         self,

@@ -515,8 +515,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             initial_state["conversation_id"] = request.conversation_id
         if request.user_id is not None:
             initial_state["user_id"] = request.user_id
-        if request.device_id is not None:
-            initial_state["device_id"] = request.device_id
+        # Always overwrite the checkpointed device binding, None included: a
+        # turn without a connected client must never inherit a previous
+        # client's device_id from the checkpoint and dispatch tools there.
+        initial_state["device_id"] = request.device_id
         if request.model_request is not None:
             initial_state["model_request"] = request.model_request
         if request.user_message_id is not None:

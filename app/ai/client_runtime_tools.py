@@ -193,6 +193,22 @@ def _format_runtime_tool_error(response: dict[str, Any]) -> str:
     return "Unknown client-local tool error"
 
 
+# Model-facing guard errors. FR-2: mention only this chat session's client,
+# never device identifiers or the existence of other clients.
+_ERR_TOOL_NOT_THIS_SESSION = (
+    "Tool unavailable: this tool belongs to a client that is not connected to "
+    "this chat session. Continue without it and let the user know."
+)
+_ERR_CLIENT_DISCONNECTED = (
+    "Tool unavailable: this chat session's client is not connected right now. "
+    "Continue without the tool and let the user know."
+)
+_ERR_CLIENT_RECONNECTED = (
+    "Tool unavailable: this chat session's client reconnected after tools were "
+    "prepared. Ask the user to resend the request to use the refreshed tools."
+)
+
+
 def _build_tool(
     *,
     spec: ClientRuntimeToolSpec,
@@ -202,34 +218,65 @@ def _build_tool(
     bound_catalog_version: int,
 ) -> BaseTool:
     async def _dispatch_client_tool(**kwargs: Any) -> str:
+        # Guard failures return tool error results instead of raising (FR-4)
+        # so the model can explain the situation and the turn completes.
         ctx = get_tool_context()
-        context_device_id = str(ctx.device_id or bound_device_id)
+        context_device_id = str(ctx.device_id) if ctx.device_id else None
 
         if context_device_id != bound_device_id:
-            raise RuntimeError(
-                "Client-local tool was requested for a different device session than the active run."
+            logger.warning(
+                "Blocked client tool '%s': bound to device %s but execution "
+                "context carries device %s",
+                spec.exposed_name,
+                bound_device_id,
+                context_device_id,
             )
+            return _ERR_TOOL_NOT_THIS_SESSION
 
         session = ClientDeviceService.lookup_active_session(UUID(bound_device_id))
         if session is None or str(session.user_id) != bound_user_id:
-            raise RuntimeError("Client device is not connected for this user.")
+            logger.warning(
+                "Blocked client tool '%s': no active session for device %s and "
+                "user %s at dispatch time",
+                spec.exposed_name,
+                bound_device_id,
+                bound_user_id,
+            )
+            return _ERR_CLIENT_DISCONNECTED
 
         if session.session_id != bound_session_id:
-            raise RuntimeError(
-                "Client device session changed after tool binding. Retry from the active device."
+            logger.warning(
+                "Blocked client tool '%s': device %s session changed after "
+                "binding (bound=%s, active=%s)",
+                spec.exposed_name,
+                bound_device_id,
+                bound_session_id,
+                session.session_id,
             )
+            return _ERR_CLIENT_RECONNECTED
 
-        response = await ClientDeviceService.dispatch_tool_call(
-            user_id=bound_user_id,
-            device_id=bound_device_id,
-            tool_name=spec.name,
-            qualified_tool_id=spec.qualified_tool_id,
-            arguments=kwargs,
-            timeout_seconds=settings.client_runtime_ws_timeout_seconds,
-            bound_session_id=bound_session_id,
-            bound_catalog_version=bound_catalog_version,
-            tool_instance_id=tool_instance_id,
-        )
+        try:
+            response = await ClientDeviceService.dispatch_tool_call(
+                user_id=bound_user_id,
+                device_id=bound_device_id,
+                tool_name=spec.name,
+                qualified_tool_id=spec.qualified_tool_id,
+                arguments=kwargs,
+                timeout_seconds=settings.client_runtime_ws_timeout_seconds,
+                bound_session_id=bound_session_id,
+                bound_catalog_version=bound_catalog_version,
+                tool_instance_id=tool_instance_id,
+            )
+        except RuntimeError as exc:
+            # The client disconnected or re-synced between the guard above and
+            # the dispatch itself; degrade to a tool error, never crash the turn.
+            logger.warning(
+                "Client tool '%s' dispatch rejected for device %s: %s",
+                spec.exposed_name,
+                bound_device_id,
+                exc,
+            )
+            return _ERR_CLIENT_DISCONNECTED
 
         if not response.get("success", False):
             raise RuntimeError(_format_runtime_tool_error(response))

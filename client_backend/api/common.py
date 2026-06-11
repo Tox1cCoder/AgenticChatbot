@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
+from client_backend.core.logging import get_logger
 from client_backend.services.runtime_bridge import get_runtime_bridge
 from client_backend.services.server_api import (
     AuthenticationError,
@@ -15,6 +16,8 @@ from client_backend.services.server_api import (
     ServerConnectionError,
     get_server_client,
 )
+
+logger = get_logger(__name__)
 
 
 def raise_server_error(exc: Exception) -> None:
@@ -47,13 +50,30 @@ def add_device_context(
     camel_key: str = "deviceId",
 ) -> dict[str, Any]:
     """
-    Add the active device ID to a payload if the caller has not set one already.
+    Stamp the payload with this installation's registered device id.
+
+    The proxy is the only component that knows where a request physically
+    originated, so it always asserts its own identity: any incoming device id
+    (stale UI state, or a value replayed from another machine) is overwritten.
+    When the local bridge is not connected, both keys are stripped so the
+    server binds no client tools rather than trusting a forwarded id.
     """
     normalized = dict(payload)
-    if snake_key in normalized or camel_key in normalized:
-        return normalized
+    incoming = [
+        normalized.pop(key) for key in (snake_key, camel_key) if key in normalized
+    ]
 
     device_id = get_runtime_bridge().get_registered_device_id()
+    foreign = [value for value in incoming if value and value != device_id]
+    if foreign:
+        logger.warning(
+            "Overriding incoming device context %s with local device id %s; "
+            "a payload carrying another device's id is the cross-client "
+            "dispatch bug signature",
+            foreign,
+            device_id or "<bridge not connected>",
+        )
+
     if device_id:
         normalized[snake_key] = device_id
     return normalized

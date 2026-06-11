@@ -5,16 +5,24 @@ Handles local session tokens and secure storage patterns.
 """
 
 import base64
+import contextlib
 import hashlib
+import json
+import os
 import secrets
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import jwt
 from pydantic import BaseModel
 
 from client_backend.core.config import client_settings, initialize_client_environment
+from client_backend.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class LocalSessionPayload(BaseModel):
@@ -110,37 +118,54 @@ def verify_local_session_token(token: str) -> LocalSessionPayload:
         raise LocalSessionError(f"Invalid local session token: {e}")
 
 
-def generate_device_identifier() -> str:
-    """
-    Generate a stable device identifier.
+DEVICE_IDENTITY_FILENAME = "device_identity.json"
 
-    This identifier should be unique per installation and stable across restarts.
+
+def generate_device_identifier(config_dir: Path | str | None = None) -> str:
+    """
+    Return this installation's device identifier, unique per installation and
+    stable across restarts.
+
+    The identifier is random — never derived from machine attributes, so two
+    installations on the same machine are distinct devices. It is generated
+    once on first run and persisted in the installation's profile directory
+    (or ``config_dir`` when given).
 
     Returns:
         A device identifier string.
     """
-    import hashlib
-    import platform
-    import uuid
+    root = Path(config_dir) if config_dir is not None else Path(client_settings.profile_root)
+    identity_path = root / DEVICE_IDENTITY_FILENAME
 
-    # Combine multiple machine-specific values
-    components = [
-        platform.node(),
-        platform.machine(),
-        platform.processor(),
-    ]
+    if identity_path.exists():
+        try:
+            stored = json.loads(identity_path.read_text(encoding="utf-8"))
+            identifier = str(stored.get("device_identifier") or "").strip()
+            if identifier:
+                return identifier
+            logger.warning(
+                "Device identity file %s has no identifier; regenerating. "
+                "This installation will re-register as a new device.",
+                identity_path,
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Device identity file %s is unreadable (%s); regenerating. "
+                "This installation will re-register as a new device.",
+                identity_path,
+                exc,
+            )
 
-    # Try to get a more stable identifier (MAC address)
-    try:
-        mac = uuid.getnode()
-        if not (mac & (1 << 40)):
-            components.append(str(mac))
-    except Exception:
-        pass
-
-    # Create a hash of the components
-    combined = "|".join(str(c) for c in components if c)
-    return hashlib.sha256(combined.encode()).hexdigest()[:32]
+    identifier = uuid4().hex
+    root.mkdir(parents=True, exist_ok=True)
+    identity_path.write_text(
+        json.dumps({"device_identifier": identifier}),
+        encoding="utf-8",
+    )
+    with contextlib.suppress(OSError):
+        # Best-effort restrictive permissions (no-op on Windows ACLs).
+        os.chmod(identity_path, 0o600)
+    return identifier
 
 
 class LocalSecretStorageError(Exception):

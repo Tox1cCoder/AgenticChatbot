@@ -2177,11 +2177,14 @@ class MessageService(IMessageService):
         custom_agents_state = self._resolve_custom_agents_state(
             resolved_user_id, message_create_data.conversation_id
         )
+        validated_device_id = self._validate_request_device_id(
+            message_create_data.device_id, resolved_user_id
+        )
         request = WorkflowExecutionRequest(
             message=message_create_data.content,
             conversation_id=str(message_create_data.conversation_id),
             user_id=str(resolved_user_id) if resolved_user_id else None,
-            device_id=str(message_create_data.device_id) if message_create_data.device_id else None,
+            device_id=validated_device_id,
             persona=sanitized_persona,
             attachments=attachments,
             model_request=model_request,
@@ -2194,6 +2197,34 @@ class MessageService(IMessageService):
             ),
         )
         return resolved_user_id, sanitized_persona, request
+
+    @staticmethod
+    def _validate_request_device_id(device_id: Any, user_id: Any) -> str | None:
+        """Treat the request ``device_id`` as untrusted per-turn input.
+
+        The device must belong to the requesting user and have an active
+        client runtime session; anything else (foreign device, disconnected
+        client, replayed id) is dropped so the turn binds no client tools
+        instead of another device's tools.
+        """
+        if device_id is None:
+            return None
+
+        from app.ai.client_runtime_tools import get_active_client_runtime_session
+
+        session = get_active_client_runtime_session(
+            user_id=str(user_id) if user_id else None,
+            device_id=str(device_id),
+        )
+        if session is None:
+            logging.warning(
+                "Dropping request device_id %s for user %s: "
+                "no active client runtime session for this user/device",
+                device_id,
+                user_id,
+            )
+            return None
+        return str(device_id)
 
     def _resolve_custom_agents_state(
         self, owner_id: UUID | None, conversation_id: UUID | None

@@ -100,8 +100,9 @@ class TestOverlappingToolNames:
         assert tools_b[0].device_id == device_b
         assert tools_a[0].tool_instance_id != tools_b[0].tool_instance_id
 
-    def test_broad_lookup_returns_both_devices(self):
-        """When no device_id filter is applied, both scopes are returned."""
+    def test_broad_lookup_without_scope_returns_nothing(self):
+        """Without a full (device_id, session_id) scope, no client tools are
+        visible — the lookup must never scan across devices."""
         state = DeferredToolState()
         conv_id = "conv-2"
 
@@ -120,10 +121,12 @@ class TestOverlappingToolNames:
                 session_id=sess,
             )
 
-        all_tools = state.get_loaded_client_tools(conv_id, "chat")
-        assert len(all_tools) == 2
-        device_ids = {t.device_id for t in all_tools}
-        assert device_ids == {"dev-x", "dev-y"}
+        assert state.get_loaded_client_tools(conv_id, "chat") == []
+        # Per-scope lookups remain intact.
+        tools_x = state.get_loaded_client_tools(
+            conv_id, "chat", device_id="dev-x", session_id="sess-x"
+        )
+        assert [t.device_id for t in tools_x] == ["dev-x"]
 
 
 # ---------------------------------------------------------------------------

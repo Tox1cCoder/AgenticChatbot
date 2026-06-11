@@ -777,6 +777,17 @@ The bridge lets a trusted local device execute privileged tools without opening 
 
 Configured by `CLIENT_HEARTBEAT_INTERVAL_SECONDS`, `CLIENT_TOOL_CALL_TIMEOUT_SECONDS`, `CLIENT_RECONNECT_*`.
 
+**Device identity** — each installation has a random identifier generated on
+first run and persisted as `device_identity.json` in the profile directory
+(`CLIENT_PROFILE_ROOT`). Two installations on the same machine are therefore
+separate, fully independent devices.
+
+> **Migration note (2026-06):** the identifier used to be derived from machine
+> attributes (hostname/MAC). Existing installations re-register as a *new*
+> device on next start; previously registered device rows become inert and can
+> be cleaned up at any time. Deleting `device_identity.json` likewise
+> re-registers the installation as a new device.
+
 ---
 
 ## Live Widgets
