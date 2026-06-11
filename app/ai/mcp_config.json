@@ -1,0 +1,65 @@
+{
+  "mcp_servers": {
+    "widgets": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "app/ai/mcp_servers/widgets_server.py"
+      ],
+      "description": "Live UI widget tools for showing interactive tables, charts, dashboards, and forms inside chat"
+    },
+    "calculator": {
+      "enabled": false,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "app/ai/mcp_servers/calculator_server.py"
+      ],
+      "description": "Basic calculator operations (add, subtract, multiply, divide, power)"
+    },
+    "tavily": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "app/ai/mcp_servers/tavily_server.py"
+      ],
+      "description": "Web search using Tavily API for real-time information retrieval"
+    },
+    "time": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "app/ai/mcp_servers/time_server.py"
+      ],
+      "description": "Current time lookup utility with timezone support"
+    },
+    "form_filler": {
+      "enabled": false,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "app/ai/mcp_servers/form_filler_server.py"
+      ],
+      "description": "Natural language incident report form filler - extracts structured data from Vietnamese/English descriptions"
+    },
+    "boring": {
+      "enabled": false,
+      "transport": "stdio",
+      "command": "cmd",
+      "args": [
+        "/c",
+        "conda",
+        "run",
+        "-n",
+        "chatbot",
+        "--no-capture-output",
+        "python",
+        "app/ai/mcp_servers/boring_servers/boring_reader_server.py"
+      ],
+      "description": "Borehole PDF data extractor - extracts structured borehole log data from PDF files"
+    }
+  }
+}
