@@ -5,7 +5,7 @@ import json
 import pytest
 
 from app.services.event_streaming.ai_sdk_v6 import AISDKV6StreamAdapter, AISDKV6StreamState
-from app.services.event_streaming.events import make_event
+from app.services.event_streaming.events import SubagentRef, make_event
 
 
 async def _collect_payloads(source):
@@ -121,3 +121,45 @@ async def test_interrupt_terminates_ui_stream():
     assert not any(
         payload != "[DONE]" and payload.get("delta") == "unreachable" for payload in payloads
     )
+
+
+@pytest.mark.asyncio
+async def test_subagent_events_map_to_data_subagent_chunks():
+    async def source():
+        yield make_event(
+            "subagent_start",
+            sequence=1,
+            subagent=SubagentRef(
+                id="w1", name="search_agent", path=["planning_agent", "w1"], status="running"
+            ),
+            data={"task": "Find sources"},
+        )
+        yield make_event(
+            "subagent_tool_execution_end",
+            sequence=2,
+            subagent=SubagentRef(
+                id="w1", name="search_agent", path=["planning_agent", "w1"], status="running"
+            ),
+            tool_call_id="sub-call-1",
+            tool_name="search_documents",
+            data={"output": "hit", "status": "success"},
+        )
+        yield make_event(
+            "subagent_end",
+            sequence=3,
+            subagent=SubagentRef(
+                id="w1", name="search_agent", path=["planning_agent", "w1"], status="completed"
+            ),
+            data={"output": "answer", "summary": "done", "elapsed_ms": 12},
+        )
+        yield make_event("complete", sequence=4, data={"message": {"id": "m-1"}})
+
+    payloads = await _collect_payloads(source)
+    subagent = [p for p in payloads if p != "[DONE]" and p.get("type") == "data-subagent"]
+
+    assert [p["data"]["phase"] for p in subagent] == ["start", "tool", "end"]
+    assert all(p["transient"] is True for p in subagent)
+    assert subagent[0]["data"]["subagent"]["id"] == "w1"
+    assert subagent[1]["data"]["toolName"] == "search_documents"
+    assert subagent[2]["data"]["subagent"]["status"] == "completed"
+    assert subagent[2]["data"]["elapsedMs"] == 12

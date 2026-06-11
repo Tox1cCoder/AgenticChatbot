@@ -15,7 +15,7 @@ from typing import Any
 
 from app.core.config import settings
 
-from .events import V3StreamEvent, make_event
+from .events import SUBAGENT_PHASE_BY_EVENT, V3StreamEvent, make_event
 
 _AI_SDK_HEARTBEAT_INTERVAL_SECONDS = float(
     getattr(settings, "ai_sdk_heartbeat_interval_seconds", 15.0) or 15.0
@@ -238,7 +238,12 @@ class AISDKV6StreamAdapter:
                 yield chunk
             return
 
-        # message_start/end, reasoning_start/end, tool_call_delta, subagent_*,
+        if etype in SUBAGENT_PHASE_BY_EVENT:
+            async for chunk in self._subagent(event):
+                yield chunk
+            return
+
+        # message_start/end, reasoning_start/end, tool_call_delta,
         # title_updated carry no assistant-ui projection without a capability flag.
 
     # -- tool handlers -----------------------------------------------------
@@ -306,6 +311,31 @@ class AISDKV6StreamAdapter:
                 "transient": True,
             }
         )
+
+    async def _subagent(self, event: V3StreamEvent) -> AsyncGenerator[str, None]:
+        data = event.data or {}
+        payload_data: dict[str, Any] = {
+            "phase": SUBAGENT_PHASE_BY_EVENT.get(event.type, "update"),
+            "subagent": event.subagent.model_dump(mode="json") if event.subagent else None,
+        }
+        if event.tool_call_id:
+            payload_data["toolCallId"] = event.tool_call_id
+        if event.tool_name:
+            payload_data["toolName"] = event.tool_name
+        for src_key, out_key in (
+            ("task", "task"),
+            ("output", "output"),
+            ("summary", "summary"),
+            ("status", "status"),
+            ("error", "error"),
+            ("render", "render"),
+            ("text", "text"),
+            ("elapsed_ms", "elapsedMs"),
+        ):
+            value = data.get(src_key)
+            if value is not None:
+                payload_data[out_key] = value
+        yield _sse({"type": "data-subagent", "data": payload_data, "transient": True})
 
     # -- terminal-bearing handlers ----------------------------------------
 

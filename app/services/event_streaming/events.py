@@ -100,3 +100,15 @@ def make_event(
         data=dict(data or {}),
         metadata=dict(metadata or {}),
     )
+
+
+# Shared by both public adapters (AI SDK `data-subagent`, Streamlit `subagent`)
+# so the wire `phase` discriminator stays consistent across protocols.
+SUBAGENT_PHASE_BY_EVENT: dict[str, str] = {
+    "subagent_start": "start",
+    "subagent_end": "end",
+    "subagent_tool_call_available": "tool",
+    "subagent_tool_execution_start": "tool",
+    "subagent_tool_execution_end": "tool",
+    "subagent_message_delta": "delta",
+}
