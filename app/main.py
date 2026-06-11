@@ -81,18 +81,6 @@ async def init_agents():
         logger.error(f"Failed to initialize agents: {e}")
 
 
-async def init_skills():
-    """Pre-scan skills folder at startup."""
-    try:
-        from app.ai.skills_registry import get_skills_registry
-
-        registry = get_skills_registry()
-        skills = registry.get_all_skills()
-        logger.info(f"Loaded {len(skills)} skills ({sum(s.enabled for s in skills)} enabled)")
-    except Exception as e:
-        logger.warning(f"Skills init failed (non-fatal): {e}")
-
-
 def _log_widget_runtime_status():
     """Log whether Redis-backed widget storage is available."""
     redis_url = settings.redis_url or settings.celery_broker_url
@@ -142,7 +130,6 @@ async def lifespan(app: FastAPI):
     await init_database_migrations()
     await init_checkpoint_tables()
     await init_agents()
-    await init_skills()
     _log_widget_runtime_status()
     _ensure_qdrant_collection()
     if settings.enable_client_runtime_bridge:
