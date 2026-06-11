@@ -11,16 +11,20 @@ subagents.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import weakref
+from collections.abc import AsyncGenerator
 from typing import Any
 from uuid import uuid4
 
 from .events import SubagentRef, V3StreamEvent, make_event
 
+_SINK_CLOSED = object()
+
 
 class SubagentEventSink:
     def __init__(self) -> None:
-        self._queue: asyncio.Queue[V3StreamEvent] = asyncio.Queue()
+        self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._sequence = 0
 
     def _next_sequence(self) -> int:
@@ -60,6 +64,18 @@ class SubagentEventSink:
             events.append(await self._queue.get())
         return events
 
+    async def stream(self) -> AsyncGenerator[V3StreamEvent, None]:
+        """Yield events as they are emitted, until :meth:`close` is called."""
+        while True:
+            event = await self._queue.get()
+            if event is _SINK_CLOSED:
+                return
+            yield event
+
+    def close(self) -> None:
+        """Signal :meth:`stream` to stop after already-queued events drain."""
+        self._queue.put_nowait(_SINK_CLOSED)
+
 
 # Graph state must stay msgpack-serializable for LangGraph checkpointing (HITL
 # interrupts persist the full state). The sink itself therefore never enters
@@ -83,3 +99,59 @@ def resolve_subagent_event_sink(token: Any) -> SubagentEventSink | None:
     if not isinstance(token, str):
         return None
     return _SINK_REGISTRY.get(token)
+
+
+async def stream_with_subagent_events(
+    primary: AsyncGenerator[V3StreamEvent, None],
+    sink: SubagentEventSink,
+) -> AsyncGenerator[V3StreamEvent, None]:
+    """Interleave ``primary`` graph events with ``sink`` subagent events live.
+
+    Both sources feed one FIFO queue, so a subagent event surfaces the instant
+    it is emitted instead of buffering until ``primary`` produces its next
+    event. Ends when ``primary`` is exhausted; sink events already enqueued are
+    flushed first. Feeder tasks are cancelled on early exit (client disconnect).
+    """
+    out: asyncio.Queue[Any] = asyncio.Queue()
+    primary_done = object()
+
+    async def _pump_primary() -> None:
+        try:
+            async for event in primary:
+                await out.put(event)
+        finally:
+            await out.put(primary_done)
+
+    async def _pump_sink() -> None:
+        async for event in sink.stream():
+            await out.put(event)
+
+    primary_task = asyncio.ensure_future(_pump_primary())
+    sink_task = asyncio.ensure_future(_pump_sink())
+    closed = False
+    try:
+        while True:
+            item = await out.get()
+            if item is primary_done:
+                break
+            yield item
+        sink.close()
+        closed = True
+        await sink_task
+        while not out.empty():
+            item = out.get_nowait()
+            if item is not primary_done:
+                yield item
+        # Re-raise the primary's exception (GraphRecursionError drives
+        # auto-continue; anything else must become a terminal error event).
+        await primary_task
+    finally:
+        # Only close on early exit (disconnect/teardown); a second sentinel
+        # after a clean run would kill the next auto-continue round's stream.
+        if not closed:
+            sink.close()
+        for task in (primary_task, sink_task):
+            if not task.done():
+                task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.gather(primary_task, sink_task, return_exceptions=True)

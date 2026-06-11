@@ -29,6 +29,7 @@ from ..services.event_streaming.subagents import (
     SubagentEventSink,
     register_subagent_event_sink,
     resolve_subagent_event_sink,
+    stream_with_subagent_events,
 )
 from .agent_metadata import (
     agent_identity,
@@ -4623,16 +4624,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             continue_reason = None
 
             try:
-                async for event in iter_v3_events_from_graph(
-                    self.graph, current_state, config=config
-                ):
+                merged = stream_with_subagent_events(
+                    iter_v3_events_from_graph(self.graph, current_state, config=config),
+                    subagent_event_sink,
+                )
+                async for event in merged:
                     for public_event in self._map_v3_stream_event(event, ctx):
                         yield public_event
-                    # Surface any custom-subagent lifecycle events emitted while
-                    # the just-completed superstep ran (dispatch_subagents).
-                    for sub_event in await subagent_event_sink.drain():
-                        for public_sub in self._map_v3_stream_event(sub_event, ctx):
-                            yield public_sub
 
             except GraphRecursionError:
                 logger.warning(

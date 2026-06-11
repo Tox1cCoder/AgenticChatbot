@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.ai.planning_subagents import (
@@ -8,10 +10,12 @@ from app.ai.planning_subagents import (
     PlanningSubagentTask,
 )
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from app.services.event_streaming.events import make_event
 from app.services.event_streaming.subagents import (
     SubagentEventSink,
     register_subagent_event_sink,
     resolve_subagent_event_sink,
+    stream_with_subagent_events,
 )
 
 
@@ -85,3 +89,72 @@ def test_resolve_sink_returns_none_for_dead_or_unknown_tokens():
     token = register_subagent_event_sink(SubagentEventSink())
     # The only strong reference was the local above — entry dies with it.
     assert resolve_subagent_event_sink(token) is None
+
+
+@pytest.mark.asyncio
+async def test_stream_with_subagent_events_yields_sink_event_while_primary_blocked():
+    sink = SubagentEventSink()
+    gate = asyncio.Event()
+
+    async def primary():
+        yield make_event("message_delta", sequence=1, data={"text": "a"})
+        await gate.wait()  # primary is blocked here while the subagent runs
+        yield make_event("message_delta", sequence=2, data={"text": "b"})
+
+    merged = stream_with_subagent_events(primary(), sink)
+    first = await merged.__anext__()
+    await sink.emit(
+        "subagent_start", task_id="w1", agent_name="search_agent", status="running"
+    )
+    second = await merged.__anext__()  # must be the subagent event, not "b"
+    gate.set()
+    rest = [event async for event in merged]
+
+    assert first.type == "message_delta"
+    assert second.type == "subagent_start"
+    assert [event.type for event in rest] == ["message_delta"]
+
+
+@pytest.mark.asyncio
+async def test_stream_with_subagent_events_propagates_primary_exception():
+    """Graph exceptions (GraphRecursionError → auto-continue, anything else →
+    terminal ``error`` event) must escape the merge, not die inside the pump."""
+    sink = SubagentEventSink()
+
+    class PrimaryBoom(RuntimeError):
+        pass
+
+    async def primary():
+        yield make_event("message_delta", sequence=1, data={"text": "a"})
+        raise PrimaryBoom("graph blew up")
+
+    received = []
+    with pytest.raises(PrimaryBoom):
+        async for event in stream_with_subagent_events(primary(), sink):
+            received.append(event.type)
+
+    assert received == ["message_delta"]
+
+
+@pytest.mark.asyncio
+async def test_sink_remains_usable_for_next_auto_continue_round():
+    """execute_request_stream reuses one sink across auto-continue rounds; a
+    completed merge must not leave a stray close-sentinel behind that would
+    kill the next round's live stream."""
+    sink = SubagentEventSink()
+
+    async def round_one():
+        yield make_event("message_delta", sequence=1, data={"text": "round-1"})
+
+    async def round_two():
+        await sink.emit(
+            "subagent_start", task_id="w1", agent_name="search_agent", status="running"
+        )
+        yield make_event("message_delta", sequence=2, data={"text": "round-2"})
+
+    first = [e.type async for e in stream_with_subagent_events(round_one(), sink)]
+    second = [e.type async for e in stream_with_subagent_events(round_two(), sink)]
+
+    assert first == ["message_delta"]
+    assert "subagent_start" in second
+    assert "message_delta" in second
