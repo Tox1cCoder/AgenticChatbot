@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -213,25 +214,32 @@ def test_restricted_skill_filtering_is_exact_and_no_op_without_refs():
 
 @pytest.mark.asyncio
 async def test_custom_agent_cannot_activate_unselected_skill(monkeypatch):
+    device_id = str(uuid4())
     monkeypatch.setattr(
-        skill_resolver,
-        "_list_server_skills",
-        lambda: [
-            ResolvedSkill(
-                name="data-analysis", description="d", source="server", lookup_name="data-analysis"
-            ),
-            ResolvedSkill(name="browser", description="b", source="server", lookup_name="browser"),
-        ],
+        skill_resolver.ClientDeviceService,
+        "lookup_active_session",
+        lambda _device_uuid: SimpleNamespace(
+            user_id="user-1",
+            session_id="session-1",
+            device_id=device_id,
+            skill_catalog={
+                "skills": [
+                    {"name": "data-analysis", "description": "d", "enabled": True},
+                    {"name": "browser", "description": "b", "enabled": True},
+                ]
+            },
+        ),
     )
-    monkeypatch.setattr(skill_resolver, "_list_client_skills", lambda **kwargs: [])
 
-    allowed_refs = [{"source": "server", "lookup_name": "data-analysis", "name": "data-analysis"}]
-    tool = create_activate_skill_tool(user_id=None, device_id=None, allowed_skill_refs=allowed_refs)
+    allowed_refs = [{"source": "client", "lookup_name": "data-analysis", "name": "data-analysis"}]
+    tool = create_activate_skill_tool(
+        user_id="user-1", device_id=device_id, allowed_skill_refs=allowed_refs
+    )
 
     # "browser" is real but not in the agent's allowlist -> rejected as unavailable.
     result = await tool.ainvoke({"skill_name": "browser"})
     assert "not found" in result.lower()
-    assert "data-analysis" in result  # only the allowed skill is listed as available
+    assert "data-analysis" in result
 
 
 def test_selected_client_tool_cannot_be_substituted_by_name_from_another_session():

@@ -1289,9 +1289,8 @@ class BaseAgent(ABC):
 
         parts = [
             "\n\n── Available Skills ──",
-            "You have access to the following skills. Some may be hosted on the "
-            "server backend and some may be available from the connected client device. "
-            "Each skill contains "
+            "You have access to the following skills, provided by the client "
+            "device connected to this chat session. Each skill contains "
             "detailed instructions that you can load on demand using the "
             "`activate_skill` tool. When a user's request seems related to "
             "a skill below, call `activate_skill` with the skill name to "
@@ -1299,7 +1298,7 @@ class BaseAgent(ABC):
         ]
         for skill in active_skills:
             lookup_name = str(skill.get("lookup_name") or skill.get("name") or "").strip()
-            source = str(skill.get("source") or "server").strip().lower()
+            source = str(skill.get("source") or "client").strip().lower()
             description = str(skill.get("description") or "").strip()
             parts.append(f"• **{lookup_name}** [{source}] – {description}")
         parts.append("\n── End Available Skills ──")

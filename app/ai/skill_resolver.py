@@ -1,4 +1,4 @@
-"""Internal server skill source resolution for prompt binding and activation."""
+"""Client skill resolution for prompt binding and activation (skills are client-owned)."""
 
 from __future__ import annotations
 
@@ -9,8 +9,6 @@ from typing import Any
 from uuid import UUID
 
 from app.services.client_device_service import ClientDeviceService
-
-from .skills_registry import get_server_skills_registry
 
 logger = logging.getLogger(__name__)
 
@@ -58,27 +56,6 @@ def get_bound_device_session(*, user_id: str | None, device_id: str | None):
         return None
 
     return session
-
-
-def _list_server_skills() -> list[ResolvedSkill]:
-    try:
-        active_skills = get_server_skills_registry().get_active_skills()
-    except Exception as exc:
-        logger.warning("Failed to load server-owned repo skills: %s", exc)
-        return []
-
-    return [
-        ResolvedSkill(
-            name=skill.name,
-            description=skill.description,
-            source="server",
-            lookup_name=skill.name,
-            category=getattr(skill, "category", None),
-            tags=tuple(getattr(skill, "tags", ()) or ()),
-            content_length=len(skill.content) if skill.content else 0,
-        )
-        for skill in active_skills
-    ]
 
 
 def _list_client_skills(*, user_id: str | None, device_id: str | None) -> list[ResolvedSkill]:
@@ -161,8 +138,7 @@ def list_resolved_skills(
     When ``allowed_skill_refs`` is provided (custom agents), the result is
     restricted to skills matching one of the selected refs.
     """
-    combined = _list_server_skills()
-    combined.extend(_list_client_skills(user_id=user_id, device_id=device_id))
+    combined = _list_client_skills(user_id=user_id, device_id=device_id)
     normalized = _normalize_lookup_names(combined)
     restricted = filter_skills_by_refs(normalized, allowed_skill_refs)
     return sorted(restricted, key=lambda item: item.lookup_name.lower())

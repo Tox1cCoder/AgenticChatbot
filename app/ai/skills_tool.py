@@ -31,7 +31,6 @@ from .skill_resolver import (
 from .skill_resolver import (
     resolve_skill_reference as resolve_runtime_skill_reference,
 )
-from .skills_registry import get_server_skills_registry
 from .tool_context import get_tool_context
 
 logger = logging.getLogger(__name__)
@@ -107,8 +106,7 @@ def create_activate_skill_tool(
 
     Skill content is fetched from the currently connected client device
     over the runtime bridge so the canonical backend does not need direct
-    access to client-local skill files. Server-local skills continue to
-    load directly from the canonical backend registry.
+    access to client-local skill files.
 
     When ``allowed_skill_refs`` is provided (custom agents), only skills in
     that allowlist can be resolved and activated; any other name is rejected.
@@ -137,20 +135,6 @@ def create_activate_skill_tool(
             return resolution_error
         if resolved_skill is None:
             return "Error: skill resolution failed."
-
-        if resolved_skill.source == "server":
-            try:
-                skill = get_server_skills_registry().get_skill(resolved_skill.name)
-            except KeyError:
-                return f"Error: skill '{resolved_skill.name}' is no longer available on the server."
-
-            if not skill.enabled:
-                return (
-                    f"Error: skill '{resolved_skill.name}' exists but is currently disabled. "
-                    "Only enabled skills can be activated."
-                )
-
-            return f"── Skill: {skill.name} ──\n\n{skill.content}\n\n── End Skill: {skill.name} ──"
 
         ctx = get_tool_context()
         context_device_id = str(ctx.device_id or bound_device_id or "")
