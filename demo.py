@@ -37,7 +37,8 @@ from upload_support import (
     upload_documents,
 )
 
-API_BASE_URL = os.environ.get("CHATBOT_API_BASE_URL", "http://127.0.0.1:8000")
+# demo.py is a UI for the local client_backend sidecar (not the canonical server).
+API_BASE_URL = os.environ.get("CHATBOT_API_BASE_URL", "http://127.0.0.1:8100")
 WIDGET_WS_BASE_URL = os.environ.get("CHATBOT_WIDGET_WS_BASE_URL", "").rstrip("/")
 REQUEST_TIMEOUT = (5, 30)
 STREAM_REQUEST_TIMEOUT = (10, 900)
@@ -3309,14 +3310,17 @@ def render_login_page():
                         {"email": email, "password": password},
                     )
                     if auth_response and "data" in auth_response:
-                        st.session_state.auth_token = auth_response["data"]["accessToken"]
-                        st.session_state.current_user_id = auth_response["data"]["userId"]
+                        data = auth_response["data"]
+                        session_token = data.get("localSessionToken") or data["accessToken"]
+                        st.session_state.auth_token = session_token
+                        st.session_state.current_user_id = data["userId"]
+                        st.session_state.device_id = data.get("deviceId")
                         st.session_state.current_user_profile = None
                         st.session_state.active_view = "chat"
                         st.session_state.show_login = False
                         st.session_state._ls_op = {
-                            "token": auth_response["data"]["accessToken"],
-                            "uid": auth_response["data"]["userId"],
+                            "token": session_token,
+                            "uid": data["userId"],
                         }
                         st.toast("Welcome back!", icon=":material/check_circle:")
                         st.rerun()
@@ -3357,14 +3361,17 @@ def render_login_page():
                                 {"email": email, "password": password},
                             )
                             if auth_response and "data" in auth_response:
-                                st.session_state.auth_token = auth_response["data"]["accessToken"]
-                                st.session_state.current_user_id = auth_response["data"]["userId"]
+                                data = auth_response["data"]
+                                session_token = data.get("localSessionToken") or data["accessToken"]
+                                st.session_state.auth_token = session_token
+                                st.session_state.current_user_id = data["userId"]
+                                st.session_state.device_id = data.get("deviceId")
                                 st.session_state.current_user_profile = None
                                 st.session_state.active_view = "chat"
                                 st.session_state.show_login = False
                                 st.session_state._ls_op = {
-                                    "token": auth_response["data"]["accessToken"],
-                                    "uid": auth_response["data"]["userId"],
+                                    "token": session_token,
+                                    "uid": data["userId"],
                                 }
                                 st.toast(
                                     "Account created!",
