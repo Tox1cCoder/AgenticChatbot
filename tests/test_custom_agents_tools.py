@@ -202,11 +202,11 @@ def test_filter_blocks_client_tool_from_other_device():
 def test_restricted_skill_filtering_is_exact_and_no_op_without_refs():
     skills = [
         ResolvedSkill(
-            name="data-analysis", description="", source="server", lookup_name="data-analysis"
+            name="data-analysis", description="", source="client", lookup_name="data-analysis"
         ),
-        ResolvedSkill(name="browser", description="", source="server", lookup_name="browser"),
+        ResolvedSkill(name="browser", description="", source="client", lookup_name="browser"),
     ]
-    refs = [{"source": "server", "lookup_name": "data-analysis", "name": "data-analysis"}]
+    refs = [{"source": "client", "lookup_name": "data-analysis", "name": "data-analysis"}]
     assert [s.name for s in filter_skills_by_refs(skills, refs)] == ["data-analysis"]
     # None means base-agent behavior: no filtering.
     assert filter_skills_by_refs(skills, None) == skills
@@ -239,7 +239,7 @@ async def test_custom_agent_cannot_activate_unselected_skill(monkeypatch):
     # "browser" is real but not in the agent's allowlist -> rejected as unavailable.
     result = await tool.ainvoke({"skill_name": "browser"})
     assert "not found" in result.lower()
-    assert "data-analysis" in result
+    assert "data-analysis" in result  # only the allowed skill is listed as available
 
 
 def test_selected_client_tool_cannot_be_substituted_by_name_from_another_session():

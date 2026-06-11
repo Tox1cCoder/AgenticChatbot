@@ -179,7 +179,7 @@ class Router:
             skills_context = "\n".join(
                 (
                     f"- **{skill.get('lookup_name') or skill.get('name')}** "
-                    f"[{skill.get('source') or 'server'}]: "
+                    f"[{skill.get('source') or 'client'}]: "
                     f"{skill.get('description') or ''}"
                 )
                 for skill in active_skills
