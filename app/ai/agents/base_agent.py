@@ -188,7 +188,10 @@ def _bind_widget_session_tools(
 
 
 class BaseAgent(ABC):
-    """Abstract base class for all agents. Child classes must implement: agent_type, agent_id, _get_base_system_prompt()."""
+    """Abstract base class for all agents.
+
+    Child classes must implement: agent_type, agent_id, _get_base_system_prompt().
+    """
 
     def __init__(
         self,
@@ -606,7 +609,8 @@ class BaseAgent(ABC):
         warnings: list[str] = []
         if request_override:
             warnings.append(
-                "Runtime model override could not be fully resolved from backend state; using default Gemini configuration."
+                "Runtime model override could not be fully resolved from backend state; "
+                "using default Gemini configuration."
             )
 
         return ResolvedRuntimeModelConfig(
