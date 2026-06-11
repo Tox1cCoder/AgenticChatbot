@@ -8020,6 +8020,12 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
                     status.update(label="Subagents: dispatching...", state="running")
                 continue
 
+            if event_type == "subagent":
+                if _upsert_stream_subagent_activity(event):
+                    render_live_trace_panel(trace_placeholder)
+                    status.update(label="Subagents: working...", state="running")
+                continue
+
             if event_type == "token":
                 content = event.get("content", "")
                 accumulated_content += content
@@ -8651,6 +8657,11 @@ def render_chat_view():
                             if _upsert_stream_subagent_activity(event):
                                 render_live_trace_panel(trace_placeholder)
                                 status.update(label="Subagents: dispatching...", state="running")
+
+                        elif event_type == "subagent":
+                            if _upsert_stream_subagent_activity(event):
+                                render_live_trace_panel(trace_placeholder)
+                                status.update(label="Subagents: working...", state="running")
 
                         elif event_type == "interrupt":
                             # Workflow paused for human approval

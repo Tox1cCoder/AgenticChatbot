@@ -192,7 +192,8 @@ Canonical mapping used by the v3 normalizer: text-delta→`message_delta`, reaso
 ## Implementation Tasks
 
 > **Task status:** Task 1 ✅ · Task 2 ✅ · Task 3 ✅ · Task 4 ✅ · Task 5 ✅ · Task 6 ✅ · Task 7 ✅ · Task 8 ✅ · Task 9 ✅ · Task 10 ✅ — PLAN COMPLETE (2026-06-10).
-> **Follow-up status (Live Subagent Progress):** Task 11 ✅ · Task 12 ✅ · Task 13 ✅ · Task 14 ⬜ · Task 15 ⬜.
+> **Follow-up status (Live Subagent Progress):** Task 11 ✅ · Task 12 ✅ · Task 13 ✅ · Task 14 ✅ · Task 15 ⬜.
+> - Task 14: `_merge_live_subagent_event` added to `subagent_activity.py` (per-worker upsert keyed by `subagent.id`; start seeds summary from `task`, tool appends artifacts, end copies summary/elapsed_ms/models/error); `build_live_subagent_activity_view` routes `{"type":"subagent"}` events to it. Both demo stream loops route `subagent` events through `_upsert_stream_subagent_activity` with a "Subagents: working..." status label. New `tests/test_subagent_activity_live.py` + demo activity suite = 12 passed; `demo.py` parses; ruff clean on touched files (demo.py's 215 pre-existing errors are unchanged by this diff — verified against stashed baseline). Deviation: the plan's snippets exceeded the 100-char line limit in four places; wrapped them (no behavior change).
 > - Task 13: `internal_sse.py::legacy_event_from_v3` projects `subagent_*` → `{"type":"subagent", "phase":…, "subagent":{…}}` using the shared `SUBAGENT_PHASE_BY_EVENT`; field passthrough matches the AI SDK adapter (snake_case on this protocol). Contract suite 9 passed; ruff clean. No deviations.
 > - Task 12: `SUBAGENT_PHASE_BY_EVENT` added to `events.py` (shared by both adapters); `ai_sdk_v6.py` projects `subagent_*` → transient `data-subagent` chunks via the new `_subagent` handler. Contract suite 5 passed; ruff clean. One cosmetic deviation: the dispatch branch sits after the `complete` branch rather than after `user_message_created` (branches are mutually exclusive on `etype`, so ordering is irrelevant); the fall-through comment no longer lists `subagent_*`.
 > - Task 11: `SubagentEventSink.stream()`/`close()` + `stream_with_subagent_events` merge added; graph drain loop replaced by the live merge. Liveness test green; regression set (subagents + graph planning + message-service subagent + graph tool events) 48 passed; ruff clean.
@@ -2787,14 +2788,14 @@ git commit -m "feat: surface subagent progress on the streamlit sse stream"
 
 ---
 
-### Task 14: Streamlit demo per-worker live rendering
+### Task 14: Streamlit demo per-worker live rendering — ✅ COMPLETE
 
 **Files:**
 - Modify: `app/ui/subagent_activity.py` (`build_live_subagent_activity_view`)
 - Modify: `demo.py` (two stream loops)
 - Test: `tests/test_subagent_activity_live.py` (new)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tests/test_subagent_activity_live.py`:
 
@@ -2845,12 +2846,12 @@ def test_live_view_tracks_each_worker_independently():
     assert view["completed"] == 2
 ```
 
-- [ ] **Step 2: Run it and verify it fails**
+- [x] **Step 2: Run it and verify it fails**
 
 Run: `python -m pytest tests/test_subagent_activity_live.py -q`
 Expected: FAIL — `build_live_subagent_activity_view` ignores `{"type": "subagent"}` events and returns `previous` (the first call returns `None`, so `view["total"]` raises `TypeError`).
 
-- [ ] **Step 3: Handle `subagent` events in the view builder**
+- [x] **Step 3: Handle `subagent` events in the view builder**
 
 In `app/ui/subagent_activity.py`, add a branch at the top of `build_live_subagent_activity_view` (right after the `if not isinstance(tool_event, dict): return previous` guard):
 
@@ -2919,12 +2920,12 @@ def _merge_live_subagent_event(
     )
 ```
 
-- [ ] **Step 4: Run the test and verify it passes**
+- [x] **Step 4: Run the test and verify it passes**
 
 Run: `python -m pytest tests/test_subagent_activity_live.py -q`
 Expected: PASS.
 
-- [ ] **Step 5: Route `subagent` events into both demo stream loops**
+- [x] **Step 5: Route `subagent` events into both demo stream loops**
 
 In `demo.py`, add a branch immediately after the streaming-loop `node_complete` handler at [demo.py:8017-8021](demo.py#L8017-L8021):
 
@@ -2945,13 +2946,13 @@ And after the resume-loop `node_complete` handler at [demo.py:8650-8653](demo.py
                                 status.update(label="Subagents: working...", state="running")
 ```
 
-- [ ] **Step 6: Verify the demo still imports and the activity suite is green**
+- [x] **Step 6: Verify the demo still imports and the activity suite is green**
 
 Run: `python -m pytest tests/test_subagent_activity_live.py tests/test_demo_subagent_activity.py -q`
 Run: `python -c "import ast; ast.parse(open('demo.py', encoding='utf-8').read())"`
 Expected: tests PASS; `demo.py` parses with no output.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add app/ui/subagent_activity.py demo.py tests/test_subagent_activity_live.py

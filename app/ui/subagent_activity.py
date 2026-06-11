@@ -302,6 +302,64 @@ def build_subagent_activity_view(message_metadata: dict[str, Any] | None) -> dic
     )
 
 
+def _merge_live_subagent_event(
+    event: dict[str, Any], previous: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    sub = event.get("subagent")
+    if not isinstance(sub, dict):
+        return previous
+    worker_id = str(sub.get("id") or "").strip()
+    if not worker_id:
+        return previous
+
+    order: list[str] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in _as_list((previous or {}).get("results")):
+        if isinstance(row, dict):
+            row_id = str(row.get("id") or "")
+            by_id[row_id] = dict(row)
+            order.append(row_id)
+
+    entry = by_id.get(worker_id)
+    if entry is None:
+        entry = {"id": worker_id, "agent": str(sub.get("name") or "unknown_agent")}
+        by_id[worker_id] = entry
+        order.append(worker_id)
+
+    entry["status"] = str(sub.get("status") or entry.get("status") or "running").strip().lower()
+
+    phase = str(event.get("phase") or "").strip().lower()
+    if phase == "start":
+        task_text = event.get("task")
+        if isinstance(task_text, str) and task_text.strip() and not entry.get("summary"):
+            entry["summary"] = task_text.strip()
+    elif phase == "tool":
+        artifacts = _as_list(entry.get("artifacts"))
+        artifacts.append(
+            {
+                "tool_call_id": event.get("tool_call_id"),
+                "tool": event.get("tool_name"),
+                "output": event.get("output"),
+                "status": event.get("status"),
+            }
+        )
+        entry["artifacts"] = artifacts
+    elif phase == "end":
+        for key in ("summary", "elapsed_ms", "requested_model", "resolved_model", "error"):
+            value = event.get(key)
+            if value is not None:
+                entry[key] = value
+
+    rebuilt = [by_id[row_id] for row_id in order]
+    any_running = any(r.get("status") == "running" for r in rebuilt)
+    dispatch_status = "running" if any_running else "completed"
+    return _build_activity_view(
+        results=rebuilt,
+        rationales=_as_list((previous or {}).get("rationales")),
+        dispatch_statuses=[dispatch_status],
+    )
+
+
 def build_live_subagent_activity_view(
     tool_event: dict[str, Any] | None,
     *,
@@ -310,6 +368,9 @@ def build_live_subagent_activity_view(
     """Build or update a live subagent activity view from a streaming tool event."""
     if not isinstance(tool_event, dict):
         return previous
+
+    if tool_event.get("type") == "subagent":
+        return _merge_live_subagent_event(tool_event, previous)
 
     if tool_event.get("type") == "node_complete" and tool_event.get("node") == "planning_agent":
         for tool_call in _as_list(tool_event.get("tool_calls")):
