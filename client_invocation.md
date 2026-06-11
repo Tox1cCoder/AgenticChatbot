@@ -364,3 +364,20 @@ pytest 9.0.2); the `.venv` runtime env has no pytest installed.
 - Ruff on every touched file: 0 new findings (8 pre-existing findings
   verified present on HEAD at shifted line numbers; left untouched to keep
   the diff in scope).
+
+**Follow-up cleanup (2026-06-11, after plan completion):**
+- The 8 pre-existing lint findings above were fixed on request (B904 ×2,
+  E501 ×5, SIM117 ×1).
+- Strict (device, session) scoping extended to the remaining client-scope
+  consumers: `get_all_loaded_tool_names`, `snapshot()` (no more
+  optional-filter scans), and `restore()` (drops other-device entries and
+  the first-ref device fallback — closes a residual leak where snapshot
+  entries from device A could re-register into device B's loaded scope).
+- Removed the never-used `inject_device_context` flag from
+  `proxy_server_request`.
+- Client bundle rebuilt with all fixes: `dist/client-backend-bundle/` +
+  `.zip` (gitignored artifacts) via `scripts/build_client_backend_bundle.py`,
+  a cross-platform port of the PowerShell builder (scripts/ is local-only
+  by repo convention). Bundle verified by import probe + checks that the
+  D2/D4 fixes are present in the shipped files.
+- Full suite re-verified after cleanup: 1065 passed.
