@@ -192,7 +192,8 @@ Canonical mapping used by the v3 normalizer: text-delta→`message_delta`, reaso
 ## Implementation Tasks
 
 > **Task status:** Task 1 ✅ · Task 2 ✅ · Task 3 ✅ · Task 4 ✅ · Task 5 ✅ · Task 6 ✅ · Task 7 ✅ · Task 8 ✅ · Task 9 ✅ · Task 10 ✅ — PLAN COMPLETE (2026-06-10).
-> **Follow-up status (Live Subagent Progress):** Task 11 ✅ · Task 12 ✅ · Task 13 ✅ · Task 14 ✅ · Task 15 ⬜.
+> **Follow-up status (Live Subagent Progress):** Task 11 ✅ · Task 12 ✅ · Task 13 ✅ · Task 14 ✅ · Task 15 ✅ — FOLLOW-UP PLAN COMPLETE (2026-06-11).
+> - Task 15: the contract file lives at `plans/AI_SDK_FE_CONTRACT.md` (not repo root as the plan's path implied) and the "Subagent Progress" section already existed as the plan's companion edit. Verified field-by-field against the implemented `ai_sdk_v6.py::_subagent` (phases, camelCase keys, transient flag — all match); the only change needed was flipping the "Status: planned" callout to "Status: shipped" with the out-of-scope notes (no resume-path live progress; `delta` phase reserved).
 > - Task 14: `_merge_live_subagent_event` added to `subagent_activity.py` (per-worker upsert keyed by `subagent.id`; start seeds summary from `task`, tool appends artifacts, end copies summary/elapsed_ms/models/error); `build_live_subagent_activity_view` routes `{"type":"subagent"}` events to it. Both demo stream loops route `subagent` events through `_upsert_stream_subagent_activity` with a "Subagents: working..." status label. New `tests/test_subagent_activity_live.py` + demo activity suite = 12 passed; `demo.py` parses; ruff clean on touched files (demo.py's 215 pre-existing errors are unchanged by this diff — verified against stashed baseline). Deviation: the plan's snippets exceeded the 100-char line limit in four places; wrapped them (no behavior change).
 > - Task 13: `internal_sse.py::legacy_event_from_v3` projects `subagent_*` → `{"type":"subagent", "phase":…, "subagent":{…}}` using the shared `SUBAGENT_PHASE_BY_EVENT`; field passthrough matches the AI SDK adapter (snake_case on this protocol). Contract suite 9 passed; ruff clean. No deviations.
 > - Task 12: `SUBAGENT_PHASE_BY_EVENT` added to `events.py` (shared by both adapters); `ai_sdk_v6.py` projects `subagent_*` → transient `data-subagent` chunks via the new `_subagent` handler. Contract suite 5 passed; ruff clean. One cosmetic deviation: the dispatch branch sits after the `complete` branch rather than after `user_message_created` (branches are mutually exclusive on `etype`, so ordering is irrelevant); the fall-through comment no longer lists `subagent_*`.
@@ -2961,16 +2962,16 @@ git commit -m "feat: render live per-worker subagent progress in the streamlit d
 
 ---
 
-### Task 15: Update the AI SDK frontend contract
+### Task 15: Update the AI SDK frontend contract — ✅ COMPLETE
 
 **Files:**
 - Modify: `AI_SDK_FE_CONTRACT.md`
 
-- [ ] **Step 1: Document the `data-subagent` part**
+- [x] **Step 1: Document the `data-subagent` part**
 
 Add a "Subagent Progress" subsection after the "Other data events" block in `AI_SDK_FE_CONTRACT.md` describing: the `data-subagent` transient part, the `phase` values (`start` / `tool` / `end`), the stable `data.subagent.id` key for in-place row updates, the phase-specific fields (`task`, `toolName`/`toolCallId`, `output`, `summary`, `status`, `elapsedMs`, `error`), and the note that the durable record is `backendMeta.subagent_results`. (Exact content is applied in this plan's companion edit; keep it in sync with `ai_sdk_v6.py::_subagent`.)
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```powershell
 git add AI_SDK_FE_CONTRACT.md
