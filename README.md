@@ -52,7 +52,7 @@ A Streamlit **demo UI** ([`demo.py`](demo.py)) and a ready-to-import **Postman c
 | **Multi-provider** | Per-user, Fernet-encrypted API keys for **Google Gemini**, **OpenAI**, and **Anthropic**, with per-agent overrides (`agent_model_configs` table). |
 | **MCP-native** | Server-managed MCP registry ([`/mcp/*`](app/api/mcp.py)) plus deferred tool search ([`tool_search`](app/ai/tool_search_tool.py)) to keep agent schemas small at prompt time. |
 | **Client runtime bridge** | Devices register, heartbeat, sync tool/skill catalogs, and receive WebSocket-dispatched tool calls — enabling local shell/filesystem/MCP execution without exposing them to the public network. |
-| **Skills** | Markdown-defined skills with YAML frontmatter, resolved to tools at runtime. Shared registry spans server, client, and device ([`app/ai/skills_registry.py`](app/ai/skills_registry.py), [`client_backend/services/local_skills_registry.py`](client_backend/services/local_skills_registry.py)). |
+| **Skills** | Markdown-defined skills with YAML frontmatter, owned by each client device. The sidecar scans `CLIENT_SKILLS_ROOTS`, syncs a per-device catalog to the server, and serves skill content over the runtime bridge ([`client_backend/services/local_skills_registry.py`](client_backend/services/local_skills_registry.py)). The server has no skills of its own. |
 | **Live widgets** | Token-minted handshake (`POST /widgets/{id}/connection`) followed by a stateful WebSocket (`/widgets/{id}/connect`) for interactive, server-driven UI components. |
 | **Summarization middleware** | Context-budget-aware rolling summarisation ([`summarization_middleware.py`](app/ai/summarization_middleware.py)) with token/message/fraction triggers, hard summary caps, and fail-closed timeouts. |
 | **Auto-continue** | Automatic continuation rounds when an agent hits iteration limits (`auto_continue_enabled`), with absolute wall-clock and iteration safety caps. |
@@ -490,9 +490,20 @@ codex-client-backend doctor --config .env.client --json # machine-readable diagn
 
 ### Demo UI
 
-```bash
-streamlit run demo.py
-```
+`demo.py` is the development client UI; it talks to the local sidecar (default `http://127.0.0.1:8100`) via `CHATBOT_API_BASE_URL`. Full three-process dev setup:
+
+1. **Canonical server** (port 8000):
+   ```bash
+   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+   ```
+2. **Sidecar** (port 8100) — set `CLIENT_SKILLS_ROOTS` to the absolute path of `<repo>/skills` so the bundled examples are served:
+   ```bash
+   codex-client-backend run --config .env.client
+   ```
+3. **Demo UI** (talks to the sidecar):
+   ```bash
+   streamlit run demo.py
+   ```
 
 ---
 
@@ -638,6 +649,8 @@ The bundled in-process MCP servers are under [`app/ai/mcp_servers/`](app/ai/mcp_
 
 The same endpoints are exposed by `client_backend` at `/mcp/*` so a desktop UI can configure MCP both globally (server) and per-device (client).
 
+**Global default tools.** Enabled servers in [`app/ai/mcp_config.json`](app/ai/mcp_config.json) are by definition global-default tools, visible to every client (currently `time`, `tavily`, `widgets` — enforced by `tests/test_mcp_global_allowlist.py`). Anything machine-specific (e.g. desktop-commander, excel) belongs in a sidecar's local MCP config (`<profile>/mcp/mcp_config.json`, same `mcpServers` JSON shape), where it becomes a device-scoped `client__` tool.
+
 ### Deferred tool binding
 
 `DeferredToolBinding` + `DeferredToolState` ([`app/ai/deferred_tool_*.py`](app/ai/)) record discovery decisions per conversation, enforce TTL, and survive turn boundaries through the LangGraph checkpoint.
@@ -672,18 +685,17 @@ The frontend owns component rendering. Unknown render types must fall back to JS
 
 Skills are markdown files with YAML frontmatter describing a capability (name, description, allowed-tools, optional arguments). They are loaded by:
 
-- **Server** — [`SkillsRegistry`](app/ai/skills_registry.py) (+ [`skill_resolver.py`](app/ai/skill_resolver.py), [`skills_snapshot.py`](app/ai/skills_snapshot.py))
-- **Client** — [`LocalSkillsRegistry`](client_backend/services/local_skills_registry.py), scanning `CLIENT_SKILLS_ROOTS`
+- **Client (only source of skills)** — [`LocalSkillsRegistry`](client_backend/services/local_skills_registry.py), scanning `CLIENT_SKILLS_ROOTS`; synced per-device to the server and resolved at chat time by [`skill_resolver.py`](app/ai/skill_resolver.py) strictly for the originating device.
+- To serve this repo's `skills/` folder during development, add its absolute path to the local sidecar's `CLIENT_SKILLS_ROOTS`.
 
-Both registries share frontmatter parsing in [`shared/skills/front_matter.py`](shared/skills/front_matter.py). Bundled examples:
+Frontmatter parsing is shared in [`shared/skills/front_matter.py`](shared/skills/front_matter.py). Bundled examples:
 
 - [`skills/playwright-cli/`](skills/playwright-cli/) — Playwright CLI browser automation
 - [`skills/take100/`](skills/take100/) — HTTP-based timesheet automation
 
-API:
+API (sidecar only — the server has no skills endpoints of its own):
 
-- Server: `/skills/*` (list / detail / toggle / reload)
-- Client: `/skills`, `/skills/{name}`, `/skills/{name}/toggle`, `/skills/reload`
+- `/skills`, `/skills/{name}`, `/skills/{name}/toggle`, `/skills/reload`
 
 When a skill is resolved to a tool (`skills_tool.py`), the agent's skill summaries are injected into its system prompt so it knows *what* is available without paying the schema cost for every skill.
 

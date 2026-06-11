@@ -108,8 +108,11 @@ simultaneously (smaller scale):
   per FR-7.
 - Remove the server skills runtime: `app/ai/skills_registry.py`,
   `skills_config.json`, the startup hook in `app/main.py:87-89`, and the
-  server path in `app/ai/skills_snapshot.py`. Snapshot **restore** drops any
-  checkpointed `source="server"` entries (NFR-2).
+  server path in `app/ai/skills_snapshot.py`. Implementation note (2026-06-11): skills are never checkpointed —
+  summaries are rebuilt from `list_resolved_skills()` every turn, so NFR-2
+  holds with no restore-filtering needed. `skills_snapshot.py` was a demo-UI
+  helper (not graph snapshotting) and is deleted with the demo's switch to
+  the sidecar `/skills` API.
 - `shared/skills/front_matter.py` stays — the sidecar's
   `LocalSkillsRegistry` uses it.
 - The repo's `skills/` directory stays as content. On this machine it is
@@ -198,8 +201,9 @@ fail against pre-fix code first):
   tools, global tools (time/tavily/widgets) still bound.
 - **Global set:** desktop-commander/excel absent from the server tool
   catalog; time/tavily/widgets bound for every client.
-- **NFR-2:** restoring a checkpoint/snapshot containing server-skill entries
-  drops them and the turn completes.
+- **NFR-2:** a conversation checkpointed before this change lists zero
+  server skills on its next turn (prompt summaries are rebuilt per turn —
+  covered by the summaries tests).
 - **Custom agents:** `allowed_skill_refs` containing a former server skill →
   ref silently unlisted; no crash.
 - **Demo parity:** endpoint-coverage check of `demo.py`'s calls vs. sidecar
@@ -213,7 +217,7 @@ fail against pre-fix code first):
 
 | Risk | Mitigation |
 |------|-----------|
-| Old checkpoints resurrect server skills via snapshot restore. | Restore filters `source="server"` entries; covered by an NFR-2 test. |
+| Old checkpoints resurrect server skills via snapshot restore. | Not an issue — skills are never checkpointed; summaries are rebuilt per turn (NFR-2). |
 | Proxy gaps break a demo feature when switching base URL. | Endpoint-coverage audit is its own task before the switch; routes added additively. |
 | Proxy additions disturb the FE team's contract. | Additive-only rule (FR-5); no existing route signatures change. |
 | Removing desktop-commander/excel surprises other clients that relied on them globally. | Intended per product model; migration documented — each machine's sidecar adds what it needs. |
