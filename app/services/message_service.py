@@ -26,6 +26,7 @@ from app.core.response_constants import (
     extract_response_content,
     normalize_message_content,
 )
+from app.core.rich_placement import finalize_article_content
 from app.factories.message_factory import MessageFactory
 from app.interfaces.message_service_interface import IMessageService
 from app.models.enums import MessageRole, PlanLifecycle
@@ -2021,6 +2022,7 @@ class MessageService(IMessageService):
         )
 
         bot_response_content = extract_response_content(bot_response, NO_RESPONSE_GENERATED)
+        bot_response_content = finalize_article_content(bot_response, bot_response_content)
 
         bot_metadata = build_bot_metadata(bot_response)
         if self._sync_response_plan_state(
@@ -2364,6 +2366,7 @@ class MessageService(IMessageService):
         bot_response_content = fix_markdown_code_blocks(
             extract_response_content(bot_response, fallback_content)
         )
+        bot_response_content = finalize_article_content(bot_response, bot_response_content)
         bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
         if reply_to_user_message_id:
             bot_metadata["reply_to_user_message_id"] = str(reply_to_user_message_id)
