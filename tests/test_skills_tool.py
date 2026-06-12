@@ -6,6 +6,13 @@ from uuid import uuid4
 import pytest
 
 from app.ai import skill_resolver, skills_tool
+from app.services import client_runtime_store as runtime_store_module
+from app.services.client_device_service import ClientDeviceService
+from app.services.client_runtime_store import (
+    DeviceSessionRecord,
+    InMemoryClientRuntimeStore,
+    reset_client_runtime_store,
+)
 
 
 def _client_session(skills, *, user_id="user-1", session_id="session-1", device_id=None):
@@ -85,3 +92,60 @@ async def test_activate_skill_unknown_name_returns_graceful_error(monkeypatch):
     assert "not found" in result.lower()
     assert "client-skill" in result  # only this session's skills are offered
     assert dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_client_skill_activation_dispatch_is_not_rejected_by_mcp_tool_catalog():
+    reset_client_runtime_store()
+    store = InMemoryClientRuntimeStore()
+    runtime_store_module._store = store
+
+    user_id = uuid4()
+    device_id = uuid4()
+    await store.put_session(
+        DeviceSessionRecord(
+            device_id=device_id,
+            session_id="session-1",
+            user_id=user_id,
+            tool_catalog={
+                "tools": [
+                    {
+                        "name": "get_current_time",
+                        "origin": "mcp",
+                        "server_name": "time",
+                        "qualified_id": "time::get_current_time",
+                    }
+                ]
+            },
+            tool_catalog_version=4,
+            skill_catalog={
+                "skills": [
+                    {"name": "client-skill", "description": "d", "enabled": True}
+                ]
+            },
+        )
+    )
+
+    dispatched = []
+
+    async def _dispatch_request(session, request, timeout_seconds):
+        dispatched.append((session, request, timeout_seconds))
+        return {"success": True, "result": "skill body"}
+
+    store.dispatch_request = _dispatch_request
+
+    try:
+        result = await ClientDeviceService.dispatch_tool_call(
+            user_id=str(user_id),
+            device_id=str(device_id),
+            tool_name="activate_skill",
+            qualified_tool_id="client_skill::activate",
+            arguments={"skill_name": "client-skill"},
+            timeout_seconds=5,
+        )
+    finally:
+        reset_client_runtime_store()
+
+    assert result == {"success": True, "result": "skill body"}
+    assert len(dispatched) == 1
+    assert dispatched[0][1].qualified_tool_id == "client_skill::activate"

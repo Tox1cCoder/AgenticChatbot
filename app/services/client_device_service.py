@@ -26,6 +26,7 @@ from app.services.client_runtime_store import (
 
 DeviceSession = DeviceSessionRecord
 logger = logging.getLogger(__name__)
+_CLIENT_SKILL_ACTIVATE_QID = "client_skill::activate"
 
 
 class ClientDeviceService:
@@ -79,11 +80,12 @@ class ClientDeviceService:
             and session.tool_catalog_version != bound_catalog_version
         ):
             raise RuntimeError(
-                "Client device tool catalog changed after tool binding. Retry from the active device."
+                "Client device tool catalog changed after tool binding. "
+                "Retry from the active device."
             )
 
         # Server-side catalog validation (defense-in-depth; sidecar also validates)
-        if session.tool_catalog:
+        if session.tool_catalog and qualified_tool_id != _CLIENT_SKILL_ACTIVATE_QID:
             tools = session.tool_catalog.get("tools", [])
             catalog_by_qid = {
                 str(entry.get("qualified_id")): entry
@@ -99,7 +101,8 @@ class ClientDeviceService:
             current_instance_id = str(catalog_entry.get("tool_instance_id") or "")
             if tool_instance_id and current_instance_id and tool_instance_id != current_instance_id:
                 raise RuntimeError(
-                    "Client device capability changed after tool binding. Retry from the active device."
+                    "Client device capability changed after tool binding. "
+                    "Retry from the active device."
                 )
 
         request = ToolDispatchRequest(
@@ -325,7 +328,8 @@ class ClientDeviceService:
             store_stale_count = await get_client_runtime_store().cleanup_stale_sessions()
         except Exception as exc:
             logger.warning(
-                "Client runtime store stale-session cleanup failed; continuing with DB cleanup only: %s",
+                "Client runtime store stale-session cleanup failed; continuing with DB "
+                "cleanup only: %s",
                 exc,
             )
             store_stale_count = 0

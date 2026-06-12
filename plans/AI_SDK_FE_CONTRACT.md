@@ -232,6 +232,32 @@ const requests = interrupt?.action_requests ?? event.data?.pendingToolCalls ?? [
 
 When `isHitl` is true, render a human-in-the-loop UI from `requests`. The stream will finish immediately after the interrupt event.
 
+## HITL Interrupt Types
+
+There is currently one AI SDK stream event for human-in-the-loop pauses:
+`data-interrupt`. The backend does not emit a separate `interrupt.type` field
+today. Frontend should derive the interrupt kind from the event and metadata:
+
+| Derived kind | How to detect | FE behavior |
+|---|---|---|
+| `tool_approval` | `event.type === "data-interrupt"` and `data.interrupt.action_requests[]` or `data.pendingToolCalls[]` is present | Render approval UI and resume through `POST /ai/resume-interrupt`. This is the current HITL interrupt shape. |
+| `planning_pause` | Final assistant metadata has `planning_budget_reached: true`, `execution_paused: true`, or `execution_pause_reason` | Do not render HITL decisions. Show the assistant content/message and let the user continue with a normal chat message. |
+| `subagent_requires_approval` | Live `data-subagent.data.subagent.status === "requires_approval"` or final `backendMeta.subagent_results[].status === "requires_approval"` | Show worker as blocked. The nested worker is not resumable through `/ai/resume-interrupt`; the user must approve or rerun the operation from the main conversation. |
+
+Pause/reason fields are not the same as decision types:
+
+| Field/value | Meaning | Resume behavior |
+|---|---|---|
+| `message_metadata.pause_reason = "tool_approval_required"` | Persisted assistant message is paused for HITL tool approval. | Use the persisted `interrupt` payload to rebuild approval UI. |
+| `pause_reason = "awaiting_approval"` | Workflow/subagent stopped because a tool needs approval. | Prefer the `interrupt` object if present. Without `interrupt`, show blocked state only. |
+| `pause_reason = "max_iterations_reached"` | Planning loop hit its iteration/budget limit. | No HITL decision. Let the user send another message to continue. |
+| `pause_reason = "consecutive_errors_limit"` | Planning loop stopped after repeated errors. | No HITL decision. Show retry/continue affordance. |
+| `execution_pause_reason = "max_tasks_reached"` | Persisted planning execution pause derived from `planning_budget_reached`. | No HITL decision. Use `execution_pause_message` for display. |
+| `recursion_limit` / `rate_limit` | Possible internal/planning pause reasons from execution guards. | No HITL decision unless a `data-interrupt` payload also exists. |
+
+Decision types are the user actions sent back on resume: `approve`, `edit`,
+`reject`, and `respond`.
+
 ## HITL Interrupt Shape
 
 ```json
@@ -310,6 +336,24 @@ Important HITL fields:
 | `action_requests[].tool_call_id` | string or null | Preferred decision target. Send back as `toolCallId`. |
 | `action_requests[].task_id` | string or null | Fallback decision target if `tool_call_id` is missing. |
 | `action_requests[].allowed_decisions` | array or null | If present, restrict UI buttons to these decisions. |
+| `data.interrupt.metadata` | object | Display/recovery metadata for the whole interrupt. See below. |
+
+Interrupt metadata fields:
+
+| Field | Type | Notes |
+|---|---|---|
+| `message` | string or null | Optional display copy for the approval UI. |
+| `reason` | string or null | Optional display reason when `message` is absent or too terse. |
+| `timeout_deadline` | string or null | ISO-8601 deadline for the approval window. FE may show countdown/expired state. |
+| `device_id` | string or null | Client device that owns a local-tool interrupt, when applicable. |
+| `tool_provenance` | object | Map keyed by tool call id or action name. Use for audit/debug and stale-runtime checks, not primary user copy. |
+| `tool_provenance.*.device_id` | string or null | Device associated with that tool call. |
+| `tool_provenance.*.tool_origin` | string or null | Tool origin such as `client_mcp`, `server_mcp`, or `internal`. |
+| `tool_provenance.*.server_name` | string or null | MCP server name, usually for client/server MCP tools. |
+| `tool_provenance.*.qualified_tool_id` | string or null | Stable qualified tool identifier when available. |
+| `tool_provenance.*.tool_instance_id` | string or null | Runtime tool instance id used for stale resume validation. |
+| `tool_provenance.*.session_id` | string or null | Runtime session id used for stale resume validation. |
+| `tool_provenance.*.catalog_version` | number or null | Tool catalog version used for stale resume validation. |
 
 ## Resume HITL
 
@@ -451,11 +495,15 @@ Common `backendMeta` fields:
   },
   "reasoning_effort": "high",
   "thinking": "provider thinking text if persisted",
+  "thinking_summary": "provider thinking summary if available",
   "reasoning_summary": "provider reasoning summary if available",
   "reasoning_tokens": 123,
+  "token_breakdown": {},
   "context_window": {},
   "agent": {},
   "handoff": {},
+  "custom_agent_warnings": [],
+  "subagent_dispatches": [],
   "subagent_results": [],
   "tool_artifacts": [],
   "live_widgets": [],
@@ -472,13 +520,108 @@ Common `backendMeta` fields:
   "rich_items": [],
   "rich_reference_warnings": [],
   "suggested_questions": [],
+  "reply_to_user_message_id": "optional-user-message-id",
+  "todos_synced": true,
   "interrupt": {},
   "paused": true,
-  "pause_reason": "tool_approval_required"
+  "pause_reason": "tool_approval_required",
+  "execution_paused": true,
+  "execution_pause_reason": "max_tasks_reached",
+  "execution_pause_message": "Completed a planning iteration. Send a message to continue."
 }
 ```
 
 All fields are optional. Frontend should ignore unknown keys.
+
+Metadata compatibility rules:
+
+- Prefer `message.messageMetadata ?? message.message_metadata ?? message.metadata ?? {}`.
+- `messageMetadata` and `metadata` are mirrors on history responses; stream payloads may include all three shapes for compatibility.
+- Internal keys beginning with `_`, such as `_rich_item_candidates` and `_inline_rich_response_v1`, should not be persisted or rendered. Ignore them if seen from a non-production path.
+
+Core runtime/model fields:
+
+| Field | Type | FE usage |
+|---|---|---|
+| `persona_used` | string | Optional trace/debug display for the persona prompt applied to this turn. |
+| `provider` | string | Model provider id, e.g. `openai`, `gemini`, `anthropic`. |
+| `model` | string | Model id used for the final response. |
+| `key_source` | string | Credential source such as `env`, `db`, `settings`, or `none`. Usually debug/admin only. |
+| `config_source` | string | Runtime model config source, e.g. request, saved agent config, default, or fallback. |
+| `config_warnings` | string[] | Non-fatal model/config warnings. Show only in debug/admin surfaces unless product wants them user-visible. |
+| `custom_model_override` | boolean | `true` when the request used an ad hoc model override. Debug/admin only. |
+| `provider_fallback` | object | Present when backend fell back from one provider/model to another. |
+| `provider_fallback.from` / `to` | string | Provider/model fallback source and target. |
+| `provider_fallback.reason` | string | Why fallback happened. |
+| `reasoning_effort` | string | Requested effort level when supported by the provider. |
+| `thinking` | string | Persisted provider thinking text if exposed by the provider/config. Treat as sensitive/debug-only unless product policy says otherwise. |
+| `thinking_summary` / `reasoning_summary` | string | Short reasoning/thinking summary when available. |
+| `reasoning_tokens` | number | Provider-reported reasoning/thinking token count when available. |
+
+Token/context fields:
+
+| Field | Type | FE usage |
+|---|---|---|
+| `token_breakdown.estimated` | object | Estimated prompt/tool/history token counts. Debug or context-meter UI. |
+| `token_breakdown.actual` | object | Provider-reported `input_tokens`, `output_tokens`, `total_tokens`, and `reasoning_tokens` when available. |
+| `token_breakdown.counts` | object | Counts for history messages, tool messages, and bound tools. |
+| `token_breakdown.bound_tool_names` | string[] | Tool names included in the model request. Debug/admin only. |
+| `context_window` | object | Context-window metadata and usage meter fields. See Context and Model Metadata. |
+
+Agent/routing fields:
+
+| Field | Type | FE usage |
+|---|---|---|
+| `agent.id` | string | Runtime agent id, e.g. `chat_agent`, `canvas_agent`, or `custom_agent:<uuid>`. |
+| `agent.kind` | string | `base` or `custom`. |
+| `agent.name` | string | Display name for the responding/selected agent. |
+| `agent.custom_agent_id` | string or null | Stable custom-agent database id when applicable. |
+| `agent.source` | string | `response` when the final response identifies itself, otherwise `selected_agent`. |
+| `handoff.from_agent_id` / `to_agent_id` | string | Agent handoff source and target. |
+| `handoff.reason` | string | Short reason the model/tool supplied for the handoff. |
+| `handoff.tool_call_id` | string or null | Tool call id associated with the handoff. |
+| `custom_agent_warnings` | array | Warnings about custom-agent tool/skill availability. |
+| `subagent_dispatches` | array | Planning dispatch debug/activity records. Prefer `data-subagent` for live progress and `subagent_results` for durable summaries. |
+| `subagent_results` | array | Durable compact worker summaries. See Subagent Progress. |
+
+Renderer/media fields:
+
+| Field | Type | FE usage |
+|---|---|---|
+| `tool_artifacts` | array | Persisted compact tool execution records. Use for trace, audit, and tool-render fallback. |
+| `live_widgets` | array | Legacy widget mount metadata. Use only when rich `live_widget` items are absent. |
+| `images` | array | Legacy image metadata. Prefer AI SDK `parts[].type === "file"` or rich image items. |
+| `has_images` / `images_count` / `agentic_images_count` | boolean/number | Legacy image counters. |
+| `canvas_artifact` | object | Legacy canvas artifact. Prefer rich `canvas_artifact` items for placement when v1 rich items exist. |
+| `rich_items_version` | number | Current version is `1`. Present only for messages with rich-item activity. |
+| `rich_items` | array | Final authoritative rich-item registry for inline/append rendering. |
+| `rich_reference_warnings` | array | Validation warnings such as `unknown_rich_item` or `invalid_rich_item`. |
+| `documents_cited` / `citations` | array | RAG citation metadata. |
+| `chunks_retrieved` / `documents_found` | number | RAG retrieval counters. |
+
+Planning/HITL/user-experience fields:
+
+| Field | Type | FE usage |
+|---|---|---|
+| `suggested_questions` | string[] | Optional follow-up suggestions. |
+| `reply_to_user_message_id` | string | Assistant message was generated as a reply to a specific user message. |
+| `interrupt` | object | Persisted HITL interrupt payload. Rebuild approval UI from this when message is paused. |
+| `paused` | boolean | `true` for persisted paused assistant messages. |
+| `pause_reason` | string | Pause reason; see HITL Interrupt Types. |
+| `thread_id` | string | Resume thread id for persisted interrupt messages. |
+| `next` | string[] | Next graph node(s) for resume/debug. |
+| `pending_tool_calls` | array | Legacy pending tool calls. Prefer `interrupt.action_requests`. |
+| `todos` | array | Current task-plan/todo state for planning UI. |
+| `planning_call_count` | number | Number of planning loop calls this turn. |
+| `all_tasks_completed` | boolean | Planning execution completed all tasks. |
+| `planning_budget_reached` | boolean | Planning loop paused after reaching budget/iteration limit. |
+| `todos_synced` | boolean | Backend synced response metadata back into persisted task-plan state. |
+| `next_task` | object | Active/next task summary for planning UI. |
+| `planning_rubric` | object | Plan-quality grading metadata. |
+| `subagent_worker_artifacts` | object | Debug/detail artifacts keyed by worker when available. |
+| `execution_paused` | boolean | Persisted planning execution pause marker. Not a HITL approval interrupt. |
+| `execution_pause_reason` | string | Current persisted value is usually `max_tasks_reached`; see HITL Interrupt Types. |
+| `execution_pause_message` | string | User-facing copy for planning pauses. |
 
 ## Images and Attachments
 
@@ -712,6 +855,42 @@ Exactly one of `payload.url` or `payload.data` is present. Allowed MIME types ar
   }
 }
 ```
+
+Canvas artifacts are standalone browser-rendered artifacts. They may appear as
+legacy `backendMeta.canvas_artifact` and/or as a rich item with
+`type: "canvas_artifact"`.
+
+Canvas artifact kinds FE should expect:
+
+| Kind | Typical user request | `language` | Rendering expectation |
+|---|---|---|---|
+| Full HTML page/app | Website, landing page, calculator, dashboard, game, form, animation, chart, HTML canvas visualization | `html` | Render `content` in the existing sandboxed canvas/iframe path as a full self-contained document. |
+| SVG artifact | Icon, logo, static vector illustration, simple diagram | `svg` | Render `content` as standalone SVG in the same reviewed canvas boundary. |
+| React browser artifact | React component/app, JSX/TSX/JS interactive artifact | `react` | Render as a self-contained browser artifact. Current prompt expects React/ReactDOM UMD CDN usage and a root mount point when React is used. |
+
+`payload.language` is a renderer/editor hint, not the human language of the
+answer and not a MIME type. `CanvasAgent` currently normalizes fenced-code
+language hints like this:
+
+| LLM code fence hint | Emitted `language` |
+|---|---|
+| `svg` | `svg` |
+| `react`, `jsx`, `js`, `javascript`, `tsx`, `ts` | `react` |
+| `html`, blank, unknown, or anything else | `html` |
+
+The rich-item schema accepts `language` as a string for forward compatibility,
+but FE should only special-case `html`, `svg`, and `react` today. Unknown future
+values should fall back to the safest existing canvas renderer or an
+unsupported-artifact placeholder.
+
+Canvas payload fields:
+
+| Field | Type | Notes |
+|---|---|---|
+| `payload.language` | string | Renderer/editor hint. Current emitted values are `html`, `svg`, and `react`. |
+| `payload.title` | string | Display title. Often derived from the HTML `<title>` tag; fallback is `Canvas`. |
+| `payload.content` | string | Full artifact source. Treat as executable/untrusted browser content and render only inside the approved sandbox boundary. |
+| `payload.preferred_height` | number or null | Optional rich-item height hint in pixels. Legacy `canvas_artifact` does not currently emit this field. |
 
 ### Rich Citation Item
 
@@ -1007,7 +1186,19 @@ Canvas responses can include legacy metadata:
 }
 ```
 
-Rich v1 may also expose this as a `canvas_artifact` rich item.
+Legacy canvas fields:
+
+| Field | Type | Notes |
+|---|---|---|
+| `content` | string | Full artifact source. Same safety boundary as rich canvas `payload.content`. |
+| `language` | string | Renderer/editor hint. `CanvasAgent` emits `html`, `svg`, or `react`; see Rich Canvas Artifact Item for normalization rules. |
+| `title` | string | Short display title. Derived from `<title>` when available. |
+| `editable` | boolean | Whether the artifact can be edited/replaced by a follow-up canvas turn. Currently `true` for `CanvasAgent` artifacts. |
+
+Rich v1 may also expose this as a `canvas_artifact` rich item. If both legacy
+metadata and a rich item are present for the same assistant message, prefer
+`backendMeta.rich_items[]` for placement and keep `canvas_artifact` as the
+legacy append fallback.
 
 ## Context and Model Metadata
 
@@ -1101,6 +1292,32 @@ function isHitlEvent(event: any) {
   return event?.type === "data-interrupt";
 }
 
+function getInterruptKind(event: any, backendMeta: any = {}) {
+  if (event?.type === "data-interrupt") {
+    return "tool_approval";
+  }
+  if (
+    event?.type === "data-subagent" &&
+    event?.data?.subagent?.status === "requires_approval"
+  ) {
+    return "subagent_requires_approval";
+  }
+  if (
+    backendMeta?.planning_budget_reached ||
+    backendMeta?.execution_paused ||
+    backendMeta?.execution_pause_reason
+  ) {
+    return "planning_pause";
+  }
+  if (
+    Array.isArray(backendMeta?.subagent_results) &&
+    backendMeta.subagent_results.some((item: any) => item?.status === "requires_approval")
+  ) {
+    return "subagent_requires_approval";
+  }
+  return null;
+}
+
 function getHitlRequests(event: any) {
   return event?.data?.interrupt?.action_requests ?? event?.data?.pendingToolCalls ?? [];
 }
@@ -1115,6 +1332,21 @@ function getLiveWidgets(meta: any) {
 function getImageParts(message: any) {
   return Array.isArray(message?.parts)
     ? message.parts.filter((part: any) => part?.type === "file" && part?.mediaType?.startsWith("image/"))
+    : [];
+}
+
+function normalizeCanvasLanguage(artifactOrPayload: any) {
+  const value = String(artifactOrPayload?.language ?? "").toLowerCase();
+  return value === "svg" || value === "react" ? value : "html";
+}
+
+function getCanvasItems(meta: any) {
+  const richCanvases = Array.isArray(meta?.rich_items)
+    ? meta.rich_items.filter((item: any) => item?.type === "canvas_artifact")
+    : [];
+  if (richCanvases.length) return richCanvases;
+  return meta?.canvas_artifact
+    ? [{ type: "canvas_artifact", payload: meta.canvas_artifact }]
     : [];
 }
 ```
