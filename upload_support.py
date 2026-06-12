@@ -1,3 +1,4 @@
+import os
 import time
 from typing import Any
 
@@ -6,7 +7,7 @@ import streamlit as st  # type: ignore
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = os.environ.get("CHATBOT_API_BASE_URL", "http://127.0.0.1:8100")
 REQUEST_TIMEOUT = (5, 30)
 
 
