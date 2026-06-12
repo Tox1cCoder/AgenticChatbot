@@ -13,13 +13,14 @@ from app.core.dependency_injection import AppAutoInjector
 from app.interfaces.conversation_service_interface import IConversationService
 from app.interfaces.message_service_interface import IMessageService
 from app.models.enums import MessageRole
+from app.repositories.utils.pagination import PaginationMeta
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationRead,
     ConversationUpdate,
 )
 from app.schemas.message import InterruptResumeRequest, MessageCreate
-from app.schemas.pagination import ConversationPaginationParams
+from app.schemas.pagination import ConversationPaginationParams, MessagePaginationParams
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
 from app.services.event_streaming.ai_sdk_v6 import (
@@ -37,10 +38,13 @@ _AI_SDK_HEARTBEAT_INTERVAL_SECONDS = 15.0
 class AISDKChatRequest(BaseModel):
     """
     - messages: the UI message history
+    - message: optional latest UI message for custom AI SDK transports
     - userId: optional (enables server-side memory features)
     """
 
     messages: list[dict[str, Any]] = Field(default_factory=list)
+    message: Any | None = None
+    content: Any | None = None
     user_id: UUID | None = Field(default=None, alias="userId")
 
     model_config = ConfigDict(populate_by_name=True, extra="allow")
@@ -110,6 +114,7 @@ class AISDKMessagesData(BaseModel):
         ..., description="Messages in Vercel AI SDK UIMessage format"
     )
     total: int = Field(..., description="Total number of messages in the conversation")
+    meta: PaginationMeta = Field(..., description="Pagination metadata")
 
 
 def _extract_user_text(messages: list[dict[str, Any]]) -> str:
@@ -148,6 +153,31 @@ def _extract_user_text(messages: list[dict[str, Any]]) -> str:
             return text.strip()
 
     return ""
+
+
+def _normalize_ai_sdk_chat_messages(payload: AISDKChatRequest) -> list[dict[str, Any]]:
+    messages = [message for message in (payload.messages or []) if isinstance(message, dict)]
+
+    extra = getattr(payload, "model_extra", {}) or {}
+    latest_message = payload.message or extra.get("message")
+    if isinstance(latest_message, dict):
+        latest_id = latest_message.get("id")
+        last_id = messages[-1].get("id") if messages else None
+        if latest_id is not None:
+            should_append = latest_id != last_id
+        else:
+            should_append = not messages or latest_message != messages[-1]
+        if should_append:
+            messages.append(latest_message)
+    elif isinstance(latest_message, str) and latest_message.strip() and not messages:
+        messages.append({"role": "user", "content": latest_message})
+
+    if not messages:
+        text = payload.content or extra.get("content") or extra.get("text")
+        if isinstance(text, str) and text.strip():
+            messages.append({"role": "user", "content": text})
+
+    return messages
 
 
 def _extract_data_from_candidate(value: Any) -> str | None:
@@ -769,7 +799,9 @@ async def delete_conversation_ai_sdk(
     description=(
         "Returns conversation messages formatted as Vercel AI SDK `UIMessage` objects. "
         "Pass `response.data.messages` directly to the `initialMessages` prop of "
-        "`useChat()`. Image attachments are embedded as `file` parts inside each message."
+        "`useChat()`. Supports page-based pagination via `page`, `limit`, `orderBy`, "
+        "and `orderDirection`. Image attachments are embedded as `file` parts inside "
+        "each message."
     ),
 )
 @AppAutoInjector.auto_inject()
@@ -777,15 +809,16 @@ async def get_conversation_messages_ai_sdk(
     conversation_id: UUID,
     message_service: IMessageService,
     current_user_id: UUID,
+    pagination: MessagePaginationParams,
 ) -> ApiResponse[AISDKMessagesData]:
     """Get conversation messages in Vercel AI SDK UIMessage format."""
     paginated_result = message_service.get_conversation_messages(
         conversation_id,
         current_user_id,
-        page=1,
-        limit=100,
-        order_by="created_at",
-        order_direction="asc",
+        page=pagination.page,
+        limit=pagination.limit,
+        order_by=pagination.order_by.to_snake_case(),
+        order_direction=pagination.order_direction.value,
         include_feedback=False,
     )
 
@@ -811,7 +844,11 @@ async def get_conversation_messages_ai_sdk(
     return ApiResponse(
         success=True,
         message="Messages retrieved successfully",
-        data=AISDKMessagesData(messages=messages, total=paginated_result.meta.total),
+        data=AISDKMessagesData(
+            messages=messages,
+            total=paginated_result.meta.total,
+            meta=paginated_result.meta,
+        ),
     )
 
 
@@ -861,8 +898,9 @@ async def chat_ui_message_stream(
     """
     Vercel AI SDK UI Message Stream protocol (SSE).
     """
-    user_text = _extract_user_text(payload.messages)
-    user_attachments = _extract_user_attachments(payload.messages)
+    request_messages = _normalize_ai_sdk_chat_messages(payload)
+    user_text = _extract_user_text(request_messages)
+    user_attachments = _extract_user_attachments(request_messages)
     if not user_text and not user_attachments:
         raise HTTPException(status_code=400, detail="No user message found")
 

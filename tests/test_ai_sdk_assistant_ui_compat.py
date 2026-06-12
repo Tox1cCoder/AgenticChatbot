@@ -43,3 +43,41 @@ async def test_chat_endpoint_returns_assistant_ui_stream():
     assert any(payload.get("type") == "text-delta" for payload in payloads)
     assert payloads[-1]["type"] == "finish"
     assert body.rstrip().endswith("data: [DONE]")
+
+
+@pytest.mark.asyncio
+async def test_chat_endpoint_accepts_single_message_request_body():
+    conversation_id = uuid4()
+    user_id = uuid4()
+
+    class FakeMessageService:
+        def __init__(self):
+            self.calls = []
+
+        def create_message_stream(self, message_create, current_user_id, **kwargs):
+            self.calls.append((message_create, current_user_id, kwargs))
+
+            async def source():
+                yield make_event("complete", sequence=1, data={"message": {"id": "m-1"}})
+
+            return source()
+
+    message_service = FakeMessageService()
+
+    response = await chat_ui_message_stream(
+        conversation_id=conversation_id,
+        payload=AISDKChatRequest(
+            message={"role": "user", "parts": [{"type": "text", "text": "hello"}]}
+        ),
+        message_service=message_service,
+        current_user_id=user_id,
+    )
+    body = "".join([chunk async for chunk in response.body_iterator])
+
+    assert body.rstrip().endswith("data: [DONE]")
+    assert len(message_service.calls) == 1
+    message_create, called_user_id, kwargs = message_service.calls[0]
+    assert message_create.conversation_id == conversation_id
+    assert message_create.content == "hello"
+    assert called_user_id == user_id
+    assert "bot_message_id" in kwargs

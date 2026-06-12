@@ -3450,9 +3450,11 @@ def render_sidebar():
             if user:
                 st.markdown(f"**{user['username']}**")
                 if st.button("Sign Out", width="stretch"):
+                    make_api_request("POST", "/auth/logout")
                     st.session_state.current_user_id = None
                     st.session_state.current_user_profile = None
                     st.session_state.current_conversation_id = None
+                    st.session_state.device_id = None
                     close_conversation_manager()
                     reset_conversation_state()
                     st.session_state.conversations_list = []

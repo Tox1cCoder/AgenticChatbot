@@ -87,3 +87,45 @@ def test_conversation_routes_use_proxy_server_request(monkeypatch):
             "params": None,
         },
     ]
+
+
+def test_list_conversations_forwards_pagination_sorting(monkeypatch):
+    calls: list[dict] = []
+
+    async def _proxy(
+        request: Request,
+        *,
+        upstream_path: str,
+        params_override=None,
+    ):
+        calls.append(
+            {
+                "path": upstream_path,
+                "params": params_override,
+            }
+        )
+        return JSONResponse({"path": upstream_path})
+
+    monkeypatch.setattr(conversations_api, "proxy_server_request", _proxy)
+
+    with TestClient(_build_app()) as client:
+        response = client.get(
+            "/conversations/"
+            "?page=2&limit=5&orderBy=createdAt&orderDirection=asc"
+            "&latestMessages=7&include=messages&include=feedback"
+        )
+
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "path": "/conversations/",
+            "params": {
+                "page": 2,
+                "limit": 5,
+                "orderBy": "createdAt",
+                "orderDirection": "asc",
+                "include": ["messages", "feedback"],
+                "latestMessages": 7,
+            },
+        }
+    ]

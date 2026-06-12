@@ -23,12 +23,17 @@ contract only covers the post-completion message history endpoint.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+from fastapi.params import Depends
+
 from app.api.ai_sdk import get_conversation_messages_ai_sdk
+from app.repositories.utils.pagination import PaginationMeta
+from app.schemas.pagination import MessagePaginationParams
 
 
 def _build_assistant_message_with_context_window() -> SimpleNamespace:
@@ -61,14 +66,43 @@ def _build_assistant_message_with_context_window() -> SimpleNamespace:
     )
 
 
-def _build_paginated_result(items: list[SimpleNamespace]) -> SimpleNamespace:
-    return SimpleNamespace(items=items, meta=SimpleNamespace(total=len(items)))
+def _build_paginated_result(
+    items: list[SimpleNamespace],
+    *,
+    total: int | None = None,
+    page: int = 1,
+    limit: int = 100,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        items=items,
+        meta=PaginationMeta.calculate(total or len(items), limit, page),
+    )
 
 
-def _build_message_service(items: list[SimpleNamespace]) -> MagicMock:
+def _build_message_service(
+    items: list[SimpleNamespace],
+    *,
+    total: int | None = None,
+    page: int = 1,
+    limit: int = 100,
+) -> MagicMock:
     service = MagicMock()
-    service.get_conversation_messages.return_value = _build_paginated_result(items)
+    service.get_conversation_messages.return_value = _build_paginated_result(
+        items,
+        total=total,
+        page=page,
+        limit=limit,
+    )
     return service
+
+
+def test_ai_sdk_messages_route_signature_exposes_pagination_dependency():
+    signature = inspect.signature(get_conversation_messages_ai_sdk)
+
+    pagination_param = signature.parameters["pagination"]
+
+    assert pagination_param.annotation is MessagePaginationParams
+    assert isinstance(pagination_param.default, Depends)
 
 
 def test_ai_sdk_messages_expose_context_window_on_both_metadata_keys():
@@ -89,7 +123,12 @@ def test_ai_sdk_messages_expose_context_window_on_both_metadata_keys():
     current_user_id = uuid4()
 
     response = asyncio.run(
-        get_conversation_messages_ai_sdk(conversation_id, message_service, current_user_id)
+        get_conversation_messages_ai_sdk(
+            conversation_id,
+            message_service,
+            current_user_id,
+            MessagePaginationParams(),
+        )
     )
 
     message_service.get_conversation_messages.assert_called_once()
@@ -97,6 +136,8 @@ def test_ai_sdk_messages_expose_context_window_on_both_metadata_keys():
     assert response.success is True
     assert response.data is not None
     assert len(response.data.messages) == 1
+    assert response.data.meta.total == 1
+    assert response.data.meta.current_page == 1
 
     ui_message = response.data.messages[0]
     assert ui_message.role == "assistant"
@@ -128,6 +169,43 @@ def test_ai_sdk_messages_expose_context_window_on_both_metadata_keys():
     assert cw_via_message_metadata["display_state"] == "ok"
 
 
+def test_ai_sdk_messages_forwards_pagination_to_message_service():
+    assistant_msg = _build_assistant_message_with_context_window()
+    message_service = _build_message_service([assistant_msg], total=9, page=2, limit=1)
+
+    conversation_id = uuid4()
+    current_user_id = uuid4()
+    pagination = MessagePaginationParams(
+        page=2,
+        limit=1,
+        orderBy="updatedAt",
+        orderDirection="desc",
+    )
+
+    response = asyncio.run(
+        get_conversation_messages_ai_sdk(
+            conversation_id,
+            message_service,
+            current_user_id,
+            pagination,
+        )
+    )
+
+    message_service.get_conversation_messages.assert_called_once_with(
+        conversation_id,
+        current_user_id,
+        page=2,
+        limit=1,
+        order_by="updated_at",
+        order_direction="desc",
+        include_feedback=False,
+    )
+    assert response.data.total == 9
+    assert response.data.meta.total == 9
+    assert response.data.meta.current_page == 2
+    assert response.data.meta.per_page == 1
+
+
 def test_ai_sdk_messages_metadata_keys_share_identity_for_assistant_messages():
     """The two metadata keys must reference the same persisted dict — i.e.
     ``metadata`` is a true mirror, not a filtered/stripped subset. Future
@@ -138,7 +216,14 @@ def test_ai_sdk_messages_metadata_keys_share_identity_for_assistant_messages():
     assistant_msg = _build_assistant_message_with_context_window()
     message_service = _build_message_service([assistant_msg])
 
-    response = asyncio.run(get_conversation_messages_ai_sdk(uuid4(), message_service, uuid4()))
+    response = asyncio.run(
+        get_conversation_messages_ai_sdk(
+            uuid4(),
+            message_service,
+            uuid4(),
+            MessagePaginationParams(),
+        )
+    )
 
     ui_message = response.data.messages[0]
     payload = ui_message.model_dump(by_alias=True)

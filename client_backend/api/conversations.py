@@ -17,27 +17,35 @@ async def list_conversations(
     request: Request,
     page: int = 1,
     limit: int = 20,
+    order_by: str = Query(default="updatedAt", alias="orderBy"),
+    order_direction: str = Query(default="desc", alias="orderDirection"),
     include: list[str] = Query(default=[]),  # noqa: B008
     latest_messages: int = Query(default=3, alias="latestMessages"),
-    _session: LocalSessionPayload = Depends(require_local_session),
+    _session: LocalSessionPayload = Depends(require_local_session),  # noqa: B008
 ) -> Response:
     """Proxy conversation listing to the canonical server."""
+    params = {
+        "page": page,
+        "limit": limit,
+        "include": include,
+        "latestMessages": latest_messages,
+    }
+    if "orderBy" in request.query_params:
+        params["orderBy"] = order_by
+    if "orderDirection" in request.query_params:
+        params["orderDirection"] = order_direction
+
     return await proxy_server_request(
         request,
         upstream_path="/conversations/",
-        params_override={
-            "page": page,
-            "limit": limit,
-            "include": include,
-            "latestMessages": latest_messages,
-        },
+        params_override=params,
     )
 
 
 @router.post("/generate-title")
 async def generate_title(
     request: Request,
-    _session: LocalSessionPayload = Depends(require_local_session),
+    _session: LocalSessionPayload = Depends(require_local_session),  # noqa: B008
 ) -> Response:
     """Generate a conversation title using the upstream server."""
     return await proxy_server_request(request, upstream_path="/conversations/generate-title")
@@ -46,7 +54,7 @@ async def generate_title(
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_conversation(
     request: Request,
-    _session: LocalSessionPayload = Depends(require_local_session),
+    _session: LocalSessionPayload = Depends(require_local_session),  # noqa: B008
 ) -> Response:
     """Create a conversation."""
     return await proxy_server_request(request, upstream_path="/conversations/")
@@ -56,7 +64,7 @@ async def create_conversation(
 async def get_conversation(
     conversation_id: str,
     request: Request,
-    _session: LocalSessionPayload = Depends(require_local_session),
+    _session: LocalSessionPayload = Depends(require_local_session),  # noqa: B008
 ) -> Response:
     """Fetch a conversation by ID."""
     return await proxy_server_request(request, upstream_path=f"/conversations/{conversation_id}")
@@ -69,7 +77,7 @@ async def get_conversation_messages(
     page: int = 1,
     limit: int = 50,
     include: list[str] = Query(default=[]),  # noqa: B008
-    _session: LocalSessionPayload = Depends(require_local_session),
+    _session: LocalSessionPayload = Depends(require_local_session),  # noqa: B008
 ) -> Response:
     """Fetch conversation messages."""
     return await proxy_server_request(
@@ -83,7 +91,7 @@ async def get_conversation_messages(
 async def update_conversation(
     conversation_id: str,
     request: Request,
-    _session: LocalSessionPayload = Depends(require_local_session),
+    _session: LocalSessionPayload = Depends(require_local_session),  # noqa: B008
 ) -> Response:
     """Update a conversation."""
     return await proxy_server_request(request, upstream_path=f"/conversations/{conversation_id}")
@@ -93,7 +101,7 @@ async def update_conversation(
 async def delete_conversation(
     conversation_id: str,
     request: Request,
-    _session: LocalSessionPayload = Depends(require_local_session),
+    _session: LocalSessionPayload = Depends(require_local_session),  # noqa: B008
 ) -> Response:
     """Delete a conversation."""
     return await proxy_server_request(request, upstream_path=f"/conversations/{conversation_id}")
