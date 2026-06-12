@@ -1,6 +1,9 @@
 """Tests for deterministic article-style placement of rich items."""
 
-from app.core.rich_placement import auto_place_rich_items
+from types import SimpleNamespace
+
+from app.core.config import settings
+from app.core.rich_placement import auto_place_rich_items, finalize_article_content
 
 IMAGE = "image"
 WIDGET = "live_widget"
@@ -125,3 +128,83 @@ def test_inserted_marker_is_parseable():
         content, items=items, max_images=3, min_score=0.25
     )
     assert parse_inline_rich_references(new_content) == ["img:0"]
+
+
+def _make_response(content, *, candidates=None, artifacts=None, capable=True):
+    metadata = {"_inline_rich_response_v1": capable}
+    if candidates is not None:
+        metadata["_rich_item_candidates"] = candidates
+    if artifacts is not None:
+        metadata["tool_artifacts"] = artifacts
+    return SimpleNamespace(
+        message=SimpleNamespace(content=content),
+        metadata=metadata,
+        tool_artifacts=None,
+    )
+
+
+def _image_candidate(item_id="image:tool:c1:0", description="Eiffel Tower at night in Paris"):
+    return {
+        "id": item_id,
+        "type": "image",
+        "display_policy": "inline_only",
+        "alt_text": description,
+        "payload": {"url": "https://example.com/eiffel.jpg", "mime_type": "image/jpeg",
+                    "description": description},
+    }
+
+
+def test_finalize_places_image_and_mutates_response_message(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
+    content = "The Eiffel Tower is stunning at night, lit by thousands of lamps."
+    response = _make_response(content, candidates=[_image_candidate()])
+    new_content = finalize_article_content(response, content)
+    assert "<!--rich:image:tool:c1:0-->" in new_content
+    assert response.message.content == new_content
+
+
+def test_finalize_noop_when_feature_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", False)
+    content = "The Eiffel Tower is stunning at night."
+    response = _make_response(content, candidates=[_image_candidate()])
+    assert finalize_article_content(response, content) == content
+
+
+def test_finalize_noop_when_auto_place_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", False)
+    content = "The Eiffel Tower is stunning at night."
+    response = _make_response(content, candidates=[_image_candidate()])
+    assert finalize_article_content(response, content) == content
+
+
+def test_finalize_noop_without_capability(monkeypatch):
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
+    content = "The Eiffel Tower is stunning at night."
+    response = _make_response(content, candidates=[_image_candidate()], capable=False)
+    assert finalize_article_content(response, content) == content
+
+
+def test_finalize_places_widget_from_artifacts(monkeypatch):
+    import json
+
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
+    artifact = {
+        "tool": "widget_create",
+        "status": "success",
+        "output": json.dumps(
+            {"widget_id": "w1", "session_id": "s1", "widget_type": "chart",
+             "title": "Quarterly revenue comparison", "status": "active", "version": 1}
+        ),
+    }
+    content = "Here is the quarterly revenue comparison between both units."
+    response = _make_response(content, artifacts=[artifact])
+    new_content = finalize_article_content(response, content)
+    assert "<!--rich:widget:w1-->" in new_content
+
+
+def test_finalize_handles_none_response():
+    assert finalize_article_content(None, "text") == "text"

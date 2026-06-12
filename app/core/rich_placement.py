@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
+from .config import settings
+from .response_constants import extract_live_widgets_from_artifacts
 from .rich_response import (
     RichItemType,
     _strip_fenced_code_blocks,  # noqa: PLC2701  # deliberate same-package reuse of CommonMark fence semantics
@@ -130,3 +133,84 @@ def auto_place_rich_items(
             out.append("")
             out.append(marker)
     return "\n".join(out), placed
+
+
+def _widget_placement_entries(
+    metadata: dict[str, Any], response_artifacts: list[dict[str, Any]] | None
+) -> list[tuple[str, str, str]]:
+    artifacts: list[dict[str, Any]] = []
+    meta_artifacts = metadata.get("tool_artifacts")
+    if isinstance(meta_artifacts, list):
+        artifacts.extend(a for a in meta_artifacts if isinstance(a, dict))
+    if response_artifacts:
+        artifacts.extend(a for a in response_artifacts if isinstance(a, dict))
+    entries: list[tuple[str, str, str]] = []
+    for widget in extract_live_widgets_from_artifacts(artifacts):
+        widget_id = widget.get("widget_id")
+        if not widget_id:
+            continue
+        text = " ".join(
+            str(part) for part in (widget.get("title"), widget.get("widget_type")) if part
+        )
+        entries.append((f"widget:{widget_id}", RichItemType.live_widget.value, text))
+    return entries
+
+
+def _image_placement_entries(metadata: dict[str, Any]) -> list[tuple[str, str, str]]:
+    entries: list[tuple[str, str, str]] = []
+    for candidate in metadata.get("_rich_item_candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("type") != RichItemType.image.value:
+            continue
+        item_id = candidate.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            continue
+        payload = candidate.get("payload")
+        description = payload.get("description") if isinstance(payload, dict) else None
+        text = " ".join(
+            str(part)
+            for part in (candidate.get("title"), candidate.get("alt_text"), description)
+            if part
+        )
+        entries.append((item_id, RichItemType.image.value, text))
+    return entries
+
+
+def finalize_article_content(response: Any, content: str) -> str:
+    """Apply article-style auto-placement to the final assistant markdown.
+
+    Mutates ``response.message.content`` to the placed content so
+    ``build_bot_metadata()`` resolves the exact marker set the persisted
+    message carries. Returns the (possibly updated) content. No-op unless the
+    inline rich-response feature and auto-placement are enabled and the
+    response advertised the per-turn capability.
+    """
+    if not content or response is None:
+        return content
+    if not getattr(settings, "inline_rich_response_enabled", False):
+        return content
+    if not getattr(settings, "rich_auto_place_enabled", False):
+        return content
+    metadata = getattr(response, "metadata", None)
+    if not isinstance(metadata, dict) or not metadata.get("_inline_rich_response_v1"):
+        return content
+
+    items = _widget_placement_entries(metadata, getattr(response, "tool_artifacts", None))
+    items.extend(_image_placement_entries(metadata))
+    if not items:
+        return content
+
+    new_content, placed = auto_place_rich_items(
+        content,
+        items=items,
+        max_images=settings.rich_auto_place_max_images,
+        min_score=settings.rich_auto_place_min_score,
+    )
+    if not placed:
+        return content
+
+    message = getattr(response, "message", None)
+    if message is not None and isinstance(getattr(message, "content", None), str):
+        message.content = new_content
+    return new_content
