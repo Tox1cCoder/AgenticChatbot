@@ -2137,6 +2137,25 @@ def _clear_inflight_state() -> None:
     st.session_state.stream_subagent_activity = None
 
 
+def _stoppable_stream_conversation_id() -> str:
+    """Return the in-flight stream's conversation id, or "" if nothing to stop.
+
+    The stop must target the conversation that was streaming (recorded in
+    ``stream_conversation_id`` at stream start), never the conversation the
+    view currently shows: mid-generation the user may click "New Chat" (the
+    ``pending_new`` sentinel, not a UUID — the backend rejects it with 422)
+    or switch to another conversation entirely.
+    """
+    if not st.session_state.get("stream_inflight"):
+        return ""
+    if not st.session_state.get("stream_user_message_id"):
+        return ""
+    conversation_id = str(st.session_state.get("stream_conversation_id") or "")
+    if conversation_id == "pending_new":
+        return ""
+    return conversation_id
+
+
 def _handle_stop_rerun(conversation_id: str) -> None:
     """
     Phase 2 of two-phase stop: called on the rerun after the streaming
@@ -2168,10 +2187,14 @@ def _handle_stop_rerun(conversation_id: str) -> None:
         result_data = stop_response.get("data", {})
         stop_status = result_data.get("status", "not_inflight")
 
+        viewing_stopped_conversation = (
+            str(st.session_state.get("current_conversation_id") or "") == conversation_id
+        )
         if stop_status == "cancelled" and result_data.get("message"):
-            # Backend persisted a partial message – append to local state
-            bot_msg = result_data["message"]
-            st.session_state.messages.append(bot_msg)
+            # Backend persisted a partial message – append to local state,
+            # but only when the stopped conversation is the one on screen.
+            if viewing_stopped_conversation:
+                st.session_state.messages.append(result_data["message"])
             st.toast("Generation stopped", icon=":material/stop_circle:")
         else:
             # Fallback: reset conversation state so next rerun reloads messages
@@ -8447,12 +8470,9 @@ def render_chat_view():
 
         # Message form
         # ── Handle interrupted stream on rerun (Phase 2 of two-phase stop) ──
-        if (
-            st.session_state.get("stream_inflight")
-            and st.session_state.get("stream_user_message_id")
-            and conversation_id
-        ):
-            _handle_stop_rerun(str(conversation_id))
+        stoppable_conversation_id = _stoppable_stream_conversation_id()
+        if stoppable_conversation_id:
+            _handle_stop_rerun(stoppable_conversation_id)
             return
 
         # Check for pending suggestion from suggestion buttons
