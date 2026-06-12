@@ -657,7 +657,10 @@ class Settings(BaseSettings):
     )
     tool_result_blob_storage_dir: str = Field(
         default="data/tool_result_blobs",
-        description="Directory for full offloaded tool result payloads.",
+        description=(
+            "Legacy read-only directory for blobs created before content moved "
+            "to Postgres. New blobs are stored in the tool_result_blobs table."
+        ),
     )
 
     context_overflow_retry_enabled: bool = Field(
