@@ -21,12 +21,13 @@ from app.core.rich_response import (
 )
 
 
-def test_inline_rich_response_rollout_is_disabled_by_default(monkeypatch):
+def test_inline_rich_response_rollout_is_enabled_by_default_kill_switch(monkeypatch):
+    """Validates that inline rich-response is enabled by default (kill switch guards the feature)."""
     from app.core.config import Settings
 
     monkeypatch.delenv("INLINE_RICH_RESPONSE_ENABLED", raising=False)
 
-    assert Settings(_env_file=None).inline_rich_response_enabled is False
+    assert Settings(_env_file=None).inline_rich_response_enabled is True
 
 
 # ---------------------------------------------------------------------------

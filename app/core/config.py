@@ -969,12 +969,11 @@ class Settings(BaseSettings):
 
     # Inline Rich Response Configuration
     inline_rich_response_enabled: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Rollout flag for the inline rich-response feature. When False, the "
+            "Kill switch for the inline rich-response feature. When False, the "
             "backend never emits marker-bearing v1 content or rich-item stream "
-            "events, regardless of the per-request capability. Keep disabled "
-            "until the renderer and security acceptance gates are approved."
+            "events, regardless of the per-request capability."
         ),
     )
     rich_item_inventory_max_items: int = Field(
