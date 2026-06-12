@@ -22,7 +22,7 @@ from app.core.rich_response import (
 
 
 def test_inline_rich_response_rollout_is_enabled_by_default_kill_switch(monkeypatch):
-    """Validates that inline rich-response is enabled by default (kill switch guards the feature)."""
+    """Inline rich-response is enabled by default; the flag remains as a kill switch."""
     from app.core.config import Settings
 
     monkeypatch.delenv("INLINE_RICH_RESPONSE_ENABLED", raising=False)
