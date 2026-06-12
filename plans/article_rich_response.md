@@ -106,7 +106,7 @@ Run all commands from the repo root: `c:\Users\ADMIN\Documents\Code Practice\Sam
 **Files:**
 - Modify: `app/core/config.py` (insert after `rich_item_selected_image_max_bytes`, ~line 998)
 
-- [ ] **Step 1: Add the three settings**
+- [x] **Step 1: Add the three settings**
 
 ```python
     rich_auto_place_enabled: bool = Field(
@@ -129,12 +129,12 @@ Run all commands from the repo root: `c:\Users\ADMIN\Documents\Code Practice\Sam
     )
 ```
 
-- [ ] **Step 2: Verify settings import cleanly**
+- [x] **Step 2: Verify settings import cleanly**
 
 Run: `python -c "from app.core.config import settings; print(settings.rich_auto_place_enabled, settings.rich_auto_place_max_images, settings.rich_auto_place_min_score)"`
 Expected: `True 3 0.25`
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add app/core/config.py
@@ -147,7 +147,7 @@ git commit -m "feat: add auto-placement settings for inline rich items"
 - Create: `app/core/rich_placement.py`
 - Test: `tests/test_rich_placement.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 """Tests for deterministic article-style placement of rich items."""
@@ -278,12 +278,12 @@ def test_inserted_marker_is_parseable():
     assert parse_inline_rich_references(new_content) == ["img:0"]
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_rich_placement.py -v`
 Expected: FAIL with `ModuleNotFoundError: No module named 'app.core.rich_placement'`
 
-- [ ] **Step 3: Implement the placement engine**
+- [x] **Step 3: Implement the placement engine**
 
 Create `app/core/rich_placement.py`:
 
@@ -427,12 +427,12 @@ def auto_place_rich_items(
 
 Note: `_strip_fenced_code_blocks` is module-private to `rich_response` but reused here deliberately (same package, same CommonMark fence semantics) — duplicating fence parsing would be the worse sin. If the linter objects, add `# noqa` with this justification.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_rich_placement.py -v`
 Expected: 10 PASSED
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/core/rich_placement.py tests/test_rich_placement.py
@@ -445,7 +445,7 @@ git commit -m "feat: deterministic article-style auto-placement engine for rich 
 - Modify: `app/core/rich_placement.py` (append)
 - Test: `tests/test_rich_placement.py` (append)
 
-- [ ] **Step 1: Write the failing tests** (append to `tests/test_rich_placement.py`)
+- [x] **Step 1: Write the failing tests** (append to `tests/test_rich_placement.py`)
 
 ```python
 from types import SimpleNamespace
@@ -534,12 +534,12 @@ def test_finalize_handles_none_response():
     assert finalize_article_content(None, "text") == "text"
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_rich_placement.py -v -k finalize`
 Expected: FAIL with `ImportError: cannot import name 'finalize_article_content'`
 
-- [ ] **Step 3: Implement** (append to `app/core/rich_placement.py`)
+- [x] **Step 3: Implement** (append to `app/core/rich_placement.py`)
 
 ```python
 def _widget_placement_entries(
@@ -623,12 +623,12 @@ def finalize_article_content(response: Any, content: str) -> str:
     return new_content
 ```
 
-- [ ] **Step 4: Run the full placement test file**
+- [x] **Step 4: Run the full placement test file**
 
 Run: `python -m pytest tests/test_rich_placement.py -v`
 Expected: 16 PASSED
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/core/rich_placement.py tests/test_rich_placement.py
@@ -640,7 +640,7 @@ git commit -m "feat: finalize_article_content integration for persistence bounda
 **Files:**
 - Modify: `app/services/message_service.py` (two sites: `resume_workflow` ~line 2023, `_persist_completed_workflow_response` ~line 2364)
 
-- [ ] **Step 1: Add the import**
+- [x] **Step 1: Add the import**
 
 In `app/services/message_service.py`, next to the existing import of `build_bot_metadata` / `extract_response_content` (match the file's existing import style for `app.core.*`):
 
@@ -650,7 +650,7 @@ from ..core.rich_placement import finalize_article_content
 
 (If the file imports `from app.core....` absolute-style, use `from app.core.rich_placement import finalize_article_content` instead — match whichever form the neighboring imports use.)
 
-- [ ] **Step 2: Hook site 1 — `_persist_completed_workflow_response`**
+- [x] **Step 2: Hook site 1 — `_persist_completed_workflow_response`**
 
 Replace (currently ~lines 2364-2367):
 
@@ -671,7 +671,7 @@ with:
         bot_metadata = build_bot_metadata(bot_response, sanitized_persona)
 ```
 
-- [ ] **Step 3: Hook site 2 — `resume_workflow`**
+- [x] **Step 3: Hook site 2 — `resume_workflow`**
 
 Replace (currently ~lines 2023-2025):
 
@@ -690,12 +690,12 @@ with:
         bot_metadata = build_bot_metadata(bot_response)
 ```
 
-- [ ] **Step 4: Run the existing rich-response and message-service test files for regressions**
+- [x] **Step 4: Run the existing rich-response and message-service test files for regressions**
 
 Run: `python -m pytest tests/test_rich_response_metadata.py tests/test_rich_response_streaming.py tests/test_message_history_pipeline.py tests/test_rich_placement.py -v`
 Expected: ALL PASS (placement is additive: with no candidates or flag off it is a no-op)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/services/message_service.py
@@ -708,7 +708,7 @@ git commit -m "feat: auto-place inline rich markers at message persistence"
 - Modify: `app/ai/prompts.py`
 - Test: `tests/test_prompts_media_capability.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 """Answer-producing prompts must state the inline media capability.
@@ -751,12 +751,12 @@ def test_non_answer_prompts_unchanged():
         assert "You CAN display images inline" not in prompt
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_prompts_media_capability.py -v`
 Expected: FAIL with `AttributeError: module 'app.ai.prompts' has no attribute 'MEDIA_CAPABILITY_SNIPPET'`
 
-- [ ] **Step 3: Implement the snippet**
+- [x] **Step 3: Implement the snippet**
 
 In `app/ai/prompts.py`, immediately after `INLINE_RICH_RESPONSE_SUFFIX` (after line 11), add:
 
@@ -779,12 +779,12 @@ Then append the snippet to exactly five prompt constants by changing each closin
 
 Do NOT touch `IMAGE_GENERATOR_SYSTEM_PROMPT`, `ROUTER_SYSTEM_PROMPT`, `PLANNING_EXECUTION_PROMPT`, `TITLE_GENERATION_PROMPT`, `TOOL_EXPLORATION_SUFFIX`, `TOOL_CONTEXT_SUFFIX`, `DELEGATION_SUFFIX`, or `INLINE_RICH_RESPONSE_SUFFIX`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_prompts_media_capability.py tests/test_rich_response_prompt_inventory.py -v`
 Expected: ALL PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/ai/prompts.py tests/test_prompts_media_capability.py
@@ -797,7 +797,7 @@ git commit -m "feat: shared media-capability snippet in all answer prompts"
 - Modify: `app/core/config.py:971-979`
 - Modify: `tests/test_rich_response_contract.py:29`
 
-- [ ] **Step 1: Update the contract test first** (it pins the default)
+- [x] **Step 1: Update the contract test first** (it pins the default)
 
 In `tests/test_rich_response_contract.py` line 29, change:
 
@@ -813,12 +813,12 @@ to:
 
 Also update the test's name/docstring if it says "disabled by default" — it now guards the enabled-by-default rollout.
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `python -m pytest tests/test_rich_response_contract.py -v`
 Expected: the flag-default test FAILS (default still False)
 
-- [ ] **Step 3: Flip the default**
+- [x] **Step 3: Flip the default**
 
 In `app/core/config.py` change the field to:
 
@@ -833,12 +833,12 @@ In `app/core/config.py` change the field to:
     )
 ```
 
-- [ ] **Step 4: Run the full rich-response test set**
+- [x] **Step 4: Run the full rich-response test set**
 
 Run: `python -m pytest tests/test_rich_response_contract.py tests/test_rich_response_metadata.py tests/test_rich_response_streaming.py tests/test_rich_response_prompt_inventory.py -v`
 Expected: ALL PASS (other tests monkeypatch the flag explicitly, verified)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/core/config.py tests/test_rich_response_contract.py
@@ -1316,3 +1316,14 @@ git commit -m "test: verification fixes for article-style rich responses"
 - **Flag flip breaking clients without the capability:** safe — the per-request `inline_rich_response_v1` capability still gates everything (`graph.py:511`, `ai_sdk.py:920-921`); flag becomes AND-condition kill switch.
 - **Auto-placement misplacing an image:** bounded by `min_score` relevance gate, per-paragraph uniqueness, and `max_images` cap; all tunable via settings without code change.
 - **Legacy blob files:** preserved on disk and readable via fallback; only new blobs are DB-backed.
+
+---
+
+## Implementation log (progress & design decisions)
+
+- **2026-06-12 — Task 1 done** (`feat: add auto-placement settings for inline rich items`). Three settings added verbatim from plan after `rich_item_selected_image_max_bytes`; verified `True 3 0.25` via settings import. No deviations.
+- **2026-06-12 — Task 2 done** (`feat: deterministic article-style auto-placement engine for rich items`). TDD: 10 tests written first (failed with ModuleNotFoundError), then `app/core/rich_placement.py` created; 10/10 pass, ruff clean. **Decisions:** (1) `_strip_fenced_code_blocks` verified to have exactly the assumed list[str]→list[bool] semantics — reused as-is with `# noqa: PLC2701` (deliberate same-package reuse of CommonMark fence semantics). (2) Imports trimmed to what Task 2 actually uses (`settings`, `extract_live_widgets_from_artifacts`, `Any` deferred to Task 3 which needs them) to keep ruff clean per-commit. (3) One over-length assertion in `test_empty_inputs_are_safe` split across lines for the 100-char limit.
+- **2026-06-12 — Task 3 done** (`feat: finalize_article_content integration for persistence boundary`). TDD: 6 finalize tests appended (failed with ImportError first), then `_widget_placement_entries` / `_image_placement_entries` / `finalize_article_content` appended verbatim from plan; 16/16 pass, ruff clean. **Decisions:** (1) `extract_live_widgets_from_artifacts` verified to accept `tool`/`tool_name` + JSON `output` artifact dicts exactly as the plan's test assumes — no adaptation. (2) No import cycle: `response_constants` does not import `rich_placement`. (3) Test-file imports hoisted to module top (E402-clean) instead of mid-file as the plan snippet showed.
+- **2026-06-12 — Task 4 done** (`feat: auto-place inline rich markers at message persistence`). Import added absolute-style (`from app.core.rich_placement import ...`, matching neighbors, line 29); hooks inserted in `resume_workflow` (line 2025) and `_persist_completed_workflow_response` (line 2369), both between content extraction and `build_bot_metadata`. Regression run: 48 passed (only pre-existing langchain-community deprecation warning). No deviations.
+- **2026-06-12 — Task 5 done** (`feat: shared media-capability snippet in all answer prompts`). Snippet added verbatim after `INLINE_RICH_RESPONSE_SUFFIX`; appended via `""" + MEDIA_CAPABILITY_SNIPPET` to exactly the 5 answer prompts; 12 tests pass (3 new + 9 inventory). **Decision:** `app/ai/prompts.py` had 73 pre-existing E501 (line-too-long) findings — all prompt prose. Added file-level `# ruff: noqa: E501` with justification comment (reflowing model-facing text harms readability) instead of reflowing; file is now ruff-clean.
+- **2026-06-12 — Task 6 done** (`feat: enable inline rich responses by default (flag becomes kill switch)`). Contract test flipped first (confirmed red), then default flipped with kill-switch description; contract test renamed to `test_inline_rich_response_rollout_is_enabled_by_default_kill_switch`. Full rich-response set: 61 passed. No other test relied implicitly on the False default.
