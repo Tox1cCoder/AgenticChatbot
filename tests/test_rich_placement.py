@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from app.core.config import settings
 from app.core.rich_placement import auto_place_rich_items, finalize_article_content
+from app.core.rich_response import parse_inline_rich_references
 
 IMAGE = "image"
 WIDGET = "live_widget"
@@ -120,8 +121,6 @@ def test_empty_inputs_are_safe():
 
 
 def test_inserted_marker_is_parseable():
-    from app.core.rich_response import parse_inline_rich_references
-
     content = "Solar panels convert sunlight into electricity using semiconductors."
     items = [("img:0", IMAGE, "solar panels sunlight electricity")]
     new_content, placed = auto_place_rich_items(
@@ -208,3 +207,49 @@ def test_finalize_places_widget_from_artifacts(monkeypatch):
 
 def test_finalize_handles_none_response():
     assert finalize_article_content(None, "text") == "text"
+
+
+def test_places_image_when_paragraph_directly_precedes_fence():
+    content = (
+        "The Eiffel Tower glows at night in Paris.\n"
+        "```python\n"
+        "print('hi')\n"
+        "```\n\n"
+        "Unrelated note."
+    )
+    items = [("img:0", IMAGE, "Eiffel Tower glowing at night Paris")]
+    new_content, placed = auto_place_rich_items(
+        content, items=items, max_images=3, min_score=0.25
+    )
+    assert placed == ["img:0"]
+    lines = new_content.split("\n")
+    prose_line = next(i for i, ln in enumerate(lines) if "glows at night" in ln)
+    marker_line = next(i for i, ln in enumerate(lines) if ln == "<!--rich:img:0-->")
+    fence_line = next(i for i, ln in enumerate(lines) if ln.startswith("```python"))
+    assert prose_line < marker_line < fence_line
+    assert parse_inline_rich_references(new_content) == ["img:0"]
+
+
+def test_places_image_when_paragraph_directly_follows_fence():
+    content = (
+        "```python\n"
+        "print('hi')\n"
+        "```\n"
+        "The Eiffel Tower glows at night in Paris."
+    )
+    items = [("img:0", IMAGE, "Eiffel Tower glowing at night Paris")]
+    new_content, placed = auto_place_rich_items(
+        content, items=items, max_images=3, min_score=0.25
+    )
+    assert placed == ["img:0"]
+    assert parse_inline_rich_references(new_content) == ["img:0"]
+
+
+def test_skips_items_with_unparseable_ids():
+    content = "Here is the quarterly revenue comparison between both units."
+    items = [("widget:bad id with spaces & <stuff>", WIDGET, "quarterly revenue comparison")]
+    new_content, placed = auto_place_rich_items(
+        content, items=items, max_images=0, min_score=0.25
+    )
+    assert placed == []
+    assert new_content == content

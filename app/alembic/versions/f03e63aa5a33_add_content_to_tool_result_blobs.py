@@ -28,6 +28,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Fails if DB-backed rows (storage_path IS NULL) exist: their payloads
+    # live only in the content column and cannot be moved back to disk.
     op.alter_column(
         "tool_result_blobs",
         "storage_path",

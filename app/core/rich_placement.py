@@ -16,6 +16,8 @@ from typing import Any
 from .config import settings
 from .response_constants import extract_live_widgets_from_artifacts
 from .rich_response import (
+    _ITEM_ID_PATTERN,  # noqa: PLC2701  # deliberate same-package reuse: inserter must mirror parser id rules
+    RICH_ITEM_ID_MAX_LENGTH,
     RichItemType,
     _strip_fenced_code_blocks,  # noqa: PLC2701  # deliberate same-package reuse of CommonMark fence semantics
     parse_inline_rich_references,
@@ -53,15 +55,23 @@ def _segment_blocks(lines: list[str]) -> list[_Block]:
     current: list[str] = []
     current_code = False
     current_end = -1
+    prev_fenced = False
     for idx, (line, fenced) in enumerate(zip(lines, in_fence, strict=False)):
         if not line.strip():
             if current:
                 blocks.append(_Block(current_end, _tokens(" ".join(current)), current_code))
                 current, current_code = [], False
+            prev_fenced = False
             continue
+        if current and fenced != prev_fenced:
+            # CommonMark fences need no surrounding blank lines; split here so
+            # adjacent prose stays matchable instead of being treated as code.
+            blocks.append(_Block(current_end, _tokens(" ".join(current)), current_code))
+            current, current_code = [], False
         current.append(line)
         current_end = idx
         current_code = current_code or fenced or line.startswith(("    ", "\t"))
+        prev_fenced = fenced
     if current:
         blocks.append(_Block(current_end, _tokens(" ".join(current)), current_code))
     return blocks
@@ -103,6 +113,10 @@ def auto_place_rich_items(
     images_placed = 0
     for item_id, item_type, text in items:
         if item_id in referenced:
+            continue
+        if len(item_id) > RICH_ITEM_ID_MAX_LENGTH or not _ITEM_ID_PATTERN.match(item_id):
+            # The parser rejects such markers; inserting one would persist a raw
+            # comment with no matching rich_items entry.
             continue
         is_image = item_type == RichItemType.image.value
         if is_image and images_placed >= max_images:
