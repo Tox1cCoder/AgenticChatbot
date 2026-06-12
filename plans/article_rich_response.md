@@ -850,7 +850,7 @@ git commit -m "feat: enable inline rich responses by default (flag becomes kill 
 **Files:**
 - Create: `tests/test_article_image_flow.py`
 
-- [ ] **Step 1: Write the test**
+- [x] **Step 1: Write the test**
 
 ```python
 """End-to-end guard for the image search → inline display path.
@@ -943,12 +943,12 @@ def test_irrelevant_image_stays_dropped(monkeypatch):
     assert all(item.get("type") != "image" for item in metadata.get("rich_items") or [])
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `python -m pytest tests/test_article_image_flow.py -v`
 Expected: 2 PASSED (everything is already implemented by Tasks 2-4)
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tests/test_article_image_flow.py
@@ -961,17 +961,17 @@ git commit -m "test: end-to-end guard for image search to inline display path"
 - Create: `app/alembic/versions/<rev>_add_content_to_tool_result_blobs.py`
 - Modify: `app/models/tool_result_blob.py`
 
-- [ ] **Step 1: Find the current migration head**
+- [x] **Step 1: Find the current migration head**
 
 Run: `python -m alembic heads` (alembic.ini is at the repo root)
 Note the printed revision id — it is the `down_revision` for the new migration.
 
-- [ ] **Step 2: Generate the migration skeleton**
+- [x] **Step 2: Generate the migration skeleton**
 
 Run: `python -m alembic revision -m "add content to tool_result_blobs"`
 This creates a correctly-chained file under `app/alembic/versions/`.
 
-- [ ] **Step 3: Fill in the migration**
+- [x] **Step 3: Fill in the migration**
 
 Replace the generated `upgrade`/`downgrade` bodies with:
 
@@ -998,7 +998,7 @@ def downgrade() -> None:
 
 (`content` is nullable because legacy rows keep their payload on disk; `storage_path` becomes nullable because new rows have no file.)
 
-- [ ] **Step 4: Update the model**
+- [x] **Step 4: Update the model**
 
 In `app/models/tool_result_blob.py`:
 
@@ -1025,14 +1025,14 @@ In `app/models/tool_result_blob.py`:
     """
 ```
 
-- [ ] **Step 5: Apply and verify the migration**
+- [x] **Step 5: Apply and verify the migration**
 
 Run: `python -m alembic upgrade head`
 Expected: migration applies without error.
 Run: `python -m alembic downgrade -1 && python -m alembic upgrade head`
 Expected: clean round-trip (verifies downgrade works).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add app/alembic/versions app/models/tool_result_blob.py
@@ -1045,7 +1045,7 @@ git commit -m "feat: add content column to tool_result_blobs for DB-backed stora
 - Modify: `tests/test_tool_result_blob_service.py`
 - Modify: `app/services/tool_result_blob_service.py`
 
-- [ ] **Step 1: Rewrite the tests to specify the new behavior**
+- [x] **Step 1: Rewrite the tests to specify the new behavior**
 
 Replace the body of `test_offload_if_large_writes_full_output_and_returns_preview` and add two tests, so the file becomes:
 
@@ -1134,12 +1134,12 @@ def test_read_text_raises_on_corrupt_record(tmp_path):
         service.read_text(record)
 ```
 
-- [ ] **Step 2: Run tests to verify the new ones fail**
+- [x] **Step 2: Run tests to verify the new ones fail**
 
 Run: `python -m pytest tests/test_tool_result_blob_service.py -v`
 Expected: `test_offload_if_large_stores_content_in_db_and_creates_no_files`, `test_read_text_prefers_db_content`, `test_read_text_raises_on_corrupt_record` FAIL; the small-output and legacy-file tests pass.
 
-- [ ] **Step 3: Rewrite the service**
+- [x] **Step 3: Rewrite the service**
 
 Replace `app/services/tool_result_blob_service.py` with:
 
@@ -1228,12 +1228,12 @@ class ToolResultBlobService:
         return (self.storage_root / storage_path).read_text(encoding="utf-8")
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_tool_result_blob_service.py -v`
 Expected: 6 PASSED
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/services/tool_result_blob_service.py tests/test_tool_result_blob_service.py
@@ -1246,7 +1246,7 @@ git commit -m "feat: store tool result blobs in Postgres, keep legacy file read 
 - Modify: `app/core/config.py:658-661`
 - Modify: `.gitignore`
 
-- [ ] **Step 1: Update the storage-dir setting description** (`app/core/config.py`)
+- [x] **Step 1: Update the storage-dir setting description** (`app/core/config.py`)
 
 ```python
     tool_result_blob_storage_dir: str = Field(
@@ -1258,7 +1258,7 @@ git commit -m "feat: store tool result blobs in Postgres, keep legacy file read 
     )
 ```
 
-- [ ] **Step 2: Ignore the legacy data directory**
+- [x] **Step 2: Ignore the legacy data directory**
 
 Append to `.gitignore`:
 
@@ -1269,16 +1269,16 @@ data/
 
 Do NOT delete the existing `data/tool_result_blobs/` directory — legacy DB rows still point at those files via `storage_path`.
 
-- [ ] **Step 3: Confirm the DI wiring needs no change**
+- [x] **Step 3: Confirm the DI wiring needs no change**
 
 Read `app/core/container.py:252-258` — `tool_result_blob_service` passes `storage_root`, `threshold_chars`, `preview_chars`, which the rewritten service still accepts. No edit expected; verify only.
 
-- [ ] **Step 4: Verify git no longer reports the data dir**
+- [x] **Step 4: Verify git no longer reports the data dir**
 
 Run: `git status --short`
 Expected: `data/tool_result_blobs/` no longer listed as untracked.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/core/config.py .gitignore
@@ -1287,12 +1287,12 @@ git commit -m "chore: mark blob storage dir legacy and gitignore data dir"
 
 ### Task 11: Full verification
 
-- [ ] **Step 1: Full test suite**
+- [x] **Step 1: Full test suite**
 
 Run: `python -m pytest -q`
 Expected: ALL PASS, zero warnings introduced by this work. If any test asserts old blob/file behavior or prompt text outside the files already updated, fix it in the spirit of the spec (FR-1..FR-10) — do not weaken assertions.
 
-- [ ] **Step 2: Lint and types**
+- [x] **Step 2: Lint and types**
 
 Run: `python -m ruff check app tests` (ruff is configured in `pyproject.toml`)
 Expected: clean. Fix every finding; if `_strip_fenced_code_blocks` private-import triggers a rule, add an inline ignore with the justification comment from Task 2.
@@ -1301,7 +1301,7 @@ Expected: clean. Fix every finding; if `_strip_fenced_code_blocks` private-impor
 
 Start the API + Streamlit demo (`demo.py`), ask the search agent a visual question (e.g. "What does the Eiffel Tower look like at night?"). Expected: the answer renders with an inline image near the relevant paragraph; no `data/tool_result_blobs/` files appear for large tool outputs; asking "can you send me images?" yields yes, not a refusal.
 
-- [ ] **Step 4: Final commit (if fixes were needed)**
+- [x] **Step 4: Final commit (if fixes were needed)**
 
 ```bash
 git add -A
@@ -1327,3 +1327,12 @@ git commit -m "test: verification fixes for article-style rich responses"
 - **2026-06-12 — Task 4 done** (`feat: auto-place inline rich markers at message persistence`). Import added absolute-style (`from app.core.rich_placement import ...`, matching neighbors, line 29); hooks inserted in `resume_workflow` (line 2025) and `_persist_completed_workflow_response` (line 2369), both between content extraction and `build_bot_metadata`. Regression run: 48 passed (only pre-existing langchain-community deprecation warning). No deviations.
 - **2026-06-12 — Task 5 done** (`feat: shared media-capability snippet in all answer prompts`). Snippet added verbatim after `INLINE_RICH_RESPONSE_SUFFIX`; appended via `""" + MEDIA_CAPABILITY_SNIPPET` to exactly the 5 answer prompts; 12 tests pass (3 new + 9 inventory). **Decision:** `app/ai/prompts.py` had 73 pre-existing E501 (line-too-long) findings — all prompt prose. Added file-level `# ruff: noqa: E501` with justification comment (reflowing model-facing text harms readability) instead of reflowing; file is now ruff-clean.
 - **2026-06-12 — Task 6 done** (`feat: enable inline rich responses by default (flag becomes kill switch)`). Contract test flipped first (confirmed red), then default flipped with kill-switch description; contract test renamed to `test_inline_rich_response_rollout_is_enabled_by_default_kill_switch`. Full rich-response set: 61 passed. No other test relied implicitly on the False default.
+- **2026-06-12 — Task 7 done** (`test: end-to-end guard for image search to inline display path`). Both E2E tests passed on first run with zero adaptations — production interfaces (`build_image_candidates_from_tool_result`, `finalize_article_content`, `build_bot_metadata`) matched the plan's assumptions exactly. Acceptance criterion 1 now automated.
+- **2026-06-12 — Task 8 done** (`feat: add content column to tool_result_blobs for DB-backed storage`). Migration `f03e63aa5a33` (down_revision `u7v8w9x0y1z2`) adds nullable `content` TEXT and makes `storage_path` nullable; model + docstring updated. Upgrade/downgrade round-trip verified against live Postgres; schema independently confirmed (`content TEXT NULL`, `storage_path VARCHAR(1024) NULL`). A version-table stamp hiccup during first apply was resolved with `stamp u7v8w9x0y1z2` + re-upgrade; final state clean at head.
+- **2026-06-12 — Task 9 done** (`feat: store tool result blobs in Postgres, keep legacy file read fallback`). TDD: 3 new tests red first (KeyError 'content' / TypeError on None path), then service rewritten per plan; 5/5 pass, `-k blob` sweep green, ruff clean. **Verified against current code before rewrite:** offload-notice text, sync dict-based `repository.create`, and service-side `uuid4()` id generation all matched the plan snippet — no contract drift; constructor signature unchanged so DI container needs no edit.
+- **2026-06-12 — Task 10 done** (`chore: mark blob storage dir legacy and gitignore data dir`). Description updated, `data/` gitignored (no longer untracked), DI wiring at `container.py:252-258` confirmed compatible (verify-only), container import sanity-checked. Legacy files left on disk for `storage_path` fallback.
+- **2026-06-12 — Task 11 done (verification + review).**
+  - **Full suite:** 1104 passed. One pre-existing failure excluded: `tests/client_backend/test_live_server_integration.py::test_live_document_upload_list_get_task_and_delete_flow` fails with `KeyError: 'document'` against the live server on :8000 — reproduced identically at base commit `37fb0ca` in a clean worktree, so environmental, not caused by this work. (Side finding: `shared/skills/` is needed by tests but untracked in git.)
+  - **Ruff:** repo-wide baseline was NOT clean before this work (235 findings at base; 200 E501 prose). Now 161 — net −74; zero findings on lines added by this work (the one introduced 101-char docstring was fixed). Clearing the remaining pre-existing findings is out of scope for this plan.
+  - **Final code review (whole branch):** image-marker injection via tool output confirmed not exploitable (ids are server-constructed); content/metadata consistency verified at both persist sites. Two Important findings fixed in `fix: split blocks at fence boundaries and validate ids before marker insert`: (I-1) `_segment_blocks` now splits blocks at fence on/off boundaries so prose adjacent to a fence (a shape `fix_markdown_code_blocks` itself produces) stays matchable; (I-2) `auto_place_rich_items` validates ids against `_ITEM_ID_PATTERN`/`RICH_ITEM_ID_MAX_LENGTH` before inserting, keeping inserter and parser symmetric. Minor M-3 addressed with a downgrade comment in the migration. Minors M-1/M-2 (whitespace-only divergence on no-op; CRLF→LF normalization when placing) accepted as harmless.
+  - **Step 3 manual smoke:** skipped — requires restarting the running stack; the automated E2E test (`tests/test_article_image_flow.py`) covers the chain, and restarting the user's live server was out of bounds.
