@@ -9,7 +9,12 @@ from uuid import UUID, uuid4
 
 
 class ToolResultBlobService:
-    """Persist full tool outputs out-of-band when they exceed a size threshold."""
+    """Persist full tool outputs out-of-band when they exceed a size threshold.
+
+    New blobs store their content in the ``tool_result_blobs`` Postgres table.
+    ``storage_root`` is retained only to read legacy records whose payload
+    still lives on disk under ``storage_path``.
+    """
 
     def __init__(
         self,
@@ -40,20 +45,16 @@ class ToolResultBlobService:
                 "size_bytes": len(output_text.encode("utf-8")),
             }
 
-        blob_id = uuid4()
-        relative_path = Path(str(conversation_id)) / f"{blob_id}.txt"
-        absolute_path = self.storage_root / relative_path
-        absolute_path.parent.mkdir(parents=True, exist_ok=True)
-        absolute_path.write_text(output_text, encoding="utf-8")
         encoded = output_text.encode("utf-8")
         record = self.repository.create(
             {
-                "id": blob_id,
+                "id": uuid4(),
                 "conversation_id": conversation_id,
                 "user_id": user_id,
                 "tool_call_id": tool_call_id,
                 "tool_name": tool_name,
-                "storage_path": str(relative_path),
+                "content": output_text,
+                "storage_path": None,
                 "sha256": hashlib.sha256(encoded).hexdigest(),
                 "size_bytes": len(encoded),
                 "content_type": "text/plain",
@@ -68,6 +69,14 @@ class ToolResultBlobService:
         }
 
     def read_text(self, record: Any) -> str:
+        content = record["content"] if isinstance(record, dict) else record.content
+        if content is not None:
+            return content
         storage_path = record["storage_path"] if isinstance(record, dict) else record.storage_path
-        absolute_path = self.storage_root / storage_path
-        return absolute_path.read_text(encoding="utf-8")
+        if not storage_path:
+            record_id = record["id"] if isinstance(record, dict) else record.id
+            raise ValueError(
+                f"Tool result blob {record_id} has neither content nor storage_path; "
+                "the record is corrupt and cannot be read."
+            )
+        return (self.storage_root / storage_path).read_text(encoding="utf-8")

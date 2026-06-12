@@ -1,5 +1,7 @@
 from uuid import uuid4
 
+import pytest
+
 from app.services.tool_result_blob_service import ToolResultBlobService
 
 
@@ -30,7 +32,7 @@ def test_offload_if_large_returns_inline_for_small_output(tmp_path):
     assert repo.created == []
 
 
-def test_offload_if_large_writes_full_output_and_returns_preview(tmp_path):
+def test_offload_if_large_stores_content_in_db_and_creates_no_files(tmp_path):
     repo = FakeRepository()
     service = ToolResultBlobService(repo, storage_root=tmp_path, threshold_chars=10)
     conversation_id = uuid4()
@@ -49,9 +51,32 @@ def test_offload_if_large_writes_full_output_and_returns_preview(tmp_path):
     )
     assert result["blob_id"]
     assert result["size_bytes"] == 26
-    assert repo.created[0]["conversation_id"] == conversation_id
-    assert repo.created[0]["user_id"] == user_id
-    assert repo.created[0]["tool_call_id"] == "call-1"
-    assert (tmp_path / repo.created[0]["storage_path"]).read_text(
-        encoding="utf-8"
-    ) == "abcdefghijklmnopqrstuvwxyz"
+    record = repo.created[0]
+    assert record["conversation_id"] == conversation_id
+    assert record["user_id"] == user_id
+    assert record["tool_call_id"] == "call-1"
+    assert record["content"] == "abcdefghijklmnopqrstuvwxyz"
+    assert record["storage_path"] is None
+    assert list(tmp_path.iterdir()) == [], "offload must not create files on disk"
+
+
+def test_read_text_prefers_db_content(tmp_path):
+    service = ToolResultBlobService(FakeRepository(), storage_root=tmp_path, threshold_chars=10)
+    record = {"content": "full output", "storage_path": None}
+    assert service.read_text(record) == "full output"
+
+
+def test_read_text_falls_back_to_legacy_file(tmp_path):
+    service = ToolResultBlobService(FakeRepository(), storage_root=tmp_path, threshold_chars=10)
+    legacy_dir = tmp_path / "conv-1"
+    legacy_dir.mkdir()
+    (legacy_dir / "blob-1.txt").write_text("legacy payload", encoding="utf-8")
+    record = {"id": "blob-1", "content": None, "storage_path": "conv-1/blob-1.txt"}
+    assert service.read_text(record) == "legacy payload"
+
+
+def test_read_text_raises_on_corrupt_record(tmp_path):
+    service = ToolResultBlobService(FakeRepository(), storage_root=tmp_path, threshold_chars=10)
+    record = {"id": "blob-x", "content": None, "storage_path": None}
+    with pytest.raises(ValueError, match="blob-x"):
+        service.read_text(record)
