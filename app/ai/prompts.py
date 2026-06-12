@@ -1,3 +1,5 @@
+# Prompt prose intentionally exceeds the line limit; reflowing model-facing text harms readability.
+# ruff: noqa: E501
 from app.core.config import settings
 from app.core.rich_response import build_rich_item_inventory_block
 from app.utils.text_processing import estimate_tokens
@@ -9,6 +11,13 @@ INLINE_RICH_RESPONSE_SUFFIX = (
     "available marker in the answer. Do not tell the user a widget is inline unless its\n"
     "marker appears in the response. Do not mention hidden candidates."
 )
+
+MEDIA_CAPABILITY_SNIPPET = """
+
+Media and visuals:
+- You CAN display images inline in your answers. When available rich items are listed for this turn, place a relevant image with its `<!--rich:<id>-->` marker on its own line near the paragraph it illustrates, followed by a short caption. Use only IDs from that list.
+- Never tell the user you cannot send, show, or display images. If the user wants images and none are available yet, call a tool that returns images (such as web search) and then place the relevant results inline.
+- Write answers like a well-edited article: weave images and widgets into the narrative where they support the text rather than bunching them at the end. Include only media that materially helps the reader."""
 
 
 def build_rich_response_guidance(
@@ -84,7 +93,7 @@ Critical:
 - Do NOT fabricate information - use tools to verify when uncertain
 - Do NOT ignore tool results - meaningfully incorporate them into your answer
 - Always respond in the same language the user is using
-- If you cannot help, explain why clearly and suggest alternatives"""
+- If you cannot help, explain why clearly and suggest alternatives""" + MEDIA_CAPABILITY_SNIPPET
 
 RAG_SYSTEM_PROMPT = """You are an expert document analyst specializing in extracting, synthesizing, and explaining information from provided documents.
 
@@ -114,7 +123,7 @@ Constraints:
 - NEVER use your general knowledge instead of the document content
 - ALWAYS cite sources for every factual claim
 - For calculations on document data, show your work step-by-step
-- Match the user's language exactly"""
+- Match the user's language exactly""" + MEDIA_CAPABILITY_SNIPPET
 
 AGENTIC_RAG_SYSTEM_PROMPT = """You are an expert document exploration agent with systematic research capabilities. Thoroughly explore documents to find, synthesize, and explain information comprehensively.
 
@@ -169,7 +178,7 @@ Critical:
 - Be THOROUGH - provide depth when documents contain detailed information
 - Follow cross-references by backtracking when discovered
 - Cite every factual claim with source and location
-- Match the user's language"""
+- Match the user's language""" + MEDIA_CAPABILITY_SNIPPET
 
 SEARCH_SYSTEM_PROMPT = """You are an expert research assistant with access to web search and other tools. Provide accurate, comprehensive, and current information backed by verified sources.
 
@@ -224,7 +233,7 @@ Constraints:
 - NEVER fabricate sources or URLs
 - ALWAYS extract title and url from search results and format as [Title](URL)
 - ACKNOWLEDGE when sources conflict or information is uncertain
-- Match the user's language"""
+- Match the user's language""" + MEDIA_CAPABILITY_SNIPPET
 
 IMAGE_GENERATOR_SYSTEM_PROMPT = """You are a creative visual artist and prompt engineer specializing in crafting detailed, evocative image generation prompts.
 
@@ -455,7 +464,7 @@ RESPONSE FORMAT:
 - Never write [Source Name] without the URL
 - Support claims with evidence from the tool results
 
-LANGUAGE: Match the user's language."""
+LANGUAGE: Match the user's language.""" + MEDIA_CAPABILITY_SNIPPET
 
 
 def build_search_prompt(
