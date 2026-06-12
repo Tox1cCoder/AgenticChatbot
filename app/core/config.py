@@ -996,6 +996,24 @@ class Settings(BaseSettings):
             "Oversized inline data is rejected at finalization rather than persisted or streamed."
         ),
     )
+    rich_auto_place_enabled: bool = Field(
+        default=True,
+        description=(
+            "Deterministically insert inline markers for relevant unreferenced "
+            "rich items (images, widgets) into the final answer at persistence time."
+        ),
+    )
+    rich_auto_place_max_images: int = Field(
+        default=3,
+        description="Maximum number of image markers auto-placement may insert per answer.",
+    )
+    rich_auto_place_min_score: float = Field(
+        default=0.25,
+        description=(
+            "Minimum keyword-overlap score (fraction of an item's descriptive tokens "
+            "found in a paragraph) required to auto-place the item after that paragraph."
+        ),
+    )
 
     # ── Validators ──────────────────────────────────────────────────────
 
