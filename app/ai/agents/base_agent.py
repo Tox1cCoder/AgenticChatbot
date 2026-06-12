@@ -1279,7 +1279,7 @@ class BaseAgent(ABC):
         device_id: str | None = None,
         allowed_skill_refs: list[dict[str, Any]] | None = None,
     ) -> str:
-        """Build a suffix listing active server/client skill summaries.
+        """Build a suffix listing the connected client's skill summaries.
 
         ``allowed_skill_refs`` restricts the listed skills to a custom agent's
         selected skills (None = base-agent behavior, all skills visible).

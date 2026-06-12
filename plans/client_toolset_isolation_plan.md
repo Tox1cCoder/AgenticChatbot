@@ -613,6 +613,29 @@ git push
 
 ---
 
+## Execution log (2026-06-11)
+
+Executed task-by-task with fresh subagents + spec/quality review per task.
+
+| Task | Commits | Verification |
+|---|---|---|
+| 1 red tests | `5585270` | All 4 tests verified failing pre-fix; test 4 initially failed for the wrong reason (test double missing `device_id`) — fixed and re-verified failing on the leak assertion (server skill content returned instead of "not found"). |
+| 2 server-skill removal | `e2d6f34`, `b2b6882` | Red tests green; 50 passed across skills+custom-agents suites. Quality review caught a plan miss: `app/ai/agents/router.py:182` had the same `or 'server'` fallback — fixed in `b2b6882` plus client-source test fixtures. |
+| 3 demo skills via sidecar | `cbf69cd` | Arch test verified red first. Spec review confirmed payload-shape parity with `client_backend/api/skills.py` (no key mismatches; demo panel has no toggle control — list/detail/reload only). |
+| 4 registry deletion | `3d79ed7` | 712 lines deleted; `import app.main` + demo AST parse clean; grep shows only `local_skills_registry` (client) references remain. |
+| 5 MCP allowlist | `65bd7c7`, `85efd1f` | Policy test verified red first. NOTE: `mcp_config.json` had been untracked in `6528953` (when it held machine servers); re-tracked deliberately with a scoped `.gitignore` negation (`!app/ai/mcp_config.json`) since the config is now shared policy. All grep hits for desktop-commander/excel elsewhere are client/device-tool fixtures (correct per product model). |
+| 6 demo → sidecar | `30a9b89` | Base URL :8100, login/signup store `localSessionToken` + `deviceId`; `accessToken` remains only in the debug fallback lines. |
+| 7 docs + spec | `56aca1d` | README Skills row/section, global-tools contract, three-process dev setup (sidecar start command verified from README: `codex-client-backend run --config .env.client`); spec §2.1/§3 NFR-2 amendment (skills are never checkpointed). |
+| 8 verification | `5c52b79` + this log | See below. |
+
+**Task 8 results:**
+- Full suite (`tests` minus live-server file): **1053 passed, 0 failed** (baseline 1065; delta = deleted parity/snapshot tests vs. new contract tests).
+- Ruff on all touched files: clean. demo.py findings 216 vs 218 at baseline (our edits removed 2, added 0; the remainder are pre-existing embedded-CSS/JS E501s). Two pre-existing base_agent E501s fixed (`5c52b79`).
+- Smoke (API-level, against the new sidecar code): sidecar boots on :8100; **discovered the 5 repo skills** via `CLIENT_SKILLS_ROOTS`; local MCP profile loaded 6 servers / 51 tools **including desktop-commander (26) and excel (7)** — the FR-3 client-side migration was already in place on this machine; `/skills` correctly rejects without a local session token; signup + login proxied to the canonical server succeeded, registering device `d7d7cb0b…` and returning `localSessionToken` (the exact contract the demo now consumes). The single-upstream-user tenancy guard was also observed working (409 on a conflicting login).
+- Smoke NOT completed: authenticated `/skills`-payload and proxied `/conversations` probes, and the interactive 3-process UI walkthrough — the server on :8000 was still running pre-change code (restarting it is the owner's call), and the owner began using the machine mid-smoke. Remaining steps for the owner: restart the server, start the sidecar (`CLIENT_SKILLS_ROOTS=<repo>\skills`), run `streamlit run demo.py`, then walk plan §Task 8 Step 3 items 2-6 (skills panel = list/reload; there is no toggle control in the demo panel).
+- Smoke artifacts: dev-DB user `smoke.isolation.v2@example.com` (id `3179cf36…`) + device row `d7d7cb0b…` — inert, delete at leisure.
+- Final whole-branch code review: no Critical/Important issues. Open minor: `demo.py:~7581` skills-panel caption still says "server-owned skills … reads the local skills/ directory directly" — stale copy to reword (left alone because demo.py carries unrelated uncommitted edits in the working tree).
+
 ## Execution notes
 
 - **Order matters within Tasks 1→4** (tests red → fix → demo decouple → delete runtime); Tasks 5 and 6 are independent of each other and of 1–4, but run Task 8 only after everything else.

@@ -1,7 +1,7 @@
 # Per-Client Toolset Isolation v2 — Skills, Global Tools, Streamlit Client
 
 **Branch:** `Thai-Postgre-FastAPI`
-**Status:** Spec approved by product owner 2026-06-11; implementation plan pending
+**Status:** Implemented 2026-06-11 (see plans/client_toolset_isolation_plan.md execution log); UI smoke walkthrough pending owner
 **Date:** 2026-06-11
 **Predecessor:** `plans/client_invocation.md` (v1 — device-scoped client *runtime tool* isolation, completed 2026-06-11)
 
