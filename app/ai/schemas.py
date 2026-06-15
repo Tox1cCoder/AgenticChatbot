@@ -196,6 +196,10 @@ class GraphState(TypedDict):
     user_id: NotRequired[str | None]
     device_id: NotRequired[str | None]
     selected_agent: NotRequired[str | None]
+    # Agent that produced the previous turn's final response. Persisted across
+    # turns (NOT reset per turn) so a follow-up can stick to the custom agent
+    # the user was already working with instead of being silently re-routed.
+    last_agent: NotRequired[str | None]
     response: NotRequired[AgentResponse | None]
     context: NotRequired[GraphContext]
     # Per-conversation custom agents keyed by runtime id ("custom_agent:<uuid>").

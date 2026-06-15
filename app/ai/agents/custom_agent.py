@@ -16,7 +16,11 @@ from langchain_core.tools import BaseTool
 from ...core.config import settings
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..client_runtime_tools import get_active_client_runtime_session
-from ..custom_agent_runtime import AgentRuntimeSpec, filter_tools_for_custom_agent
+from ..custom_agent_runtime import (
+    AgentRuntimeSpec,
+    filter_tools_for_custom_agent,
+    rebase_client_tool_refs,
+)
 from ..deferred_tool_binding import (
     get_deferred_tools_for_binding,
     should_use_deferred_loading,
@@ -165,9 +169,17 @@ class CustomAgent(BaseAgent):
         else:
             remote_tools = []
 
+        # Rebase the agent's persisted client-tool refs onto the device's current
+        # live tools so a sidecar reconnect/resync (which rotates session_id /
+        # catalog_version / tool_instance_id) does not strand the agent's own
+        # selected tools. The strict matcher stays unchanged — it just compares
+        # against current-session refs. No-op for server-only agents or when no
+        # device is connected.
+        spec = self._request_spec(device_id=device_id, live_tools=remote_tools)
+
         _, availability_warnings = filter_tools_for_custom_agent(
             [*server_candidates, *remote_tools],
-            self._spec,
+            spec,
             request_device_id=device_id,
         )
 
@@ -202,20 +214,20 @@ class CustomAgent(BaseAgent):
                 )
             external, _ = filter_tools_for_custom_agent(
                 external_candidates,
-                self._spec,
+                spec,
                 request_device_id=device_id,
             )
             warnings = availability_warnings
         else:
             external, warnings = filter_tools_for_custom_agent(
                 [*server_candidates, *remote_tools],
-                self._spec,
+                spec,
                 request_device_id=device_id,
             )
         self.set_runtime_warnings(warnings)
 
         tools: list[BaseTool] = list(
-            self.restricted_internal_tools(user_id=user_id, device_id=device_id)
+            self.restricted_internal_tools(user_id=user_id, device_id=device_id, spec=spec)
         )
         for tool in internal_tools or []:
             tools.append(tool)
@@ -231,33 +243,61 @@ class CustomAgent(BaseAgent):
             deduped.append(tool)
         return deduped
 
+    def _request_spec(
+        self,
+        *,
+        device_id: str | None,
+        live_tools: list[BaseTool],
+    ) -> AgentRuntimeSpec:
+        """Spec with client-tool refs rebased onto the current session's live tools.
+
+        Returns ``self._spec`` unchanged for server-only agents, when no device is
+        connected, or when nothing needs rebasing — so server-tool flows and the
+        no-client path are untouched.
+        """
+        if not device_id or not self._spec.allowed_client_tool_refs:
+            return self._spec
+        rebased = rebase_client_tool_refs(
+            self._spec.allowed_client_tool_refs,
+            live_tools,
+            request_device_id=str(device_id),
+        )
+        if rebased is self._spec.allowed_client_tool_refs:
+            return self._spec
+        return self._spec.model_copy(update={"allowed_client_tool_refs": rebased})
+
     def restricted_internal_tools(
         self,
         *,
         user_id: str | None,
         device_id: str | None,
+        spec: AgentRuntimeSpec | None = None,
     ) -> list[Any]:
         """Internal tools every custom agent gets: restricted tool_search + skills.
 
         The dynamic ``hand_off`` tool is injected by the graph (Task 10) from the
         spec's allowed targets; external client tools are appended after exact
-        filtering by the graph's tool node (Task 9).
+        filtering by the graph's tool node (Task 9). ``spec`` lets the caller pass
+        a session-rebased spec so the restricted ``tool_search`` allowlist tracks
+        the current session's client tool instances; it defaults to the persisted
+        spec for standalone callers.
         """
+        spec = spec or self._spec
         tools: list[Any] = [
-            create_tool_search_tool_for_custom_agent(self._spec),
+            create_tool_search_tool_for_custom_agent(spec),
             create_activate_skill_tool(
                 user_id=user_id,
                 device_id=device_id,
-                allowed_skill_refs=self._spec.allowed_skill_refs,
+                allowed_skill_refs=spec.allowed_skill_refs,
             ),
         ]
         # Dynamic hand_off scoped to this agent's valid targets (base + other
         # attached custom agents). Same tool object the graph re-validates.
-        if self._spec.allowed_handoff_targets:
+        if spec.allowed_handoff_targets:
             tools.append(
                 create_hand_off_tool(
-                    self._spec.allowed_handoff_targets,
-                    self._spec.handoff_target_descriptions,
+                    spec.allowed_handoff_targets,
+                    spec.handoff_target_descriptions,
                 )
             )
         return tools

@@ -209,8 +209,15 @@ class ClientToolCatalog:
                 self._clear()
             return False
 
-        # Check if catalog version changed
-        if session.tool_catalog_version == self._catalog_version:
+        # Rebuild when either the catalog version OR the session changed. A
+        # reconnect resets catalog_version (often back to 0), so comparing the
+        # version alone can collide with the previous session's number and leave
+        # the catalog pinned to a stale session_id — which would keep the
+        # rotated tool_instance_ids unfindable via tool_search.
+        if (
+            session.tool_catalog_version == self._catalog_version
+            and session.session_id == self._session_id
+        ):
             return False
 
         self._rebuild_from_catalog(

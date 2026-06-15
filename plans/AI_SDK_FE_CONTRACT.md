@@ -41,7 +41,7 @@ Request fields:
 | `messages[].parts` | array | Optional. Text parts use `{ "type": "text", "text": "..." }`; file/image parts are supported. |
 | `messages[].attachments` | array | Optional image attachments. Also accepts `experimental_attachments` or `files`. |
 | `userId` | string, optional | Enables server-side user-aware features. |
-| `inlineRichResponseV1` | boolean, optional | Opt in to marker-positioned rich UI items. Also accepted as `inline_rich_response_v1`. |
+| `inlineRichResponseV1` | boolean, optional | Opt in to marker-positioned rich UI items and article-style inline placement. Also accepted as `inline_rich_response_v1`. |
 | `deviceId` | string, optional | Usually injected by the sidecar/client backend for local runtime tools. |
 
 The response is `text/event-stream` and includes:
@@ -139,6 +139,7 @@ Notes:
 - `data-assistant-message.data.message.content` is intentionally omitted on the stream because answer text already arrived as `text-delta`.
 - Metadata may appear under `message_metadata`, `messageMetadata`, and/or `metadata` depending on path/projection. Treat `messageMetadata ?? message_metadata ?? metadata` as the backend metadata.
 - `parts` may contain generated image/file parts. For v1 rich responses, only selected images appear as file parts.
+- Article-style auto-placement can add final `<!--rich:<id>-->` markers at persistence time after text deltas have already streamed. For the AI SDK stream, use the persisted message from history after `finish` when you need the exact final marker layout.
 
 Rich item upsert:
 
@@ -766,6 +767,24 @@ Display policies:
 | `inline_only` | Render only at marker. Images use this. Do not append elsewhere. |
 | `inline_or_append` | Render at marker if present; otherwise append below the answer. |
 
+### Article-Style Auto-Placement
+
+The article rich-response implementation does not add new stream event types or
+new rich item types. It changes when markers can appear:
+
+- `inlineRichResponseV1: true` is still the client capability flag.
+- The server-side `inline_rich_response_enabled` setting now defaults to enabled and remains a kill switch. If it is disabled, the backend strips/omits v1 marker behavior even when the client opts in.
+- When `rich_auto_place_enabled` is enabled, the backend may insert markers for relevant unreferenced image candidates and live widgets into the final persisted assistant markdown.
+- Auto-placement is deterministic and bounded by server settings. Current defaults: at most 3 auto-placed images per answer, one placed item per paragraph, and a minimum keyword-overlap score of 0.25. Widget placement is not capped by the image limit.
+- Images still use `display_policy: "inline_only"`. Unplaced image candidates are dropped/scrubbed from v1 legacy image fields; clients should not render a separate gallery from hidden candidates.
+- The final authoritative layout is the pair of persisted `message.content` plus `messageMetadata.rich_items`.
+
+Streaming note:
+
+- If the model wrote markers itself, those markers can appear in `text-delta`.
+- If the backend inserted markers during persistence, the earlier `text-delta` stream may not contain those markers.
+- The AI SDK `data-assistant-message` event intentionally omits `content`, so clients that need exact article placement during/after a live run should refetch `GET /ai/conversations/{conversationId}/messages` after `finish`, or use an application-level finalized message source if one is available.
+
 ### Rich Image Item
 
 ```json
@@ -1105,7 +1124,13 @@ Fields:
 | `error` | string or null | Error text, if failed. |
 | `status` | string | `success`, `error`, `failed`, or `rejected`. |
 | `render` | object, optional | Structured render payload for UI. |
-| `blob_id` / related blob fields | optional | May appear when large tool output is offloaded. |
+| `blob_id` | string, optional | Present when a large tool output was offloaded. Fetch full text with `GET /tool-results/{blob_id}` using normal auth. |
+| `blob_size_bytes` | number, optional | Size of the full offloaded output in bytes. |
+| `output_truncated` | boolean, optional | `true` when `output` is only a preview plus an offload notice. |
+
+Offloaded tool-result storage is backend-internal. New blobs are stored in the
+database, while legacy file-backed blobs remain readable through the same
+`GET /tool-results/{blob_id}` endpoint; frontend behavior does not change.
 
 Render payload is tool-specific. Examples:
 

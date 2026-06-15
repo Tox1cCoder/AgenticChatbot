@@ -28,6 +28,7 @@ __all__ = [
     "build_base_agent_runtime_spec",
     "build_custom_agent_runtime_spec",
     "filter_tools_for_custom_agent",
+    "rebase_client_tool_refs",
     "client_ref_matches_metadata",
     "list_selected_skill_summaries",
 ]
@@ -298,6 +299,62 @@ def filter_tools_for_custom_agent(
         if index not in matched_ref_indexes
     ]
     return allowed, warnings
+
+
+def rebase_client_tool_refs(
+    refs: list[dict[str, Any]],
+    live_tools: list[Any],
+    *,
+    request_device_id: str | None,
+) -> list[dict[str, Any]]:
+    """Rebase persisted client-tool refs onto the device's current live tools.
+
+    A custom agent persists its selected client tools with the session-scoped
+    identity (``session_id``, ``catalog_version``, ``tool_instance_id``) captured
+    when the agent was saved. Those rotate on every sidecar reconnect/resync, so
+    the exact-identity authorization match (:func:`client_ref_matches_metadata`)
+    would reject the agent's own tools after a reconnect. This rebinds each
+    persisted ref to the genuinely-current tool sharing its STABLE identity —
+    same device and same ``qualified_tool_id`` — copying the live runtime fields
+    so the strict matcher accepts the current tool. Refs whose tool is absent
+    from the current device's live set are left unchanged (and reported
+    unavailable downstream).
+
+    Scoped strictly to ``request_device_id``: a tool on any other device is never
+    used as a rebase source, so cross-device isolation is preserved. The strict
+    matcher and dispatch-time validation are untouched — this only refreshes the
+    volatile fields the matcher compares.
+    """
+    if not request_device_id or not refs:
+        return refs
+
+    live_by_qid: dict[str, dict[str, Any]] = {}
+    for tool in live_tools:
+        meta = _tool_metadata(tool)
+        if not _is_client_tool(meta):
+            continue
+        if str(meta.get("device_id")) != str(request_device_id):
+            continue
+        qualified_id = str(meta.get("qualified_tool_id") or "")
+        if qualified_id:
+            live_by_qid[qualified_id] = meta
+
+    rebased: list[dict[str, Any]] = []
+    changed = False
+    for ref in refs:
+        qualified_id = str(ref.get("qualified_tool_id") or "")
+        live_meta = live_by_qid.get(qualified_id)
+        if live_meta is not None and str(ref.get("device_id")) == str(request_device_id):
+            new_ref = dict(ref)
+            new_ref["session_id"] = live_meta.get("session_id")
+            new_ref["catalog_version"] = live_meta.get("catalog_version")
+            new_ref["tool_instance_id"] = live_meta.get("tool_instance_id")
+            rebased.append(new_ref)
+            if new_ref != ref:
+                changed = True
+        else:
+            rebased.append(ref)
+    return rebased if changed else refs
 
 
 # --------------------------------------------------------------------------- #

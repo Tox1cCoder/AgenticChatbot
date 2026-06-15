@@ -474,6 +474,14 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         self._attach_final_agent_metadata(state, response)
         state["response"] = response
 
+        # Remember the agent that produced this turn's response so the next
+        # turn can stick to it (custom-agent stickiness — see _route_node). The
+        # last writer in a turn wins, so after a handoff this lands on the agent
+        # that actually answered, not the source.
+        selected = state.get("selected_agent")
+        if selected:
+            state["last_agent"] = selected
+
         ai_kwargs: dict[str, Any] = {"content": response.message.content}
         assistant_message_id = state.get("assistant_message_id")
         if response.message.tool_calls:
@@ -1365,6 +1373,19 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         planning_mode_enabled, has_existing_plan = self._get_planning_flags(state)
 
+        # Custom-agent stickiness: keep a natural follow-up on the custom agent
+        # that handled the previous turn instead of letting the router silently
+        # re-route a terse follow-up to a base agent (which would lose the custom
+        # agent's deferred tools/skills and trigger a handoff storm). Skipped
+        # when planning supervises; released inside the helper when the user
+        # explicitly names a different attached custom agent.
+        if not (planning_mode_enabled and has_existing_plan):
+            sticky_agent = self._sticky_custom_agent(state, content)
+            if sticky_agent:
+                state["selected_agent"] = sticky_agent
+                self._record_agent_invocation(state, sticky_agent, via="sticky")
+                return state
+
         agent_msg = AgentMessage(
             role=MessageRole.USER,
             content=content,
@@ -1379,16 +1400,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         # Surface attached custom agents to the router (runtime ids as routable
         # targets + descriptors for the prompt / deterministic matching).
-        custom_agents = GraphStateView(state).custom_agents()
-        custom_descriptors = [
-            {
-                "runtime_agent_id": entry.get("runtime_agent_id") or runtime_id,
-                "name": entry.get("name"),
-                "description": entry.get("description"),
-                "agent_order": entry.get("agent_order", 0),
-            }
-            for runtime_id, entry in custom_agents.items()
-        ]
+        custom_descriptors = self._custom_agent_descriptors(state)
         available_agents.extend(d["runtime_agent_id"] for d in custom_descriptors)
 
         selected_agent = await self.router.route_message(
@@ -2173,6 +2185,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 "router": "selected by the router",
                 "handoff": "received via hand_off",
                 "preselected": "resumed for this turn",
+                "sticky": "continuing from the previous turn",
             }
             lines.append("Agents involved in this turn so far, in order:")
             for entry in trail:
@@ -2227,6 +2240,38 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         trail.append(entry)
         context["agents_invoked"] = trail
         state["context"] = context
+
+    def _custom_agent_descriptors(self, state: GraphState) -> list[dict[str, Any]]:
+        """Attached custom agents as router descriptors (runtime id, name, etc.)."""
+        return [
+            {
+                "runtime_agent_id": entry.get("runtime_agent_id") or runtime_id,
+                "name": entry.get("name"),
+                "description": entry.get("description"),
+                "agent_order": entry.get("agent_order", 0),
+            }
+            for runtime_id, entry in GraphStateView(state).custom_agents().items()
+        ]
+
+    def _sticky_custom_agent(self, state: GraphState, content: str | None) -> str | None:
+        """Return the previous turn's custom agent if a follow-up should stay on it.
+
+        Stickiness applies only to an attached custom agent. It is released when
+        the user explicitly names a *different* attached custom agent (the
+        router's deterministic override then selects that one), or when the
+        previous custom agent is no longer attached to the conversation.
+        """
+        last_agent = state.get("last_agent")
+        if not is_custom_runtime_id(last_agent):
+            return None
+        if not self._is_attached_custom_agent(state, last_agent):
+            return None
+        explicit = self.router._match_explicit_custom_agent(
+            content or "", self._custom_agent_descriptors(state)
+        )
+        if explicit and explicit != last_agent:
+            return None
+        return last_agent
 
     def _build_custom_agent(
         self, state: GraphState, runtime_agent_id: str | None
