@@ -504,16 +504,18 @@ class Settings(BaseSettings):
     mineru_api_url: str = Field(
         default="",
         description=(
-            "Optional MinerU FastAPI base URL. When blank, each mineru CLI call starts "
-            "a temporary local mineru-api service (higher startup overhead)."
+            "Base URL of a running mineru-api service (e.g. 'http://localhost:8765'). "
+            "When set, workers skip the per-document subprocess cold start. "
+            "Use with MINERU_BACKEND=hybrid-http-client or vlm-http-client. "
+            "Start the service with scripts/start_mineru_service.ps1."
         ),
     )
     mineru_backend: str = Field(
         default="pipeline",
         description=(
-            "MinerU processing backend. Supported values: 'pipeline', "
-            "'hybrid-auto-engine', 'hybrid-http-client', 'vlm-auto-engine', "
-            "'vlm-http-client'."
+            "MinerU parse backend. Options: 'pipeline', 'hybrid-auto-engine', "
+            "'hybrid-http-client', 'vlm-auto-engine', 'vlm-http-client'. "
+            "Use 'hybrid-http-client' or 'vlm-http-client' when MINERU_API_URL is set."
         ),
     )
     mineru_method: str = Field(

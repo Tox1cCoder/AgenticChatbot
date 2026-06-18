@@ -1,8 +1,41 @@
+import logging
 import os
 import platform
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+def _check_mineru_service(settings) -> None:
+    """Log a prominent warning if mineru_api_url is configured but unreachable."""
+    url = str(getattr(settings, "mineru_api_url", "") or "").strip()
+    if not url:
+        return  # Not configured — cold-start mode, no check needed
+
+    # Probe a health/docs endpoint
+    probe_url = url.rstrip("/") + "/docs"  # mineru-api serves FastAPI /docs
+    try:
+        with urllib.request.urlopen(probe_url, timeout=5) as resp:
+            if resp.status < 400:
+                logger.info("MinerU service at %s is reachable.", url)
+                return
+    except Exception:
+        pass
+
+    logger.warning(
+        "\n"
+        "╔══════════════════════════════════════════════════════════╗\n"
+        "║  WARNING: MinerU API service is NOT reachable            ║\n"
+        "║  MINERU_API_URL = %s\n"
+        "║  Document parsing will fail until the service is running.║\n"
+        "║  Start it: scripts/start_mineru_service.ps1              ║\n"
+        "╚══════════════════════════════════════════════════════════╝",
+        url,
+    )
 
 
 def _resolve_worker_pool(configured_pool: str, system: str) -> str:
@@ -29,6 +62,8 @@ def start_worker():
     from app.core.config import get_settings
 
     settings = get_settings()
+    _check_mineru_service(settings)
+
     system = platform.system()
     pool = _resolve_worker_pool(settings.celery_worker_pool, system)
     concurrency = settings.celery_worker_concurrency
