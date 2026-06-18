@@ -34,6 +34,7 @@ def _build_service(tmp_path: Path) -> DocumentProcessingService:
     service.settings.rag_chunk_overlap_tokens = 40
     service.settings.rag_chunk_max_tokens = 800
     service.settings.document_images_storage_path = str(tmp_path / "document_images")
+    service.settings.image_caption_max_concurrency = 4
 
     service.collection_name = "documents_gemma"
     service.embedding_dimension = 768
@@ -272,3 +273,78 @@ def test_process_document_parses_xlsx_without_mineru(tmp_path):
     assert "Thu nhap" in content
     assert "1000" in content
     assert "=B2*(1-C2)" in content
+
+
+def test_captioning_concurrency_bounded_by_semaphore(tmp_path):
+    """All images are captioned even when the semaphore limit is smaller than the image count."""
+    service = _build_service(tmp_path)
+    # Set concurrency limit below number of images to exercise the semaphore gate.
+    service.settings.image_caption_max_concurrency = 2
+
+    # Create 5 distinct source images.
+    num_images = 5
+    images_data = []
+    for i in range(num_images):
+        img_path = tmp_path / f"img_{i}.png"
+        Image.new("RGB", (4, 4), color=(i * 40, 0, 0)).save(img_path)
+        images_data.append(
+            {"path": str(img_path), "page_number": i, "mime_type": "image/png"}
+        )
+
+    call_count = 0
+
+    async def _fake_caption(*, image_bytes, image_name):
+        nonlocal call_count
+        call_count += 1
+        return f"caption for {image_name}"
+
+    service.gemini_client = object()
+    service._generate_image_caption_with_retry = _fake_caption
+
+    results = asyncio.run(
+        service._prepare_images_for_indexing(
+            images_data=images_data,
+            document_id="doc-semaphore-test",
+        )
+    )
+
+    assert len(results) == num_images, f"Expected {num_images} results, got {len(results)}"
+    assert call_count == num_images, f"Expected {num_images} caption calls, got {call_count}"
+    for result in results:
+        assert result["caption"].startswith("caption for")
+
+
+def test_captioning_failure_degrades_to_metadata_caption(tmp_path):
+    """A captioning exception must not drop the image — it falls back to metadata caption."""
+    service = _build_service(tmp_path)
+    service.settings.image_caption_max_concurrency = 4
+
+    img_path = tmp_path / "chart.png"
+    Image.new("RGB", (4, 4), color="blue").save(img_path)
+    images_data = [
+        {
+            "path": str(img_path),
+            "page_number": 1,
+            "mime_type": "image/png",
+            "caption": "metadata caption from pdf",
+        }
+    ]
+
+    async def _failing_caption(*, image_bytes, image_name):
+        raise RuntimeError("Simulated Gemini API failure")
+
+    service.gemini_client = object()
+    service._generate_image_caption_with_retry = _failing_caption
+
+    results = asyncio.run(
+        service._prepare_images_for_indexing(
+            images_data=images_data,
+            document_id="doc-failure-test",
+        )
+    )
+
+    assert len(results) == 1, "Image must still be returned despite captioning failure"
+    # The fallback caption comes from _caption_from_image_metadata; for images with a
+    # "caption" key in the input dict that method returns it directly.
+    assert results[0]["caption"] == "metadata caption from pdf"
+    assert "stored_path" in results[0]

@@ -293,6 +293,10 @@ class Settings(BaseSettings):
         default=5.0,
         description="Base delay (seconds) to wait before retrying caption requests when no retry hint is provided",
     )
+    image_caption_max_concurrency: int = Field(
+        default=4,
+        description="Maximum number of simultaneous Gemini caption API calls per document.",
+    )
 
     # Qdrant Configuration
     qdrant_url: str = Field(

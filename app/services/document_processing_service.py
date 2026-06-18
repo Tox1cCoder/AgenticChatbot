@@ -542,15 +542,16 @@ class DocumentProcessingService:
         images_data: list[dict[str, Any]],
         document_id: str,
     ) -> list[dict[str, Any]]:
-        prepared_images: list[dict[str, Any]] = []
-        seen_source_paths: set[str] = set()
-
         storage_path = Path(self.settings.document_images_storage_path)
         if not storage_path.is_absolute():
             storage_path = (Path.cwd() / storage_path).resolve()
 
         doc_storage_path = storage_path / document_id
         doc_storage_path.mkdir(parents=True, exist_ok=True)
+
+        # Phase 1: copy files, collect caption candidates
+        candidates = []   # (img_data, dest_path, metadata_caption)
+        seen_source_paths: set[str] = set()
 
         for img_data in images_data:
             source_path = Path(img_data["path"])
@@ -567,42 +568,46 @@ class DocumentProcessingService:
             shutil.copy2(source_path, dest_path)
 
             caption = self._caption_from_image_metadata(img_data)
+            candidates.append((img_data, dest_path, caption))
+
+        # Phase 2: caption concurrently (bounded by semaphore)
+        sem = asyncio.Semaphore(self.settings.image_caption_max_concurrency)
+
+        async def _caption_one(img_data, dest_path, metadata_caption):
+            caption = metadata_caption  # fallback
             if self.gemini_client:
-                try:
-                    with Image.open(dest_path) as img:
-                        rgb_img = img.convert("RGB")
-                        buffer = io.BytesIO()
-                        rgb_img.save(buffer, format="JPEG")
-                    image_bytes = buffer.getvalue()
-
-                    generated_caption = await self._generate_image_caption_with_retry(
-                        image_bytes=image_bytes,
-                        image_name=dest_path.name,
-                    )
-                    if generated_caption:
-                        caption = generated_caption
-                except Exception as e:
-                    logger.error(
-                        f"Failed to generate caption for {dest_path.name}: {str(e)}",
-                        exc_info=True,
-                    )
-
+                async with sem:
+                    try:
+                        with Image.open(dest_path) as img:
+                            rgb_img = img.convert("RGB")
+                            buffer = io.BytesIO()
+                            rgb_img.save(buffer, format="JPEG")
+                        image_bytes = buffer.getvalue()
+                        generated = await self._generate_image_caption_with_retry(
+                            image_bytes=image_bytes,
+                            image_name=dest_path.name,
+                        )
+                        if generated:
+                            caption = generated
+                    except Exception as e:
+                        logger.error(
+                            "Failed to generate caption for %s: %s", dest_path.name, e, exc_info=True
+                        )
             try:
                 relative_image_path = dest_path.relative_to(Path.cwd())
             except ValueError:
                 relative_image_path = dest_path
 
-            prepared_images.append(
-                {
-                    **img_data,
-                    "stored_path": str(relative_image_path),
-                    "caption": caption,
-                    "page_number": img_data.get("page_number"),
-                    "mime_type": img_data["mime_type"],
-                }
-            )
+            return {
+                **img_data,
+                "stored_path": str(relative_image_path),
+                "caption": caption,
+                "page_number": img_data.get("page_number"),
+                "mime_type": img_data["mime_type"],
+            }
 
-        return prepared_images
+        results = await asyncio.gather(*[_caption_one(*c) for c in candidates])
+        return list(results)
 
     def _attach_prepared_images_to_chunks(
         self,
