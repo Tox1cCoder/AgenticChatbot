@@ -44,6 +44,7 @@ from ..tool_scope import is_client_only_scope
 from ..user_memory_tools import create_user_memory_tools
 from ..utils import (
     coerce_response_text,
+    extract_inline_images_from_content,
     extract_openai_reasoning_summary,
     extract_openai_reasoning_tokens,
 )
@@ -1135,6 +1136,15 @@ class BaseAgent(ABC):
             if thinking:
                 metadata["thinking"] = thinking
 
+            # Image-capable models return generated images as content blocks that
+            # ``coerce_response_text`` drops. Subclasses that can act on inline
+            # images (the image generator) opt in to harvest them here so they are
+            # not silently lost. Transient — consumers move them to ``images``.
+            if self._should_harvest_inline_images():
+                inline_images = extract_inline_images_from_content(response.content)
+                if inline_images:
+                    metadata["response_inline_images"] = inline_images
+
             if isinstance(reasoning_summary, str) and reasoning_summary.strip():
                 metadata["reasoning_summary"] = reasoning_summary.strip()
             if isinstance(reasoning_tokens, int) and reasoning_tokens >= 0:
@@ -1168,6 +1178,14 @@ class BaseAgent(ABC):
         custom-agent identity and unavailable-tool/skill warnings.
         """
         return None
+
+    def _should_harvest_inline_images(self) -> bool:
+        """Whether to surface inline images from the model response.
+
+        Off by default — only the image generator acts on images returned
+        directly by an image-capable model.
+        """
+        return False
 
     def _build_delegation_suffix(self, target_descriptions: dict[str, str] | None = None) -> str:
         """Delegation prompt suffix.

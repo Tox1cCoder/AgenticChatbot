@@ -2,6 +2,7 @@
 Shared utility functions for AI agents.
 """
 
+import base64
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -67,6 +68,87 @@ def coerce_response_text(content: Any) -> str:
         return str(content)
     else:
         return str(content) if content is not None else ""
+
+
+def _parse_image_data_uri(url: Any) -> tuple[str | None, str | None]:
+    """Return ``(base64_data, mime)`` for a ``data:`` URI, else ``(None, None)``.
+
+    Remote ``http(s)`` URLs are intentionally not harvested — only inline data.
+    """
+    if not isinstance(url, str) or not url.startswith("data:"):
+        return None, None
+    try:
+        header, data = url.split(",", 1)
+    except ValueError:
+        return None, None
+    mime = header[len("data:") :].split(";")[0] or None
+    return (data or None), mime
+
+
+def _coerce_image_b64(data: Any) -> str | None:
+    """Coerce raw image bytes or an already-encoded/base64 data URI to base64 text."""
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(data)).decode("utf-8")
+    if isinstance(data, str) and data.strip():
+        if data.startswith("data:"):
+            return _parse_image_data_uri(data)[0]
+        return data
+    return None
+
+
+def _parse_inline_image_block(item: Any) -> dict[str, str] | None:
+    """Extract ``{"data", "mime"}`` from a single multimodal content block."""
+    if not isinstance(item, dict):
+        inline = getattr(item, "inline_data", None)
+        if inline is not None:
+            data = _coerce_image_b64(getattr(inline, "data", None))
+            if data:
+                return {"data": data, "mime": getattr(inline, "mime_type", None) or "image/png"}
+        return None
+
+    inline = item.get("inline_data")
+    if isinstance(inline, dict):
+        data = _coerce_image_b64(inline.get("data"))
+        if data:
+            return {"data": data, "mime": inline.get("mime_type") or "image/png"}
+
+    item_type = item.get("type")
+    if item_type == "image_url" or "image_url" in item:
+        url = item.get("image_url")
+        if isinstance(url, dict):
+            url = url.get("url")
+        data, mime = _parse_image_data_uri(url)
+        if data:
+            return {"data": data, "mime": mime or "image/png"}
+
+    if item_type in ("image", "media"):
+        data = _coerce_image_b64(item.get("data"))
+        if data:
+            return {"data": data, "mime": item.get("mime_type") or "image/png"}
+        data, mime = _parse_image_data_uri(item.get("url") or item.get("image"))
+        if data:
+            return {"data": data, "mime": mime or item.get("mime_type") or "image/png"}
+
+    return None
+
+
+def extract_inline_images_from_content(content: Any) -> list[dict[str, str]]:
+    """Recover inline base64 images from a multimodal LLM response.
+
+    Image-capable models return generated images as content blocks alongside (or
+    instead of) text. ``coerce_response_text`` drops them; this surfaces them as
+    ``{"data": <base64>, "mime": <mime>}`` dicts so callers can keep the images
+    rather than discarding them. Remote URLs are skipped (inline data only).
+    """
+    if isinstance(content, str) or content is None:
+        return []
+    blocks = content if isinstance(content, list) else [content]
+    images: list[dict[str, str]] = []
+    for item in blocks:
+        parsed = _parse_inline_image_block(item)
+        if parsed:
+            images.append(parsed)
+    return images
 
 
 def extract_openai_reasoning_summary(content: Any) -> str | None:

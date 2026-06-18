@@ -5,7 +5,7 @@ Compatibility proxy routes for server-owned API surfaces.
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 
-from client_backend.api.common import proxy_server_request
+from client_backend.api.common import proxy_server_request, rewrite_widget_ws_url
 from client_backend.core.auth import require_local_session
 from client_backend.core.security import LocalSessionPayload
 from client_backend.services.runtime_bridge import get_runtime_bridge
@@ -340,6 +340,7 @@ async def proxy_widget_connection(
     return await proxy_server_request(
         request,
         upstream_path=f"/widgets/{widget_id}/connection",
+        json_transform=rewrite_widget_ws_url,
     )
 
 

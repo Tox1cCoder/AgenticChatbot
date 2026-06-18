@@ -52,6 +52,36 @@ class ImageGeneratorAgent(BaseAgent):
     def _get_base_system_prompt(self) -> str:
         return self._get_system_prompt()
 
+    def _should_harvest_inline_images(self) -> bool:
+        return True
+
+    def _harvest_inline_images(
+        self, response: AgentResponse, original_prompt: str
+    ) -> list[dict[str, Any]]:
+        """Wrap images the base agent surfaced from the model into image records.
+
+        Returns records in the same shape ``_generate_images`` produces so the
+        rest of the pipeline (metadata, persistence, rendering) is unchanged.
+        """
+        raw = (response.metadata or {}).get("response_inline_images") or []
+        images: list[dict[str, Any]] = []
+        for item in raw:
+            data = item.get("data") if isinstance(item, dict) else None
+            if not data:
+                continue
+            images.append(
+                {
+                    "data": data,
+                    "mime": item.get("mime") or "image/png",
+                    "prompt": original_prompt,
+                    "model": self.model_name,
+                    "aspect_ratio": self.default_aspect_ratio,
+                }
+            )
+            if len(images) >= self.max_images:
+                break
+        return images
+
     async def invoke_model(
         self,
         message: AgentMessage,
@@ -208,13 +238,8 @@ Do not output anything else, just the prompt."""
         if response.error:
             return response
 
-        # The LLM produced a text response — treat it as the enhanced prompt.
-        enhanced_prompt = (response.message.content or "").strip()
-        if not enhanced_prompt:
-            return response
-
         # Derive the original user request from the current turn messages.
-        original_prompt = enhanced_prompt
+        original_prompt = ""
         for msg in reversed(messages):
             if (
                 hasattr(msg, "content")
@@ -224,6 +249,28 @@ Do not output anything else, just the prompt."""
             ):
                 original_prompt = msg.content.strip()
                 break
+
+        # The runtime model may itself be an image-capable model that returns the
+        # generated images inline (with reasoning but no usable text). Harvest
+        # those instead of discarding them and reporting "no response".
+        harvested = self._harvest_inline_images(response, original_prompt)
+        if harvested:
+            response.metadata = response.metadata or {}
+            response.metadata.pop("response_inline_images", None)
+            response.metadata["images"] = harvested
+            text = (response.message.content or "").strip()
+            response.message.content = text or await self._generate_user_facing_response(
+                original_prompt
+            )
+            return response
+
+        # Otherwise the LLM produced a text response — treat it as the enhanced
+        # prompt and generate images via the dedicated Gemini image client.
+        enhanced_prompt = (response.message.content or "").strip()
+        if not enhanced_prompt:
+            return response
+
+        original_prompt = original_prompt or enhanced_prompt
 
         try:
             images, narrative = await self._generate_images(enhanced_prompt, original_prompt)
