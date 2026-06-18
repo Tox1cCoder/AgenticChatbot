@@ -193,7 +193,7 @@ class GeminiRAGEmbeddingService:
                 if delay_hint is not None:
                     delay = max(delay_hint, self._MIN_RETRY_DELAY)
                 else:
-                    delay = self._BASE_RETRY_DELAY * attempt
+                    delay = self._BASE_RETRY_DELAY * (2 ** (attempt - 1))
                 logger.warning(
                     "Gemini rate limit on embedding batch "
                     f"(attempt {attempt}/{self._MAX_RETRY_ATTEMPTS}). "

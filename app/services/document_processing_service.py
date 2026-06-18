@@ -1475,11 +1475,7 @@ class DocumentProcessingService:
                     await asyncio.sleep(delay)
                     continue
 
-                logger.error(
-                    f"Gemini client error while captioning {image_name}: {str(e)}",
-                    exc_info=True,
-                )
-                return None
+                raise
             except Exception as e:
                 last_error = e
                 logger.error(
