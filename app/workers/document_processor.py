@@ -295,7 +295,8 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
         # Get DocumentProcessingService for indexing helpers
         processing_service = container.document_processing_service()
 
-        index_start = time.time()
+        index_timings: dict[str, float] = {}
+        index_start = time.monotonic()
 
         # Build document reference
         doc_ref = SimpleNamespace(
@@ -306,6 +307,7 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
         )
 
         # Caption images + attach to chunks (async)
+        caption_t0 = time.monotonic()
         if parse_result.images_data:
             prepared_images = _run_async(
                 processing_service._prepare_images_for_indexing(
@@ -319,6 +321,7 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
             )
         else:
             prepared_images = []
+        index_timings["caption_s"] = time.monotonic() - caption_t0
 
         # Build BuiltChunks for indexing (sync)
         built_chunks = processing_service._build_chunks_for_indexing(
@@ -330,6 +333,7 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
             document=doc_ref,
             built_chunks=built_chunks,
             parse_artifact_id=artifact.id,
+            timing_sink=index_timings,
         )
 
         # Store image records (async)
@@ -347,7 +351,28 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
         _mark_document(document_repo, document_id, DocumentStatus.READY)
         updated_document = document_repo.get_by_id(UUID(document_id))
 
-        processing_time = time.time() - index_start
+        total_s = time.monotonic() - index_start
+        index_timings["total_s"] = total_s
+
+        # Build timings dict with all stages
+        timings = {
+            "parse_s": round(parse_result.parse_elapsed_s, 3),
+            "caption_s": round(index_timings.get("caption_s", 0.0), 3),
+            "embed_s": round(index_timings.get("embed_s", 0.0), 3),
+            "upsert_s": round(index_timings.get("upsert_s", 0.0), 3),
+            "total_s": round(total_s, 3),
+        }
+
+        # Structured log line
+        logger.info(
+            "document=%s indexed: parse_s=%.3f caption_s=%.3f embed_s=%.3f upsert_s=%.3f total_s=%.3f",
+            document_id,
+            timings["parse_s"],
+            timings["caption_s"],
+            timings["embed_s"],
+            timings["upsert_s"],
+            timings["total_s"],
+        )
 
         # Emit PROCESSING_COMPLETED event
         try:
@@ -365,11 +390,12 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
                             "chunks_created": len(built_chunks),
                             "chunks_stored": len(persisted_chunks),
                             "images_stored": images_stored,
-                            "processing_time": processing_time,
+                            "processing_time": timings["total_s"],
                             "task_id": task_id,
                             "artifact_id": artifact_id,
                             "parse_artifact_id": artifact_id,
                             "stage": "index",
+                            "timings": timings,
                         },
                     ),
                 )
@@ -384,7 +410,8 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
             "chunks_created": len(built_chunks),
             "chunks_stored": len(persisted_chunks),
             "images_stored": images_stored,
-            "processing_time": processing_time,
+            "processing_time": timings["total_s"],
+            "timings": timings,
             "message": f"Document '{filename}' indexed successfully",
         }
 

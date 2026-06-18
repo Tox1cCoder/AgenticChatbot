@@ -19,6 +19,7 @@ only lookup metadata; canonical text lives in SQL.
 from __future__ import annotations
 
 import logging
+import time as _time
 import uuid
 import warnings
 from collections.abc import Iterable
@@ -135,6 +136,7 @@ class DocumentIndexService:
         document: Any,
         built_chunks: list[BuiltChunk],
         parse_artifact_id: UUID | None,
+        timing_sink: dict | None = None,
     ) -> list[DocumentChunk]:
         """Replace chunks for ``document`` with ``built_chunks`` and index them."""
         document_id = self._coerce_uuid(document.id)
@@ -149,6 +151,7 @@ class DocumentIndexService:
             self._embed_and_upsert(
                 document=document,
                 persisted_chunks=persisted,
+                timing_sink=timing_sink,
             )
         except Exception as exc:
             for chunk in persisted:
@@ -230,6 +233,7 @@ class DocumentIndexService:
         *,
         document: Any,
         persisted_chunks: Iterable[DocumentChunk],
+        timing_sink: dict | None = None,
     ) -> None:
         persisted = list(persisted_chunks)
         if not persisted:
@@ -241,7 +245,10 @@ class DocumentIndexService:
         # to the embedding service (rag_embedding_batch_size).
         texts = [chunk.content for chunk in persisted]
         titles = [title] * len(texts)
+
+        embed_t0 = _time.monotonic()
         vectors = self.embedding_service.embed_documents(texts, titles=titles)
+        embed_s = _time.monotonic() - embed_t0
 
         # Build points for all chunks.
         points: list[PointStruct] = []
@@ -256,11 +263,17 @@ class DocumentIndexService:
 
         # Upsert to Qdrant in batches by qdrant_upsert_batch_size to avoid
         # overwhelming the server with a single large request.
+        upsert_t0 = _time.monotonic()
         for batch in _batched(points, self.qdrant_upsert_batch_size):
             self.qdrant_client.upsert(
                 collection_name=self.collection_name,
                 points=batch,
             )
+        upsert_s = _time.monotonic() - upsert_t0
+
+        if timing_sink is not None:
+            timing_sink["embed_s"] = embed_s
+            timing_sink["upsert_s"] = upsert_s
 
     @staticmethod
     def _title_for_document(document: Any, chunks: list[DocumentChunk]) -> str | None:
