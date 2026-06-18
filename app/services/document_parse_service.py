@@ -13,6 +13,7 @@ The result is a ``ParseResult`` dataclass containing:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import mimetypes
@@ -25,11 +26,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from app.core.config import Settings
+from app.models.document_parse_artifact import DocumentParseArtifact
+from app.repositories.document_parse_artifact import DocumentParseArtifactRepository
 from app.services.document_chunk_builder import DocumentChunkBuilder
 
 logger = logging.getLogger(__name__)
@@ -53,14 +57,94 @@ class DocumentParseService:
     EXCEL_EXTENSIONS: frozenset[str] = frozenset({".xlsx"})
     MINERU_EXTENSIONS: frozenset[str] = frozenset({".pdf", ".docx", ".pptx", ".html", ".md"})
 
-    def __init__(self, settings: Settings, chunk_builder: DocumentChunkBuilder | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        chunk_builder: DocumentChunkBuilder | None = None,
+        artifact_repo: DocumentParseArtifactRepository | None = None,
+    ):
         self.settings = settings
         self.document_chunk_builder = chunk_builder or DocumentChunkBuilder(
             target_tokens=settings.rag_chunk_target_tokens,
             overlap_tokens=settings.rag_chunk_overlap_tokens,
             max_tokens=settings.rag_chunk_max_tokens,
         )
+        self._artifact_repo = artifact_repo
         self._mineru_output_path: str | None = None
+
+    def persist_parse_result(
+        self,
+        document_id: str,
+        result: ParseResult,
+    ) -> DocumentParseArtifact:
+        """Write ParseResult to disk as JSON and upsert a DocumentParseArtifact row.
+
+        Writes chunks_with_metadata + images_data to:
+            {parse_artifacts_storage_path}/{document_id}/normalized_chunks.json
+
+        Image copying is deferred to T012 index stage — only original temp paths
+        are recorded in artifact_metadata.
+
+        Raises:
+            RuntimeError: If no artifact_repo was injected at construction time.
+        """
+        if self._artifact_repo is None:
+            raise RuntimeError(
+                "DocumentParseService.persist_parse_result() requires an "
+                "artifact_repo injected at construction time."
+            )
+
+        artifact_dir = Path(self.settings.parse_artifacts_storage_path) / document_id
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = artifact_dir / "normalized_chunks.json"
+
+        payload = {
+            "chunks_with_metadata": result.chunks_with_metadata,
+            "images_data": result.images_data,
+            "backend_used": result.backend_used,
+            "parse_elapsed_s": result.parse_elapsed_s,
+        }
+        json_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        artifact_path.write_bytes(json_bytes)
+
+        checksum = hashlib.sha256(json_bytes).hexdigest()
+        size = len(json_bytes)
+
+        # Image copying deferred to T012 index stage
+        image_paths = [entry.get("path") for entry in result.images_data if entry.get("path")]
+        artifact_metadata = {
+            "backend_used": result.backend_used,
+            "parse_elapsed_s": result.parse_elapsed_s,
+            "chunk_count": len(result.chunks_with_metadata),
+            "image_count": len(result.images_data),
+            "image_paths": image_paths,
+        }
+
+        created = self._artifact_repo.replace_for_document(
+            document_id=UUID(document_id),
+            artifacts=[
+                {
+                    "artifact_type": "normalized_chunks",
+                    "storage_path": str(artifact_path),
+                    "mime_type": "application/json",
+                    "size_bytes": size,
+                    "checksum_sha256": checksum,
+                    "artifact_metadata": artifact_metadata,
+                }
+            ],
+        )
+        return created[0]
+
+    def load_parse_result(self, artifact: DocumentParseArtifact) -> ParseResult:
+        """Load a persisted ParseResult from disk. Raises FileNotFoundError if gone."""
+        with open(artifact.storage_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return ParseResult(
+            chunks_with_metadata=data["chunks_with_metadata"],
+            images_data=data.get("images_data", []),
+            parse_elapsed_s=data.get("parse_elapsed_s", 0.0),
+            backend_used=data.get("backend_used", "unknown"),
+        )
 
     async def parse_document(
         self,

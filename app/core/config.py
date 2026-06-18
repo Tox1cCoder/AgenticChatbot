@@ -542,6 +542,10 @@ class Settings(BaseSettings):
         default="app/storage/document_images",
         description="Storage path for extracted document images",
     )
+    parse_artifacts_storage_path: str = Field(
+        default="app/storage/parse_artifacts",
+        description="Directory where parse artifact JSON files are stored.",
+    )
 
     # RAG Retrieval Configuration
     rag_top_k: int = Field(
