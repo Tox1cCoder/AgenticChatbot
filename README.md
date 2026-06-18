@@ -1241,6 +1241,26 @@ nssm start MinerUService
 
 See [`scripts/start_mineru_service.ps1`](scripts/start_mineru_service.ps1) for full usage options and NSSM commands.
 
+### Verifying warm parse (no cold start)
+
+Run the same PDF through the upload API twice and compare parse times:
+
+1. Start the MinerU service: `scripts/start_mineru_service.ps1`
+2. Set `MINERU_API_URL=http://localhost:8765` in `.env`, restart Celery workers
+3. Upload any multi-page PDF via the API
+4. Note `parse_s` in the worker logs (look for: `MinerU completed for ... in X.XXs`)
+5. Upload the **same PDF** again immediately
+6. Compare: second `parse_s` should be 80-90% lower (no model load overhead)
+
+Expected results:
+| Run | parse_s | model load? |
+|-----|---------|-------------|
+| Cold (first) | ~40-90 s | Yes — models load from disk |
+| Warm (second+) | ~3-10 s | No — models already in memory |
+
+If both runs show similar times, the service is restarting between requests
+(check NSSM service status: `nssm status MinerUService`).
+
 ---
 
 ## Troubleshooting
