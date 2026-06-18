@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+import warnings
 from collections.abc import Iterable
 from typing import Any
 from uuid import UUID
@@ -52,7 +53,8 @@ class DocumentIndexService:
         embedding_model_name: str | None = None,
         embedding_dimension: int | None = None,
         embedding_provider: str | None = None,
-        index_batch_size: int = 16,
+        index_batch_size: int | None = None,
+        qdrant_upsert_batch_size: int = 1000,
     ):
         self.chunk_repository = chunk_repository
         self.qdrant_client = qdrant_client
@@ -72,7 +74,16 @@ class DocumentIndexService:
         self.embedding_provider = embedding_provider or getattr(
             embedding_service, "provider", "unknown"
         )
-        self.index_batch_size = max(1, int(index_batch_size))
+        # index_batch_size is deprecated; batching is now internal to the
+        # embedding service. Accept but ignore the parameter.
+        if index_batch_size is not None:
+            warnings.warn(
+                "index_batch_size is deprecated. Batching is now internal to "
+                "the embedding service (rag_embedding_batch_size). This parameter is ignored.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        self.qdrant_upsert_batch_size = max(1, int(qdrant_upsert_batch_size))
 
     # ------------------------------------------------------------------
     # Public API
@@ -230,26 +241,30 @@ class DocumentIndexService:
 
         title = self._title_for_document(document, persisted)
 
-        points: list[PointStruct] = []
-        for batch in _batched(persisted, self.index_batch_size):
-            texts = [chunk.content for chunk in batch]
-            titles = [title] * len(texts)
-            vectors = self.embedding_service.embed_documents(texts, titles=titles)
-            for chunk, vector in zip(batch, vectors, strict=True):
-                points.append(
-                    PointStruct(
-                        id=self._point_id_for_chunk(chunk.id),
-                        vector=list(vector),
-                        payload=self._payload_for_chunk(document, chunk),
-                    )
-                )
+        # Single embed_documents call for all chunks — batching is internal
+        # to the embedding service (rag_embedding_batch_size).
+        texts = [chunk.content for chunk in persisted]
+        titles = [title] * len(texts)
+        vectors = self.embedding_service.embed_documents(texts, titles=titles)
 
-        # Upsert in one call at the end — keeps Qdrant writes minimal and
-        # avoids partial state during batch embedding.
-        self.qdrant_client.upsert(
-            collection_name=self.collection_name,
-            points=points,
-        )
+        # Build points for all chunks.
+        points: list[PointStruct] = []
+        for chunk, vector in zip(persisted, vectors, strict=True):
+            points.append(
+                PointStruct(
+                    id=self._point_id_for_chunk(chunk.id),
+                    vector=list(vector),
+                    payload=self._payload_for_chunk(document, chunk),
+                )
+            )
+
+        # Upsert to Qdrant in batches by qdrant_upsert_batch_size to avoid
+        # overwhelming the server with a single large request.
+        for batch in _batched(points, self.qdrant_upsert_batch_size):
+            self.qdrant_client.upsert(
+                collection_name=self.collection_name,
+                points=batch,
+            )
 
     @staticmethod
     def _title_for_document(document: Any, chunks: list[DocumentChunk]) -> str | None:

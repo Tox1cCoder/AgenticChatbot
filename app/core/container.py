@@ -441,7 +441,7 @@ class Container(containers.DeclarativeContainer):
         embedding_model_name=settings.rag_embedding_model,
         embedding_dimension=settings.rag_embedding_dimension,
         embedding_provider=settings.rag_embedding_provider,
-        index_batch_size=getattr(settings, "rag_index_batch_size", 16),
+        qdrant_upsert_batch_size=settings.qdrant_upsert_batch_size,
     )
 
     document_chunk_builder = providers.Factory(

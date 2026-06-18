@@ -236,7 +236,7 @@ class Settings(BaseSettings):
     )
     rag_index_batch_size: int = Field(
         default=16,
-        description="Batch size used when embedding chunks during indexing.",
+        description="[DEPRECATED] Formerly controlled index-level batching. Batching is now internal to the embedding service (rag_embedding_batch_size). This setting is ignored.",
     )
     # Gemini Embeddings API accepts up to 100 contents per embed_content call
     # (documented limit for gemini-embedding-2). Default 32 is conservative.
