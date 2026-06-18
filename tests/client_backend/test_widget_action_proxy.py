@@ -10,6 +10,51 @@ from fastapi.testclient import TestClient
 
 
 @pytest.mark.asyncio
+async def test_proxy_widget_connection_rewrites_relative_ws_url_to_canonical_server(
+    monkeypatch,
+):
+    from client_backend.api import proxy as proxy_api
+
+    upstream_payload = {
+        "widget_id": "w-1",
+        "session_id": "conv-1",
+        "ws_url": "/widgets/w-1/connect?session_id=conv-1&token=abc",
+        "token": "abc",
+    }
+
+    class FakeJsonResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        content = json.dumps(upstream_payload).encode("utf-8")
+
+        def json(self):
+            return dict(upstream_payload)
+
+    class FakeServerClient:
+        base_url = "http://canonical.test:8000"
+
+        async def request_response(self, method, path, **kwargs):
+            return FakeJsonResponse()
+
+    monkeypatch.setattr(
+        "client_backend.api.common.get_server_client",
+        lambda: FakeServerClient(),
+    )
+
+    app = FastAPI()
+    app.include_router(proxy_api.router)
+    app.dependency_overrides[proxy_api.require_local_session] = lambda: object()
+
+    with TestClient(app) as client:
+        response = client.post("/widgets/w-1/connection")
+
+    assert response.status_code == 200
+    assert response.json()["ws_url"] == (
+        "ws://canonical.test:8000/widgets/w-1/connect?session_id=conv-1&token=abc"
+    )
+
+
+@pytest.mark.asyncio
 async def test_proxy_widget_action_forwards_to_canonical_server(monkeypatch):
     from client_backend.api import proxy as proxy_api
 
