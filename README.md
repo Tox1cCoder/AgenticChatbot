@@ -1215,6 +1215,34 @@ Wheels can be built with `python -m build`.
 
 ---
 
+## MinerU Persistent Service
+
+By default, every document parse cold-starts a temporary MinerU process, incurring 30–90 s GPU model load overhead. To eliminate this, run the persistent `mineru-api` FastAPI service:
+
+```powershell
+pwsh -File scripts/start_mineru_service.ps1
+```
+
+This binds the service to `localhost:8765` and loads GPU models once on startup. Then configure your `.env`:
+
+```env
+MINERU_API_URL=http://localhost:8765
+```
+
+The service must be running before starting Celery workers or submitting document parsing tasks.
+
+To register as a Windows service (persistent across reboots), use NSSM:
+
+```powershell
+nssm install MinerUService "C:\path\to\Scripts\mineru-api.exe" "--host 0.0.0.0 --port 8765"
+nssm set MinerUService AppDirectory "C:\Users\ADMIN\Documents\Code Practice\Sample Chatbot"
+nssm start MinerUService
+```
+
+See [`scripts/start_mineru_service.ps1`](scripts/start_mineru_service.ps1) for full usage options and NSSM commands.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause & fix |
