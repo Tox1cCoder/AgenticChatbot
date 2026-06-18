@@ -291,12 +291,16 @@ class DocumentParseService:
             )
 
             parse_started_at = time.perf_counter()
-            result = subprocess.run(
+            # stdout redirected to DEVNULL to suppress verbose MinerU progress output.
+            # stderr is inherited (not piped) so errors appear in the worker console.
+            # Avoids a Windows pipe-deadlock: when capture_output=True, Python waits for
+            # the pipe to close after killing MinerU, but MinerU's ML child processes
+            # hold the pipe handles open, causing communicate() to hang indefinitely.
+            subprocess.run(
                 cmd,
                 timeout=self.settings.mineru_timeout,
                 check=True,
-                capture_output=True,
-                text=True,
+                stdout=subprocess.DEVNULL,
             )
             parse_elapsed = time.perf_counter() - parse_started_at
             logger.info(
@@ -307,9 +311,6 @@ class DocumentParseService:
                 method if supports_method_and_lang else "n/a",
                 "configured" if api_url else "auto-local",
             )
-
-            if result.stdout:
-                logger.debug("MinerU stdout for %s:\n%s", document_id, result.stdout)
 
             filename_without_ext = Path(file_path).stem
             filename_aliases = self._build_filename_aliases(filename_without_ext, original_filename)
@@ -449,18 +450,16 @@ class DocumentParseService:
                 f"MinerU timed out after {self.settings.mineru_timeout}s"
             ) from exc
         except subprocess.CalledProcessError as exc:
-            combined = "\n".join(filter(None, [exc.stdout, exc.stderr]))
             backend_for_log = locals().get(
                 "backend", getattr(self.settings, "mineru_backend", "pipeline")
             )
             logger.error(
-                "MinerU (backend=%s) failed (exit %s) while processing %s:\n%s",
+                "MinerU (backend=%s) failed (exit %s) while processing %s",
                 backend_for_log,
                 exc.returncode,
                 file_path,
-                combined or "(no output captured)",
             )
-            raise RuntimeError(f"MinerU failed with error: {combined}") from exc
+            raise RuntimeError(f"MinerU failed (exit {exc.returncode})") from exc
         except Exception as exc:
             logger.error(
                 "Unexpected MinerU error while processing %s: %s", file_path, exc
