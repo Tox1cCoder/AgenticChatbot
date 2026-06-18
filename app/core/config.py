@@ -238,6 +238,15 @@ class Settings(BaseSettings):
         default=16,
         description="Batch size used when embedding chunks during indexing.",
     )
+    # Gemini Embeddings API accepts up to 100 contents per embed_content call
+    # (documented limit for gemini-embedding-2). Default 32 is conservative.
+    rag_embedding_batch_size: int = Field(
+        default=32,
+        description=(
+            "Max number of chunks per Gemini embed_content request. "
+            "Clamped to the API maximum of 100."
+        ),
+    )
 
     # Media Resolution Configuration (for vision models)
     media_resolution: str = Field(

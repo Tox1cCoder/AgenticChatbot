@@ -17,7 +17,7 @@ Key invariants:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 from google import genai
 from google.genai import types
@@ -82,11 +82,19 @@ class GeminiRAGEmbeddingService:
     model_name: str = "gemini-embedding-2"
     dimension: int = 768
     query_task: str = "search result"
+    # Gemini Embeddings API accepts up to 100 contents per embed_content call.
+    # Default 32 is conservative; raise via config if throughput matters.
+    embedding_batch_size: int = 32
     provider: str = field(default="gemini", init=False)
     client: Any = field(default=None, init=False, repr=False)
 
+    # Hard ceiling imposed by the Gemini Embeddings API for gemini-embedding-2.
+    _API_MAX_BATCH: ClassVar[int] = 100
+
     def __post_init__(self) -> None:
         self.client = genai.Client(api_key=self.api_key)
+        # Clamp to the documented API maximum so misconfigured values fail safe.
+        self.embedding_batch_size = min(self.embedding_batch_size, self._API_MAX_BATCH)
 
     # ------------------------------------------------------------------
     # Public API
@@ -101,17 +109,35 @@ class GeminiRAGEmbeddingService:
         if len(titles) != len(texts):
             raise ValueError("titles must match texts length")
 
+        if not texts:
+            return []
+
+        pairs = list(zip(texts, titles, strict=True))
         vectors: list[list[float]] = []
-        for text, title in zip(texts, titles, strict=True):
-            payload = self._format_document(text, title)
+        batch_size = self.embedding_batch_size
+
+        for batch_start in range(0, len(pairs), batch_size):
+            batch = pairs[batch_start : batch_start + batch_size]
+            contents = [self._format_document(text, title) for text, title in batch]
             response = self.client.models.embed_content(
                 model=self.model_name,
-                contents=payload,
+                contents=contents,
                 config=types.EmbedContentConfig(
                     output_dimensionality=self.dimension,
                 ),
             )
-            vectors.append(self._single_embedding(response))
+            embeddings = list(getattr(response, "embeddings", []) or [])
+            if len(embeddings) != len(batch):
+                raise RuntimeError(
+                    f"Embedding count mismatch: sent {len(batch)} contents, "
+                    f"got {len(embeddings)} embeddings back"
+                )
+            for emb in embeddings:
+                values = getattr(emb, "values", None)
+                if values is None:
+                    raise RuntimeError("Embedding response missing values")
+                vectors.append([float(v) for v in values])
+
         return vectors
 
     def embed_query(self, query: str) -> list[float]:
