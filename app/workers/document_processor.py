@@ -77,7 +77,7 @@ def _emit_failed(document_id: str, filename: str, task_id: str, exc: Exception):
             )
         )
     except Exception:
-        pass
+        logger.warning("Failed to emit PROCESSING_FAILED event for document %s", document_id, exc_info=True)
 
 
 def _cleanup_parse_artifacts(temp_file_path: str, document_id: str):
@@ -86,7 +86,7 @@ def _cleanup_parse_artifacts(temp_file_path: str, document_id: str):
         if os.path.isfile(temp_file_path):
             os.unlink(temp_file_path)
     except Exception:
-        pass
+        logger.warning("Cleanup error for %s", temp_file_path, exc_info=True)
 
     try:
         settings_ = get_settings()
@@ -94,7 +94,7 @@ def _cleanup_parse_artifacts(temp_file_path: str, document_id: str):
         if mineru_output_path.exists():
             shutil.rmtree(mineru_output_path)
     except Exception:
-        pass
+        logger.warning("Cleanup error for MinerU output dir %s", mineru_output_path, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -199,9 +199,6 @@ def parse_document_task(self, document_id: str, temp_file_path: str, filename: s
             exc_info=True,
         )
 
-        _mark_document(document_repo, document_id, DocumentStatus.FAILED)
-        _emit_failed(document_id, filename, task_id, exc)
-
         retryable = self.request.retries < self.max_retries and not isinstance(
             exc, (FileNotFoundError, ValueError)
         )
@@ -214,6 +211,9 @@ def parse_document_task(self, document_id: str, temp_file_path: str, filename: s
             )
             raise self.retry(exc=exc, countdown=retry_delay) from exc
 
+        # Terminal failure — only mark FAILED and emit event when not retrying
+        _mark_document(document_repo, document_id, DocumentStatus.FAILED)
+        _emit_failed(document_id, filename, task_id, exc)
         logger.error(
             f"Document {document_id} ('{filename}') parse failed after "
             f"{self.max_retries} attempts"
@@ -237,7 +237,7 @@ def parse_document_task(self, document_id: str, temp_file_path: str, filename: s
     name="app.workers.document_processor.index_document_task",
     queue="index",
     time_limit=get_settings().celery_index_time_limit,
-    soft_time_limit=get_settings().celery_index_time_limit - 30,
+    soft_time_limit=max(1, get_settings().celery_index_time_limit - 30),
 )
 def index_document_task(self, artifact_id: str) -> dict[str, Any]:
     """Load artifact, caption images, embed, upsert Qdrant, mark READY.
@@ -422,15 +422,6 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
             exc_info=True,
         )
 
-        if document_id:
-            _mark_document(document_repo, document_id, DocumentStatus.FAILED)
-            _emit_failed(document_id, filename or artifact_id, task_id, exc)
-        else:
-            logger.error(
-                "index_document_task: cannot mark document FAILED — document_id unknown "
-                "(artifact_id=%s, error=%s)", artifact_id, exc
-            )
-
         retryable = self.request.retries < self.max_retries and not isinstance(
             exc, (FileNotFoundError, ValueError)
         )
@@ -443,6 +434,15 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
             # Reload artifact from disk on retry — never re-parse
             raise self.retry(exc=exc, countdown=retry_delay) from exc
 
+        # Terminal failure — only mark FAILED and emit event when not retrying
+        if document_id:
+            _mark_document(document_repo, document_id, DocumentStatus.FAILED)
+            _emit_failed(document_id, filename or artifact_id, task_id, exc)
+        else:
+            logger.error(
+                "index_document_task: cannot mark document FAILED — document_id unknown "
+                "(artifact_id=%s, error=%s)", artifact_id, exc
+            )
         logger.error(
             f"Artifact {artifact_id} indexing failed after {self.max_retries} attempts"
         )

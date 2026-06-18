@@ -181,7 +181,15 @@ class DocumentProcessingService:
             index_sig = self.celery_app.signature(
                 "app.workers.document_processor.index_document_task",
             )
-            task = celery_chain(parse_sig, index_sig).apply_async()
+            task = celery_chain(parse_sig, index_sig).apply_async(
+                retry=True,
+                retry_policy={
+                    "max_retries": 3,
+                    "interval_start": 0,
+                    "interval_step": 30,
+                    "interval_max": 180,
+                },
+            )
         except Exception:
             try:
                 if staged_path.is_file():

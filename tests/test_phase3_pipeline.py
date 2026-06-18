@@ -10,7 +10,6 @@ All external I/O (DB, Qdrant, filesystem beyond tmp_path) is mocked.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -462,8 +461,7 @@ def test_index_task_marks_document_failed_when_artifact_not_found(monkeypatch):
         raised_exc = exc
 
     assert task_raised, "Task should have raised when artifact is not found"
-    # The task must not crash the process — reaching here confirms that
-    assert isinstance(raised_exc, Exception)
+    assert isinstance(raised_exc, ValueError)
 
 
 # ---------------------------------------------------------------------------
@@ -500,7 +498,7 @@ def test_parse_task_emits_failed_event_on_terminal_error(tmp_path, monkeypatch):
     # It runs in a _run_async() block so the AsyncMock is awaited.
     assert mock_bus.emit.called, "event_bus.emit was never called"
     first_call_args = mock_bus.emit.call_args_list[0]
-    emitted_event = first_call_args.args[0] if first_call_args.args else first_call_args[0][0]
+    emitted_event = first_call_args.args[0]
     assert emitted_event == DocumentEvent.PROCESSING_FAILED, (
         f"Expected PROCESSING_FAILED, got: {emitted_event}"
     )

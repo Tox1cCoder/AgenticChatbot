@@ -149,7 +149,7 @@ def start_worker():
         concurrency=index_concurrency,
         pool=pool,
         time_limit=settings.celery_index_time_limit,
-        soft_time_limit=settings.celery_index_time_limit - 30,
+        soft_time_limit=max(1, settings.celery_index_time_limit - 30),
         label="index",
         settings=settings,
     )
