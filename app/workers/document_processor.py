@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import shutil
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -285,7 +286,7 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
         # Get DocumentProcessingService for indexing helpers
         processing_service = container.document_processing_service()
 
-        index_start = __import__("time").time()
+        index_start = time.time()
 
         # Build document reference
         doc_ref = SimpleNamespace(
@@ -337,7 +338,7 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
         _mark_document(document_repo, document_id, DocumentStatus.READY)
         updated_document = document_repo.get_by_id(UUID(document_id))
 
-        processing_time = __import__("time").time() - index_start
+        processing_time = time.time() - index_start
 
         # Emit PROCESSING_COMPLETED event
         try:
@@ -386,6 +387,11 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
         if document_id:
             _mark_document(document_repo, document_id, DocumentStatus.FAILED)
             _emit_failed(document_id, filename or artifact_id, task_id, exc)
+        else:
+            logger.error(
+                "index_document_task: cannot mark document FAILED — document_id unknown "
+                "(artifact_id=%s, error=%s)", artifact_id, exc
+            )
 
         retryable = self.request.retries < self.max_retries and not isinstance(
             exc, (FileNotFoundError, ValueError)
@@ -402,13 +408,7 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
         logger.error(
             f"Artifact {artifact_id} indexing failed after {self.max_retries} attempts"
         )
-        return {
-            "success": False,
-            "artifact_id": artifact_id,
-            "document_id": document_id,
-            "error": str(exc),
-            "message": f"Failed to index document after {self.max_retries} attempts",
-        }
+        raise exc  # Let Celery see this as a failure
 
 
 # ---------------------------------------------------------------------------
