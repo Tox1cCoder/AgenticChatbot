@@ -182,6 +182,15 @@ def parse_document_task(self, document_id: str, temp_file_path: str, filename: s
             result.parse_elapsed_s,
         )
 
+        # T014: stage completion log for pipeline observability
+        logger.info(
+            "Document %s parse stage complete: artifact_id=%s, backend=%s, parse_elapsed_s=%.2f",
+            document_id,
+            str(artifact.id),
+            result.backend_used,
+            result.parse_elapsed_s,
+        )
+
         return str(artifact.id)
 
     except Exception as exc:
@@ -359,6 +368,8 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
                             "processing_time": processing_time,
                             "task_id": task_id,
                             "artifact_id": artifact_id,
+                            "parse_artifact_id": artifact_id,
+                            "stage": "index",
                         },
                     ),
                 )

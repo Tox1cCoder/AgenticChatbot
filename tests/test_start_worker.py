@@ -1,9 +1,23 @@
 import os
 
 
+class FakePopen:
+    """Minimal subprocess.Popen stub that records the command and supports wait()."""
+
+    def __init__(self, cmd, **kwargs):
+        self.cmd = cmd
+        self.pid = 99999
+
+    def wait(self):
+        return 0
+
+    def terminate(self):
+        pass
+
+
 def test_start_worker_does_not_seed_default_celery_env_vars(monkeypatch):
     """Worker startup must not mutate broker/result env vars."""
-    captured = {}
+    spawned = []
 
     monkeypatch.delenv("CELERY_BROKER_URL", raising=False)
     monkeypatch.delenv("CELERY_RESULT_BACKEND", raising=False)
@@ -18,10 +32,11 @@ def test_start_worker_does_not_seed_default_celery_env_vars(monkeypatch):
 
     _cfg.get_settings.cache_clear()  # type: ignore[attr-defined]
 
-    def fake_run(cmd):
-        captured["cmd"] = cmd
+    def fake_popen(cmd, **kwargs):
+        spawned.append(cmd)
+        return FakePopen(cmd)
 
-    monkeypatch.setattr("app.workers.start_worker.subprocess.run", fake_run)
+    monkeypatch.setattr("app.workers.start_worker.subprocess.Popen", fake_popen)
 
     from app.workers.start_worker import start_worker
 
@@ -29,8 +44,12 @@ def test_start_worker_does_not_seed_default_celery_env_vars(monkeypatch):
 
     assert "CELERY_BROKER_URL" not in os.environ
     assert "CELERY_RESULT_BACKEND" not in os.environ
-    joined = " ".join(captured["cmd"])
-    # Windows default should not be solo any more — the worker must run
-    # tasks concurrently for batch uploads to actually overlap.
-    assert "--pool=solo" not in joined
-    assert "--pool=threads" in joined
+
+    assert len(spawned) == 2, "Expected two worker processes (parse + index)"
+
+    for cmd in spawned:
+        joined = " ".join(cmd)
+        # Windows default should not be solo any more — the worker must run
+        # tasks concurrently for batch uploads to actually overlap.
+        assert "--pool=solo" not in joined
+        assert "--pool=threads" in joined

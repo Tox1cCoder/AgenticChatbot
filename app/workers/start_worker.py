@@ -52,8 +52,68 @@ def _resolve_worker_pool(configured_pool: str, system: str) -> str:
     return "threads" if system == "Windows" else "prefork"
 
 
+def _build_worker_cmd(
+    queues: str,
+    concurrency: int,
+    pool: str,
+    time_limit: int,
+    soft_time_limit: int,
+    label: str,
+    settings,
+) -> list[str]:
+    """Return the argv list for a single Celery worker process."""
+    return [
+        sys.executable,
+        "-m",
+        "celery",
+        "-A",
+        "app.workers.celery_app",
+        "worker",
+        "--loglevel=info",
+        f"--queues={queues}",
+        f"--pool={pool}",
+        f"--concurrency={concurrency}",
+        f"--hostname=worker-{label}@%h",
+        f"--max-tasks-per-child={settings.celery_worker_max_tasks_per_child}",
+        f"--time-limit={time_limit}",
+        f"--soft-time-limit={soft_time_limit}",
+    ]
+
+
+def _spawn_worker(
+    queues: str,
+    concurrency: int,
+    pool: str,
+    time_limit: int,
+    soft_time_limit: int,
+    label: str,
+    settings,
+) -> subprocess.Popen:
+    """Start a Celery worker subprocess for *queues* and return its Popen handle."""
+    cmd = _build_worker_cmd(
+        queues=queues,
+        concurrency=concurrency,
+        pool=pool,
+        time_limit=time_limit,
+        soft_time_limit=soft_time_limit,
+        label=label,
+        settings=settings,
+    )
+    print(f"Starting {label} worker: queues={queues} pool={pool} concurrency={concurrency}")
+    print(f"Command [{label}]:", " ".join(cmd))
+    return subprocess.Popen(cmd)
+
+
 def start_worker():
-    """Start the Celery worker using config-driven flags."""
+    """Start parse and index Celery workers using config-driven flags.
+
+    Spawns two parallel worker processes:
+    - parse worker  : consumes the ``parse`` queue, concurrency from celery_parse_concurrency
+    - index worker  : consumes the ``index`` queue, concurrency from celery_index_concurrency
+
+    Dev-mode tip: for a minimal single-process setup start Celery manually with
+    ``celery -A app.workers.celery_app worker -Q parse,index`` to handle both queues.
+    """
     project_root = Path(__file__).parent.parent.parent
     os.chdir(project_root)
 
@@ -66,41 +126,50 @@ def start_worker():
 
     system = platform.system()
     pool = _resolve_worker_pool(settings.celery_worker_pool, system)
-    concurrency = settings.celery_worker_concurrency
-    if pool == "solo" and concurrency != 1:
-        # The solo pool only ever runs one task at a time. Clamp the
-        # concurrency value so the printed banner does not mislead.
-        concurrency = 1
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "celery",
-        "-A",
-        "app.workers.celery_app",
-        "worker",
-        "--loglevel=info",
-        f"--pool={pool}",
-        f"--concurrency={concurrency}",
-        f"--max-tasks-per-child={settings.celery_worker_max_tasks_per_child}",
-        f"--time-limit={settings.celery_worker_time_limit}",
-        f"--soft-time-limit={settings.celery_worker_soft_time_limit}",
-    ]
+    parse_concurrency = settings.celery_parse_concurrency
+    index_concurrency = settings.celery_index_concurrency
+    if pool == "solo":
+        # The solo pool only ever runs one task at a time. Clamp both
+        # concurrency values so the printed banner does not mislead.
+        parse_concurrency = 1
+        index_concurrency = 1
 
-    print(
-        "Starting Celery worker: "
-        f"pool={pool} concurrency={concurrency} "
-        f"prefetch={settings.celery_worker_prefetch_multiplier} "
-        f"(platform={system})"
+    p_parse = _spawn_worker(
+        queues="parse",
+        concurrency=parse_concurrency,
+        pool=pool,
+        time_limit=settings.mineru_timeout + 60,
+        soft_time_limit=settings.mineru_timeout + 30,
+        label="parse",
+        settings=settings,
     )
-    print("Command:", " ".join(cmd))
+    p_index = _spawn_worker(
+        queues="index",
+        concurrency=index_concurrency,
+        pool=pool,
+        time_limit=settings.celery_index_time_limit,
+        soft_time_limit=settings.celery_index_time_limit - 30,
+        label="index",
+        settings=settings,
+    )
+
+    print(f"Both workers started (PIDs: parse={p_parse.pid}, index={p_index.pid})")
 
     try:
-        subprocess.run(cmd)
+        p_parse.wait()
+        p_index.wait()
     except KeyboardInterrupt:
-        print("\nShutting down worker...")
+        print("\nShutting down workers...")
+        p_parse.terminate()
+        p_index.terminate()
+        p_parse.wait()
+        p_index.wait()
     except Exception as e:
-        print(f"Error starting worker: {e}")
+        print(f"Error waiting for workers: {e}")
+        p_parse.terminate()
+        p_index.terminate()
+        raise
 
 
 if __name__ == "__main__":

@@ -46,3 +46,8 @@ celery_app.conf.imports = (
     "app.workers.document_processor",
     "app.workers.cleanup_tasks",
 )
+
+celery_app.conf.task_routes = {
+    "app.workers.document_processor.parse_document_task": {"queue": "parse"},
+    "app.workers.document_processor.index_document_task": {"queue": "index"},
+}

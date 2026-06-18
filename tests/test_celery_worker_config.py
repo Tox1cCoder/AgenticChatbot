@@ -6,8 +6,23 @@ Replaces the prior assertion that Windows always appends ``--pool=solo``.
 from __future__ import annotations
 
 
-def _captured_cmd(monkeypatch, *, system: str, env: dict[str, str] | None = None) -> list[str]:
-    captured: dict[str, list[str]] = {}
+class FakePopen:
+    """Minimal subprocess.Popen stub that records the command and supports wait()."""
+
+    def __init__(self, cmd, **kwargs):
+        self.cmd = cmd
+        self.pid = 99999
+
+    def wait(self):
+        return 0
+
+    def terminate(self):
+        pass
+
+
+def _captured_cmds(monkeypatch, *, system: str, env: dict[str, str] | None = None) -> list[list[str]]:
+    """Return [parse_cmd, index_cmd] spawned by start_worker()."""
+    spawned: list[list[str]] = []
 
     monkeypatch.setattr("app.workers.start_worker.os.chdir", lambda _path: None)
     monkeypatch.setattr("app.workers.start_worker.platform.system", lambda: system)
@@ -30,49 +45,68 @@ def _captured_cmd(monkeypatch, *, system: str, env: dict[str, str] | None = None
 
     _cfg.get_settings.cache_clear()  # type: ignore[attr-defined]
 
-    def fake_run(cmd):
-        captured["cmd"] = cmd
+    def fake_popen(cmd, **kwargs):
+        spawned.append(cmd)
+        return FakePopen(cmd)
 
-    monkeypatch.setattr("app.workers.start_worker.subprocess.run", fake_run)
+    monkeypatch.setattr("app.workers.start_worker.subprocess.Popen", fake_popen)
 
     from app.workers.start_worker import start_worker
 
     start_worker()
-    return captured["cmd"]
+    return spawned
 
 
 def test_windows_auto_pool_resolves_to_threads(monkeypatch):
-    cmd = _captured_cmd(monkeypatch, system="Windows", env={"CELERY_WORKER_POOL": "auto"})
-    joined = " ".join(cmd)
-    assert "--pool=threads" in joined
-    assert "--pool=solo" not in joined
+    cmds = _captured_cmds(monkeypatch, system="Windows", env={"CELERY_WORKER_POOL": "auto"})
+    assert len(cmds) == 2, "Expected two worker processes (parse + index)"
+    for cmd in cmds:
+        joined = " ".join(cmd)
+        assert "--pool=threads" in joined
+        assert "--pool=solo" not in joined
 
 
 def test_linux_auto_pool_resolves_to_prefork(monkeypatch):
-    cmd = _captured_cmd(monkeypatch, system="Linux", env={"CELERY_WORKER_POOL": "auto"})
-    joined = " ".join(cmd)
-    assert "--pool=prefork" in joined
+    cmds = _captured_cmds(monkeypatch, system="Linux", env={"CELERY_WORKER_POOL": "auto"})
+    assert len(cmds) == 2
+    for cmd in cmds:
+        joined = " ".join(cmd)
+        assert "--pool=prefork" in joined
 
 
 def test_concurrency_is_configurable(monkeypatch):
-    cmd = _captured_cmd(
+    cmds = _captured_cmds(
         monkeypatch,
         system="Windows",
-        env={"CELERY_WORKER_POOL": "threads", "CELERY_WORKER_CONCURRENCY": "4"},
+        env={
+            "CELERY_WORKER_POOL": "threads",
+            "CELERY_PARSE_CONCURRENCY": "4",
+            "CELERY_INDEX_CONCURRENCY": "2",
+        },
     )
-    joined = " ".join(cmd)
-    assert "--concurrency=4" in joined
-    assert "--pool=threads" in joined
+    assert len(cmds) == 2
+    # parse worker
+    parse_joined = " ".join(cmds[0])
+    assert "--concurrency=4" in parse_joined
+    assert "--pool=threads" in parse_joined
+    assert "--queues=parse" in parse_joined
+    # index worker
+    index_joined = " ".join(cmds[1])
+    assert "--concurrency=2" in index_joined
+    assert "--pool=threads" in index_joined
+    assert "--queues=index" in index_joined
 
 
 def test_explicit_solo_remains_available(monkeypatch):
-    cmd = _captured_cmd(monkeypatch, system="Windows", env={"CELERY_WORKER_POOL": "solo"})
-    joined = " ".join(cmd)
-    assert "--pool=solo" in joined
+    cmds = _captured_cmds(monkeypatch, system="Windows", env={"CELERY_WORKER_POOL": "solo"})
+    assert len(cmds) == 2
+    for cmd in cmds:
+        joined = " ".join(cmd)
+        assert "--pool=solo" in joined
 
 
 def test_time_limits_passed_through(monkeypatch):
-    cmd = _captured_cmd(
+    cmds = _captured_cmds(
         monkeypatch,
         system="Linux",
         env={
@@ -80,12 +114,26 @@ def test_time_limits_passed_through(monkeypatch):
             "CELERY_WORKER_TIME_LIMIT": "120",
             "CELERY_WORKER_SOFT_TIME_LIMIT": "60",
             "CELERY_WORKER_MAX_TASKS_PER_CHILD": "5",
+            "CELERY_INDEX_TIME_LIMIT": "120",
         },
     )
-    joined = " ".join(cmd)
-    assert "--time-limit=120" in joined
-    assert "--soft-time-limit=60" in joined
-    assert "--max-tasks-per-child=5" in joined
+    assert len(cmds) == 2
+    for cmd in cmds:
+        joined = " ".join(cmd)
+        assert "--max-tasks-per-child=5" in joined
+    # index worker inherits time limit from celery_index_time_limit
+    index_joined = " ".join(cmds[1])
+    assert "--time-limit=120" in index_joined
+
+
+def test_hostname_disambiguation(monkeypatch):
+    """Each worker must have a distinct hostname for Celery monitoring."""
+    cmds = _captured_cmds(monkeypatch, system="Linux", env={"CELERY_WORKER_POOL": "prefork"})
+    assert len(cmds) == 2
+    parse_joined = " ".join(cmds[0])
+    index_joined = " ".join(cmds[1])
+    assert "--hostname=worker-parse@%h" in parse_joined
+    assert "--hostname=worker-index@%h" in index_joined
 
 
 def test_document_processing_service_uses_factory_provider():
