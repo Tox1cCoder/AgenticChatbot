@@ -172,17 +172,16 @@ class DocumentProcessingService:
         )
 
         try:
-            task = self.celery_app.send_task(
-                "app.workers.document_processor.process_document_task",
+            from celery import chain as celery_chain
+
+            parse_sig = self.celery_app.signature(
+                "app.workers.document_processor.parse_document_task",
                 args=[document_id, str(staged_path), filename],
-                retry=True,
-                retry_policy={
-                    "max_retries": 3,
-                    "interval_start": 0,
-                    "interval_step": 30,
-                    "interval_max": 180,
-                },
             )
+            index_sig = self.celery_app.signature(
+                "app.workers.document_processor.index_document_task",
+            )
+            task = celery_chain(parse_sig, index_sig).apply_async()
         except Exception:
             try:
                 if staged_path.is_file():

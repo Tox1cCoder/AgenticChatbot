@@ -546,6 +546,18 @@ class Settings(BaseSettings):
         default="app/storage/parse_artifacts",
         description="Directory where parse artifact JSON files are stored.",
     )
+    celery_index_time_limit: int = Field(
+        default=600,
+        description="Hard time limit in seconds for index_document_task.",
+    )
+    celery_parse_concurrency: int = Field(
+        default=2,
+        description="Number of concurrent workers for the parse queue.",
+    )
+    celery_index_concurrency: int = Field(
+        default=8,
+        description="Number of concurrent workers for the index queue.",
+    )
 
     # RAG Retrieval Configuration
     rag_top_k: int = Field(
