@@ -160,15 +160,13 @@ class DocumentIndexService:
                     )
             raise
 
-        for chunk in persisted:
-            point_id = self._point_id_for_chunk(chunk.id)
-            self.chunk_repository.mark_indexed(
-                chunk.id,
-                point_id=point_id,
-                embedding_model=self.embedding_model_name,
-                embedding_dimension=self.embedding_dimension,
-                collection_name=self.collection_name,
-            )
+        self.chunk_repository.mark_indexed_bulk(
+            [chunk.id for chunk in persisted],
+            point_ids=[str(self._point_id_for_chunk(chunk.id)) for chunk in persisted],
+            embedding_model=self.embedding_model_name,
+            embedding_dimension=self.embedding_dimension,
+            collection_name=self.collection_name,
+        )
 
         return persisted
 
@@ -194,15 +192,13 @@ class DocumentIndexService:
             document=None,
             persisted_chunks=chunks,
         )
-        for chunk in chunks:
-            point_id = self._point_id_for_chunk(chunk.id)
-            self.chunk_repository.mark_indexed(
-                chunk.id,
-                point_id=point_id,
-                embedding_model=self.embedding_model_name,
-                embedding_dimension=self.embedding_dimension,
-                collection_name=self.collection_name,
-            )
+        self.chunk_repository.mark_indexed_bulk(
+            [chunk.id for chunk in chunks],
+            point_ids=[str(self._point_id_for_chunk(chunk.id)) for chunk in chunks],
+            embedding_model=self.embedding_model_name,
+            embedding_dimension=self.embedding_dimension,
+            collection_name=self.collection_name,
+        )
         return chunks
 
     # ------------------------------------------------------------------

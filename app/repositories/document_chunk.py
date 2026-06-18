@@ -87,6 +87,49 @@ class DocumentChunkRepository:
             db.refresh(chunk)
             return chunk
 
+    def mark_indexed_bulk(
+        self,
+        chunk_ids: list[UUID],
+        *,
+        point_ids: list[str],
+        embedding_model: str,
+        embedding_dimension: int,
+        collection_name: str,
+    ) -> int:
+        """Bulk update all chunks with embedding metadata in a single operation.
+
+        Args:
+            chunk_ids: List of chunk IDs to update.
+            point_ids: List of Qdrant point IDs (parallel to chunk_ids).
+            embedding_model: Name of the embedding model.
+            embedding_dimension: Dimension of the embeddings.
+            collection_name: Name of the Qdrant collection.
+
+        Returns:
+            The number of chunks updated.
+        """
+        if not chunk_ids:
+            return 0
+
+        with self.session_factory() as db:
+            now = datetime.now(timezone.utc)
+            mappings = [
+                {
+                    "id": chunk_id,
+                    "qdrant_point_id": point_id,
+                    "embedding_model": embedding_model,
+                    "embedding_dimension": embedding_dimension,
+                    "qdrant_collection_name": collection_name,
+                    "index_status": "indexed",
+                    "index_error": None,
+                    "indexed_at": now,
+                }
+                for chunk_id, point_id in zip(chunk_ids, point_ids, strict=True)
+            ]
+            db.bulk_update_mappings(DocumentChunk, mappings)
+            db.commit()
+            return len(mappings)
+
     def mark_index_failed(self, chunk_id: UUID, error: str) -> DocumentChunk | None:
         with self.session_factory() as db:
             chunk = db.query(DocumentChunk).filter(DocumentChunk.id == chunk_id).first()
