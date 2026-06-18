@@ -278,13 +278,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    # Now import requests
     try:
-        import requests  # noqa: F401
+        import requests
     except ImportError:
         sys.exit("Error: requests module not found. Install it via: pip install requests")
-
-    import requests
 
     base_url = args.base_url.rstrip("/")
     conversation_id = args.conversation_id
