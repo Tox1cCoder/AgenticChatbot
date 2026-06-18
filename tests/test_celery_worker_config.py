@@ -5,19 +5,7 @@ Replaces the prior assertion that Windows always appends ``--pool=solo``.
 
 from __future__ import annotations
 
-
-class FakePopen:
-    """Minimal subprocess.Popen stub that records the command and supports wait()."""
-
-    def __init__(self, cmd, **kwargs):
-        self.cmd = cmd
-        self.pid = 99999
-
-    def wait(self):
-        return 0
-
-    def terminate(self):
-        pass
+from .conftest import FakePopen
 
 
 def _captured_cmds(monkeypatch, *, system: str, env: dict[str, str] | None = None) -> list[list[str]]:
@@ -121,6 +109,10 @@ def test_time_limits_passed_through(monkeypatch):
     for cmd in cmds:
         joined = " ".join(cmd)
         assert "--max-tasks-per-child=5" in joined
+    # parse worker time limit should be mineru_timeout + 60
+    # (mineru_timeout defaults to 300 in settings, so expected value is 360)
+    parse_joined = " ".join(cmds[0])
+    assert "--time-limit=360" in parse_joined
     # index worker inherits time limit from celery_index_time_limit
     index_joined = " ".join(cmds[1])
     assert "--time-limit=120" in index_joined

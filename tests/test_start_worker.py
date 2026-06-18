@@ -1,18 +1,6 @@
 import os
 
-
-class FakePopen:
-    """Minimal subprocess.Popen stub that records the command and supports wait()."""
-
-    def __init__(self, cmd, **kwargs):
-        self.cmd = cmd
-        self.pid = 99999
-
-    def wait(self):
-        return 0
-
-    def terminate(self):
-        pass
+from .conftest import FakePopen
 
 
 def test_start_worker_does_not_seed_default_celery_env_vars(monkeypatch):

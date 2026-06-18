@@ -161,14 +161,18 @@ def start_worker():
         p_index.wait()
     except KeyboardInterrupt:
         print("\nShutting down workers...")
-        p_parse.terminate()
-        p_index.terminate()
+        if p_parse.poll() is None:
+            p_parse.terminate()
+        if p_index.poll() is None:
+            p_index.terminate()
         p_parse.wait()
         p_index.wait()
     except Exception as e:
         print(f"Error waiting for workers: {e}")
-        p_parse.terminate()
-        p_index.terminate()
+        if p_parse.poll() is None:
+            p_parse.terminate()
+        if p_index.poll() is None:
+            p_index.terminate()
         raise
 
 

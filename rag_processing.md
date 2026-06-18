@@ -105,15 +105,13 @@ Phases are ordered by value ÷ effort and each ships independently. Tasks marked
 
 ### Phase 1 — True batched + concurrent embedding (biggest win, no structural change)
 
-- **T001 — Batched embedding requests.**
+- **T001 — Batched embedding requests.** ✅ DONE (commit 519b0f2)
   `app/services/rag_embedding_service.py`: `embed_documents()` sends up to
   `rag_embedding_batch_size` (new setting, default 32) formatted contents per
   `embed_content` call instead of one. Validate `len(response.embeddings) == len(batch)`;
   raise `RuntimeError` on mismatch (keep the no-silent-fallback invariant).
-  *Verify during implementation:* the per-request content limit for the configured
-  embedding model; clamp the setting and document the max. If the model rejects
-  multi-content requests entirely, fall back to single-content requests and rely on T002
-  for the speedup.
+  *Design decisions:* `_API_MAX_BATCH = 100` as `ClassVar`; batch size clamped at init;
+  empty-input short-circuit added; SDK accepts `list[str]` for batch contents (ContentsType).
 - **T002 — Concurrent batch calls.**
   Run batches through a `ThreadPoolExecutor` bounded by `rag_embedding_max_concurrency`
   (new setting, default 4). Preserve input order in the returned vectors. Retry 429s with
