@@ -28,6 +28,7 @@ from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.repositories.document_image import DocumentImageRepository
 from app.schemas.document_image import DocumentImageCreate
 from app.services.document_chunk_builder import DocumentChunkBuilder, NormalizedBlock
+from app.services.gemini_retry import is_rate_limit_error, parse_retry_delay
 
 logger = logging.getLogger(__name__)
 
@@ -1457,84 +1458,8 @@ class DocumentProcessingService:
                 return self._request_image_caption(image_bytes, image_name)
             except genai_errors.ClientError as e:
                 last_error = e
-                status = (e.status or "").upper() if isinstance(e.status, str) else ""
-                if e.code == 429 or status == "RESOURCE_EXHAUSTED":
-                    delay_hint = None
-                    details = getattr(e, "details", None)
-                    detail_entries = []
-                    if isinstance(details, dict):
-                        error_block = details.get("error")
-                        if isinstance(error_block, dict):
-                            detail_entries = error_block.get("details") or []
-                        if not detail_entries:
-                            detail_entries = details.get("details") or []
-                    elif isinstance(details, list):
-                        detail_entries = details
-
-                    for entry in detail_entries or []:
-                        if not isinstance(entry, dict):
-                            continue
-                        retry_value = entry.get("retryDelay") or entry.get("retry_delay")
-                        if retry_value is None:
-                            continue
-
-                        parsed_value = None
-                        if isinstance(retry_value, (int, float)):
-                            parsed_value = float(retry_value)
-                        elif isinstance(retry_value, str):
-                            match = re.match(r"([\d\.]+)\s*([a-zA-Z]*)", retry_value.strip())
-                            if match:
-                                amount_str, unit = match.groups()
-                                try:
-                                    amount = float(amount_str)
-                                except ValueError:
-                                    amount = None
-                                if amount is not None:
-                                    unit = unit.lower()
-                                    if unit in (
-                                        "",
-                                        "s",
-                                        "sec",
-                                        "secs",
-                                        "second",
-                                        "seconds",
-                                    ):
-                                        parsed_value = amount
-                                    elif unit in (
-                                        "ms",
-                                        "millisecond",
-                                        "milliseconds",
-                                    ):
-                                        parsed_value = amount / 1000.0
-                                    elif unit in (
-                                        "m",
-                                        "min",
-                                        "mins",
-                                        "minute",
-                                        "minutes",
-                                    ):
-                                        parsed_value = amount * 60.0
-                        elif isinstance(retry_value, dict):
-                            seconds = retry_value.get("seconds")
-                            nanos = retry_value.get("nanos", 0)
-                            if seconds is not None or nanos:
-                                seconds = float(seconds or 0)
-                                parsed_value = seconds + float(nanos) / 1_000_000_000
-
-                        if parsed_value is not None:
-                            delay_hint = parsed_value
-                            break
-
-                    if delay_hint is None:
-                        message = getattr(e, "message", "")
-                        if isinstance(message, str):
-                            match = re.search(r"retry in\s+([\d\.]+)s", message, re.IGNORECASE)
-                            if match:
-                                try:
-                                    delay_hint = float(match.group(1))
-                                except ValueError:
-                                    delay_hint = None
-
+                if is_rate_limit_error(e):
+                    delay_hint = parse_retry_delay(e)
                     if delay_hint is not None:
                         delay = max(delay_hint, 0.5)
                     else:

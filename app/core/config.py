@@ -247,6 +247,10 @@ class Settings(BaseSettings):
             "Clamped to the API maximum of 100."
         ),
     )
+    rag_embedding_max_concurrency: int = Field(
+        default=4,
+        description="Max concurrent Gemini embed_content requests during indexing.",
+    )
 
     # Media Resolution Configuration (for vision models)
     media_resolution: str = Field(

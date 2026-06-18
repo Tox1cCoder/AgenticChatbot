@@ -131,6 +131,7 @@ class Container(containers.DeclarativeContainer):
                 dimension=settings.rag_embedding_dimension,
                 query_task=settings.rag_embedding_query_task,
                 embedding_batch_size=settings.rag_embedding_batch_size,
+                embedding_max_concurrency=settings.rag_embedding_max_concurrency,
             )
         if provider == "sentence_transformers":
             from sentence_transformers import SentenceTransformer

@@ -16,11 +16,19 @@ Key invariants:
 
 from __future__ import annotations
 
+import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
+
+from app.services.gemini_retry import is_rate_limit_error, parse_retry_delay
+
+logger = logging.getLogger(__name__)
 
 
 class RAGEmbeddingService(Protocol):
@@ -85,11 +93,19 @@ class GeminiRAGEmbeddingService:
     # Gemini Embeddings API accepts up to 100 contents per embed_content call.
     # Default 32 is conservative; raise via config if throughput matters.
     embedding_batch_size: int = 32
+    # Number of batches submitted concurrently via ThreadPoolExecutor.
+    embedding_max_concurrency: int = 4
     provider: str = field(default="gemini", init=False)
     client: Any = field(default=None, init=False, repr=False)
 
     # Hard ceiling imposed by the Gemini Embeddings API for gemini-embedding-2.
     _API_MAX_BATCH: ClassVar[int] = 100
+    # Maximum retry attempts per batch on 429 / RESOURCE_EXHAUSTED.
+    _MAX_RETRY_ATTEMPTS: ClassVar[int] = 5
+    # Minimum sleep between retries even when the server hint is very small.
+    _MIN_RETRY_DELAY: ClassVar[float] = 0.5
+    # Base back-off (seconds) when no retryDelay hint is present.
+    _BASE_RETRY_DELAY: ClassVar[float] = 5.0
 
     def __post_init__(self) -> None:
         self.client = genai.Client(api_key=self.api_key)
@@ -113,32 +129,79 @@ class GeminiRAGEmbeddingService:
             return []
 
         pairs = list(zip(texts, titles, strict=True))
-        vectors: list[list[float]] = []
         batch_size = self.embedding_batch_size
+        batches = [
+            pairs[start : start + batch_size]
+            for start in range(0, len(pairs), batch_size)
+        ]
 
-        for batch_start in range(0, len(pairs), batch_size):
-            batch = pairs[batch_start : batch_start + batch_size]
-            contents = [self._format_document(text, title) for text, title in batch]
-            response = self.client.models.embed_content(
-                model=self.model_name,
-                contents=contents,
-                config=types.EmbedContentConfig(
-                    output_dimensionality=self.dimension,
-                ),
-            )
-            embeddings = list(getattr(response, "embeddings", []) or [])
-            if len(embeddings) != len(batch):
-                raise RuntimeError(
-                    f"Embedding count mismatch: sent {len(batch)} contents, "
-                    f"got {len(embeddings)} embeddings back"
+        # Submit all batches concurrently; collect results in submission order
+        # to preserve input ordering.
+        with ThreadPoolExecutor(max_workers=self.embedding_max_concurrency) as executor:
+            futures = [
+                executor.submit(
+                    self._embed_batch,
+                    [text for text, _ in batch],
+                    [title for _, title in batch],
                 )
-            for emb in embeddings:
-                values = getattr(emb, "values", None)
-                if values is None:
-                    raise RuntimeError("Embedding response missing values")
-                vectors.append([float(v) for v in values])
+                for batch in batches
+            ]
+            results = [f.result() for f in futures]
 
+        vectors: list[list[float]] = []
+        for batch_vectors in results:
+            vectors.extend(batch_vectors)
         return vectors
+
+    def _embed_batch(
+        self, batch_texts: list[str], batch_titles: list[str | None]
+    ) -> list[list[float]]:
+        """Call the Gemini embed_content API for one batch, retrying on 429s.
+
+        Returns a list of float vectors in the same order as *batch_texts*.
+        """
+        contents = [
+            self._format_document(text, title)
+            for text, title in zip(batch_texts, batch_titles, strict=True)
+        ]
+        for attempt in range(1, self._MAX_RETRY_ATTEMPTS + 1):
+            try:
+                response = self.client.models.embed_content(
+                    model=self.model_name,
+                    contents=contents,
+                    config=types.EmbedContentConfig(
+                        output_dimensionality=self.dimension,
+                    ),
+                )
+                embeddings = list(getattr(response, "embeddings", []) or [])
+                if len(embeddings) != len(contents):
+                    raise RuntimeError(
+                        f"Embedding count mismatch: sent {len(contents)} contents, "
+                        f"got {len(embeddings)} embeddings back"
+                    )
+                vectors: list[list[float]] = []
+                for emb in embeddings:
+                    values = getattr(emb, "values", None)
+                    if values is None:
+                        raise RuntimeError("Embedding response missing values")
+                    vectors.append([float(v) for v in values])
+                return vectors
+            except genai_errors.ClientError as exc:
+                if not is_rate_limit_error(exc) or attempt == self._MAX_RETRY_ATTEMPTS:
+                    raise
+                delay_hint = parse_retry_delay(exc)
+                if delay_hint is not None:
+                    delay = max(delay_hint, self._MIN_RETRY_DELAY)
+                else:
+                    delay = self._BASE_RETRY_DELAY * attempt
+                logger.warning(
+                    "Gemini rate limit on embedding batch "
+                    f"(attempt {attempt}/{self._MAX_RETRY_ATTEMPTS}). "
+                    f"Waiting {delay:.2f}s before retry."
+                )
+                time.sleep(delay)
+        # Unreachable — the loop raises on the final attempt.
+        raise RuntimeError("_embed_batch exhausted retries without raising")  # pragma: no cover
 
     def embed_query(self, query: str) -> list[float]:
         response = self.client.models.embed_content(
