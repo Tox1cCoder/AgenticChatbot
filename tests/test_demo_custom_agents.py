@@ -148,6 +148,161 @@ def test_custom_agent_edit_defaults_include_current_tools_and_skills(monkeypatch
     assert selected_skill_keys == [("server", "data-analysis")]
 
 
+def test_build_tool_refs_expands_selected_mcp_server_to_all_server_tools(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    server_tools = [
+        {
+            "type": "server_mcp",
+            "server_name": "calculator",
+            "tool_name": "add",
+            "qualified_tool_id": "calculator::add",
+        },
+        {
+            "type": "server_mcp",
+            "server_name": "calculator",
+            "tool_name": "subtract",
+            "qualified_tool_id": "calculator::subtract",
+        },
+        {
+            "type": "server_mcp",
+            "server_name": "search",
+            "tool_name": "web",
+            "qualified_tool_id": "search::web",
+        },
+    ]
+
+    refs = demo._build_tool_refs(
+        [],
+        server_tools,
+        [],
+        selected_server_names=["calculator"],
+    )
+
+    assert [ref["qualified_tool_id"] for ref in refs] == [
+        "calculator::add",
+        "calculator::subtract",
+    ]
+    assert all(ref["type"] == "server_mcp" for ref in refs)
+
+
+def test_build_tool_refs_deduplicates_server_group_and_individual_tool(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    calculate_tool = {
+        "type": "server_mcp",
+        "server_name": "calculator",
+        "tool_name": "calculate",
+        "qualified_tool_id": "calculator::calculate",
+    }
+    server_tools = [
+        calculate_tool,
+        {
+            "type": "server_mcp",
+            "server_name": "calculator",
+            "tool_name": "explain",
+            "qualified_tool_id": "calculator::explain",
+        },
+    ]
+
+    refs = demo._build_tool_refs(
+        [demo._custom_agent_tool_option_key(calculate_tool)],
+        server_tools,
+        [],
+        selected_server_names=["calculator"],
+    )
+
+    assert [ref["qualified_tool_id"] for ref in refs] == [
+        "calculator::calculate",
+        "calculator::explain",
+    ]
+
+
+def test_custom_agent_edit_defaults_detect_all_tools_from_server(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    server_tools = [
+        {
+            "type": "server_mcp",
+            "server_name": "calculator",
+            "tool_name": "add",
+            "qualified_tool_id": "calculator::add",
+        },
+        {
+            "type": "server_mcp",
+            "server_name": "calculator",
+            "tool_name": "subtract",
+            "qualified_tool_id": "calculator::subtract",
+        },
+        {
+            "type": "server_mcp",
+            "server_name": "search",
+            "tool_name": "web",
+            "qualified_tool_id": "search::web",
+        },
+    ]
+    tool_refs = [server_tools[0], server_tools[1], server_tools[2]]
+
+    selected_servers = demo._custom_agent_selected_server_names(tool_refs, server_tools)
+    selected_tool_keys = demo._custom_agent_selected_tool_keys(
+        tool_refs,
+        server_tools,
+        [],
+        excluded_server_names=selected_servers,
+    )
+
+    assert selected_servers == ["calculator"]
+    assert selected_tool_keys == [demo._custom_agent_tool_option_key(server_tools[2])]
+
+
+def test_custom_agent_edit_matches_reconnected_client_tool_by_stable_identity(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    current_client_tool = {
+        "type": "client",
+        "device_id": "device-1",
+        "session_id": "session-2",
+        "catalog_version": "2",
+        "tool_instance_id": "instance-2",
+        "server_name": "csv",
+        "qualified_tool_id": "client__csv__profile",
+        "tool_name": "profile",
+    }
+    saved_client_tool = {
+        **current_client_tool,
+        "session_id": "session-1",
+        "catalog_version": "1",
+        "tool_instance_id": "instance-1",
+    }
+
+    assert demo._custom_agent_tool_refs_available([saved_client_tool], [], [current_client_tool])
+    selected_keys = demo._custom_agent_selected_tool_keys(
+        [saved_client_tool], [], [current_client_tool]
+    )
+
+    assert selected_keys == [demo._custom_agent_tool_option_key(current_client_tool)]
+
+
+def test_custom_agent_edit_matches_legacy_server_skill_to_client_skill(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    current_client_skill = {
+        "source": "client",
+        "lookup_name": "data-analysis",
+        "name": "data-analysis",
+    }
+    legacy_server_skill_ref = {
+        "source": "server",
+        "lookup_name": "data-analysis",
+        "name": "data-analysis",
+    }
+
+    selected = demo._custom_agent_selected_skill_keys(
+        [legacy_server_skill_ref], [current_client_skill]
+    )
+
+    assert demo._custom_agent_skill_refs_available(
+        [legacy_server_skill_ref], [current_client_skill]
+    )
+    assert selected == [("client", "data-analysis")]
+    assert demo._build_skill_refs(selected, [current_client_skill]) == [current_client_skill]
+
+
 def test_custom_agent_build_skill_refs_filters_stale_selection(monkeypatch):
     demo = _import_demo_with_ui_stubs(monkeypatch)
     skills = [
