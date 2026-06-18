@@ -51,6 +51,7 @@ from app.services.conversation_service import ConversationService
 from app.services.custom_agent_service import CustomAgentService
 from app.services.document_chunk_builder import DocumentChunkBuilder
 from app.services.document_index_service import DocumentIndexService
+from app.services.document_parse_service import DocumentParseService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
 from app.services.feedback_service import FeedbackService
@@ -451,6 +452,12 @@ class Container(containers.DeclarativeContainer):
         max_tokens=settings.rag_chunk_max_tokens,
     )
 
+    document_parse_service = providers.Factory(
+        DocumentParseService,
+        settings=providers.Object(settings),
+        chunk_builder=document_chunk_builder,
+    )
+
     document_processing_service = providers.Factory(
         DocumentProcessingService,
         settings=providers.Object(settings),
@@ -459,6 +466,7 @@ class Container(containers.DeclarativeContainer):
         document_index_service=document_index_service,
         document_chunk_builder=document_chunk_builder,
         document_parse_artifact_repository=document_parse_artifact_repository,
+        document_parse_service=document_parse_service,
     )
 
     document_service: providers.Provider[IDocumentService] = providers.Factory(

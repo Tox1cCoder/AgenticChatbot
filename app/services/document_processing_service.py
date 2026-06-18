@@ -28,6 +28,7 @@ from app.core.events import DocumentEvent, DocumentEventData, get_event_bus
 from app.repositories.document_image import DocumentImageRepository
 from app.schemas.document_image import DocumentImageCreate
 from app.services.document_chunk_builder import DocumentChunkBuilder, NormalizedBlock
+from app.services.document_parse_service import DocumentParseService
 from app.services.gemini_retry import is_rate_limit_error, parse_retry_delay
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class DocumentProcessingService:
         document_index_service: Any | None = None,
         document_chunk_builder: DocumentChunkBuilder | None = None,
         document_parse_artifact_repository: Any | None = None,
+        document_parse_service: DocumentParseService | None = None,
     ):
         self.settings = settings
         self.celery_app = celery_app
@@ -53,6 +55,10 @@ class DocumentProcessingService:
             max_tokens=settings.rag_chunk_max_tokens,
         )
         self.document_parse_artifact_repository = document_parse_artifact_repository
+        self._parse_service = document_parse_service or DocumentParseService(
+            settings=settings,
+            chunk_builder=self.document_chunk_builder,
+        )
         self.collection_name = settings.qdrant_collection_name
         self.embedding_dimension = settings.rag_embedding_dimension
         self._event_bus = get_event_bus()
@@ -350,850 +356,139 @@ class DocumentProcessingService:
             "filename": filename,
         }
 
+    # ---------------------------------------------------------------------------
+    # Parse-stage delegation helpers
+    # ---------------------------------------------------------------------------
+    # All parse logic lives in DocumentParseService.  These wrappers preserve
+    # the existing public/private API so that:
+    #  * Tests that call these methods directly keep working.
+    #  * Tests that mock them on a service instance keep intercepting the call
+    #    (Python attribute lookup checks the instance dict first).
+    #  * Tests that use object.__new__(DocumentProcessingService) to bypass
+    #    __init__ get a lazy-initialised _parse_service on first access.
+    # ---------------------------------------------------------------------------
+
+    def _get_parse_service(self) -> "DocumentParseService":
+        """Return the parse service, constructing one lazily if __init__ was bypassed."""
+        ps = getattr(self, "_parse_service", None)
+        if ps is None:
+            chunk_builder = getattr(self, "document_chunk_builder", None)
+            if chunk_builder is None:
+                chunk_builder = DocumentChunkBuilder(
+                    target_tokens=self.settings.rag_chunk_target_tokens,
+                    overlap_tokens=self.settings.rag_chunk_overlap_tokens,
+                    max_tokens=self.settings.rag_chunk_max_tokens,
+                )
+            ps = DocumentParseService(settings=self.settings, chunk_builder=chunk_builder)
+            self._parse_service = ps
+        return ps
+
     async def _process_with_mineru(
         self, file_path: str, document_id: str, original_filename: str | None = None
     ) -> list[dict[str, Any]]:
-        try:
-            temp_dir = Path(self.settings.temp_storage_path)
-            output_dir = temp_dir / f"mineru_output_{document_id}"
-            output_dir.mkdir(parents=True, exist_ok=True)
-            self._mineru_output_path = str(output_dir)
+        """Delegate to DocumentParseService._process_with_mineru.
 
-            backend_raw = (
-                str(getattr(self.settings, "mineru_backend", "pipeline") or "pipeline")
-                .strip()
-                .lower()
-            )
-            backend_aliases = {
-                "vlm": "vlm-auto-engine",
-                "hybrid": "hybrid-auto-engine",
-            }
-            backend = backend_aliases.get(backend_raw, backend_raw)
-            valid_backends = {
-                "pipeline",
-                "hybrid-auto-engine",
-                "hybrid-http-client",
-                "vlm-auto-engine",
-                "vlm-http-client",
-            }
-            if backend not in valid_backends:
-                raise ValueError(
-                    "Invalid MinerU backend "
-                    f"'{backend_raw}'. Allowed values: {', '.join(sorted(valid_backends))}"
-                )
-
-            extra_args: list[str] = list(getattr(self.settings, "mineru_extra_args", []) or [])
-            api_url = str(getattr(self.settings, "mineru_api_url", "") or "").strip()
-
-            # Build formula / table flags from settings
-            formula_flag = (
-                "true" if getattr(self.settings, "extract_formulas_from_pdf", True) else "false"
-            )
-            table_flag = (
-                "true" if getattr(self.settings, "extract_tables_from_pdf", True) else "false"
-            )
-
-            method = str(getattr(self.settings, "mineru_method", "auto") or "auto").strip().lower()
-            valid_methods = {"auto", "txt", "ocr"}
-            if method not in valid_methods:
-                raise ValueError(
-                    f"Invalid MinerU method '{method}'. Allowed values: {', '.join(sorted(valid_methods))}"
-                )
-
-            lang = str(getattr(self.settings, "mineru_lang", "") or "").strip()
-            supports_method_and_lang = backend == "pipeline" or backend.startswith("hybrid-")
-
-            cmd = [
-                "mineru",
-                "-p",
-                file_path,
-                "-o",
-                str(output_dir),
-                "--backend",
-                backend,
-                "-f",
-                formula_flag,
-                "-t",
-                table_flag,
-            ]
-
-            if supports_method_and_lang:
-                cmd.extend(["-m", method])
-                if lang:
-                    cmd.extend(["-l", lang])
-
-            if api_url:
-                cmd.extend(["--api-url", api_url])
-
-            cmd.extend(extra_args)
-
-            logger.info(
-                "Running MinerU (backend=%s, method=%s, api_url=%s) for document %s: %s",
-                backend,
-                method if supports_method_and_lang else "n/a",
-                "configured" if api_url else "auto-local",
-                document_id,
-                " ".join(cmd),
-            )
-
-            parse_started_at = time.perf_counter()
-            result = subprocess.run(
-                cmd,
-                timeout=self.settings.mineru_timeout,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            parse_elapsed = time.perf_counter() - parse_started_at
-            logger.info(
-                "MinerU completed for %s in %.2fs (backend=%s, method=%s, api_url=%s)",
-                document_id,
-                parse_elapsed,
-                backend,
-                method if supports_method_and_lang else "n/a",
-                "configured" if api_url else "auto-local",
-            )
-
-            if result.stdout:
-                logger.debug("MinerU stdout for %s:\n%s", document_id, result.stdout)
-
-            filename_without_ext = Path(file_path).stem
-            filename_aliases = self._build_filename_aliases(filename_without_ext, original_filename)
-            base_output_dir = self._resolve_mineru_output_dir(output_dir, filename_aliases)
-
-            search_roots: list[Path] = []
-            if base_output_dir is not None and base_output_dir.exists():
-                search_roots.append(base_output_dir)
-            else:
-                logger.warning(
-                    "MinerU output directory missing for %s. Searching entire output tree.",
-                    filename_without_ext,
-                )
-
-            if output_dir not in search_roots:
-                search_roots.append(output_dir)
-
-            markdown_file = self._resolve_markdown_file(search_roots, filename_aliases)
-            images_dir = markdown_file.parent / "images"
-
-            # Try to find content_list.json for structured metadata
-            content_list_path = markdown_file.parent / f"{markdown_file.stem}_content_list.json"
-            content_blocks = None
-
-            if content_list_path.exists():
-                try:
-                    content_blocks = self._parse_content_list_json(content_list_path)
-                    logger.info(
-                        "Loaded %d content blocks from content_list.json for %s",
-                        len(content_blocks),
-                        original_filename or filename_without_ext,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Failed to parse content_list.json for %s: %s. Falling back to markdown.",
-                        original_filename or filename_without_ext,
-                        str(e),
-                    )
-                    content_blocks = None
-            else:
-                logger.info(
-                    "content_list.json not found for %s, using markdown fallback",
-                    original_filename or filename_without_ext,
-                )
-
-            images_by_path: dict[str, int] = {}
-
-            if content_blocks:
-                for block in content_blocks:
-                    block_type = block.get("type")
-                    if block_type not in ("image", "table"):
-                        continue
-
-                    img_path = block.get("img_path", "")
-                    page_idx = block.get("page_idx")
-                    if img_path and page_idx is not None:
-                        images_by_path[img_path] = page_idx
-
-            images_data = []
-            page_to_images: dict[int, list[dict[str, Any]]] = {}
-
-            if images_dir.exists():
-                for img_file in images_dir.iterdir():
-                    if img_file.is_file() and img_file.suffix.lower() in [
-                        ".png",
-                        ".jpg",
-                        ".jpeg",
-                    ]:
-                        relative_path = f"images/{img_file.name}"
-                        page_number = images_by_path.get(relative_path)
-
-                        mime_type, _ = mimetypes.guess_type(str(img_file))
-                        if not mime_type:
-                            suffix = img_file.suffix.lower()
-                            if suffix in {".jpg", ".jpeg"}:
-                                mime_type = "image/jpeg"
-                            elif suffix == ".png":
-                                mime_type = "image/png"
-                            elif suffix == ".gif":
-                                mime_type = "image/gif"
-                        mime_type = mime_type or f"image/{img_file.suffix.lstrip('.').lower()}"
-
-                        image_entry = {
-                            "path": str(img_file),
-                            "page_number": page_number,
-                            "mime_type": mime_type,
-                        }
-                        images_data.append(image_entry)
-
-                        if page_number is not None:
-                            page_to_images.setdefault(page_number, []).append(image_entry)
-
-            if content_blocks:
-                chunks_with_metadata = self._create_chunks_with_page_metadata(
-                    content_blocks,
-                    page_to_images,
-                    max_chunk_size=self._legacy_char_chunk_size(),
-                )
-            else:
-                with open(markdown_file, encoding="utf-8") as f:
-                    markdown_content = f.read()
-
-                documents = [
-                    type(
-                        "Document",
-                        (),
-                        {"page_content": markdown_content, "metadata": {}},
-                    )()
-                ]
-                chunks = self._create_chunks(documents)
-
-                unpaged_images = [img for img in images_data if img["page_number"] is None]
-
-                chunks_with_metadata = []
-                for chunk in chunks:
-                    chunks_with_metadata.append(
-                        {
-                            "text": chunk,
-                            "page_start": None,
-                            "page_end": None,
-                            "has_images": bool(unpaged_images),
-                            "image_count": len(unpaged_images),
-                            "has_tables": False,
-                            "table_count": 0,
-                        }
-                    )
-
-            # Store images data for later processing
-            self._extracted_images = images_data
-
-            return chunks_with_metadata
-
-        except subprocess.TimeoutExpired as exc:
-            logger.error(
-                "MinerU timed out after %ss while processing %s",
-                self.settings.mineru_timeout,
-                file_path,
-            )
-            raise RuntimeError(f"MinerU timed out after {self.settings.mineru_timeout}s") from exc
-        except subprocess.CalledProcessError as exc:
-            # MinerU routes progress/errors to stdout; log both streams.
-            combined = "\n".join(filter(None, [exc.stdout, exc.stderr]))
-            backend_for_log = locals().get(
-                "backend", getattr(self.settings, "mineru_backend", "pipeline")
-            )
-            logger.error(
-                "MinerU (backend=%s) failed (exit %s) while processing %s:\n%s",
-                backend_for_log,
-                exc.returncode,
-                file_path,
-                combined or "(no output captured)",
-            )
-            raise RuntimeError(f"MinerU failed with error: {combined}") from exc
-        except Exception as exc:
-            logger.error("Unexpected MinerU error while processing %s: %s", file_path, exc)
-            raise RuntimeError(f"Unexpected error in MinerU processing: {str(exc)}") from exc
+        Output directory is named ``mineru_output_{document_id}`` so that
+        concurrent uploads never share temp paths.
+        """
+        parse_service = self._get_parse_service()
+        chunks_with_metadata, images_data = await parse_service._process_with_mineru(
+            file_path=file_path,
+            document_id=document_id,
+            original_filename=original_filename,
+        )
+        # Propagate _mineru_output_path so callers that inspect it still work.
+        self._mineru_output_path = parse_service._mineru_output_path
+        # Store images for the index stage.
+        self._extracted_images = images_data
+        return chunks_with_metadata
 
     def _legacy_char_chunk_size(self) -> int:
-        """Approximate char count for a target-token chunk.
-
-        Bridges between the legacy char-based splitter and the token-based
-        settings. ~4 characters per token is the standard heuristic.
-        """
-        return max(200, int(self.settings.rag_chunk_target_tokens * 4))
+        """Delegate to parse service."""
+        return self._get_parse_service()._legacy_char_chunk_size()
 
     def _legacy_char_overlap(self) -> int:
-        return max(0, int(self.settings.rag_chunk_overlap_tokens * 4))
+        """Delegate to parse service."""
+        return self._get_parse_service()._legacy_char_overlap()
 
     def _create_chunks(
         self,
         documents: list,
-        max_chunk_size: int = None,
-        overlap: int = None,
+        max_chunk_size: int | None = None,
+        overlap: int | None = None,
     ) -> list[str]:
-        if max_chunk_size is None:
-            max_chunk_size = self._legacy_char_chunk_size()
-        if overlap is None:
-            overlap = self._legacy_char_overlap()
-        separators = ["\n\n", "\n", " ", ""]
-
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=max_chunk_size,
-            chunk_overlap=overlap,
-            length_function=len,
-            separators=separators,
-        )
-        split_docs = text_splitter.split_documents(documents)
-        return [doc.page_content for doc in split_docs]
+        """Delegate to parse service."""
+        return self._get_parse_service()._create_chunks(documents, max_chunk_size, overlap)
 
     def _process_excel_workbook(
         self,
         file_path: str,
         original_filename: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Convert an Excel workbook into text chunks without MinerU."""
-        try:
-            from openpyxl import load_workbook
-        except ImportError as exc:
-            raise RuntimeError("openpyxl is required to parse .xlsx uploads") from exc
+        """Delegate Excel workbook parsing to DocumentParseService."""
+        return self._get_parse_service()._process_excel_workbook(file_path, original_filename)
 
-        formula_workbook = load_workbook(file_path, data_only=False, read_only=True)
-        value_workbook = load_workbook(file_path, data_only=True, read_only=True)
-
-        try:
-            chunks_with_metadata: list[dict[str, Any]] = []
-            value_sheets = {sheet.title: sheet for sheet in value_workbook.worksheets}
-
-            for sheet_index, formula_sheet in enumerate(formula_workbook.worksheets):
-                value_sheet = value_sheets.get(formula_sheet.title)
-                rows = self._extract_excel_rows(formula_sheet, value_sheet)
-                if not rows:
-                    continue
-
-                text = self._excel_rows_to_markdown(formula_sheet.title, rows)
-                chunks_with_metadata.append(
-                    {
-                        "text": text,
-                        "page_start": sheet_index,
-                        "page_end": sheet_index,
-                        "has_images": False,
-                        "image_count": 0,
-                        "has_tables": True,
-                        "table_count": 1,
-                        "sheet_name": formula_sheet.title,
-                        "source": original_filename,
-                    }
-                )
-
-            if chunks_with_metadata:
-                return chunks_with_metadata
-
-            return [
-                {
-                    "text": f"Workbook {original_filename or Path(file_path).name} contains no non-empty sheets.",
-                    "page_start": None,
-                    "page_end": None,
-                    "has_images": False,
-                    "image_count": 0,
-                    "has_tables": False,
-                    "table_count": 0,
-                    "source": original_filename,
-                }
-            ]
-        finally:
-            formula_workbook.close()
-            value_workbook.close()
-
-    def _extract_excel_rows(self, formula_sheet: Any, value_sheet: Any | None) -> list[list[str]]:
-        rows: list[list[str]] = []
-        value_rows = value_sheet.iter_rows() if value_sheet is not None else None
-
-        for formula_row in formula_sheet.iter_rows():
-            value_row = next(value_rows, []) if value_rows is not None else []
-            values: list[str] = []
-
-            for index, formula_cell in enumerate(formula_row):
-                value_cell = value_row[index] if index < len(value_row) else None
-                display_value = (
-                    value_cell.value
-                    if value_cell is not None and value_cell.value is not None
-                    else formula_cell.value
-                )
-                values.append(self._stringify_excel_cell(display_value))
-
-            while values and not values[-1]:
-                values.pop()
-
-            if values and any(value.strip() for value in values):
-                rows.append(values)
-
-        return rows
+    def _extract_excel_rows(
+        self, formula_sheet: Any, value_sheet: Any | None
+    ) -> list[list[str]]:
+        """Delegate to parse service."""
+        return self._get_parse_service()._extract_excel_rows(formula_sheet, value_sheet)
 
     @classmethod
     def _excel_rows_to_markdown(cls, sheet_name: str, rows: list[list[str]]) -> str:
-        column_count = max((len(row) for row in rows), default=0)
-        if column_count == 0:
-            return f"# Sheet: {sheet_name}"
-
-        padded_rows = [row + [""] * (column_count - len(row)) for row in rows]
-        header = [
-            value if value else f"Column {index + 1}" for index, value in enumerate(padded_rows[0])
-        ]
-        data_rows = padded_rows[1:]
-
-        lines = [
-            f"# Sheet: {sheet_name}",
-            "",
-            "| " + " | ".join(cls._escape_markdown_table_cell(value) for value in header) + " |",
-            "| " + " | ".join("---" for _ in header) + " |",
-        ]
-        for row in data_rows:
-            lines.append(
-                "| " + " | ".join(cls._escape_markdown_table_cell(value) for value in row) + " |"
-            )
-
-        return "\n".join(lines).strip()
+        """Delegate to parse service."""
+        return DocumentParseService._excel_rows_to_markdown(sheet_name, rows)
 
     @staticmethod
     def _stringify_excel_cell(value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, datetime):
-            return value.isoformat(sep=" ")
-        return str(value)
+        return DocumentParseService._stringify_excel_cell(value)
 
     @staticmethod
     def _escape_markdown_table_cell(value: str) -> str:
-        return value.replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+        return DocumentParseService._escape_markdown_table_cell(value)
 
     def _parse_content_list_json(self, content_list_path: Path) -> list[dict[str, Any]]:
-        """
-        Parse MinerU's content_list.json to extract structured content with metadata.
-
-        Returns list of content blocks with:
-        - text/content: The actual content
-        - page_idx: Page number (0-indexed)
-        - bbox: Bounding box [x0, y0, x1, y1] (normalized to 0-1000)
-        - type: text, table, image, equation
-        - text_level: Heading level (0=body, 1=h1, 2=h2, etc.)
-        """
-        with open(content_list_path, encoding="utf-8") as f:
-            content_list = json.load(f)
-
-        return content_list
+        """Delegate to parse service."""
+        return self._get_parse_service()._parse_content_list_json(content_list_path)
 
     def _create_chunks_with_page_metadata(
         self,
         content_blocks: list[dict[str, Any]],
         page_to_images: dict[int, list[dict[str, Any]]],
-        max_chunk_size: int = None,
+        max_chunk_size: int | None = None,
     ) -> list[dict[str, Any]]:
-        """
-        Create chunks from content_list.json blocks while preserving page metadata.
-
-        Strategy:
-        - Accumulate text from consecutive blocks
-        - Split when chunk exceeds max_chunk_size
-        - Track page_start and page_end for chunks spanning multiple pages
-        - Associate images and tables with their source pages
-        """
-        if max_chunk_size is None:
-            max_chunk_size = self._legacy_char_chunk_size()
-
-        chunks_with_metadata: list[dict[str, Any]] = []
-        current_chunk_text = ""
-        current_page_start: int | None = None
-        current_page_end: int | None = None
-        current_images: list[dict[str, Any]] = []
-        current_tables: list[dict[str, Any]] = []
-        pages_in_current_chunk: set = set()
-
-        def _finalize_chunk():
-            """Save current accumulated chunk if it has content."""
-            nonlocal current_chunk_text, current_page_start, current_page_end
-            nonlocal current_images, current_tables, pages_in_current_chunk
-
-            if not current_chunk_text.strip():
-                return
-
-            # Gather images for pages in this chunk
-            chunk_images = current_images.copy()
-            for page in pages_in_current_chunk:
-                if page in page_to_images:
-                    for img in page_to_images[page]:
-                        if img not in chunk_images:
-                            chunk_images.append(img)
-
-            chunks_with_metadata.append(
-                {
-                    "text": current_chunk_text.strip(),
-                    "page_start": current_page_start,
-                    "page_end": current_page_end,
-                    "has_images": bool(chunk_images),
-                    "image_count": len(chunk_images),
-                    "images": chunk_images,
-                    "has_tables": bool(current_tables),
-                    "table_count": len(current_tables),
-                    "tables": current_tables,
-                }
-            )
-
-            # Reset for next chunk
-            current_chunk_text = ""
-            current_page_start = None
-            current_page_end = None
-            current_images = []
-            current_tables = []
-            pages_in_current_chunk = set()
-
-        for block in content_blocks:
-            page_idx = block.get("page_idx", 0)
-            block_type = block.get("type", "text")
-            bbox = block.get("bbox")
-            text_level = block.get("text_level", 0)
-
-            # Extract text content based on block type
-            text = ""
-            if block_type == "text":
-                text = block.get("text", "")
-                # Add markdown heading prefix based on text_level
-                if text_level and text_level > 0:
-                    heading_prefix = "#" * text_level + " "
-                    text = heading_prefix + text
-            elif block_type == "table":
-                # Store table metadata, include body if available
-                table_entry = {
-                    "page": page_idx,
-                    "bbox": bbox,
-                    "caption": block.get("table_caption", []),
-                    "footnote": block.get("table_footnote", []),
-                    "body": block.get("table_body", ""),
-                }
-                current_tables.append(table_entry)
-                # Include caption text in chunk for searchability
-                captions = block.get("table_caption", [])
-                footnotes = block.get("table_footnote", [])
-                if captions:
-                    text = "[Table: " + " ".join(captions) + "]"
-                elif footnotes:
-                    text = "[Table] " + " ".join(str(note) for note in footnotes if note)
-                else:
-                    text = "[Table]"
-            elif block_type == "image":
-                # Store image metadata from content_list
-                image_entry = {
-                    "page": page_idx,
-                    "bbox": bbox,
-                    "path": block.get("img_path", ""),
-                    "caption": block.get("image_caption", []),
-                    "footnote": block.get("image_footnote", []),
-                }
-                current_images.append(image_entry)
-                # Include caption text in chunk for searchability
-                captions = block.get("image_caption", [])
-                footnotes = block.get("image_footnote", [])
-                if captions:
-                    text = "[Image: " + " ".join(captions) + "]"
-                elif footnotes:
-                    text = "[Image] " + " ".join(str(note) for note in footnotes if note)
-                else:
-                    text = "[Image]"
-            elif block_type == "equation":
-                # Include equation text
-                text = block.get("text", "")
-                if not text:
-                    text = "[Equation]"
-            else:
-                # Fallback for any other block type
-                text = block.get("text", "")
-
-            # Check if adding this block would exceed chunk size
-            proposed_length = len(current_chunk_text) + len(text) + 1  # +1 for newline
-            if current_chunk_text and proposed_length > max_chunk_size:
-                _finalize_chunk()
-
-            # Update page tracking
-            if current_page_start is None:
-                current_page_start = page_idx
-            current_page_end = page_idx
-            pages_in_current_chunk.add(page_idx)
-
-            # Append text
-            if text:
-                current_chunk_text += text + "\n"
-
-        # Finalize the last chunk
-        _finalize_chunk()
-
-        logger.info(
-            "Created %d page-aware chunks from %d content blocks",
-            len(chunks_with_metadata),
-            len(content_blocks),
+        """Delegate to parse service."""
+        return self._get_parse_service()._create_chunks_with_page_metadata(
+            content_blocks, page_to_images, max_chunk_size
         )
-
-        return chunks_with_metadata
 
     @staticmethod
     def _normalize_filename_token(value: str) -> str:
-        normalized = unicodedata.normalize("NFKD", value or "")
-        normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-        normalized = normalized.lower()
-        normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
-        normalized = re.sub(r"-+", "-", normalized).strip("-")
-        return normalized
+        return DocumentParseService._normalize_filename_token(value)
 
     @staticmethod
     def _collapse_filename_token(value: str) -> str:
-        normalized = DocumentProcessingService._normalize_filename_token(value)
-        return normalized.replace("-", "")
+        return DocumentParseService._collapse_filename_token(value)
 
     def _build_filename_aliases(
         self, sanitized_stem: str, original_filename: str | None = None
     ) -> list[str]:
-        aliases: list[str] = []
-
-        def _add_alias(value: str | None) -> None:
-            if value is None:
-                return
-            candidate = value.strip()
-            if candidate and candidate not in aliases:
-                aliases.append(candidate)
-
-        _add_alias(sanitized_stem)
-        _add_alias(self._normalize_filename_token(sanitized_stem))
-
-        if sanitized_stem and "_" in sanitized_stem:
-            without_prefix = sanitized_stem.split("_", 1)[1]
-            _add_alias(without_prefix)
-            _add_alias(self._normalize_filename_token(without_prefix))
-
-        if original_filename:
-            original_stem = Path(original_filename).stem
-            _add_alias(original_stem)
-            _add_alias(self._normalize_filename_token(original_stem))
-            original_suffix = Path(original_filename).suffix.lower()
-        else:
-            original_suffix = ""
-
-        if original_suffix:
-            existing_aliases = list(aliases)
-            for alias in existing_aliases:
-                alias_with_ext = f"{alias}{original_suffix}"
-                if alias_with_ext not in aliases:
-                    aliases.append(alias_with_ext)
-
-        return aliases
+        """Delegate to parse service."""
+        return self._get_parse_service()._build_filename_aliases(sanitized_stem, original_filename)
 
     def _resolve_mineru_output_dir(
         self, output_dir: Path, filename_candidates: list[str]
     ) -> Path | None:
-        if not output_dir.exists():
-            return None
-
-        ordered_candidates: list[str] = []
-        for candidate in filename_candidates or []:
-            if candidate and candidate not in ordered_candidates:
-                ordered_candidates.append(candidate)
-
-        if not ordered_candidates:
-            return None
-
-        for candidate in ordered_candidates:
-            expected_dir = output_dir / candidate
-            if expected_dir.exists():
-                return expected_dir
-
-        normalized_targets = list(
-            filter(
-                None,
-                (
-                    self._normalize_filename_token(candidate)
-                    for candidate in ordered_candidates
-                    if candidate
-                ),
-            )
-        )
-        normalized_target_set = set(normalized_targets)
-        collapsed_target_set = set(
-            filter(
-                None,
-                (
-                    self._collapse_filename_token(candidate)
-                    for candidate in ordered_candidates
-                    if candidate
-                ),
-            )
-        )
-
-        normalized_matches: list[Path] = []
-
-        child_dirs = [child for child in output_dir.iterdir() if child.is_dir()]
-
-        for child in child_dirs:
-            normalized_child = self._normalize_filename_token(child.name)
-            collapsed_child = self._collapse_filename_token(child.name)
-
-            def _matches_target(token: str | None, token_set: set[str]) -> bool:
-                if not token or not token_set:
-                    return False
-                if token in token_set:
-                    return True
-                return any(
-                    token.endswith(target)
-                    or token.startswith(target)
-                    or target.endswith(token)
-                    or target.startswith(token)
-                    for target in token_set
-                )
-
-            if _matches_target(normalized_child, normalized_target_set) or _matches_target(
-                collapsed_child, collapsed_target_set
-            ):
-                normalized_matches.append(child)
-
-        if normalized_matches:
-            chosen = sorted(
-                normalized_matches,
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )[0]
-            return chosen
-
-        if child_dirs:
-            chosen = sorted(
-                child_dirs,
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )[0]
-            return chosen
-
-        return None
+        """Delegate to parse service."""
+        return self._get_parse_service()._resolve_mineru_output_dir(output_dir, filename_candidates)
 
     def _resolve_markdown_file(
         self, search_roots: list[Path], filename_candidates: list[str]
     ) -> Path:
-        ordered_candidates: list[str] = []
-        for candidate in filename_candidates or []:
-            if candidate and candidate not in ordered_candidates:
-                ordered_candidates.append(candidate)
+        """Delegate to parse service."""
+        return self._get_parse_service()._resolve_markdown_file(search_roots, filename_candidates)
 
-        if not ordered_candidates:
-            raise RuntimeError("MinerU output missing filename hints")
-
-        def _is_markdown_file(path: Path) -> bool:
-            suffixes = [suffix.lower() for suffix in path.suffixes]
-            if not suffixes:
-                lowered_name = path.name.lower()
-                return (
-                    lowered_name.endswith(".md")
-                    or lowered_name.endswith(".markdown")
-                    or lowered_name.endswith(".mdx")
-                )
-            return any(suffix in {".md", ".markdown", ".mdx"} for suffix in suffixes)
-
-        markdown_suffixes = {".md", ".markdown", ".mdx"}
-
-        def _search_in_root(root: Path) -> Path | None:
-            if root is None or not root.exists():
-                return None
-
-            for candidate in ordered_candidates:
-                exact_matches = sorted(
-                    root.glob(f"**/{candidate}.md"),
-                    key=lambda p: len(p.parts),
-                )
-                if exact_matches:
-                    return exact_matches[0]
-
-            all_markdown = sorted(
-                (
-                    path
-                    for path in root.rglob("*")
-                    if path.is_file()
-                    and (path.suffix.lower() in markdown_suffixes or _is_markdown_file(path))
-                ),
-                key=lambda p: (len(p.parts), p.stat().st_mtime),
-            )
-
-            normalized_map: dict[str, Path] = {}
-            collapsed_map: dict[str, Path] = {}
-            for path in all_markdown:
-                normalized_name = self._normalize_filename_token(path.stem)
-                if normalized_name and normalized_name not in normalized_map:
-                    normalized_map[normalized_name] = path
-                collapsed_name = self._collapse_filename_token(path.stem)
-                if collapsed_name and collapsed_name not in collapsed_map:
-                    collapsed_map[collapsed_name] = path
-
-            for candidate in ordered_candidates:
-                normalized_candidate = self._normalize_filename_token(candidate)
-                if normalized_candidate and normalized_candidate in normalized_map:
-                    return normalized_map[normalized_candidate]
-                collapsed_candidate = self._collapse_filename_token(candidate)
-                if collapsed_candidate and collapsed_candidate in collapsed_map:
-                    return collapsed_map[collapsed_candidate]
-
-            normalized_candidates = [
-                self._normalize_filename_token(candidate)
-                for candidate in ordered_candidates
-                if candidate
-            ]
-            normalized_candidates = [token for token in normalized_candidates if token]
-            collapsed_candidates = [
-                self._collapse_filename_token(candidate)
-                for candidate in ordered_candidates
-                if candidate
-            ]
-            collapsed_candidates = [token for token in collapsed_candidates if token]
-
-            for path in all_markdown:
-                normalized_name = self._normalize_filename_token(path.stem) or ""
-                collapsed_name = self._collapse_filename_token(path.stem)
-                if not normalized_name and not collapsed_name:
-                    continue
-                for normalized_candidate in normalized_candidates:
-                    if (
-                        normalized_candidate in normalized_name
-                        or normalized_name in normalized_candidate
-                    ):
-                        return path
-                for collapsed_candidate in collapsed_candidates:
-                    if (
-                        collapsed_candidate in collapsed_name
-                        or collapsed_name in collapsed_candidate
-                    ):
-                        return path
-
-            if all_markdown:
-                return all_markdown[0]
-
-            return None
-
-        unique_roots: list[Path] = []
-        for root in search_roots or []:
-            if root and root not in unique_roots and root.exists():
-                unique_roots.append(root)
-
-        default_output_root = Path("output")
-        if default_output_root.exists() and default_output_root not in unique_roots:
-            unique_roots.append(default_output_root)
-
-        if not unique_roots:
-            raise RuntimeError(f"MinerU output missing markdown file for {ordered_candidates[0]}")
-
-        searched_roots: list[Path] = []
-        for root in unique_roots:
-            searched_roots.append(root)
-            result = _search_in_root(root)
-            if result:
-                if root != unique_roots[0]:
-                    logger.warning(
-                        "MinerU markdown resolved via fallback root %s for %s",
-                        root,
-                        ordered_candidates[0],
-                    )
-                return result
-
-        raise RuntimeError(f"MinerU output missing markdown file for {ordered_candidates[0]}")
+    # --- End of delegated parse methods ---
 
     def _build_chunks_for_indexing(self, chunks_with_metadata: list[dict[str, Any]]):
         blocks: list[NormalizedBlock] = []
