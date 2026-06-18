@@ -264,10 +264,13 @@ def test_index_document_does_not_lazy_load_document_from_detached_chunks():
         parse_artifact_id=None,
     )
 
-    assert repo.mark_indexed.called
+    # T004: bulk mark is used now, not per-chunk mark_indexed.
+    assert repo.mark_indexed_bulk.called
 
 
-def test_index_document_embeds_in_batches():
+def test_index_document_embeds_in_single_call():
+    """After T004, _embed_and_upsert makes a single embed_documents call for
+    all chunks. Internal batching is the embedding service's responsibility."""
     document = _make_document()
     persisted = [_persisted_chunk(document.id, i) for i in range(5)]
 
@@ -282,7 +285,7 @@ def test_index_document_embeds_in_batches():
         qdrant_client=qdrant,
         embedding_service=embedding,
         embedding_dimension=4,
-        batch_size=2,
+        batch_size=2,  # deprecated — accepted but ignored
     )
     service.index_document(
         document=document,
@@ -290,12 +293,17 @@ def test_index_document_embeds_in_batches():
         parse_artifact_id=None,
     )
 
-    # batch_size=2 across 5 chunks should produce 3 embed calls: [2, 2, 1].
-    batch_sizes = [len(texts) for texts, _ in embedding.doc_calls]
-    assert batch_sizes == [2, 2, 1], f"Expected batches [2,2,1], got {batch_sizes}"
+    # DocumentIndexService now makes exactly one embed_documents call for all
+    # chunks. The embedding service handles internal batching.
+    assert len(embedding.doc_calls) == 1, (
+        f"Expected 1 embed_documents call, got {len(embedding.doc_calls)}"
+    )
+    texts, _ = embedding.doc_calls[0]
+    assert len(texts) == 5, f"All 5 chunk texts must be passed; got {len(texts)}"
 
 
 def test_index_document_marks_chunks_indexed_after_qdrant_upsert():
+    """After T004, mark_indexed_bulk is called once (not per-chunk mark_indexed)."""
     document = _make_document()
     persisted = [_persisted_chunk(document.id, 0), _persisted_chunk(document.id, 1)]
 
@@ -311,13 +319,15 @@ def test_index_document_marks_chunks_indexed_after_qdrant_upsert():
         parse_artifact_id=None,
     )
 
-    assert repo.mark_indexed.call_count == 2
-    for call in repo.mark_indexed.call_args_list:
-        kwargs = call.kwargs
-        assert "point_id" in kwargs
-        assert kwargs["embedding_model"] == "gemini-embedding-2"
-        assert kwargs["embedding_dimension"] == 8
-        assert kwargs["collection_name"] == "documents_gemini_embedding_2_3072"
+    assert repo.mark_indexed_bulk.call_count == 1
+    bulk_call = repo.mark_indexed_bulk.call_args
+    kwargs = bulk_call.kwargs
+    assert kwargs["embedding_model"] == "gemini-embedding-2"
+    assert kwargs["embedding_dimension"] == 8
+    assert kwargs["collection_name"] == "documents_gemini_embedding_2_3072"
+    # Verify both chunk IDs are included in the bulk call.
+    chunk_ids = bulk_call.args[0] if bulk_call.args else kwargs.get("chunk_ids", [])
+    assert len(chunk_ids) == 2
 
 
 def test_index_document_marks_failed_and_raises_on_qdrant_error():
@@ -400,3 +410,49 @@ def test_ensure_collection_validates_dimension_match():
 
     with pytest.raises(ValueError, match="vector size"):
         service.ensure_collection()
+
+
+def test_index_document_calls_bulk_mark_indexed(monkeypatch=None):
+    """T005 — T004: mark_indexed_bulk is called once; mark_indexed is NOT called.
+
+    After T004, DocumentIndexService.index_document calls
+    chunk_repository.mark_indexed_bulk once with all chunk IDs instead of
+    calling mark_indexed once per chunk.
+    """
+    import pytest  # noqa: F401 — needed for assertions in this scope
+
+    document = _make_document()
+    persisted = [
+        _persisted_chunk(document.id, 0),
+        _persisted_chunk(document.id, 1),
+        _persisted_chunk(document.id, 2),
+    ]
+
+    repo = MagicMock()
+    repo.replace_document_chunks.return_value = persisted
+
+    qdrant = MagicMock()
+
+    service = _build_service(chunk_repo=repo, qdrant_client=qdrant)
+    service.index_document(
+        document=document,
+        built_chunks=[_make_built_chunk(i) for i in range(3)],
+        parse_artifact_id=None,
+    )
+
+    # Bulk mark is called exactly once.
+    assert repo.mark_indexed_bulk.call_count == 1, (
+        f"mark_indexed_bulk must be called once; got {repo.mark_indexed_bulk.call_count}"
+    )
+    # Per-chunk mark_indexed must NOT be called.
+    assert repo.mark_indexed.call_count == 0, (
+        f"mark_indexed (per-chunk) must not be called; got {repo.mark_indexed.call_count}"
+    )
+    # The IDs passed to bulk mark match the persisted chunk IDs.
+    bulk_call = repo.mark_indexed_bulk.call_args
+    chunk_ids_passed = bulk_call.args[0]
+    expected_ids = {chunk.id for chunk in persisted}
+    assert set(chunk_ids_passed) == expected_ids, (
+        f"Bulk mark must receive all persisted chunk IDs; "
+        f"expected {expected_ids}, got {set(chunk_ids_passed)}"
+    )
