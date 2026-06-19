@@ -3719,6 +3719,8 @@ def _render_thumbnail_gallery(
     caption_max_chars: int = 40,
     align: str = "left",
     card_style: bool = False,
+    natural: bool = False,
+    indent_px: int = 0,
 ) -> None:
     """Render a flex gallery of clickable `img-thumb` thumbnails.
 
@@ -3727,7 +3729,10 @@ def _render_thumbnail_gallery(
 
     `card_style=True` produces the larger framed cards used for agent
     images; `card_style=False` produces the compact inline thumbnails used
-    for user attachments.
+    for user attachments. `natural=True` (cards only) shows the full image at
+    its real aspect ratio, capped at `thumb_width`, instead of cropping it to a
+    fixed box — used for generated images that are the message's actual content.
+    `indent_px` insets the whole gallery from the alignment-side edge.
     """
     if not items:
         return
@@ -3747,23 +3752,38 @@ def _render_thumbnail_gallery(
 
         if card_style:
             cap_div = (
-                f'<div style="font-size:.75em; color:#64748b; padding:4px 6px; '
+                f'<div style="font-size:.75em; color:#64748b; padding:5px 8px; '
                 f"line-height:1.3; overflow:hidden; text-overflow:ellipsis; "
                 f'white-space:nowrap; max-width:{thumb_width}px;" '
                 f'title="{escaped_full_name}">{escaped_display_name}</div>'
                 if name
                 else ""
             )
+            if natural:
+                container_style = (
+                    f"max-width:{thumb_width}px; flex:0 1 {thumb_width}px; "
+                    "border-radius:10px; overflow:hidden; background:#f8fafc; "
+                    "border:1px solid #e2e8f0;"
+                )
+                img_style = (
+                    f"width:100%; height:auto; max-width:{thumb_width}px; "
+                    "display:block; cursor:zoom-in; border-radius:10px 10px 0 0;"
+                )
+            else:
+                container_style = (
+                    f"width:{thumb_width}px; flex-shrink:0; text-align:center; "
+                    "border-radius:8px; overflow:hidden; background:#f8fafc; "
+                    "border:1px solid #e2e8f0;"
+                )
+                img_style = (
+                    f"width:{thumb_width}px; height:{thumb_height}px; object-fit:cover; "
+                    "display:block; cursor:zoom-in; border-radius:8px 8px 0 0;"
+                )
             parts.append(
-                f'<div style="width:{thumb_width}px; flex-shrink:0; text-align:center; '
-                f"border-radius:8px; overflow:hidden; background:#f8fafc; "
-                f'border:1px solid #e2e8f0;">'
+                f'<div style="{container_style}">'
                 f'<img src="{escaped_src}" alt="{escaped_display_name}" '
                 f'class="img-thumb" loading="lazy" '
-                f'title="Click to view full size" '
-                f'style="width:{thumb_width}px; height:{thumb_height}px; '
-                f"object-fit:cover; display:block; cursor:zoom-in; "
-                f'border-radius:8px 8px 0 0;" '
+                f'title="Click to view full size" style="{img_style}" '
                 f"onerror=\"this.parentElement.style.display='none'\" />"
                 f"{cap_div}</div>"
             )
@@ -3786,10 +3806,13 @@ def _render_thumbnail_gallery(
 
     wrapper_align = "flex-end" if align == "right" else "flex-start"
     gap = "8px" if card_style else "4px"
+    pad = ""
+    if indent_px:
+        pad = f"padding-{'right' if align == 'right' else 'left'}:{indent_px}px; "
     gallery_html = (
         f'<div style="display:flex; flex-wrap:wrap; gap:{gap}; '
         f"justify-content:{wrapper_align}; align-items:flex-start; "
-        f'margin:8px 0;">' + "".join(parts) + "</div>"
+        f'{pad}margin:8px 0;">' + "".join(parts) + "</div>"
     )
     st.markdown(gallery_html, unsafe_allow_html=True)
 
@@ -3810,6 +3833,7 @@ def render_attachment_gallery(attachments: list[dict[str, str]], *, align: str) 
         caption_max_chars=20,
         align=align,
         card_style=False,
+        indent_px=12,
     )
 
 
@@ -5457,25 +5481,49 @@ def render_live_widgets(
 
 
 def render_agent_images(message_metadata: dict):
-    """Agent-side 150×120 framed image cards (Tavily, Image Generator)."""
+    """Agent-side image rendering.
+
+    Model-generated images (base64, the message's actual content) render at full
+    size and natural aspect ratio; remote result thumbnails (e.g. web search)
+    keep the compact 150×120 framed-card grid. Both are inset from the edge.
+    """
     if not message_metadata:
         return
     images = message_metadata.get("images") or []
     if not images:
         return
-    items: list[dict[str, str]] = []
+    generated: list[dict[str, str]] = []
+    thumbs: list[dict[str, str]] = []
     for idx, image in enumerate(images, start=1):
         normalized = _normalize_image_for_gallery(image, f"Image {idx}")
-        if normalized:
-            items.append(normalized)
-    _render_thumbnail_gallery(
-        items,
-        thumb_width=150,
-        thumb_height=120,
-        caption_max_chars=40,
-        align="left",
-        card_style=True,
-    )
+        if not normalized:
+            continue
+        # Base64-inlined images are model-generated content; remote URLs are
+        # search/result thumbnails that read better as a compact grid.
+        is_generated = isinstance(image, dict) and bool(image.get("data")) and not image.get("url")
+        (generated if is_generated else thumbs).append(normalized)
+
+    if generated:
+        _render_thumbnail_gallery(
+            generated,
+            thumb_width=380,
+            thumb_height=0,
+            caption_max_chars=60,
+            align="left",
+            card_style=True,
+            natural=True,
+            indent_px=12,
+        )
+    if thumbs:
+        _render_thumbnail_gallery(
+            thumbs,
+            thumb_width=150,
+            thumb_height=120,
+            caption_max_chars=40,
+            align="left",
+            card_style=True,
+            indent_px=12,
+        )
 
 
 def get_message_metadata(msg: dict[str, Any]) -> dict[str, Any]:
@@ -7040,13 +7088,18 @@ def _render_inline_rich_item(
     auto_mount: bool,
 ) -> None:
     """Render a single rich-item record at its inline marker position."""
+    from app.core.rich_response import GENERIC_IMAGE_ALT_TEXT
+
     item_type = item.get("type")
     payload = item.get("payload") or {}
     if item_type == "image":
         url = payload.get("url")
         data = payload.get("data")
         mime = payload.get("mime_type") or "image/png"
-        caption = item.get("alt_text") or item.get("title")
+        alt_text = item.get("alt_text")
+        if alt_text == GENERIC_IMAGE_ALT_TEXT:
+            alt_text = None
+        caption = item.get("title") or alt_text
         if url:
             st.image(url, caption=caption, use_container_width=True)
         elif data:

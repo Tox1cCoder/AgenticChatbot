@@ -38,6 +38,11 @@ RICH_ITEMS_VERSION: int = 1
 #: Maximum length (in characters) of an item id.
 RICH_ITEM_ID_MAX_LENGTH: int = 128
 
+#: Fallback ``alt_text`` assigned to tool-result images that arrive without a
+#: description. It carries no descriptive signal, so auto-placement must not
+#: treat it as one and renderers must not surface it as a caption.
+GENERIC_IMAGE_ALT_TEXT: str = "Image from tool result"
+
 #: Allowed inline raster MIME types for image payloads.
 ALLOWED_IMAGE_MIME_TYPES: frozenset[str] = frozenset(
     {"image/png", "image/jpeg", "image/webp", "image/gif"}
@@ -456,9 +461,11 @@ def _payload_has_inline_binary(item: Any) -> bool:
 
 _INVENTORY_HEADER = "AVAILABLE RICH ITEMS FOR OPTIONAL INLINE PLACEMENT:"
 _INVENTORY_FOOTER = (
-    "To display an item inside your answer, put `<!--rich:<id>-->` on its own line.\n"
-    "Use only items that materially support the answer. For an image, write a concise\n"
-    "caption as normal markdown immediately after the marker. Do not invent item IDs."
+    "To display an item, copy its `<!--rich:...-->` marker (shown for that item) onto\n"
+    "its own line, keeping the `rich:` prefix exactly — do not shorten it to\n"
+    "`<!--<id>-->`. Use only items that materially support the answer. For an image,\n"
+    "write a concise caption as normal markdown immediately after the marker. Do not\n"
+    "invent item IDs."
 )
 
 
@@ -523,10 +530,11 @@ def build_rich_item_inventory_block(
         item_id = getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else None)
         item_type = _get_type(item) or "unknown"
         summary = _summary_text(item, summary_chars)
+        marker = f"<!--rich:{item_id}-->"
         if summary:
-            lines.append(f"- {item_id} | {item_type} | {summary}")
+            lines.append(f"- {marker} | {item_type} | {summary}")
         else:
-            lines.append(f"- {item_id} | {item_type}")
+            lines.append(f"- {marker} | {item_type}")
     lines.append("")
     lines.append(_INVENTORY_FOOTER)
     block = "\n".join(lines)
@@ -548,6 +556,7 @@ __all__ = [
     "ALLOWED_URL_SCHEMES",
     "CanvasPayload",
     "CanvasRichItem",
+    "GENERIC_IMAGE_ALT_TEXT",
     "CitationPayload",
     "CitationRichItem",
     "ImagePayload",

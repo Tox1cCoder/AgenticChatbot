@@ -3,7 +3,11 @@
 from types import SimpleNamespace
 
 from app.core.config import settings
-from app.core.rich_placement import auto_place_rich_items, finalize_article_content
+from app.core.rich_placement import (
+    _repair_unprefixed_markers,
+    auto_place_rich_items,
+    finalize_article_content,
+)
 from app.core.rich_response import parse_inline_rich_references
 
 IMAGE = "image"
@@ -253,3 +257,120 @@ def test_skips_items_with_unparseable_ids():
     )
     assert placed == []
     assert new_content == content
+
+
+# ---------------------------------------------------------------------------
+# Repair of model-authored markers that drop the required ``rich:`` prefix.
+# A model that writes ``<!--widget:<id>-->`` (id already namespaced) instead of
+# ``<!--rich:widget:<id>-->`` makes the marker invisible to every consumer: it
+# leaks as literal text and the item falls to the append-after-body fallback.
+# ---------------------------------------------------------------------------
+
+
+def test_repairs_bare_widget_marker_for_known_id():
+    content = "Intro paragraph.\n\n<!--widget:w1-->\n\nMore text."
+    out = _repair_unprefixed_markers(content, {"widget:w1"})
+    assert "<!--rich:widget:w1-->" in out
+    assert "\n<!--widget:w1-->\n" not in out
+
+
+def test_repairs_bare_image_marker_for_known_id():
+    content = "See below.\n\n<!--image:tool:c1:0-->"
+    out = _repair_unprefixed_markers(content, {"image:tool:c1:0"})
+    assert out.rstrip().endswith("<!--rich:image:tool:c1:0-->")
+
+
+def test_repair_leaves_unknown_comments_untouched():
+    content = "Intro.\n\n<!--widget:w1-->\n\n<!--TODO revisit this later-->"
+    out = _repair_unprefixed_markers(content, {"widget:w2"})
+    assert out == content
+
+
+def test_repair_ignores_already_correct_markers():
+    content = "Intro.\n\n<!--rich:widget:w1-->\n\nEnd."
+    out = _repair_unprefixed_markers(content, {"widget:w1"})
+    assert out == content
+
+
+def test_repair_skips_markers_inside_code_fence():
+    content = "```\n<!--widget:w1-->\n```"
+    out = _repair_unprefixed_markers(content, {"widget:w1"})
+    assert out == content
+
+
+def test_repair_noop_without_known_ids():
+    content = "Intro.\n\n<!--widget:w1-->"
+    assert _repair_unprefixed_markers(content, set()) == content
+
+
+def test_repaired_marker_becomes_referenced():
+    content = "Here is the breakdown.\n\n<!--widget:w1-->\n\nThat is the trend."
+    out = _repair_unprefixed_markers(content, {"widget:w1"})
+    assert parse_inline_rich_references(out) == ["widget:w1"]
+
+
+def test_image_placement_entries_skips_signalless_candidates():
+    from app.core.rich_placement import _image_placement_entries
+    from app.core.rich_response import GENERIC_IMAGE_ALT_TEXT
+
+    metadata = {
+        "_rich_item_candidates": [
+            {  # only the generic fallback → no real signal
+                "id": "image:tool:c1:4",
+                "type": "image",
+                "alt_text": GENERIC_IMAGE_ALT_TEXT,
+                "payload": {"url": "https://lookaside.instagram.com/seo/crawler"},
+            },
+            {  # genuine description → eligible
+                "id": "image:tool:c1:0",
+                "type": "image",
+                "alt_text": "Eiffel Tower at night",
+                "payload": {"description": "Eiffel Tower at night in Paris"},
+            },
+        ]
+    }
+    ids = [entry[0] for entry in _image_placement_entries(metadata)]
+    assert ids == ["image:tool:c1:0"]
+
+
+def test_generic_alt_text_image_is_not_auto_placed(monkeypatch):
+    """Regression: a description-less junk image matched a paragraph via the
+    generic fallback's 'tool'/'result' tokens and was auto-placed, rendering a
+    broken placeholder. Such images carry no signal and must never be placed."""
+    from app.core.rich_response import GENERIC_IMAGE_ALT_TEXT
+
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
+    content = "Here are the latest match results and tool output for the league."
+    candidate = {
+        "id": "image:tool:c1:4",
+        "type": "image",
+        "display_policy": "inline_only",
+        "alt_text": GENERIC_IMAGE_ALT_TEXT,
+        "payload": {"url": "https://lookaside.instagram.com/seo/crawler", "mime_type": "image/png"},
+    }
+    response = _make_response(content, candidates=[candidate])
+    assert finalize_article_content(response, content) == content
+
+
+def test_finalize_repairs_model_authored_bare_widget_marker(monkeypatch):
+    import json
+
+    monkeypatch.setattr(settings, "inline_rich_response_enabled", True)
+    monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
+    artifact = {
+        "tool": "widget_create",
+        "status": "success",
+        "output": json.dumps(
+            {"widget_id": "w1", "session_id": "s1", "widget_type": "chart",
+             "title": "Quarterly revenue", "status": "active", "version": 1}
+        ),
+    }
+    # The model placed the marker itself but dropped the ``rich:`` prefix.
+    content = "Here is the breakdown.\n\n<!--widget:w1-->\n\nThat is the trend."
+    response = _make_response(content, artifacts=[artifact])
+    new_content = finalize_article_content(response, content)
+    assert "<!--rich:widget:w1-->" in new_content
+    assert "\n<!--widget:w1-->\n" not in new_content
+    assert response.message.content == new_content
+    assert parse_inline_rich_references(new_content) == ["widget:w1"]

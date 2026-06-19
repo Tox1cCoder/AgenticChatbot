@@ -86,3 +86,4 @@ skills
 
 # Legacy offloaded tool results (pre-Postgres blobs)
 data/
+storage/

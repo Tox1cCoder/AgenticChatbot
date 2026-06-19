@@ -9,6 +9,7 @@ from anyio import BrokenResourceError, ClosedResourceError
 
 from ..core.config import settings
 from ..core.rich_response import (
+    GENERIC_IMAGE_ALT_TEXT,
     RichDisplayPolicy,
     RichItemType,
 )
@@ -119,7 +120,7 @@ def build_image_candidates_from_tool_result(
                 "type": RichItemType.image.value,
                 "source": "web_search" if tool_name == "tavily_search" else "tool_image",
                 "display_policy": RichDisplayPolicy.inline_only.value,
-                "alt_text": str(description or image.get("alt") or "Image from tool result"),
+                "alt_text": str(description or image.get("alt") or GENERIC_IMAGE_ALT_TEXT),
                 "title": image.get("title"),
                 "payload": payload,
                 "provenance": {

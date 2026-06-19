@@ -81,7 +81,10 @@ class AgentMessage(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     attachments: list[dict[str, str]] | None = Field(
         default=None,
-        description="Optional image attachments with structure {name: str, mime: str, data: str (base64)}",
+        description=(
+            "Optional image attachments with structure "
+            "{name: str, mime: str, data: str (base64)}"
+        ),
     )
     tool_calls: list[dict[str, Any]] | None = Field(
         default=None,
@@ -137,6 +140,7 @@ class WorkflowExecutionRequest(BaseModel):
     custom_agents: dict[str, Any] = Field(default_factory=dict)
     user_message_id: str | None = None
     assistant_message_id: str | None = None
+    inline_rich_response_v1: bool = False
 
 
 class ContinuationSignal(TypedDict, total=False):

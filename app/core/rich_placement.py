@@ -17,6 +17,7 @@ from .config import settings
 from .response_constants import extract_live_widgets_from_artifacts
 from .rich_response import (
     _ITEM_ID_PATTERN,  # noqa: PLC2701  # deliberate same-package reuse: inserter must mirror parser id rules
+    GENERIC_IMAGE_ALT_TEXT,
     RICH_ITEM_ID_MAX_LENGTH,
     RichItemType,
     _strip_fenced_code_blocks,  # noqa: PLC2701  # deliberate same-package reuse of CommonMark fence semantics
@@ -24,6 +25,11 @@ from .rich_response import (
 )
 
 _WORD_RE = re.compile(r"[a-z0-9]{3,}")
+
+#: A standalone HTML-comment line whose inner text uses the rich-item id
+#: charset. Used to detect markers the model wrote without the ``rich:``
+#: prefix so they can be repaired against the known-id set.
+_BARE_MARKER_LINE_RE = re.compile(r"^([ ]{0,3})<!--([A-Za-z0-9_\-.:]+)-->([ \t]*)$")
 
 #: Generic words that carry no placement signal for media descriptions.
 _STOPWORDS = frozenset(
@@ -149,6 +155,43 @@ def auto_place_rich_items(
     return "\n".join(out), placed
 
 
+def _repair_unprefixed_markers(content: str, known_ids: set[str]) -> str:
+    """Restore the ``rich:`` prefix on model-authored markers that dropped it.
+
+    Some models write ``<!--widget:<id>-->`` instead of the contract's
+    ``<!--rich:widget:<id>-->`` because the rich-item id already carries a
+    namespace (``widget:``/``image:``/...), so the canonical marker looks
+    redundant and the ``rich:`` prefix gets dropped. Every consumer (the marker
+    parser, the live-stream normalizer, the renderer) requires that prefix, so
+    such a marker leaks as literal text and leaves its item unreferenced — the
+    image is discarded and the widget falls to the append-after-body fallback.
+
+    A bare standalone marker whose inner text exactly matches a known available
+    rich-item id is rewritten to the canonical ``rich:`` form. Ids are
+    server-constructed, so an exact match is unambiguous: incidental HTML
+    comments never collide. Markers inside fenced code are left untouched,
+    mirroring ``parse_inline_rich_references``.
+    """
+    if not content or not known_ids or "<!--" not in content:
+        return content
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    in_fence = _strip_fenced_code_blocks(lines)
+    changed = False
+    for idx, (line, fenced) in enumerate(zip(lines, in_fence, strict=False)):
+        if fenced:
+            continue
+        match = _BARE_MARKER_LINE_RE.match(line)
+        if match is None:
+            continue
+        inner = match.group(2)
+        if inner.startswith("rich:") or inner not in known_ids:
+            continue
+        lines[idx] = f"{match.group(1)}<!--rich:{inner}-->{match.group(3)}"
+        changed = True
+    return "\n".join(lines) if changed else content
+
+
 def _widget_placement_entries(
     metadata: dict[str, Any], response_artifacts: list[dict[str, Any]] | None
 ) -> list[tuple[str, str, str]]:
@@ -182,11 +225,20 @@ def _image_placement_entries(metadata: dict[str, Any]) -> list[tuple[str, str, s
             continue
         payload = candidate.get("payload")
         description = payload.get("description") if isinstance(payload, dict) else None
+        alt_text = candidate.get("alt_text")
+        if alt_text == GENERIC_IMAGE_ALT_TEXT:
+            # The generic fallback is not a real description; using it as a
+            # placement signal lets junk images (e.g. crawler/SEO URLs) match a
+            # paragraph via tokens like "tool"/"result" and render broken.
+            alt_text = None
         text = " ".join(
-            str(part)
-            for part in (candidate.get("title"), candidate.get("alt_text"), description)
-            if part
+            str(part) for part in (candidate.get("title"), alt_text, description) if part
         )
+        if not text.strip():
+            # No genuine descriptive signal → never auto-place; it cannot be
+            # relevance-matched or captioned. The model may still place it
+            # explicitly if it judges the image useful.
+            continue
         entries.append((item_id, RichItemType.image.value, text))
     return entries
 
@@ -215,13 +267,17 @@ def finalize_article_content(response: Any, content: str) -> str:
     if not items:
         return content
 
-    new_content, placed = auto_place_rich_items(
-        content,
+    # Repair markers the model authored without the ``rich:`` prefix first, so
+    # the now-canonical marker is recognized as a reference (the item renders
+    # inline) and auto-placement does not place a second copy of it.
+    repaired = _repair_unprefixed_markers(content, {entry[0] for entry in items})
+    new_content, _placed = auto_place_rich_items(
+        repaired,
         items=items,
         max_images=settings.rich_auto_place_max_images,
         min_score=settings.rich_auto_place_min_score,
     )
-    if not placed:
+    if new_content == content:
         return content
 
     message = getattr(response, "message", None)
