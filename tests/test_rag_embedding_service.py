@@ -29,7 +29,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -199,8 +199,8 @@ def test_embed_documents_preserves_input_order_across_batches(monkeypatch):
 
     # Each batch returns distinctly recognisable vectors so we can tell
     # which batch supplied which result position.
-    batch_a = _make_response([1.0], [2.0])   # texts 0, 1
-    batch_b = _make_response([3.0], [4.0])   # texts 2, 3
+    batch_a = _make_response([1.0], [2.0])  # texts 0, 1
+    batch_b = _make_response([3.0], [4.0])  # texts 2, 3
 
     # Use a lock-protected list to supply responses in call order rather than
     # relying on side_effect ordering (which is call-count based, safe here).
@@ -218,9 +218,7 @@ def test_embed_documents_preserves_input_order_across_batches(monkeypatch):
 
     client.models.embed_content.side_effect = fake_embed_content
 
-    vectors = service.embed_documents(
-        ["a", "b", "c", "d"], titles=["t1", "t2", "t3", "t4"]
-    )
+    vectors = service.embed_documents(["a", "b", "c", "d"], titles=["t1", "t2", "t3", "t4"])
 
     assert len(vectors) == 4
     assert vectors[0] == [1.0]
@@ -291,9 +289,7 @@ def test_embed_documents_concurrency_cap_respected(monkeypatch):
     )
 
     # 6 texts → 6 single-item batches.
-    client.models.embed_content.side_effect = [
-        _make_response([float(i)]) for i in range(6)
-    ]
+    client.models.embed_content.side_effect = [_make_response([float(i)]) for i in range(6)]
 
     executor_init_kwargs: list[dict] = []
     _original_executor = ThreadPoolExecutor
@@ -312,6 +308,5 @@ def test_embed_documents_concurrency_cap_respected(monkeypatch):
 
     assert executor_init_kwargs, "ThreadPoolExecutor must be instantiated"
     assert executor_init_kwargs[0].get("max_workers") == 2, (
-        f"max_workers must equal embedding_max_concurrency=2; "
-        f"got {executor_init_kwargs[0]}"
+        f"max_workers must equal embedding_max_concurrency=2; got {executor_init_kwargs[0]}"
     )

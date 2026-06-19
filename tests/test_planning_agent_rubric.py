@@ -58,8 +58,14 @@ async def test_generate_plan_attaches_satisfied_rubric_metadata(monkeypatch):
         context_window = None
         fallback_config = None
 
-    monkeypatch.setattr(agent, "_resolve_runtime_model_config", lambda *_args, **_kwargs: _Runtime())
-    monkeypatch.setattr(agent, "_create_langchain_model_from_runtime", lambda *_args, **_kwargs: (_FakeToolModel(), False))
+    monkeypatch.setattr(
+        agent, "_resolve_runtime_model_config", lambda *_args, **_kwargs: _Runtime()
+    )
+    monkeypatch.setattr(
+        agent,
+        "_create_langchain_model_from_runtime",
+        lambda *_args, **_kwargs: (_FakeToolModel(), False),
+    )
 
     responses = [
         AIMessage(content="", tool_calls=[_todo_call("Implement native planning rubric grading")]),
@@ -82,7 +88,9 @@ async def test_generate_plan_attaches_satisfied_rubric_metadata(monkeypatch):
     )
 
     assert response.error is None
-    assert response.metadata["todos"][0]["description"] == "Implement native planning rubric grading"
+    assert (
+        response.metadata["todos"][0]["description"] == "Implement native planning rubric grading"
+    )
     assert response.metadata["planning_rubric"]["status"] == "satisfied"
     assert response.metadata["planning_rubric"]["iterations"] == 1
 
@@ -104,8 +112,14 @@ async def test_generate_plan_revises_after_needs_revision(monkeypatch):
         context_window = None
         fallback_config = None
 
-    monkeypatch.setattr(agent, "_resolve_runtime_model_config", lambda *_args, **_kwargs: _Runtime())
-    monkeypatch.setattr(agent, "_create_langchain_model_from_runtime", lambda *_args, **_kwargs: (_FakeToolModel(), False))
+    monkeypatch.setattr(
+        agent, "_resolve_runtime_model_config", lambda *_args, **_kwargs: _Runtime()
+    )
+    monkeypatch.setattr(
+        agent,
+        "_create_langchain_model_from_runtime",
+        lambda *_args, **_kwargs: (_FakeToolModel(), False),
+    )
 
     responses = [
         AIMessage(content="", tool_calls=[_todo_call("Fix backend")]),
@@ -164,8 +178,14 @@ async def test_generate_plan_marks_max_iterations_reached(monkeypatch):
         context_window = None
         fallback_config = None
 
-    monkeypatch.setattr(agent, "_resolve_runtime_model_config", lambda *_args, **_kwargs: _Runtime())
-    monkeypatch.setattr(agent, "_create_langchain_model_from_runtime", lambda *_args, **_kwargs: (_FakeToolModel(), False))
+    monkeypatch.setattr(
+        agent, "_resolve_runtime_model_config", lambda *_args, **_kwargs: _Runtime()
+    )
+    monkeypatch.setattr(
+        agent,
+        "_create_langchain_model_from_runtime",
+        lambda *_args, **_kwargs: (_FakeToolModel(), False),
+    )
 
     responses = [
         AIMessage(content="", tool_calls=[_todo_call("Fix backend")]),
@@ -208,8 +228,14 @@ async def test_generate_plan_marks_grader_error(monkeypatch):
         context_window = None
         fallback_config = None
 
-    monkeypatch.setattr(agent, "_resolve_runtime_model_config", lambda *_args, **_kwargs: _Runtime())
-    monkeypatch.setattr(agent, "_create_langchain_model_from_runtime", lambda *_args, **_kwargs: (_FakeToolModel(), False))
+    monkeypatch.setattr(
+        agent, "_resolve_runtime_model_config", lambda *_args, **_kwargs: _Runtime()
+    )
+    monkeypatch.setattr(
+        agent,
+        "_create_langchain_model_from_runtime",
+        lambda *_args, **_kwargs: (_FakeToolModel(), False),
+    )
 
     responses = [
         AIMessage(content="", tool_calls=[_todo_call("Implement native planning rubric grading")]),

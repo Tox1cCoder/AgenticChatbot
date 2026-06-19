@@ -157,9 +157,7 @@ class DocumentService(IDocumentService):
                 self.repository.delete(existing.id)
             else:
                 raise DuplicateDocumentFilenameError(
-                    detail=(
-                        f"A document named '{filename}' already exists in this conversation."
-                    )
+                    detail=(f"A document named '{filename}' already exists in this conversation.")
                 )
 
         document_data = DocumentCreate(

@@ -74,9 +74,7 @@ def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
     if event.type == "state_snapshot":
         legacy_type = event.data.get("legacy_type")
         if legacy_type in {"node_complete", "continuation_start"}:
-            payload = {
-                key: value for key, value in event.data.items() if key != "legacy_type"
-            }
+            payload = {key: value for key, value in event.data.items() if key != "legacy_type"}
             payload["type"] = legacy_type
             if legacy_type == "node_complete" and "node" not in payload and event.node:
                 payload["node"] = event.node
@@ -86,8 +84,7 @@ def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
         message = event.data.get("message")
         payload = {
             "type": "error",
-            "error": event.data.get("error")
-            or (message if isinstance(message, str) else None),
+            "error": event.data.get("error") or (message if isinstance(message, str) else None),
         }
         if isinstance(message, dict):
             # Streamlit renders the persisted error bot message directly.

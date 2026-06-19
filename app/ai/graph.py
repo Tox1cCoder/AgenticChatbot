@@ -4106,9 +4106,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     data.get("chunk"), data.get("metadata"), ctx
                 )
             elif kind == "updates_tuple":
-                yield from self._map_legacy_update_node(
-                    event.node, data.get("node_state"), ctx
-                )
+                yield from self._map_legacy_update_node(event.node, data.get("node_state"), ctx)
             elif kind == "values":
                 yield from self._map_v3_values_snapshot(data, ctx)
             return
@@ -4349,8 +4347,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 (
                     msg
                     for msg in reversed(new_messages)
-                    if isinstance(msg, AIMessage)
-                    and getattr(msg, "tool_calls", None)
+                    if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None)
                 ),
                 None,
             )
@@ -4362,9 +4359,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                         "id": normalized_tc.get("id"),
                         "args": make_json_safe(normalized_tc.get("args", {})),
                     }
-                    for normalized_tc in (
-                        normalize_tool_call(tc) for tc in planning_ai.tool_calls
-                    )
+                    for normalized_tc in (normalize_tool_call(tc) for tc in planning_ai.tool_calls)
                 ]
                 yield {"type": "node_complete", **node_info}
 

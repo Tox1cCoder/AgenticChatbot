@@ -316,8 +316,7 @@ class PlanningAgent(BaseAgent):
             prompt += (
                 "\n\n# PLANNING RUBRIC FEEDBACK\n"
                 "Revise the plan by calling write_todos. Do not answer in prose until "
-                "the rubric feedback is resolved.\n"
-                + planning_rubric_feedback.strip()
+                "the rubric feedback is resolved.\n" + planning_rubric_feedback.strip()
             )
 
         return prompt

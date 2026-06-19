@@ -114,9 +114,7 @@ class AISDKV6StreamAdapter:
             while True:
                 if pending_next is None:
                     pending_next = asyncio.create_task(anext(source))
-                done, _ = await asyncio.wait(
-                    {pending_next}, timeout=self._heartbeat_interval
-                )
+                done, _ = await asyncio.wait({pending_next}, timeout=self._heartbeat_interval)
                 if not done:
                     yield make_event("heartbeat", sequence=0)
                     continue
@@ -265,9 +263,7 @@ class AISDKV6StreamAdapter:
         tool_name = event.tool_name or "unknown"
         if tool_call_id not in state.pending_tool_call_ids:
             state.pending_tool_call_ids.append(tool_call_id)
-        yield _sse(
-            {"type": "tool-input-start", "toolCallId": tool_call_id, "toolName": tool_name}
-        )
+        yield _sse({"type": "tool-input-start", "toolCallId": tool_call_id, "toolName": tool_name})
         yield _sse(
             {
                 "type": "tool-input-available",

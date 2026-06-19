@@ -216,9 +216,7 @@ async def test_ai_sdk_complete_does_not_emit_unselected_image_file_parts():
                     "content": "No relevant image selected.",
                     "message_metadata": {
                         "rich_items_version": 1,
-                        "images": [
-                            {"url": "https://img.test/hidden.png", "mime": "image/png"}
-                        ],
+                        "images": [{"url": "https://img.test/hidden.png", "mime": "image/png"}],
                         "rich_items": [],
                     },
                 }

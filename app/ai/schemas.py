@@ -82,8 +82,7 @@ class AgentMessage(BaseModel):
     attachments: list[dict[str, str]] | None = Field(
         default=None,
         description=(
-            "Optional image attachments with structure "
-            "{name: str, mime: str, data: str (base64)}"
+            "Optional image attachments with structure {name: str, mime: str, data: str (base64)}"
         ),
     )
     tool_calls: list[dict[str, Any]] | None = Field(

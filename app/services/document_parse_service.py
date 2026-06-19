@@ -245,9 +245,7 @@ class DocumentParseService:
                 "true" if getattr(self.settings, "extract_tables_from_pdf", True) else "false"
             )
 
-            method = (
-                str(getattr(self.settings, "mineru_method", "auto") or "auto").strip().lower()
-            )
+            method = str(getattr(self.settings, "mineru_method", "auto") or "auto").strip().lower()
             valid_methods = {"auto", "txt", "ocr"}
             if method not in valid_methods:
                 raise ValueError(
@@ -331,9 +329,7 @@ class DocumentParseService:
             markdown_file = self._resolve_markdown_file(search_roots, filename_aliases)
             images_dir = markdown_file.parent / "images"
 
-            content_list_path = (
-                markdown_file.parent / f"{markdown_file.stem}_content_list.json"
-            )
+            content_list_path = markdown_file.parent / f"{markdown_file.stem}_content_list.json"
             content_blocks = None
 
             if content_list_path.exists():
@@ -446,9 +442,7 @@ class DocumentParseService:
                 self.settings.mineru_timeout,
                 file_path,
             )
-            raise RuntimeError(
-                f"MinerU timed out after {self.settings.mineru_timeout}s"
-            ) from exc
+            raise RuntimeError(f"MinerU timed out after {self.settings.mineru_timeout}s") from exc
         except subprocess.CalledProcessError as exc:
             backend_for_log = locals().get(
                 "backend", getattr(self.settings, "mineru_backend", "pipeline")
@@ -461,12 +455,8 @@ class DocumentParseService:
             )
             raise RuntimeError(f"MinerU failed (exit {exc.returncode})") from exc
         except Exception as exc:
-            logger.error(
-                "Unexpected MinerU error while processing %s: %s", file_path, exc
-            )
-            raise RuntimeError(
-                f"Unexpected error in MinerU processing: {str(exc)}"
-            ) from exc
+            logger.error("Unexpected MinerU error while processing %s: %s", file_path, exc)
+            raise RuntimeError(f"Unexpected error in MinerU processing: {str(exc)}") from exc
 
     def _legacy_char_chunk_size(self) -> int:
         """Approximate char count for a target-token chunk (~4 chars/token heuristic)."""
@@ -557,9 +547,7 @@ class DocumentParseService:
             formula_workbook.close()
             value_workbook.close()
 
-    def _extract_excel_rows(
-        self, formula_sheet: Any, value_sheet: Any | None
-    ) -> list[list[str]]:
+    def _extract_excel_rows(self, formula_sheet: Any, value_sheet: Any | None) -> list[list[str]]:
         rows: list[list[str]] = []
         value_rows = value_sheet.iter_rows() if value_sheet is not None else None
 
@@ -592,8 +580,7 @@ class DocumentParseService:
 
         padded_rows = [row + [""] * (column_count - len(row)) for row in rows]
         header = [
-            value if value else f"Column {index + 1}"
-            for index, value in enumerate(padded_rows[0])
+            value if value else f"Column {index + 1}" for index, value in enumerate(padded_rows[0])
         ]
         data_rows = padded_rows[1:]
 
@@ -604,9 +591,7 @@ class DocumentParseService:
             "| " + " | ".join("---" for _ in header) + " |",
         ]
         for row in data_rows:
-            lines.append(
-                "| " + " | ".join(cls._escape_markdown_table_cell(v) for v in row) + " |"
-            )
+            lines.append("| " + " | ".join(cls._escape_markdown_table_cell(v) for v in row) + " |")
 
         return "\n".join(lines).strip()
 
@@ -620,12 +605,7 @@ class DocumentParseService:
 
     @staticmethod
     def _escape_markdown_table_cell(value: str) -> str:
-        return (
-            value.replace("\\", "\\\\")
-            .replace("|", "\\|")
-            .replace("\r", " ")
-            .replace("\n", " ")
-        )
+        return value.replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
     def _parse_content_list_json(self, content_list_path: Path) -> list[dict[str, Any]]:
         """Parse MinerU's content_list.json into structured content blocks."""
@@ -939,9 +919,7 @@ class DocumentParseService:
                     path
                     for path in root.rglob("*")
                     if path.is_file()
-                    and (
-                        path.suffix.lower() in markdown_suffixes or _is_markdown_file(path)
-                    )
+                    and (path.suffix.lower() in markdown_suffixes or _is_markdown_file(path))
                 ),
                 key=lambda p: (len(p.parts), p.stat().st_mtime),
             )
@@ -1010,9 +988,7 @@ class DocumentParseService:
             unique_roots.append(default_output_root)
 
         if not unique_roots:
-            raise RuntimeError(
-                f"MinerU output missing markdown file for {ordered_candidates[0]}"
-            )
+            raise RuntimeError(f"MinerU output missing markdown file for {ordered_candidates[0]}")
 
         searched_roots: list[Path] = []
         for root in unique_roots:
@@ -1027,6 +1003,4 @@ class DocumentParseService:
                     )
                 return result
 
-        raise RuntimeError(
-            f"MinerU output missing markdown file for {ordered_candidates[0]}"
-        )
+        raise RuntimeError(f"MinerU output missing markdown file for {ordered_candidates[0]}")

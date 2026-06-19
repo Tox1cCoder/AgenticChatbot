@@ -14,9 +14,7 @@ from app.services.ai_service import AIService
 
 
 def test_to_ai_request_preserves_inline_rich_response_flag():
-    req = WorkflowExecutionRequest(
-        message="hi", conversation_id="c1", inline_rich_response_v1=True
-    )
+    req = WorkflowExecutionRequest(message="hi", conversation_id="c1", inline_rich_response_v1=True)
     ai_req = AIService._to_ai_request(req)
     assert ai_req.inline_rich_response_v1 is True
 

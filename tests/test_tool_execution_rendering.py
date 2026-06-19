@@ -139,4 +139,3 @@ def test_lookup_tool_render_payload_from_state_context():
 
     assert render["type"] == "mcp_app"
     assert render["template_uri"] == "ui://canva/presentation-viewer.html"
-

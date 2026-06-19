@@ -58,8 +58,6 @@ def test_corrupt_identity_file_is_regenerated(tmp_path):
 def test_identifier_is_not_machine_derived(tmp_path):
     """Random per-installation identity: a fresh directory must never
     reproduce another directory's identifier (the old machine-hash did)."""
-    identifiers = {
-        generate_device_identifier(tmp_path / f"install-{i}") for i in range(3)
-    }
+    identifiers = {generate_device_identifier(tmp_path / f"install-{i}") for i in range(3)}
 
     assert len(identifiers) == 3

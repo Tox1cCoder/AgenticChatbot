@@ -130,10 +130,7 @@ class GeminiRAGEmbeddingService:
 
         pairs = list(zip(texts, titles, strict=True))
         batch_size = self.embedding_batch_size
-        batches = [
-            pairs[start : start + batch_size]
-            for start in range(0, len(pairs), batch_size)
-        ]
+        batches = [pairs[start : start + batch_size] for start in range(0, len(pairs), batch_size)]
 
         # Submit all batches concurrently; collect results in submission order
         # to preserve input ordering.

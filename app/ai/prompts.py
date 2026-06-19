@@ -52,7 +52,8 @@ def build_rich_response_guidance(
     return f"{inventory}\n\n{INLINE_RICH_RESPONSE_SUFFIX}"
 
 
-CHAT_SYSTEM_PROMPT = """You are an expert AI assistant and knowledgeable conversationalist. Provide accurate, thorough, and genuinely useful responses.
+CHAT_SYSTEM_PROMPT = (
+    """You are an expert AI assistant and knowledgeable conversationalist. Provide accurate, thorough, and genuinely useful responses.
 
 All questions should be answered comprehensively with details, unless the user specifically requests a concise response. For simple factual questions, be direct and clear. For complex topics, provide thorough explanations with depth.
 
@@ -93,9 +94,12 @@ Critical:
 - Do NOT fabricate information - use tools to verify when uncertain
 - Do NOT ignore tool results - meaningfully incorporate them into your answer
 - Always respond in the same language the user is using
-- If you cannot help, explain why clearly and suggest alternatives""" + MEDIA_CAPABILITY_SNIPPET
+- If you cannot help, explain why clearly and suggest alternatives"""
+    + MEDIA_CAPABILITY_SNIPPET
+)
 
-RAG_SYSTEM_PROMPT = """You are an expert document analyst specializing in extracting, synthesizing, and explaining information from provided documents.
+RAG_SYSTEM_PROMPT = (
+    """You are an expert document analyst specializing in extracting, synthesizing, and explaining information from provided documents.
 
 Answer questions using ONLY the document context provided below. All factual claims must be grounded in the documents. Be thorough and insightful in your analysis - don't give shallow summaries.
 
@@ -123,9 +127,12 @@ Constraints:
 - NEVER use your general knowledge instead of the document content
 - ALWAYS cite sources for every factual claim
 - For calculations on document data, show your work step-by-step
-- Match the user's language exactly""" + MEDIA_CAPABILITY_SNIPPET
+- Match the user's language exactly"""
+    + MEDIA_CAPABILITY_SNIPPET
+)
 
-AGENTIC_RAG_SYSTEM_PROMPT = """You are an expert document exploration agent with systematic research capabilities. Thoroughly explore documents to find, synthesize, and explain information comprehensively.
+AGENTIC_RAG_SYSTEM_PROMPT = (
+    """You are an expert document exploration agent with systematic research capabilities. Thoroughly explore documents to find, synthesize, and explain information comprehensively.
 
 Your primary tool is search_documents with these actions:
 - SCAN_ALL: Preview all documents at once (ALWAYS start with this)
@@ -178,9 +185,12 @@ Critical:
 - Be THOROUGH - provide depth when documents contain detailed information
 - Follow cross-references by backtracking when discovered
 - Cite every factual claim with source and location
-- Match the user's language""" + MEDIA_CAPABILITY_SNIPPET
+- Match the user's language"""
+    + MEDIA_CAPABILITY_SNIPPET
+)
 
-SEARCH_SYSTEM_PROMPT = """You are an expert research assistant with access to web search and other tools. Provide accurate, comprehensive, and current information backed by verified sources.
+SEARCH_SYSTEM_PROMPT = (
+    """You are an expert research assistant with access to web search and other tools. Provide accurate, comprehensive, and current information backed by verified sources.
 
 All questions should be answered comprehensively with details and thorough research. Don't provide superficial answers when depth is possible.
 
@@ -233,7 +243,9 @@ Constraints:
 - NEVER fabricate sources or URLs
 - ALWAYS extract title and url from search results and format as [Title](URL)
 - ACKNOWLEDGE when sources conflict or information is uncertain
-- Match the user's language""" + MEDIA_CAPABILITY_SNIPPET
+- Match the user's language"""
+    + MEDIA_CAPABILITY_SNIPPET
+)
 
 IMAGE_GENERATOR_SYSTEM_PROMPT = """You are a creative visual artist and prompt engineer specializing in crafting detailed, evocative image generation prompts.
 
@@ -436,7 +448,8 @@ def build_chat_prompt(
     return "\n".join(parts)
 
 
-SEARCH_WITH_RESULTS_SYSTEM_PROMPT = """You are a research assistant with tool results available.
+SEARCH_WITH_RESULTS_SYSTEM_PROMPT = (
+    """You are a research assistant with tool results available.
 
 You have already called some tools. Their results are in the messages above.
 
@@ -464,7 +477,9 @@ RESPONSE FORMAT:
 - Never write [Source Name] without the URL
 - Support claims with evidence from the tool results
 
-LANGUAGE: Match the user's language.""" + MEDIA_CAPABILITY_SNIPPET
+LANGUAGE: Match the user's language."""
+    + MEDIA_CAPABILITY_SNIPPET
+)
 
 
 def build_search_prompt(

@@ -1,12 +1,9 @@
 import asyncio
 import io
-import json
 import logging
-import mimetypes
 import os
 import re
 import shutil
-import subprocess
 import time
 import unicodedata
 import uuid
@@ -20,7 +17,6 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 from langchain_community.document_loaders import TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from PIL import Image
 
 from app.core.config import Settings
@@ -435,9 +431,7 @@ class DocumentProcessingService:
         """Delegate Excel workbook parsing to DocumentParseService."""
         return self._get_parse_service()._process_excel_workbook(file_path, original_filename)
 
-    def _extract_excel_rows(
-        self, formula_sheet: Any, value_sheet: Any | None
-    ) -> list[list[str]]:
+    def _extract_excel_rows(self, formula_sheet: Any, value_sheet: Any | None) -> list[list[str]]:
         """Delegate to parse service."""
         return self._get_parse_service()._extract_excel_rows(formula_sheet, value_sheet)
 
@@ -558,7 +552,7 @@ class DocumentProcessingService:
         doc_storage_path.mkdir(parents=True, exist_ok=True)
 
         # Phase 1: copy files, collect caption candidates
-        candidates = []   # (img_data, dest_path, metadata_caption)
+        candidates = []  # (img_data, dest_path, metadata_caption)
         seen_source_paths: set[str] = set()
 
         for img_data in images_data:
@@ -599,7 +593,10 @@ class DocumentProcessingService:
                             caption = generated
                     except Exception as e:
                         logger.error(
-                            "Failed to generate caption for %s: %s", dest_path.name, e, exc_info=True
+                            "Failed to generate caption for %s: %s",
+                            dest_path.name,
+                            e,
+                            exc_info=True,
                         )
             try:
                 relative_image_path = dest_path.relative_to(Path.cwd())

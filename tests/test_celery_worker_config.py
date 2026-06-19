@@ -8,7 +8,9 @@ from __future__ import annotations
 from .conftest import FakePopen
 
 
-def _captured_cmds(monkeypatch, *, system: str, env: dict[str, str] | None = None) -> list[list[str]]:
+def _captured_cmds(
+    monkeypatch, *, system: str, env: dict[str, str] | None = None
+) -> list[list[str]]:
     """Return [parse_cmd, index_cmd] spawned by start_worker()."""
     spawned: list[list[str]] = []
 

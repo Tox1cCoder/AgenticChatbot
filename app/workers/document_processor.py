@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 import shutil
@@ -77,7 +78,9 @@ def _emit_failed(document_id: str, filename: str, task_id: str, exc: Exception):
             )
         )
     except Exception:
-        logger.warning("Failed to emit PROCESSING_FAILED event for document %s", document_id, exc_info=True)
+        logger.warning(
+            "Failed to emit PROCESSING_FAILED event for document %s", document_id, exc_info=True
+        )
 
 
 def _cleanup_parse_artifacts(temp_file_path: str, document_id: str):
@@ -204,7 +207,7 @@ def parse_document_task(self, document_id: str, temp_file_path: str, filename: s
         )
         if retryable:
             cleanup_staged_file = False
-            retry_delay = min(300, 60 * (2 ** self.request.retries))
+            retry_delay = min(300, 60 * (2**self.request.retries))
             logger.info(
                 f"Retrying parse_document_task {task_id} for document {document_id} "
                 f"(attempt {self.request.retries + 1}/{self.max_retries}) in {retry_delay}s"
@@ -215,8 +218,7 @@ def parse_document_task(self, document_id: str, temp_file_path: str, filename: s
         _mark_document(document_repo, document_id, DocumentStatus.FAILED)
         _emit_failed(document_id, filename, task_id, exc)
         logger.error(
-            f"Document {document_id} ('{filename}') parse failed after "
-            f"{self.max_retries} attempts"
+            f"Document {document_id} ('{filename}') parse failed after {self.max_retries} attempts"
         )
         raise
 
@@ -375,7 +377,7 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
         )
 
         # Emit PROCESSING_COMPLETED event
-        try:
+        with contextlib.suppress(Exception):
             _run_async(
                 get_event_bus().emit(
                     DocumentEvent.PROCESSING_COMPLETED,
@@ -400,8 +402,6 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
                     ),
                 )
             )
-        except Exception:
-            pass
 
         return {
             "success": True,
@@ -426,7 +426,7 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
             exc, (FileNotFoundError, ValueError)
         )
         if retryable:
-            retry_delay = min(300, 60 * (2 ** self.request.retries))
+            retry_delay = min(300, 60 * (2**self.request.retries))
             logger.info(
                 f"Retrying index_document_task {task_id} for artifact {artifact_id} "
                 f"(attempt {self.request.retries + 1}/{self.max_retries}) in {retry_delay}s"
@@ -441,11 +441,11 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
         else:
             logger.error(
                 "index_document_task: cannot mark document FAILED — document_id unknown "
-                "(artifact_id=%s, error=%s)", artifact_id, exc
+                "(artifact_id=%s, error=%s)",
+                artifact_id,
+                exc,
             )
-        logger.error(
-            f"Artifact {artifact_id} indexing failed after {self.max_retries} attempts"
-        )
+        logger.error(f"Artifact {artifact_id} indexing failed after {self.max_retries} attempts")
         raise exc  # Let Celery see this as a failure
 
 
@@ -461,9 +461,7 @@ def index_document_task(self, artifact_id: str) -> dict[str, Any]:
     default_retry_delay=60,
     name="app.workers.document_processor.process_document_task",
 )
-def process_document_task(
-    self, document_id: str, temp_file_path: str, filename: str
-) -> str:
+def process_document_task(self, document_id: str, temp_file_path: str, filename: str) -> str:
     """Compatibility shim: enqueues the parse→index chain.
 
     Handles any tasks already in the queue at deploy time that reference

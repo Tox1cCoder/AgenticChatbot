@@ -216,9 +216,7 @@ class V3ProtocolTranslator:
             yield from self._translate_updates(data, namespace)
         # tasks / checkpoints / custom channels are not consumed today.
 
-    def _translate_messages(
-        self, data: Any, namespace: list[str]
-    ) -> Iterable[V3StreamEvent]:
+    def _translate_messages(self, data: Any, namespace: list[str]) -> Iterable[V3StreamEvent]:
         message_event, metadata = _message_event_and_metadata(data)
         if message_event is None:
             return
@@ -356,9 +354,7 @@ class V3ProtocolTranslator:
             },
         )
 
-    def _translate_updates(
-        self, data: Any, namespace: list[str]
-    ) -> Iterable[V3StreamEvent]:
+    def _translate_updates(self, data: Any, namespace: list[str]) -> Iterable[V3StreamEvent]:
         if not isinstance(data, dict):
             return
         node = data.get("node")
@@ -374,9 +370,7 @@ class V3ProtocolTranslator:
             },
         )
 
-    def _translate_lifecycle(
-        self, data: Any, namespace: list[str]
-    ) -> Iterable[V3StreamEvent]:
+    def _translate_lifecycle(self, data: Any, namespace: list[str]) -> Iterable[V3StreamEvent]:
         if not isinstance(data, dict):
             return
         event_name = data.get("event")

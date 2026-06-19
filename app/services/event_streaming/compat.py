@@ -61,6 +61,7 @@ def infer_tool_state(
         return "unknown"
     return "error" if _looks_like_tool_error(result) else "completed"
 
+
 _DIRECT_EVENT_TYPES: set[str] = {
     "agent_selected",
     "rich_items",

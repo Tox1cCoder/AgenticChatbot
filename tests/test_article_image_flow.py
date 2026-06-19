@@ -74,8 +74,14 @@ def test_irrelevant_image_stays_dropped(monkeypatch):
     monkeypatch.setattr(settings, "rich_auto_place_enabled", True)
 
     irrelevant = json.dumps(
-        {"images": [{"url": "https://example.com/cat.jpg",
-                     "description": "A cat sleeping on a windowsill"}]}
+        {
+            "images": [
+                {
+                    "url": "https://example.com/cat.jpg",
+                    "description": "A cat sleeping on a windowsill",
+                }
+            ]
+        }
     )
     candidates = build_image_candidates_from_tool_result(
         irrelevant, tool_call_id="call-2", tool_name="tavily_search"

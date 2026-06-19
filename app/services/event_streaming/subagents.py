@@ -82,9 +82,7 @@ class SubagentEventSink:
 # state — only an opaque string token does. The registry holds weak references:
 # the streaming generator owns the only strong reference, so a sink (and its
 # registry entry) dies with its stream and resumed runs simply resolve to None.
-_SINK_REGISTRY: weakref.WeakValueDictionary[str, SubagentEventSink] = (
-    weakref.WeakValueDictionary()
-)
+_SINK_REGISTRY: weakref.WeakValueDictionary[str, SubagentEventSink] = weakref.WeakValueDictionary()
 
 
 def register_subagent_event_sink(sink: SubagentEventSink) -> str:

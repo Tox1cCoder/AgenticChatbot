@@ -21,7 +21,6 @@ from app.schemas.document import DocumentStatus
 from app.services.document_parse_service import DocumentParseService, ParseResult
 from app.workers.celery_app import celery_app
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -58,13 +57,9 @@ def _fake_artifact(document_id: str, artifact_id=None, storage_path: str | None 
 def _minimal_parse_result(n_chunks: int = 2, n_images: int = 0) -> ParseResult:
     return ParseResult(
         chunks_with_metadata=[
-            {"text": f"chunk {i}", "page_start": i, "page_end": i}
-            for i in range(n_chunks)
+            {"text": f"chunk {i}", "page_start": i, "page_end": i} for i in range(n_chunks)
         ],
-        images_data=[
-            {"file_path": f"/tmp/img_{i}.png", "page": i}
-            for i in range(n_images)
-        ],
+        images_data=[{"file_path": f"/tmp/img_{i}.png", "page": i} for i in range(n_images)],
         parse_elapsed_s=0.5,
         backend_used="pipeline",
     )
@@ -87,9 +82,7 @@ def _make_mock_session_local(monkeypatch, owner_id: UUID | None = None):
     mock_cm = MagicMock()
     mock_cm.__enter__ = MagicMock(return_value=mock_session)
     mock_cm.__exit__ = MagicMock(return_value=False)
-    monkeypatch.setattr(
-        "app.workers.document_processor.SessionLocal", lambda: mock_cm
-    )
+    monkeypatch.setattr("app.workers.document_processor.SessionLocal", lambda: mock_cm)
     return mock_session, mock_cm
 
 
@@ -108,9 +101,7 @@ def _make_mock_doc_repo(monkeypatch, document: SimpleNamespace):
 def _make_mock_event_bus(monkeypatch):
     mock_bus = MagicMock()
     mock_bus.emit = AsyncMock()
-    monkeypatch.setattr(
-        "app.workers.document_processor.get_event_bus", lambda: mock_bus
-    )
+    monkeypatch.setattr("app.workers.document_processor.get_event_bus", lambda: mock_bus)
     return mock_bus
 
 
@@ -133,7 +124,7 @@ def test_artifact_roundtrip_preserves_all_fields(tmp_path):
 
     # Mock artifact repo: replace_for_document returns a real-looking artifact
     # with the actual storage path computed by the service.
-    artifact_path = tmp_path / document_id / "normalized_chunks.json"
+    tmp_path / document_id / "normalized_chunks.json"
 
     def _fake_replace_for_document(*, document_id: UUID, artifacts: list):
         row = artifacts[0]
@@ -157,13 +148,9 @@ def test_artifact_roundtrip_preserves_all_fields(tmp_path):
 
     parse_result = ParseResult(
         chunks_with_metadata=[
-            {"text": f"chunk {i}", "page_start": i, "page_end": i + 1}
-            for i in range(3)
+            {"text": f"chunk {i}", "page_start": i, "page_end": i + 1} for i in range(3)
         ],
-        images_data=[
-            {"file_path": f"/tmp/img_{i}.png", "page": i}
-            for i in range(2)
-        ],
+        images_data=[{"file_path": f"/tmp/img_{i}.png", "page": i} for i in range(2)],
         parse_elapsed_s=1.23,
         backend_used="pipeline",
     )
@@ -201,7 +188,7 @@ def test_parse_task_returns_artifact_id_string(tmp_path, monkeypatch):
     temp_file.write_text("Hello world", encoding="utf-8")
 
     fake_doc = _fake_document(document_id)
-    mock_doc_repo = _make_mock_doc_repo(monkeypatch, fake_doc)
+    _make_mock_doc_repo(monkeypatch, fake_doc)
     _make_mock_session_local(monkeypatch)
     _make_mock_event_bus(monkeypatch)
 
@@ -211,18 +198,16 @@ def test_parse_task_returns_artifact_id_string(tmp_path, monkeypatch):
     mock_container = MagicMock()
     mock_container.document_parse_artifact_repository.return_value = MagicMock()
     mock_container.document_chunk_builder.return_value = MagicMock()
-    monkeypatch.setattr(
-        "app.workers.document_processor.get_container", lambda: mock_container
-    )
+    monkeypatch.setattr("app.workers.document_processor.get_container", lambda: mock_container)
 
     with patch("app.services.document_parse_service.DocumentParseService") as MockParseService:
         instance = MockParseService.return_value
         instance.parse_document = AsyncMock(return_value=fake_parse_result)
         instance.persist_parse_result.return_value = fake_artifact
 
-        result = celery_app.tasks[
-            "app.workers.document_processor.parse_document_task"
-        ].apply(args=[document_id, str(temp_file), "upload.txt"])
+        result = celery_app.tasks["app.workers.document_processor.parse_document_task"].apply(
+            args=[document_id, str(temp_file), "upload.txt"]
+        )
 
     assert not result.failed(), f"Task failed unexpectedly: {result.result}"
     retval = result.get()
@@ -259,7 +244,7 @@ def test_index_task_accepts_artifact_id_from_parse(tmp_path, monkeypatch):
 
     _make_mock_session_local(monkeypatch)
     mock_doc_repo = _make_mock_doc_repo(monkeypatch, fake_doc)
-    mock_bus = _make_mock_event_bus(monkeypatch)
+    _make_mock_event_bus(monkeypatch)
 
     mock_artifact_repo = MagicMock()
     mock_artifact_repo.get_by_id.return_value = fake_artifact
@@ -270,18 +255,15 @@ def test_index_task_accepts_artifact_id_from_parse(tmp_path, monkeypatch):
 
     # Mock processing service
     mock_proc_service = MagicMock()
-    mock_proc_service._build_chunks_for_indexing.return_value = [
-        MagicMock(), MagicMock()
-    ]
+    mock_proc_service._build_chunks_for_indexing.return_value = [MagicMock(), MagicMock()]
     mock_proc_service.document_index_service.index_document.return_value = [
-        MagicMock(), MagicMock()
+        MagicMock(),
+        MagicMock(),
     ]
     mock_proc_service._store_prepared_images = AsyncMock(return_value=0)
     mock_container.document_processing_service.return_value = mock_proc_service
 
-    monkeypatch.setattr(
-        "app.workers.document_processor.get_container", lambda: mock_container
-    )
+    monkeypatch.setattr("app.workers.document_processor.get_container", lambda: mock_container)
 
     with patch("app.services.document_parse_service.DocumentParseService") as MockParseService:
         instance = MockParseService.return_value
@@ -292,9 +274,9 @@ def test_index_task_accepts_artifact_id_from_parse(tmp_path, monkeypatch):
             backend_used="text",
         )
 
-        result = celery_app.tasks[
-            "app.workers.document_processor.index_document_task"
-        ].apply(args=[str(artifact_id)])
+        result = celery_app.tasks["app.workers.document_processor.index_document_task"].apply(
+            args=[str(artifact_id)]
+        )
 
     assert not result.failed(), f"Task failed: {result.result}"
     retval = result.get()
@@ -351,9 +333,7 @@ def test_index_retry_does_not_call_parse_document(tmp_path, monkeypatch):
     mock_proc_service._store_prepared_images = AsyncMock(return_value=0)
     mock_container.document_processing_service.return_value = mock_proc_service
 
-    monkeypatch.setattr(
-        "app.workers.document_processor.get_container", lambda: mock_container
-    )
+    monkeypatch.setattr("app.workers.document_processor.get_container", lambda: mock_container)
 
     parse_document_spy = AsyncMock(side_effect=AssertionError("parse_document called!"))
 
@@ -368,9 +348,9 @@ def test_index_retry_does_not_call_parse_document(tmp_path, monkeypatch):
             backend_used="text",
         )
 
-        result = celery_app.tasks[
-            "app.workers.document_processor.index_document_task"
-        ].apply(args=[str(artifact_id)])
+        result = celery_app.tasks["app.workers.document_processor.index_document_task"].apply(
+            args=[str(artifact_id)]
+        )
 
     # parse_document must never have been called
     assert parse_document_spy.call_count == 0, (
@@ -396,9 +376,7 @@ def test_parse_task_marks_document_failed_on_value_error(tmp_path, monkeypatch):
     mock_container = MagicMock()
     mock_container.document_parse_artifact_repository.return_value = MagicMock()
     mock_container.document_chunk_builder.return_value = MagicMock()
-    monkeypatch.setattr(
-        "app.workers.document_processor.get_container", lambda: mock_container
-    )
+    monkeypatch.setattr("app.workers.document_processor.get_container", lambda: mock_container)
 
     # Use a nonexistent file — triggers FileNotFoundError inside the task
     nonexistent = str(tmp_path / "nonexistent.txt")
@@ -406,9 +384,9 @@ def test_parse_task_marks_document_failed_on_value_error(tmp_path, monkeypatch):
     # task_eager_propagates=True means Celery re-raises the exception directly
     task_raised = False
     try:
-        celery_app.tasks[
-            "app.workers.document_processor.parse_document_task"
-        ].apply(args=[document_id, nonexistent, "nonexistent.txt"])
+        celery_app.tasks["app.workers.document_processor.parse_document_task"].apply(
+            args=[document_id, nonexistent, "nonexistent.txt"]
+        )
     except Exception:
         task_raised = True
 
@@ -445,17 +423,15 @@ def test_index_task_marks_document_failed_when_artifact_not_found(monkeypatch):
 
     mock_container = MagicMock()
     mock_container.document_parse_artifact_repository.return_value = mock_artifact_repo
-    monkeypatch.setattr(
-        "app.workers.document_processor.get_container", lambda: mock_container
-    )
+    monkeypatch.setattr("app.workers.document_processor.get_container", lambda: mock_container)
 
     phantom_id = str(uuid4())
     task_raised = False
     raised_exc = None
     try:
-        celery_app.tasks[
-            "app.workers.document_processor.index_document_task"
-        ].apply(args=[phantom_id])
+        celery_app.tasks["app.workers.document_processor.index_document_task"].apply(
+            args=[phantom_id]
+        )
     except Exception as exc:
         task_raised = True
         raised_exc = exc
@@ -481,16 +457,14 @@ def test_parse_task_emits_failed_event_on_terminal_error(tmp_path, monkeypatch):
     mock_container = MagicMock()
     mock_container.document_parse_artifact_repository.return_value = MagicMock()
     mock_container.document_chunk_builder.return_value = MagicMock()
-    monkeypatch.setattr(
-        "app.workers.document_processor.get_container", lambda: mock_container
-    )
+    monkeypatch.setattr("app.workers.document_processor.get_container", lambda: mock_container)
 
     nonexistent = str(tmp_path / "nope.txt")
 
     try:
-        celery_app.tasks[
-            "app.workers.document_processor.parse_document_task"
-        ].apply(args=[document_id, nonexistent, "nope.txt"])
+        celery_app.tasks["app.workers.document_processor.parse_document_task"].apply(
+            args=[document_id, nonexistent, "nope.txt"]
+        )
     except Exception:
         pass  # expected — task propagates terminal error
 
@@ -532,9 +506,7 @@ def test_small_documents_complete_independently_of_large(tmp_path, monkeypatch):
         }
         artifact_file.write_text(json.dumps(payload), encoding="utf-8")
 
-        artifact = _fake_artifact(
-            doc_id, artifact_id=artifact_id, storage_path=str(artifact_file)
-        )
+        artifact = _fake_artifact(doc_id, artifact_id=artifact_id, storage_path=str(artifact_file))
         parse_result = _minimal_parse_result(n_chunks=1)
         return artifact, parse_result
 
@@ -585,9 +557,7 @@ def test_small_documents_complete_independently_of_large(tmp_path, monkeypatch):
                 "app.workers.document_processor.get_container",
                 lambda: mock_container,
             ),
-            patch(
-                "app.services.document_parse_service.DocumentParseService"
-            ) as MockParseService,
+            patch("app.services.document_parse_service.DocumentParseService") as MockParseService,
         ):
             svc_instance = MockParseService.return_value
             svc_instance.parse_document = AsyncMock(return_value=parse_result)
@@ -608,9 +578,7 @@ def test_small_documents_complete_independently_of_large(tmp_path, monkeypatch):
             index_result = celery_app.tasks[
                 "app.workers.document_processor.index_document_task"
             ].apply(args=[returned_artifact_id])
-            assert not index_result.failed(), (
-                f"index failed for {doc_id}: {index_result.result}"
-            )
+            assert not index_result.failed(), f"index failed for {doc_id}: {index_result.result}"
 
             # Confirm READY was set
             update_calls = mock_doc_repo.update.call_args_list

@@ -18,7 +18,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-
 PlanningRubricVerdict = Literal["satisfied", "needs_revision", "failed", "grader_error"]
 PlanningRubricTerminalStatus = Literal[
     "satisfied",

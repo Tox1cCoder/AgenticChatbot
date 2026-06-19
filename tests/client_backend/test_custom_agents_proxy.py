@@ -134,12 +134,8 @@ async def test_proxy_ai_custom_agents_aliases(monkeypatch):
 
     params_by_call = {(method, path): kwargs["params"] for method, path, kwargs in server.calls}
     assert ("deviceId", "device-123") in params_by_call[("POST", "/ai/custom-agents")]
-    assert ("deviceId", "device-123") in params_by_call[
-        ("GET", "/ai/custom-agents/options")
-    ]
-    assert ("deviceId", "device-123") in params_by_call[
-        ("PATCH", "/ai/custom-agents/abc")
-    ]
+    assert ("deviceId", "device-123") in params_by_call[("GET", "/ai/custom-agents/options")]
+    assert ("deviceId", "device-123") in params_by_call[("PATCH", "/ai/custom-agents/abc")]
 
 
 @pytest.mark.asyncio
@@ -150,8 +146,9 @@ async def test_proxy_ai_conversation_custom_agents_alias(monkeypatch):
     with client:
         assert client.get("/ai/conversations/c1/custom-agents").status_code == 200
         assert (
-            client.put("/ai/conversations/c1/custom-agents", json={"customAgentIds": []})
-            .status_code
+            client.put(
+                "/ai/conversations/c1/custom-agents", json={"customAgentIds": []}
+            ).status_code
             == 200
         )
 

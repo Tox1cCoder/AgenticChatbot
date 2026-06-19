@@ -287,9 +287,7 @@ def test_captioning_concurrency_bounded_by_semaphore(tmp_path):
     for i in range(num_images):
         img_path = tmp_path / f"img_{i}.png"
         Image.new("RGB", (4, 4), color=(i * 40, 0, 0)).save(img_path)
-        images_data.append(
-            {"path": str(img_path), "page_number": i, "mime_type": "image/png"}
-        )
+        images_data.append({"path": str(img_path), "page_number": i, "mime_type": "image/png"})
 
     call_count = 0
 

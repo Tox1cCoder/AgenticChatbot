@@ -878,9 +878,7 @@ class MessageService(IMessageService):
             sequence=_next_sequence(),
             conversation_id=str(message_create_data.conversation_id),
             message_id=str(user_message_id),
-            data={
-                "message": MessageRead.model_validate(created_message).model_dump(mode="json")
-            },
+            data={"message": MessageRead.model_validate(created_message).model_dump(mode="json")},
         )
 
         # Start async title generation only if this is a user message and the first one
@@ -936,9 +934,7 @@ class MessageService(IMessageService):
                         )
                         break
 
-                    event = _service_event_from_ai_event(
-                        raw_event, sequence=_next_sequence()
-                    )
+                    event = _service_event_from_ai_event(raw_event, sequence=_next_sequence())
                     event_type = event.type
 
                     if event_type == "agent_selected":
@@ -964,9 +960,7 @@ class MessageService(IMessageService):
                     elif event_type == "tool_call_available":
                         inflight.touch()
                         if event.tool_call_id is not None:
-                            stream_tool_args_by_id[str(event.tool_call_id)] = event.data.get(
-                                "args"
-                            )
+                            stream_tool_args_by_id[str(event.tool_call_id)] = event.data.get("args")
                         yield event
 
                     elif event_type == "tool_execution_end":

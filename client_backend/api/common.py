@@ -61,9 +61,7 @@ def add_device_context(
     server binds no client tools rather than trusting a forwarded id.
     """
     normalized = dict(payload)
-    incoming = [
-        normalized.pop(key) for key in (snake_key, camel_key) if key in normalized
-    ]
+    incoming = [normalized.pop(key) for key in (snake_key, camel_key) if key in normalized]
 
     device_id = get_runtime_bridge().get_registered_device_id()
     foreign = [value for value in incoming if value and value != device_id]

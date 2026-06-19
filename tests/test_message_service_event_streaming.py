@@ -82,11 +82,14 @@ async def test_message_service_accumulates_v3_text_and_persists_once():
         execute_request_stream=source,
     )
     service._persist_completed_workflow_response = AsyncMock(
-        side_effect=lambda **kwargs: persisted.append(kwargs) or MessageRead.model_validate(
-            _message_row(
-                conversation_id=conversation_id,
-                sender=MessageRole.assistant.value,
-                content="hello",
+        side_effect=lambda **kwargs: (
+            persisted.append(kwargs)
+            or MessageRead.model_validate(
+                _message_row(
+                    conversation_id=conversation_id,
+                    sender=MessageRole.assistant.value,
+                    content="hello",
+                )
             )
         )
     )
@@ -142,11 +145,14 @@ async def test_resume_stream_accepts_v3_events_and_persists_once():
         resume_interrupted_execution_stream=resume_source,
     )
     service._persist_completed_workflow_response = AsyncMock(
-        side_effect=lambda **kwargs: persisted.append(kwargs) or MessageRead.model_validate(
-            _message_row(
-                conversation_id=conversation_id,
-                sender=MessageRole.assistant.value,
-                content="resumed",
+        side_effect=lambda **kwargs: (
+            persisted.append(kwargs)
+            or MessageRead.model_validate(
+                _message_row(
+                    conversation_id=conversation_id,
+                    sender=MessageRole.assistant.value,
+                    content="resumed",
+                )
             )
         )
     )

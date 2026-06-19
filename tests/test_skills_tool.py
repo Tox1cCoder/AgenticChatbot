@@ -36,9 +36,7 @@ def test_summaries_list_only_the_bound_clients_skills(monkeypatch):
 
     summaries = skills_tool.get_available_skill_summaries(user_id="user-1", device_id=device_id)
 
-    assert [(entry["name"], entry["source"]) for entry in summaries] == [
-        ("client-skill", "client")
-    ]
+    assert [(entry["name"], entry["source"]) for entry in summaries] == [("client-skill", "client")]
 
 
 def test_summaries_are_empty_without_a_device():
@@ -119,9 +117,7 @@ async def test_client_skill_activation_dispatch_is_not_rejected_by_mcp_tool_cata
             },
             tool_catalog_version=4,
             skill_catalog={
-                "skills": [
-                    {"name": "client-skill", "description": "d", "enabled": True}
-                ]
+                "skills": [{"name": "client-skill", "description": "d", "enabled": True}]
             },
         )
     )

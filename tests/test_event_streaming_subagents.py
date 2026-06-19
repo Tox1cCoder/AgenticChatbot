@@ -103,9 +103,7 @@ async def test_stream_with_subagent_events_yields_sink_event_while_primary_block
 
     merged = stream_with_subagent_events(primary(), sink)
     first = await merged.__anext__()
-    await sink.emit(
-        "subagent_start", task_id="w1", agent_name="search_agent", status="running"
-    )
+    await sink.emit("subagent_start", task_id="w1", agent_name="search_agent", status="running")
     second = await merged.__anext__()  # must be the subagent event, not "b"
     gate.set()
     rest = [event async for event in merged]
@@ -147,9 +145,7 @@ async def test_sink_remains_usable_for_next_auto_continue_round():
         yield make_event("message_delta", sequence=1, data={"text": "round-1"})
 
     async def round_two():
-        await sink.emit(
-            "subagent_start", task_id="w1", agent_name="search_agent", status="running"
-        )
+        await sink.emit("subagent_start", task_id="w1", agent_name="search_agent", status="running")
         yield make_event("message_delta", sequence=2, data={"text": "round-2"})
 
     first = [e.type async for e in stream_with_subagent_events(round_one(), sink)]

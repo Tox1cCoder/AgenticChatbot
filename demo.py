@@ -1719,8 +1719,12 @@ def _custom_agent_skill_refs_available(
         key = _custom_agent_skill_key(ref)
         if key in available:
             continue
-        if key and key[0] == "server" and any(
-            lookup in client_key_by_lookup for lookup in _custom_agent_skill_lookup_values(ref)
+        if (
+            key
+            and key[0] == "server"
+            and any(
+                lookup in client_key_by_lookup for lookup in _custom_agent_skill_lookup_values(ref)
+            )
         ):
             continue
         return False

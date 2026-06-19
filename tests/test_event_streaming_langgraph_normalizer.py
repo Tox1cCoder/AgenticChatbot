@@ -254,9 +254,7 @@ def test_translator_lifecycle_started_and_completed_become_subagent_events():
         )
     )
     completed = list(
-        t.translate(
-            _v3("lifecycle", {"event": "completed", "namespace": ns}, seq=2, namespace=[])
-        )
+        t.translate(_v3("lifecycle", {"event": "completed", "namespace": ns}, seq=2, namespace=[]))
     )
     assert [e.type for e in started] == ["subagent_start"]
     assert started[0].subagent is not None

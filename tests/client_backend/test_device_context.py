@@ -75,9 +75,7 @@ def test_foreign_camel_case_key_is_replaced(connected_bridge, caplog):
 
 
 def test_both_key_styles_are_normalized_to_own_id(connected_bridge):
-    result = add_device_context(
-        {"device_id": FOREIGN_DEVICE_ID, "deviceId": FOREIGN_DEVICE_ID}
-    )
+    result = add_device_context({"device_id": FOREIGN_DEVICE_ID, "deviceId": FOREIGN_DEVICE_ID})
 
     assert result["device_id"] == OWN_DEVICE_ID
     assert "deviceId" not in result
