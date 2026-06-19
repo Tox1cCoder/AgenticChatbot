@@ -147,10 +147,20 @@ class DocumentService(IDocumentService):
         await self.processing_service.validate_upload_file(filename, file_size)
 
         filename_key = normalize_document_filename(filename)
-        if self.repository.filename_exists_in_conversation(conversation_id, filename_key):
-            raise DuplicateDocumentFilenameError(
-                detail=(f"A document named '{filename}' already exists in this conversation.")
-            )
+        existing = self.repository.get_by_conversation_and_filename_key(
+            conversation_id, filename_key
+        )
+        if existing is not None:
+            if existing.status == DocumentStatus.FAILED.value:
+                # Auto-replace: silently delete the failed document so the new
+                # upload can proceed with the same filename.
+                self.repository.delete(existing.id)
+            else:
+                raise DuplicateDocumentFilenameError(
+                    detail=(
+                        f"A document named '{filename}' already exists in this conversation."
+                    )
+                )
 
         document_data = DocumentCreate(
             conversation_id=conversation_id,

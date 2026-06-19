@@ -56,7 +56,7 @@ class DocumentParseArtifact(Base):
     artifact_metadata = Column(JSONB, nullable=False, default=dict)
 
     # Relationships
-    document = relationship("Document", backref="parse_artifacts")
+    document = relationship("Document", back_populates="parse_artifacts")
     chunks = relationship("DocumentChunk", back_populates="parse_artifact")
 
     def __repr__(self) -> str:
