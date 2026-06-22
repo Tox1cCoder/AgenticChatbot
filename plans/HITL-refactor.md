@@ -382,7 +382,7 @@ git commit -m "feat(hitl): policy resolver + tool-overrides-server precedence (c
 **Interfaces:**
 - Produces: `ToolApprovalSetting` ORM model — columns `id, created_at, updated_at, user_id, scope_type, scope_value, require_approval`; table `tool_approval_settings`; unique `(user_id, scope_type, scope_value)`.
 
-- [ ] **Step 1: Write the failing test — `tests/test_tool_approval_setting_model.py`**
+- [x] **Step 1: Write the failing test — `tests/test_tool_approval_setting_model.py`**
 
 ```python
 """Structural guard for the ToolApprovalSetting model + migration registration."""
@@ -429,12 +429,12 @@ def test_migration_chains_from_current_head():
     assert "tool_approval_settings" in text
 ```
 
-- [ ] **Step 2: Run and verify FAIL**
+- [x] **Step 2: Run and verify FAIL**
 
 Run: `.conda\python.exe -m pytest tests/test_tool_approval_setting_model.py -q`
 Expected: FAIL — module/file does not exist.
 
-- [ ] **Step 3: Create `app/models/tool_approval_setting.py`**
+- [x] **Step 3: Create `app/models/tool_approval_setting.py`**
 
 ```python
 """Per-user Human-in-the-Loop approval setting (server-scoped or tool-scoped)."""
@@ -499,7 +499,7 @@ class ToolApprovalSetting(Base):
         )
 ```
 
-- [ ] **Step 4: Register in `app/models/__init__.py`**
+- [x] **Step 4: Register in `app/models/__init__.py`**
 
 Add the import next to the other model imports (after the `SkillSetting` import):
 
@@ -513,7 +513,7 @@ Add to the `__all__` list (after `"SkillSetting",`):
     "ToolApprovalSetting",
 ```
 
-- [ ] **Step 5: Create the migration `app/alembic/versions/g0h1i2j3k4l5_add_tool_approval_settings.py`**
+- [x] **Step 5: Create the migration `app/alembic/versions/g0h1i2j3k4l5_add_tool_approval_settings.py`**
 
 ```python
 """add tool_approval_settings (per-user HITL approval policy)
@@ -585,13 +585,13 @@ def downgrade() -> None:
     op.drop_table("tool_approval_settings")
 ```
 
-- [ ] **Step 6: Verify model import + tests; confirm single migration head**
+- [x] **Step 6: Verify model import + tests; confirm single migration head**
 
 Run: `.conda\python.exe -m pytest tests/test_tool_approval_setting_model.py -q` → PASS
 Run: `.conda\python.exe -c "import app.models; import app.main"` → no ImportError
 Run: `.conda\python.exe -m alembic heads` → exactly one head: `g0h1i2j3k4l5 (head)`, confirming we extend the current head and create no second head.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add app/models/tool_approval_setting.py app/models/__init__.py app/alembic/versions/g0h1i2j3k4l5_add_tool_approval_settings.py tests/test_tool_approval_setting_model.py
@@ -2066,3 +2066,13 @@ git push
   - Kept `hitl_config` dependency-light per the plan (no `app.ai.utils` import) — `_tool_call_name` inlined to read normalized dicts/objects, avoiding a circular import.
   - `identity_requires_approval` checks `qualified_tool_id` before bare `name` in the `tools` map, so a `"<server>::<tool>"` rule wins over a bare-name rule, matching the precedence ladder verbatim.
   - `any_call_requires_approval` short-circuits the master kill-switch up front (before iterating calls) in addition to the per-identity check, so a master-off policy is O(1).
+
+### Task 2 — ToolApprovalSetting model + migration + registration ✅ 2026-06-22
+
+- **Tests:** `tests/test_tool_approval_setting_model.py` (3 cases: columns/constraints, `__all__` export, migration chains from head). Step-2 verify-fail confirmed `ModuleNotFoundError: No module named 'app.models.tool_approval_setting'`.
+- **Implementation:** New `app/models/tool_approval_setting.py` (`ToolApprovalSetting`, table `tool_approval_settings`, unique `(user_id, scope_type, scope_value)`, check `scope_type IN ('server','tool')`); registered in `app/models/__init__.py` (import + `__all__`); migration `g0h1i2j3k4l5` revising `f03e63aa5a33`.
+- **Verification:** `pytest …model.py` → **3 passed**; `import app.models; import app.main` → no ImportError; `alembic heads` → exactly one head `g0h1i2j3k4l5 (head)` (no branch).
+- **Commit:** `feat(hitl): ToolApprovalSetting model + migration` (4 files, +171).
+- **Design decisions:**
+  - Named the model `ToolApprovalSetting` to sit alongside the pre-existing `ToolApproval` (the per-call decision record) without collision — distinct table, distinct concept (policy vs. decision).
+  - `scope_value` sized `String(512)` to comfortably hold qualified ids `"<server>::<tool>"`; indexed for the per-user policy read.
