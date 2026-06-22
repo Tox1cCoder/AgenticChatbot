@@ -1189,7 +1189,7 @@ git commit -m "feat(hitl): per-user settings service + /hitl/settings API"
 - Consumes: `any_call_requires_approval`, `policy_from_context` (Task 1); `ensure_agent_tool_map` (`app/ai/tool_execution.py`), `get_global_mcp_manager` (`app/ai/mcp_registry.py`); `normalize_tool_call`, `GraphStateView` (already imported in `graph.py`).
 - Produces: `MultiAgentWorkflow._needs_approval(state, normalized_calls, *, agent=None, tool_map=None) -> bool` (async).
 
-- [ ] **Step 1: Write the failing gate test — `tests/test_hitl_gate_policy.py`**
+- [x] **Step 1: Write the failing gate test — `tests/test_hitl_gate_policy.py`**
 
 ```python
 """The graph gate honors a per-turn per-user policy and resolves server provenance."""
@@ -1329,12 +1329,12 @@ async def test_generic_worker_uses_parent_state_hitl_policy(monkeypatch):
     assert response.metadata["pause_reason"] == "awaiting_approval"
 ```
 
-- [ ] **Step 2: Run and verify FAIL**
+- [x] **Step 2: Run and verify FAIL**
 
 Run: `.conda\python.exe -m pytest tests/test_hitl_gate_policy.py -q`
 Expected: FAIL — `_should_call_tools` is currently sync (returns a str, not awaitable) and ignores `hitl_policy`/server resolution, so awaiting it errors and/or the server-scope case returns `"tools"`.
 
-- [ ] **Step 3: Add imports + the `_needs_approval` helper in `app/ai/graph.py`**
+- [x] **Step 3: Add imports + the `_needs_approval` helper in `app/ai/graph.py`**
 
 Update the hitl_config import (line 52). All five gate sites move to `_needs_approval`, so `requires_human_approval` becomes unused **in graph.py** and must be dropped from this import (it stays defined/public in `hitl_config` for the legacy tests). Replace:
 
@@ -1393,7 +1393,7 @@ Add this method to `MultiAgentWorkflow`, directly above `_prepare_interrupt_payl
         )
 ```
 
-- [ ] **Step 4: Make `_should_call_tools` async + policy-aware (graph.py:1209-1222)**
+- [x] **Step 4: Make `_should_call_tools` async + policy-aware (graph.py:1209-1222)**
 
 Replace the whole method:
 
@@ -1416,7 +1416,7 @@ Replace the whole method:
         return "tools"
 ```
 
-- [ ] **Step 5: Replace the RAG gate (graph.py:2452-2453)**
+- [x] **Step 5: Replace the RAG gate (graph.py:2452-2453)**
 
 Change:
 
@@ -1431,7 +1431,7 @@ to:
             if await self._needs_approval(state, non_search_tool_calls, agent=agent):
 ```
 
-- [ ] **Step 6: Replace the RAG sub-worker gate (graph.py:2891-2892)**
+- [x] **Step 6: Replace the RAG sub-worker gate (graph.py:2891-2892)**
 
 Change:
 
@@ -1446,7 +1446,7 @@ to:
                 if await self._needs_approval(parent_state, normalized_calls, agent=agent):
 ```
 
-- [ ] **Step 7: Replace the generic worker gate (graph.py:2995-2996)**
+- [x] **Step 7: Replace the generic worker gate (graph.py:2995-2996)**
 
 Change:
 
@@ -1462,7 +1462,7 @@ to:
             if await self._needs_approval(parent_state, normalized_worker_calls, agent=agent):
 ```
 
-- [ ] **Step 8: Replace the planning gate (graph.py:3296-3297)**
+- [x] **Step 8: Replace the planning gate (graph.py:3296-3297)**
 
 Change:
 
@@ -1479,7 +1479,7 @@ to (the planning node already built `tool_map` at line 3271 — pass it to avoid
             ):
 ```
 
-- [ ] **Step 9: Fix `tests/test_custom_agents_graph.py:180,188` (now a coroutine)**
+- [x] **Step 9: Fix `tests/test_custom_agents_graph.py:180,188` (now a coroutine)**
 
 Change the two assertions to await the coroutine. Mark the test(s) async if not already:
 
@@ -1491,12 +1491,12 @@ Change the two assertions to await the coroutine. Mark the test(s) async if not 
 
 If those assertions live in a sync test, convert that test to `async def` + `@pytest.mark.asyncio` (mirror the style of other async tests in the file). The state dicts used there have no `hitl_policy` → `policy_from_context` returns the global policy → with the default empty `hitl_tools_require_approval` the gate returns `"tools"`, preserving the original expectation.
 
-- [ ] **Step 10: Run gate + custom-agent graph suites**
+- [x] **Step 10: Run gate + custom-agent graph suites**
 
 Run: `.conda\python.exe -m pytest tests/test_hitl_gate_policy.py tests/test_custom_agents_graph.py tests/test_hitl_config.py tests/test_client_tool_isolation.py -q`
 Expected: PASS. (`requires_human_approval` is no longer referenced in `graph.py` after this task — Step 3 dropped it from the import — but stays defined and public in `hitl_config.py`, which is what the two legacy tests import and exercise.)
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```powershell
 git add app/ai/graph.py tests/test_hitl_gate_policy.py tests/test_custom_agents_graph.py
@@ -2097,3 +2097,14 @@ git push
   - **Camel base divergence from the plan's literal code:** the plan's `app/schemas/hitl.py` snippet imported `pydantic.alias_generators.to_camel`. The codebase convention (12 schema modules) is a *local* `_CamelModel` built on the shared `app.utils.case_conversion.to_camel_case` helper. I followed the codebase convention (reuse the shared helper) instead of introducing pydantic's generator — same camelCase output, consistent with every other schema module. The API test asserts the exact camelCase keys (`scopeType`/`scopeValue`/`requireApproval`/`masterEnabled`), which pass.
   - 422 on invalid `scope_type` comes for free from the `Literal["server","tool"]` field on `HitlScopeRule` (Pydantic validation at the request boundary), so the bad value never reaches the repository.
   - Service holds the `is_hitl_enabled()`/`get_tools_requiring_approval()` reads so the master switch + legacy floor are always reported from live settings, not persisted per-user.
+
+### Task 5 — Wire the policy into all five graph gates ✅ 2026-06-22
+
+- **Tests:** `tests/test_hitl_gate_policy.py` (4 cases: server-scope gates via `_should_call_tools`, tool-override exempts a server tool, master-off never gates, generic worker reads `parent_state` policy). Step-2 verify-fail confirmed `AttributeError: module 'app.ai.graph' has no attribute 'get_global_mcp_manager'`.
+- **Implementation:** `app/ai/graph.py` — dropped `requires_human_approval` from the import (now `any_call_requires_approval`, `policy_from_context`), added `from .mcp_registry import get_global_mcp_manager`, added async `MultiAgentWorkflow._needs_approval(...)` helper above `_prepare_interrupt_payload`, made `_should_call_tools` async, and replaced all five `requires_human_approval(...)` sites (`_should_call_tools`, RAG gate, RAG sub-worker, generic worker, planning) with `await self._needs_approval(...)`. `tests/test_custom_agents_graph.py` test converted to `async def` (+`await`).
+- **Verification:** `import app.ai.graph` → OK (no circular import from `mcp_registry`); `ruff check app/ai/graph.py` → All checks passed; `pytest test_hitl_gate_policy.py test_custom_agents_graph.py test_hitl_config.py test_client_tool_isolation.py -q` → **44 passed**.
+- **Commit:** `feat(hitl): route all five gates through the per-user policy resolver` (3 files, +209/-40).
+- **Design decisions:**
+  - **Planning gate nested-`if` collapse (deviation from plan's literal code):** the plan kept `if external_tool_calls:` wrapping `if await self._needs_approval(...):`. Removing the old intervening `ext_tool_names = [...]` assignment made ruff flag a real **new** SIM102 (collapsible nested-if). I collapsed them to `if external_tool_calls and await self._needs_approval(...):` and dedented the block body — behavior-identical (short-circuit on empty calls; `approved_external_calls` is already captured above the block) and keeps the touched file ruff-clean (the plan's Task 10 requires fixing new findings).
+  - Async conversion of `_should_call_tools` is safe: its only internal caller is the LangGraph conditional-edge registration (`self._should_call_tools` at graph.py:775), and LangGraph awaits async edge callables. `asyncio_mode = "auto"` (pyproject.toml) means the converted sync test needed only `async def`/`await`, no `@pytest.mark.asyncio` (which couldn't be used there anyway — `pytest` is imported lower in that file).
+  - `_needs_approval` only builds a `tool_map`/fetches the MCP manager when `master_enabled` is true and a tool_map isn't already supplied, so the master kill-switch path stays cheap and the planning gate reuses its pre-built `tool_map`.
