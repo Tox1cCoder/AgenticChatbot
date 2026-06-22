@@ -61,7 +61,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(op.f("ix_tool_approval_settings_scope_value"), table_name="tool_approval_settings")
+    op.drop_index(
+        op.f("ix_tool_approval_settings_scope_value"), table_name="tool_approval_settings"
+    )
     op.drop_index(op.f("ix_tool_approval_settings_user_id"), table_name="tool_approval_settings")
     op.drop_index(op.f("ix_tool_approval_settings_id"), table_name="tool_approval_settings")
     op.drop_table("tool_approval_settings")

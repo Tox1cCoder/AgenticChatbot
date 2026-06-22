@@ -3028,7 +3028,19 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 return response
 
             normalized_worker_calls = [normalize_tool_call(tc) for tc in tool_calls]
-            if await self._needs_approval(parent_state, normalized_worker_calls, agent=agent):
+            # Build the worker tool_map once (reused across loop iterations so a tool
+            # loaded via tool_search stays available) and feed it to the approval gate
+            # so provenance resolves without a second ensure_agent_tool_map call.
+            if tool_map is None:
+                tool_map = await ensure_agent_tool_map(
+                    agent,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    device_id=device_id,
+                )
+            if await self._needs_approval(
+                parent_state, normalized_worker_calls, tool_map=tool_map
+            ):
                 if response.metadata is None:
                     response.metadata = {}
                 response.metadata["requires_approval"] = True
@@ -3044,13 +3056,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 ai_kwargs["tool_calls"] = tool_calls
             worker_messages.append(AIMessage(**ai_kwargs))
 
-            if tool_map is None:
-                tool_map = await ensure_agent_tool_map(
-                    agent,
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    device_id=device_id,
-                )
             with tool_execution_context(conversation_id, user_id, tool_state_key, device_id):
                 outputs, artifacts, _images = await execute_tool_calls(
                     tool_calls=tool_calls,
