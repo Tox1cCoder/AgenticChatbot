@@ -615,7 +615,7 @@ git commit -m "feat(hitl): ToolApprovalSetting model + migration"
   - `delete(user_id: UUID, scope_type: str, scope_value: str) -> bool`
   - `build_policy(user_id: UUID) -> dict` → `{"servers": {str: bool}, "tools": {str: bool}}`
 
-- [ ] **Step 1: Write the failing test — `tests/test_tool_approval_setting_repository.py`**
+- [x] **Step 1: Write the failing test — `tests/test_tool_approval_setting_repository.py`**
 
 ```python
 """ToolApprovalSettingRepository uses the sync session-factory style (no real DB)."""
@@ -723,12 +723,12 @@ def test_rejects_invalid_scope_type():
         raise AssertionError("invalid scope_type should fail")
 ```
 
-- [ ] **Step 2: Run and verify FAIL**
+- [x] **Step 2: Run and verify FAIL**
 
 Run: `.conda\python.exe -m pytest tests/test_tool_approval_setting_repository.py -q`
 Expected: FAIL — module does not exist.
 
-- [ ] **Step 3: Implement `app/repositories/tool_approval_setting.py`**
+- [x] **Step 3: Implement `app/repositories/tool_approval_setting.py`**
 
 ```python
 """Session-factory backed repository for per-user HITL approval settings."""
@@ -831,7 +831,7 @@ class ToolApprovalSettingRepository:
         return {"servers": servers, "tools": tools}
 ```
 
-- [ ] **Step 4: Run + commit**
+- [x] **Step 4: Run + commit**
 
 Run: `.conda\python.exe -m pytest tests/test_tool_approval_setting_repository.py -q` → PASS
 
@@ -2076,3 +2076,13 @@ git push
 - **Design decisions:**
   - Named the model `ToolApprovalSetting` to sit alongside the pre-existing `ToolApproval` (the per-call decision record) without collision — distinct table, distinct concept (policy vs. decision).
   - `scope_value` sized `String(512)` to comfortably hold qualified ids `"<server>::<tool>"`; indexed for the per-user policy read.
+
+### Task 3 — ToolApprovalSettingRepository (session-factory, sync) ✅ 2026-06-22
+
+- **Tests:** `tests/test_tool_approval_setting_repository.py` (4 cases: create-when-missing, update-in-place, build_policy grouping + garbage-scope drop, invalid scope_type rejection) using the repo's hand-rolled `_FakeSession`/`@contextmanager` factory (no real DB). Step-2 verify-fail confirmed `ModuleNotFoundError`.
+- **Implementation:** `app/repositories/tool_approval_setting.py` — `ToolApprovalSettingRepository(session_factory)` with `list_by_user`, `set` (upsert), `bulk_set`, `delete`, `build_policy`. `set`/`delete` validate scope via `_validate_scope`.
+- **Verification:** `pytest …repository.py -q` → **4 passed**.
+- **Commit:** `feat(hitl): ToolApprovalSettingRepository + build_policy` (2 files, +200).
+- **Design decisions:**
+  - `build_policy` silently ignores unknown `scope_type` rows (defensive against future scope kinds / dirty data) rather than raising — the read path must never break a turn.
+  - `set` upserts (select-then-update-or-insert) keyed on the `(user_id, scope_type, scope_value)` unique tuple, matching the DB constraint so concurrent writers converge on update rather than violating the constraint.
