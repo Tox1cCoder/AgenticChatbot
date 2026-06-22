@@ -1843,7 +1843,7 @@ git commit -m "feat(hitl): sidecar proxies /hitl/settings (additive)"
 - Consumes: `make_api_request` (demo.py:2816). Calls the sidecar's `/hitl/settings` (Task 8) which proxies to the server (Task 4).
 - Produces: demo helpers `get_hitl_settings()`, `set_hitl_setting(scope_type, scope_value, require_approval)`, `clear_hitl_setting(scope_type, scope_value)`.
 
-- [ ] **Step 1: Write the failing static test — `tests/test_hitl_demo_panel.py`**
+- [x] **Step 1: Write the failing static test — `tests/test_hitl_demo_panel.py`**
 
 ```python
 """Static guard: the demo MCP panel manages HITL approval via the sidecar API."""
@@ -1871,12 +1871,12 @@ def test_demo_renders_per_server_and_per_tool_controls():
     assert "qualified_tool_options" in src    # duplicate tool names select by server::tool
 ```
 
-- [ ] **Step 2: Run and verify FAIL**
+- [x] **Step 2: Run and verify FAIL**
 
 Run: `.conda\python.exe -m pytest tests/test_hitl_demo_panel.py -q`
 Expected: FAIL — helpers/labels absent.
 
-- [ ] **Step 3: Add the helpers (near `get_mcp_tools`, ~demo.py:3347)**
+- [x] **Step 3: Add the helpers (near `get_mcp_tools`, ~demo.py:3347)**
 
 ```python
 def get_hitl_settings() -> dict[str, Any] | None:
@@ -1903,7 +1903,7 @@ def clear_hitl_setting(scope_type: str, scope_value: str) -> dict[str, Any] | No
     return response.get("data") if response else None
 ```
 
-- [ ] **Step 4: Render the per-server toggle in the Configured Servers loop (~demo.py:7876-7919)**
+- [x] **Step 4: Render the per-server toggle in the Configured Servers loop (~demo.py:7876-7919)**
 
 Before the loop, fetch settings once:
 
@@ -1928,7 +1928,7 @@ Change the per-row column split from `st.columns([3, 1, 1])` to `st.columns([3, 
                         st.rerun()
 ```
 
-- [ ] **Step 5: Make the tool selector use a qualified key (near demo.py:7953-7966)**
+- [x] **Step 5: Make the tool selector use a qualified key (near demo.py:7953-7966)**
 
 Replace the current selectbox that uses only `tool.get("name")` as the option value with a qualified key. This prevents the UI from editing the wrong rule when two servers expose the same tool name:
 
@@ -1956,7 +1956,7 @@ Replace the current selectbox that uses only `tool.get("name")` as the option va
     selected_tool_name = selected_tool.get("name")
 ```
 
-- [ ] **Step 6: Render the per-tool tri-state in the Tools section (after the selected-tool details, ~demo.py:7978)**
+- [x] **Step 6: Render the per-tool tri-state in the Tools section (after the selected-tool details, ~demo.py:7978)**
 
 ```python
         st.markdown("**Human approval**")
@@ -1988,12 +1988,12 @@ Replace the current selectbox that uses only `tool.get("name")` as the option va
                     st.rerun()
 ```
 
-- [ ] **Step 7: Run static test + demo import**
+- [x] **Step 7: Run static test + demo import**
 
 Run: `.conda\python.exe -m pytest tests/test_hitl_demo_panel.py -q` → PASS
 Run: `.conda\python.exe -c "import ast, pathlib; ast.parse(pathlib.Path('demo.py').read_text(encoding='utf-8'))"` → no SyntaxError
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```powershell
 git add demo.py tests/test_hitl_demo_panel.py
@@ -2137,3 +2137,14 @@ git push
 - **Design decisions:**
   - Reused the existing `router` (mounted both unprefixed and under `/api` in `client_backend/main.py`), so `/hitl/settings` and `/api/hitl/settings` are both served with no `main.py` edit.
   - No device stamping (`params_override` omitted) because the policy is per-user, not per-device — matching `/providers`, not `/custom-agents`.
+
+### Task 9 — Demo MCP panel: per-server toggle + per-tool tri-state ✅ 2026-06-22
+
+- **Tests:** `tests/test_hitl_demo_panel.py` (static source guards: helpers + endpoint calls present; per-server "Approval: ON" label, `hitl_tool_mode_` widget key, `qualified_tool_options` present). Step-2 verify-fail confirmed assertions absent.
+- **Implementation:** Added `get_hitl_settings`/`set_hitl_setting`/`clear_hitl_setting` helpers (after `execute_mcp_tool`). Configured Servers loop: fetch settings once before the loop, show a read-only caption when the global master is off, widened `st.columns([3,1,1])` → `[3,1,1,1]`, added a `col4` per-server **Approval: ON/OFF** toggle. Tools section: replaced the bare-name selectbox with a `qualified_tool_options` (`server::tool`) keyed selectbox, and added a per-tool **Inherit/Require/Skip** radio writing tool-scoped rules.
+- **Verification:** `pytest tests/test_hitl_demo_panel.py -q` → **2 passed**; `ast.parse(demo.py)` → AST OK; `ruff check demo.py` → **215 errors, identical count to HEAD** (zero new findings; demo.py's large pre-existing baseline unchanged — verified by stash/compare).
+- **Commit:** `feat(hitl): demo MCP panel toggles approval per-server and per-tool` (2 files, +124/-8).
+- **Design decisions:**
+  - **Qualified-key selectbox (correctness fix):** keying the tool selector by `"<server>::<tool>"` instead of the bare name prevents the per-tool radio from editing the wrong rule when two servers expose the same tool name. `selected_tool_name` is still derived for the existing execute-form key, so downstream code is unaffected.
+  - **POST helper reformatted to a named `payload` dict** so the `make_api_request("POST", "/hitl/settings", payload)` call sits on one line — both readable and matching the static guard (the original multi-line form split the call across lines).
+  - The global master switch is shown read-only (a caption), per the plan: the demo manages per-user rules, not the admin-level `enable_human_in_the_loop`.
