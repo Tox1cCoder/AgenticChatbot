@@ -40,6 +40,15 @@ async def proxy_providers(
     return await proxy_server_request(request, upstream_path="/providers")
 
 
+@router.api_route("/hitl/settings", methods=["GET", "POST", "DELETE"])
+async def proxy_hitl_settings(
+    request: Request,
+    _session: LocalSessionPayload = Depends(require_local_session),
+) -> Response:
+    # Per-user policy: forward verbatim, no device stamping.
+    return await proxy_server_request(request, upstream_path="/hitl/settings")
+
+
 @router.api_route("/providers/{provider_type}", methods=["GET", "DELETE"])
 async def proxy_provider(
     provider_type: str,
