@@ -1748,7 +1748,7 @@ git commit -m "test(hitl): guard client-sidecar + deferred-tool approval round-t
 - Consumes: `proxy_server_request`, `require_local_session`, `LocalSessionPayload` (existing in `client_backend/api/proxy.py` / `common.py`).
 - Produces: sidecar routes `GET/POST/DELETE /hitl/settings` proxying to the same upstream paths (no device stamping).
 
-- [ ] **Step 1: Write the failing proxy test — `tests/client_backend/test_hitl_proxy.py`**
+- [x] **Step 1: Write the failing proxy test — `tests/client_backend/test_hitl_proxy.py`**
 
 ```python
 """The sidecar proxies /hitl/settings to the canonical server without device stamping."""
@@ -1803,12 +1803,12 @@ def test_post_and_delete_hitl_settings_proxy(client):
     assert captured["method"] == "DELETE"
 ```
 
-- [ ] **Step 2: Run and verify FAIL**
+- [x] **Step 2: Run and verify FAIL**
 
 Run: `.conda\python.exe -m pytest tests/client_backend/test_hitl_proxy.py -q`
 Expected: FAIL — routes not defined (404).
 
-- [ ] **Step 3: Add the routes to `client_backend/api/proxy.py`**
+- [x] **Step 3: Add the routes to `client_backend/api/proxy.py`**
 
 Add near the other `@router.api_route(...)` proxy definitions (mirror the per-user `/providers` style, which passes no `params_override`):
 
@@ -1822,7 +1822,7 @@ async def proxy_hitl_settings(
     return await proxy_server_request(request, upstream_path="/hitl/settings")
 ```
 
-- [ ] **Step 4: Run + commit**
+- [x] **Step 4: Run + commit**
 
 Run: `.conda\python.exe -m pytest tests/client_backend/test_hitl_proxy.py -q` → PASS
 
@@ -2127,3 +2127,13 @@ git push
 - **Commit:** `test(hitl): guard client-sidecar + deferred-tool approval round-trips` (1 file, +64).
 - **Design decisions:**
   - This task is the explicit "HITL works with the client sidecar + deferred tools" requirement. The two origins the old global-name list never modeled — client (`client__<server>__<tool>` resolved from the name even before a tool_map exists) and deferred server tools (bare name, server recovered through `McpManager.get_server_for_tool`) — are both proven gateable here, confirming the Task-1 resolver covers them end-to-end.
+
+### Task 8 — Sidecar proxy routes for /hitl/settings ✅ 2026-06-22
+
+- **Tests:** `tests/client_backend/test_hitl_proxy.py` (2 cases: GET proxies to `/hitl/settings` with `params_override is None`; POST + DELETE both forward verbatim). Step-2 verify-fail confirmed 404 (routes undefined).
+- **Implementation:** Added one additive `@router.api_route("/hitl/settings", methods=["GET","POST","DELETE"])` to `client_backend/api/proxy.py`, mirroring the per-user `/providers` style (no `params_override` → no device stamping). No change to existing route signatures (FR-5 honored).
+- **Verification:** `pytest tests/client_backend/test_hitl_proxy.py -q` → **2 passed**.
+- **Commit:** `feat(hitl): sidecar proxies /hitl/settings (additive)` (2 files, +59).
+- **Design decisions:**
+  - Reused the existing `router` (mounted both unprefixed and under `/api` in `client_backend/main.py`), so `/hitl/settings` and `/api/hitl/settings` are both served with no `main.py` edit.
+  - No device stamping (`params_override` omitted) because the policy is per-user, not per-device — matching `/providers`, not `/custom-agents`.
