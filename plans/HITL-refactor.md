@@ -1518,12 +1518,12 @@ git commit -m "feat(hitl): route all five gates through the per-user policy reso
 - Consumes: `ToolApprovalSettingRepository.build_policy` (same policy shape exposed by `HitlSettingsService.build_turn_policy` in Task 4); the `hitl_policy` carrier field.
 - Produces: `WorkflowExecutionRequest.hitl_policy: dict | None`; `context["hitl_policy"]` in initial graph state.
 
-- [ ] **Step 1: Locate the `inline_rich_response_v1` carrier and mirror it**
+- [x] **Step 1: Locate the `inline_rich_response_v1` carrier and mirror it**
 
 Run: `rg -n "inline_rich_response_v1" app`
 This field is the working precedent for carrying a per-turn flag across the dual `WorkflowExecutionRequest` schemas into graph context (see `[[dual-workflow-request-schema-drift]]`). For EVERY location it appears in `app/schemas/workflow.py` and the AI-layer request schema, add a sibling `hitl_policy: dict | None = None` (default `None`). Do not skip the `_to_ai_request` conversion test below — if the AI-layer schema is missing the field, Pydantic will silently drop it there.
 
-- [ ] **Step 2: Write the failing injection test — `tests/test_hitl_turn_policy_injection.py`**
+- [x] **Step 2: Write the failing injection test — `tests/test_hitl_turn_policy_injection.py`**
 
 ```python
 """The per-turn HITL policy reaches graph context via the workflow request."""
@@ -1559,12 +1559,12 @@ def test_ai_service_conversion_preserves_hitl_policy():
     assert ai_req.hitl_policy == policy
 ```
 
-- [ ] **Step 3: Run and verify FAIL**
+- [x] **Step 3: Run and verify FAIL**
 
 Run: `.conda\python.exe -m pytest tests/test_hitl_turn_policy_injection.py -q`
 Expected: FAIL — `hitl_policy` is not a field yet, is not present on the AI-layer schema, and is not injected into context.
 
-- [ ] **Step 4: Inject into context in `app/ai/graph.py:_build_initial_state_from_request`**
+- [x] **Step 4: Inject into context in `app/ai/graph.py:_build_initial_state_from_request`**
 
 Where the `context` dict is built (~line 512, alongside `inline_rich_response_v1`), add:
 
@@ -1576,7 +1576,7 @@ Where the `context` dict is built (~line 512, alongside `inline_rich_response_v1
 
 Also add `hitl_policy: dict[str, Any] | None = None` to both `app/schemas/workflow.py::WorkflowExecutionRequest` and `app/ai/schemas.py::WorkflowExecutionRequest`, and add `hitl_policy: dict[str, Any]` to `app/ai/schemas.py::GraphContext` near `inline_rich_response_v1`.
 
-- [ ] **Step 5: Accept the repository + resolve the policy in `app/services/message_service.py`**
+- [x] **Step 5: Accept the repository + resolve the policy in `app/services/message_service.py`**
 
 Add the parameter to `MessageService.__init__` (mirror how `custom_agent_service` is accepted and stored):
 
@@ -1630,12 +1630,12 @@ and pass it into the `WorkflowExecutionRequest(...)` construction (~line 2191):
             hitl_policy=hitl_policy,
 ```
 
-- [ ] **Step 6: Run injection + a message-service smoke**
+- [x] **Step 6: Run injection + a message-service smoke**
 
 Run: `.conda\python.exe -m pytest tests/test_hitl_turn_policy_injection.py tests/test_custom_agents_message_service.py -q`
 Expected: PASS. (`tool_approval_setting_repository` defaults to `None`, so existing `MessageService` constructions in tests that don't pass it keep working and `_resolve_hitl_policy` returns `None` → global-policy fallback.)
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add app/services/message_service.py app/core/container.py app/schemas/workflow.py app/ai/schemas.py app/ai/graph.py tests/test_hitl_turn_policy_injection.py
@@ -2108,3 +2108,14 @@ git push
   - **Planning gate nested-`if` collapse (deviation from plan's literal code):** the plan kept `if external_tool_calls:` wrapping `if await self._needs_approval(...):`. Removing the old intervening `ext_tool_names = [...]` assignment made ruff flag a real **new** SIM102 (collapsible nested-if). I collapsed them to `if external_tool_calls and await self._needs_approval(...):` and dedented the block body — behavior-identical (short-circuit on empty calls; `approved_external_calls` is already captured above the block) and keeps the touched file ruff-clean (the plan's Task 10 requires fixing new findings).
   - Async conversion of `_should_call_tools` is safe: its only internal caller is the LangGraph conditional-edge registration (`self._should_call_tools` at graph.py:775), and LangGraph awaits async edge callables. `asyncio_mode = "auto"` (pyproject.toml) means the converted sync test needed only `async def`/`await`, no `@pytest.mark.asyncio` (which couldn't be used there anyway — `pytest` is imported lower in that file).
   - `_needs_approval` only builds a `tool_map`/fetches the MCP manager when `master_enabled` is true and a tool_map isn't already supplied, so the master kill-switch path stays cheap and the planning gate reuses its pre-built `tool_map`.
+
+### Task 6 — Load per-user policy per turn + carry into graph context ✅ 2026-06-22
+
+- **Tests:** `tests/test_hitl_turn_policy_injection.py` (3 cases: service request carries `hitl_policy`, `_build_initial_state_from_request` injects it into `context`, `AIService._to_ai_request` preserves it through the dual-schema round-trip). Step-3 verify-fail confirmed all 3 failed (field absent).
+- **Implementation:** Added `hitl_policy: dict[str, Any] | None = None` to **both** `app/schemas/workflow.py::WorkflowExecutionRequest` and `app/ai/schemas.py::WorkflowExecutionRequest`, and `hitl_policy: dict[str, Any]` to `app/ai/schemas.py::GraphContext`. `_build_initial_state_from_request` injects `"hitl_policy": getattr(request, "hitl_policy", None)` alongside `inline_rich_response_v1`. `MessageService.__init__` accepts `tool_approval_setting_repository=None`; new `_resolve_hitl_policy(user_id)` (mirrors `_resolve_custom_agents_state`) called in `_build_user_message_workflow_request` and passed as `hitl_policy=`. Container passes `tool_approval_setting_repository=` into the `MessageService` provider.
+- **Verification:** `import app.main` → BOOT OK; `pytest test_hitl_turn_policy_injection.py test_custom_agents_message_service.py -q` → **11 passed**; `ruff check` on touched files → All checks passed (after fixing one I001).
+- **Commit:** `feat(hitl): load per-user policy per turn and inject into graph context` (6 files, +75/-2).
+- **Design decisions:**
+  - **Verified the dual-schema drift trap (`[[dual-workflow-request-schema-drift]]`):** `_to_ai_request` does `AIWorkflowExecutionRequest.model_validate(request.model_dump())`, which silently drops any field absent from the AI-layer schema. Test 3 is the guard — it passes only because the field was added to BOTH schemas, not just the service one.
+  - **Fixed an I001 introduced in Task 4:** the `ToolApprovalSettingRepository` import was placed after `custom_agent` instead of after `tool_approval` (alphabetical), tripping ruff's import-sort. Task 4's plan steps had no ruff gate so it slipped through; corrected here via ruff's safe autofix (import reorder only — both symbols still imported, boot verified).
+  - `_resolve_hitl_policy` returns `None` (not an empty policy) when no repo/user, so `policy_from_context` falls back to the global policy and legacy/test `MessageService` constructions (which omit the new param) keep working unchanged.
