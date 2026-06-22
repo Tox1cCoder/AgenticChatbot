@@ -27,6 +27,7 @@ from app.repositories.user import UserRepository
 from app.services.ai_service import AIService
 from app.services.custom_agent_service import CustomAgentService
 from app.services.document_processing_service import DocumentProcessingService
+from app.services.hitl_settings_service import HitlSettingsService
 from app.services.jwt_service import JwtService
 from app.services.mcp_service import MCPService
 from app.services.model_config_service import ModelConfigService
@@ -133,6 +134,7 @@ class AppAutoInjector(AutoInjector):
             ProviderService: container_ref.provider_service,
             ModelConfigService: container_ref.model_config_service,
             CustomAgentService: container_ref.custom_agent_service,
+            HitlSettingsService: container_ref.hitl_settings_service,
         }
 
     @classmethod

@@ -32,6 +32,7 @@ from app.repositories.conversation_memory_summary import (
     ConversationMemorySummaryRepository,
 )
 from app.repositories.custom_agent import CustomAgentRepository
+from app.repositories.tool_approval_setting import ToolApprovalSettingRepository
 from app.repositories.document import DocumentRepository
 from app.repositories.document_chunk import DocumentChunkRepository
 from app.repositories.document_image import DocumentImageRepository
@@ -49,6 +50,7 @@ from app.services.ai_service import AIService
 from app.services.auth_service import AuthService
 from app.services.conversation_service import ConversationService
 from app.services.custom_agent_service import CustomAgentService
+from app.services.hitl_settings_service import HitlSettingsService
 from app.services.document_chunk_builder import DocumentChunkBuilder
 from app.services.document_index_service import DocumentIndexService
 from app.services.document_parse_service import DocumentParseService
@@ -194,6 +196,11 @@ class Container(containers.DeclarativeContainer):
 
     custom_agent_repository = providers.Factory(
         CustomAgentRepository,
+        session_factory=db.provided.session,
+    )
+
+    tool_approval_setting_repository = providers.Factory(
+        ToolApprovalSettingRepository,
         session_factory=db.provided.session,
     )
 
@@ -387,6 +394,11 @@ class Container(containers.DeclarativeContainer):
         conversation_validation_utils=conversation_validation_utils,
         model_config_service=model_config_service,
         generation_registry=providers.Callable(get_generation_registry),
+    )
+
+    hitl_settings_service = providers.Factory(
+        HitlSettingsService,
+        repository=tool_approval_setting_repository,
     )
 
     planning_runtime_service: providers.Provider[IPlanningRuntimeService] = providers.Factory(
