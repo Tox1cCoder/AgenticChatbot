@@ -125,6 +125,7 @@ class MessageService(IMessageService):
         summary_repository: Any | None = None,
         conversation_summarizer: Any | None = None,
         custom_agent_service: Any | None = None,
+        tool_approval_setting_repository=None,
     ):
         self.repository = message_repository
         self.conversation_validation_utils = conversation_validation_utils
@@ -137,6 +138,8 @@ class MessageService(IMessageService):
         self.conversation_summarizer = conversation_summarizer
         # Resolves attached custom agents into workflow state each user turn.
         self.custom_agent_service = custom_agent_service
+        # Resolves the per-user HITL approval policy into workflow state each turn.
+        self.tool_approval_setting_repository = tool_approval_setting_repository
         self.redis_client = self._init_redis_client()
         # Coalesces concurrent summary refreshes per conversation. ``_pending``
         # holds the latest (user_id, through_message_id) tuple for an
@@ -2176,6 +2179,7 @@ class MessageService(IMessageService):
         custom_agents_state = self._resolve_custom_agents_state(
             resolved_user_id, message_create_data.conversation_id
         )
+        hitl_policy = self._resolve_hitl_policy(resolved_user_id)
         validated_device_id = self._validate_request_device_id(
             message_create_data.device_id, resolved_user_id
         )
@@ -2194,6 +2198,7 @@ class MessageService(IMessageService):
             inline_rich_response_v1=bool(
                 getattr(message_create_data, "inline_rich_response_v1", False)
             ),
+            hitl_policy=hitl_policy,
         )
         return resolved_user_id, sanitized_persona, request
 
@@ -2243,6 +2248,30 @@ class MessageService(IMessageService):
         except Exception as exc:  # pragma: no cover - defensive
             logging.warning("Failed to resolve custom agents for conversation: %s", exc)
             return {}
+
+    def _resolve_hitl_policy(self, user_id) -> dict | None:
+        """Resolve the per-user HITL approval policy for this turn.
+
+        Best-effort: returns ``None`` when no repository is wired or no user is
+        resolved, so the graph falls back to the global policy and legacy turns
+        are unaffected.
+        """
+        repo = getattr(self, "tool_approval_setting_repository", None)
+        if repo is None or not user_id:
+            return None
+        try:
+            from app.ai.hitl_config import get_tools_requiring_approval, is_hitl_enabled
+
+            grouped = repo.build_policy(user_id)
+            return {
+                "master_enabled": is_hitl_enabled(),
+                "servers": grouped["servers"],
+                "tools": grouped["tools"],
+                "global_tools": list(get_tools_requiring_approval()),
+            }
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.warning("Failed to resolve HITL policy: %s", exc)
+            return None
 
     @staticmethod
     def _agent_selected_event(

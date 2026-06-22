@@ -32,7 +32,6 @@ from app.repositories.conversation_memory_summary import (
     ConversationMemorySummaryRepository,
 )
 from app.repositories.custom_agent import CustomAgentRepository
-from app.repositories.tool_approval_setting import ToolApprovalSettingRepository
 from app.repositories.document import DocumentRepository
 from app.repositories.document_chunk import DocumentChunkRepository
 from app.repositories.document_image import DocumentImageRepository
@@ -43,6 +42,7 @@ from app.repositories.message import MessageRepository
 from app.repositories.model_provider import ModelProviderRepository
 from app.repositories.task_plan import TaskPlanRepository
 from app.repositories.tool_approval import ToolApprovalRepository
+from app.repositories.tool_approval_setting import ToolApprovalSettingRepository
 from app.repositories.tool_result_blob import ToolResultBlobRepository
 from app.repositories.user import UserRepository
 from app.repositories.user_memory import UserMemoryRepository
@@ -50,7 +50,6 @@ from app.services.ai_service import AIService
 from app.services.auth_service import AuthService
 from app.services.conversation_service import ConversationService
 from app.services.custom_agent_service import CustomAgentService
-from app.services.hitl_settings_service import HitlSettingsService
 from app.services.document_chunk_builder import DocumentChunkBuilder
 from app.services.document_index_service import DocumentIndexService
 from app.services.document_parse_service import DocumentParseService
@@ -58,6 +57,7 @@ from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
 from app.services.feedback_service import FeedbackService
 from app.services.generation_registry import get_generation_registry
+from app.services.hitl_settings_service import HitlSettingsService
 from app.services.jwt_service import JwtService
 from app.services.mcp_service import MCPService
 from app.services.message_service import MessageService
@@ -427,6 +427,7 @@ class Container(containers.DeclarativeContainer):
         summary_repository=conversation_memory_summary_repository,
         conversation_summarizer=conversation_summarizer,
         custom_agent_service=custom_agent_service,
+        tool_approval_setting_repository=tool_approval_setting_repository,
     )
 
     feedback_service: providers.Provider[IFeedbackService] = providers.Factory(

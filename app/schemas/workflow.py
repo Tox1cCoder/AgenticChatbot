@@ -110,6 +110,13 @@ class WorkflowExecutionRequest(BaseModel):
             "surface marker syntax / rich-item inventory to agents."
         ),
     )
+    hitl_policy: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Per-turn, per-user human-in-the-loop approval policy resolved server-side "
+            "and carried into graph context. None falls back to the global policy."
+        ),
+    )
 
 
 class WorkflowResponseMessage(BaseModel):

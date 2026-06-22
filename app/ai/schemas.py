@@ -140,6 +140,7 @@ class WorkflowExecutionRequest(BaseModel):
     user_message_id: str | None = None
     assistant_message_id: str | None = None
     inline_rich_response_v1: bool = False
+    hitl_policy: dict[str, Any] | None = None
 
 
 class ContinuationSignal(TypedDict, total=False):
@@ -185,6 +186,9 @@ class GraphContext(TypedDict, total=False):
     # Per-turn capability flag forwarded from the service boundary so workflow
     # nodes can decide whether to surface marker syntax / inventory to agents.
     inline_rich_response_v1: bool
+    # Per-turn, per-user HITL approval policy (checkpoint-safe plain dict). Read by
+    # the gate via ``policy_from_context``; absent/None falls back to the global policy.
+    hitl_policy: dict[str, Any]
     # Turn-scoped Planning rubric metadata. ``planning_rubric`` mirrors the
     # PlanningRubricAttempt metadata for the most recent graded plan; the
     # ``planning_rubric_feedback`` string drives a forced revision pass when a
