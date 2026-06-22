@@ -860,7 +860,7 @@ git commit -m "feat(hitl): ToolApprovalSettingRepository + build_policy"
   - `HitlSettingsService(repository)` with `get_settings(user_id) -> dict`, `apply(user_id, items) -> dict`, `clear(user_id, scope_type, scope_value) -> dict`, `build_turn_policy(user_id) -> dict`.
   - REST: `GET /hitl/settings`, `POST /hitl/settings`, `DELETE /hitl/settings`.
 
-- [ ] **Step 1: Write the failing API test — `tests/test_hitl_api.py`**
+- [x] **Step 1: Write the failing API test — `tests/test_hitl_api.py`**
 
 ```python
 """HTTP-level tests for the per-user HITL settings API."""
@@ -945,12 +945,12 @@ def test_rejects_invalid_scope_type(api):
     assert resp.status_code == 422
 ```
 
-- [ ] **Step 2: Run and verify FAIL**
+- [x] **Step 2: Run and verify FAIL**
 
 Run: `.conda\python.exe -m pytest tests/test_hitl_api.py -q`
 Expected: FAIL — `app.api.hitl` does not exist.
 
-- [ ] **Step 3: Create `app/schemas/hitl.py`**
+- [x] **Step 3: Create `app/schemas/hitl.py`**
 
 ```python
 """Schemas for the per-user HITL approval settings API."""
@@ -984,7 +984,7 @@ class HitlSettingsResponse(_CamelModel):
 
 (If `app/schemas/` already defines a shared camel-case base model, import that instead of `_CamelModel` — grep `alias_generator=to_camel` in `app/schemas` and reuse the existing base to stay DRY.)
 
-- [ ] **Step 4: Create `app/services/hitl_settings_service.py`**
+- [x] **Step 4: Create `app/services/hitl_settings_service.py`**
 
 ```python
 """Per-user HITL approval settings service."""
@@ -1037,7 +1037,7 @@ class HitlSettingsService:
         }
 ```
 
-- [ ] **Step 5: Create `app/api/hitl.py`**
+- [x] **Step 5: Create `app/api/hitl.py`**
 
 ```python
 from uuid import UUID
@@ -1099,7 +1099,7 @@ async def clear_hitl_setting(
     return ApiResponse(success=True, message="HITL setting cleared", data=_to_response(data))
 ```
 
-- [ ] **Step 6: Register the repo + service in `app/core/container.py`**
+- [x] **Step 6: Register the repo + service in `app/core/container.py`**
 
 Add the repository provider after `custom_agent_repository` (~line 198):
 
@@ -1133,7 +1133,7 @@ from app.services.hitl_settings_service import HitlSettingsService
 
 Do not inject the repository into `message_service` in this task. Task 6 adds the constructor parameter and provider argument together so every task-level commit remains boot-importable.
 
-- [ ] **Step 7: Wire `HitlSettingsService` for auto-injection in `app/core/dependency_injection.py`**
+- [x] **Step 7: Wire `HitlSettingsService` for auto-injection in `app/core/dependency_injection.py`**
 
 Add the import (with the other service imports near line 28-31):
 
@@ -1147,7 +1147,7 @@ Add to `AppAutoInjector.wiring_map` (after `CustomAgentService: container_ref.cu
             HitlSettingsService: container_ref.hitl_settings_service,
 ```
 
-- [ ] **Step 8: Export + mount the router**
+- [x] **Step 8: Export + mount the router**
 
 In `app/api/__init__.py`, add an export mirroring the existing `mcp` router export:
 
@@ -1163,13 +1163,13 @@ In `app/main.py`, add inside the include block (after `app.include_router(mcp_ro
 
 (Import `hitl_router` alongside the other router imports at the top of `app/main.py`, mirroring `mcp_router`.)
 
-- [ ] **Step 9: Run boot-import + API tests**
+- [x] **Step 9: Run boot-import + API tests**
 
 Run: `.conda\python.exe -c "import app.main"` → no ImportError
 Run: `.conda\python.exe -m pytest tests/test_hitl_api.py -q` → PASS
 (If the DB at `settings.database_url` is unreachable in this environment, the fixture will error on connect — start the dev Postgres or run this task's test against it; do not stub it out.)
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```powershell
 git add app/services/hitl_settings_service.py app/schemas/hitl.py app/api/hitl.py app/api/__init__.py app/core/container.py app/core/dependency_injection.py app/main.py tests/test_hitl_api.py
@@ -2086,3 +2086,14 @@ git push
 - **Design decisions:**
   - `build_policy` silently ignores unknown `scope_type` rows (defensive against future scope kinds / dirty data) rather than raising — the read path must never break a turn.
   - `set` upserts (select-then-update-or-insert) keyed on the `(user_id, scope_type, scope_value)` unique tuple, matching the DB constraint so concurrent writers converge on update rather than violating the constraint.
+
+### Task 4 — HitlSettingsService + DI wiring + /hitl/settings API ✅ 2026-06-22
+
+- **Tests:** `tests/test_hitl_api.py` (3 cases: POST→GET roundtrip of server+tool rules, DELETE clears a rule, invalid scope_type → 422). Step-2 verify-fail confirmed `ModuleNotFoundError: No module named 'app.api.hitl'`.
+- **Implementation:** `app/schemas/hitl.py` (camel schemas), `app/services/hitl_settings_service.py` (`get_settings`/`apply`/`clear`/`build_turn_policy`), `app/api/hitl.py` (`GET/POST/DELETE /hitl/settings`). Container: repo provider `tool_approval_setting_repository` + service provider `hitl_settings_service` (NOT injected into `message_service` yet — deferred to Task 6 so every commit boots). DI: `HitlSettingsService` added to `AppAutoInjector.wiring_map`. Router exported in `app/api/__init__.py` and mounted in `app/main.py`.
+- **Verification:** `import app.main` → BOOT OK; `pytest tests/test_hitl_api.py -q` → **3 passed** against the live dev Postgres (DB reachable in this environment; the `tool_approval_settings` table exists, exercised by real insert/select/delete).
+- **Commit:** `feat(hitl): per-user settings service + /hitl/settings API` (8 files, +231).
+- **Design decisions:**
+  - **Camel base divergence from the plan's literal code:** the plan's `app/schemas/hitl.py` snippet imported `pydantic.alias_generators.to_camel`. The codebase convention (12 schema modules) is a *local* `_CamelModel` built on the shared `app.utils.case_conversion.to_camel_case` helper. I followed the codebase convention (reuse the shared helper) instead of introducing pydantic's generator — same camelCase output, consistent with every other schema module. The API test asserts the exact camelCase keys (`scopeType`/`scopeValue`/`requireApproval`/`masterEnabled`), which pass.
+  - 422 on invalid `scope_type` comes for free from the `Literal["server","tool"]` field on `HitlScopeRule` (Pydantic validation at the request boundary), so the bad value never reaches the repository.
+  - Service holds the `is_hitl_enabled()`/`get_tools_requiring_approval()` reads so the master switch + legacy floor are always reported from live settings, not persisted per-user.
