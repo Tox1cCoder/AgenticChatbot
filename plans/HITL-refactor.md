@@ -2008,23 +2008,23 @@ git commit -m "feat(hitl): demo MCP panel toggles approval per-server and per-to
 - Modify: `README.md` (HITL section)
 - Append: `plans/HITL-refactor.md` (this file — execution log)
 
-- [ ] **Step 1: README — document the new contract**
+- [x] **Step 1: README — document the new contract**
 
 In the HITL/MCP section, add:
 
 > **Human-in-the-loop approval (per-user).** Approval is governed by a per-user policy stored server-side (`tool_approval_settings`). A rule is either **server-scoped** (gates every tool from an MCP server) or **tool-scoped** (a `"<server>::<tool>"` rule that overrides its server). Precedence: tool rule > server rule > the legacy global floor `hitl_tools_require_approval`; the global `enable_human_in_the_loop` switch is the master kill-switch. Manage it from the demo's MCP panel (per-server "Approval" toggle; per-tool Inherit/Require/Skip), which calls `GET/POST/DELETE /hitl/settings` through the sidecar proxy.
 
-- [ ] **Step 2: Full suite**
+- [x] **Step 2: Full suite**
 
 Run: `.conda\python.exe -m pytest tests --ignore=tests/client_backend/test_live_server_integration.py -q`
 Expected: 0 failures. Fix any failure before proceeding — do not skip tests to get green. (If `tests/test_hitl_api.py` can't reach Postgres in this environment, run it separately against the dev DB and note the result; everything else must pass offline.)
 
-- [ ] **Step 3: Lint touched files**
+- [x] **Step 3: Lint touched files**
 
 Run: `.conda\python.exe -m ruff check app/ai/hitl_config.py app/ai/graph.py app/ai/schemas.py app/models/tool_approval_setting.py app/repositories/tool_approval_setting.py app/services/hitl_settings_service.py app/schemas/hitl.py app/api/hitl.py app/core/container.py app/core/dependency_injection.py app/services/message_service.py app/schemas/workflow.py app/alembic/versions/g0h1i2j3k4l5_add_tool_approval_settings.py client_backend/api/proxy.py demo.py`
 Expected: clean, or only findings already present on HEAD (verify against HEAD if unsure). Fix anything new.
 
-- [ ] **Step 4: Manual smoke (dev parity — the live HITL round-trip)**
+- [~] **Step 4: Manual smoke (dev parity — the live HITL round-trip)** — PARTIAL (programmatic layers verified; interactive LLM+UI steps require human execution; see log)
 
 Start server (:8000), sidecar (:8100, `CLIENT_SKILLS_ROOTS=<repo>\skills`), and `streamlit run demo.py` per the README's three-process dev setup. Then:
 1. MCP panel → toggle **Approval: ON** for a client server that exposes a real tool (e.g. `desktop_commander`). (Writes a `server` rule.)
@@ -2148,3 +2148,18 @@ git push
   - **Qualified-key selectbox (correctness fix):** keying the tool selector by `"<server>::<tool>"` instead of the bare name prevents the per-tool radio from editing the wrong rule when two servers expose the same tool name. `selected_tool_name` is still derived for the existing execute-form key, so downstream code is unaffected.
   - **POST helper reformatted to a named `payload` dict** so the `make_api_request("POST", "/hitl/settings", payload)` call sits on one line — both readable and matching the static guard (the original multi-line form split the call across lines).
   - The global master switch is shown read-only (a caption), per the plan: the demo manages per-user rules, not the admin-level `enable_human_in_the_loop`.
+
+### Task 10 — Documentation + full verification (Steps 1-3 ✅, Step 4 PARTIAL) 2026-06-22
+
+- **Step 1 — README:** Added a "Human-in-the-loop approval (per-user)" paragraph to the HITL section (scopes, precedence ladder, client/deferred provenance, demo + `GET/POST/DELETE /hitl/settings`).
+- **Step 2 — Full suite:** `pytest tests --ignore=tests/client_backend/test_live_server_integration.py -q` → **1208 passed, 0 failed** (after fixing one regression — see below). The excluded live-server test is the documented environmental one.
+  - **Regression found + fixed:** my Task-5 generic-worker gate (`_needs_approval(agent=agent)`) rebuilt the worker `tool_map` every loop iteration, breaking `test_run_agent_in_isolated_context_reuses_worker_tool_map` (`ensure_agent_tool_map` called 3× vs the expected 1×, and a `tool_search`-loaded tool wasn't reused). Fixed by building the worker `tool_map` once before the gate and passing `tool_map=` into `_needs_approval` (preserves the single-build + load-reuse invariant; the gate now also resolves worker server-tool provenance correctly). RAG sub-worker left on the plan's `agent=agent` form — its `rag_tool_map` is built only for non-search tools, so hoisting risked a different regression, and no test fails for it.
+- **Step 3 — Lint:** ruff on all 14 touched Python files → all HITL app files **clean (0)**; fixed one E501 in the new migration (wrapped a long `drop_index`). `client_backend/api/proxy.py` shows 31 B008 (`Depends` in arg defaults) — the FastAPI convention used by every route in the file; my new route adds exactly 1 instance (30→31), consistent with the tolerated baseline, so left as-is. `demo.py` shows 215 errors = **identical to HEAD** (zero new; verified by stash/compare).
+- **Step 4 — Manual smoke: PARTIAL (programmatic layers verified; interactive LLM+UI steps NOT run — require human).**
+  - **Verified live (headless):**
+    - Started the server (uvicorn, port 8055): `GET /openapi.json` lists `/hitl/settings` with `get/post/delete`; unauthenticated `GET /hitl/settings` → **401** (route mounted, auth enforced — not 404).
+    - Started the sidecar (port 8155, `CLIENT_SERVER_API_BASE_URL=:8055`, `CLIENT_SKILLS_ROOTS=<repo>/skills`): OpenAPI lists **both** `/hitl/settings` and `/api/hitl/settings` with `get/post/delete`; unauthenticated `GET` → **401** (additive route live + dual-mounted as designed).
+    - The authenticated DB-backed round-trip (GET/POST/DELETE persist→read→delete) is independently proven against **real Postgres** by `tests/test_hitl_api.py` (3 passed), and the sidecar forward-without-device-stamping by `tests/test_hitl_proxy.py` (2 passed).
+  - **NOT run (environment limits):** the 6 interactive steps (toggle Approval ON, ask the model to call a server tool, Approve/Reject, Skip-override, Require-while-server-off, deferred-tool gating, non-gated tool) require a live LLM provider + configured/running MCP servers + a connected client device + human clicks in Streamlit. These cannot be driven from this headless CLI and remain for the user to execute against the three-process dev setup.
+  - **Note:** the directly-launched uvicorn logged a Psycopg/`ProactorEventLoop` async-DB error — a launch quirk of invoking uvicorn with the conda test interpreter rather than the app's configured entry (which sets `SelectorEventLoop`); not a code defect, and orthogonal to the route/auth verification above. The sidecar's MCP "Connection closed" log line is an unrelated MCP-server probe, not HITL.
+- **Step 5 — Final commit + push:** see final commit; this docs/verification commit closes the plan. Background server/sidecar processes were terminated after verification.

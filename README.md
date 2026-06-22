@@ -760,6 +760,8 @@ HITL is global (`ENABLE_HUMAN_IN_THE_LOOP=true`) with a per-tool opt-in list (`H
 
 Timeout handling is Redis-backed; after `HITL_APPROVAL_TIMEOUT_MINUTES` the interrupt is auto-rejected or cleaned up.
 
+**Human-in-the-loop approval (per-user).** Beyond the global `HITL_TOOLS_REQUIRE_APPROVAL` floor, approval is governed by a per-user policy stored server-side (`tool_approval_settings`). A rule is either **server-scoped** (gates every tool from an MCP server) or **tool-scoped** (a `"<server>::<tool>"` rule that overrides its server). Precedence: tool rule > server rule > the legacy global floor `hitl_tools_require_approval`; the global `enable_human_in_the_loop` switch is the master kill-switch. The gate resolves each pending call's provenance (client tools from their `client__<server>__<tool>` name, server tools via the MCP manager) so it works for client-sidecar and deferred (search-loaded) tools alike. Manage it from the demo's MCP panel (per-server "Approval" toggle; per-tool Inherit/Require/Skip), which calls `GET/POST/DELETE /hitl/settings` through the sidecar proxy.
+
 ---
 
 ## Client Runtime Bridge
