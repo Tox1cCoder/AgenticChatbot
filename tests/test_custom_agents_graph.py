@@ -152,7 +152,7 @@ def test_should_continue_routes_custom_runtime_id_to_static_custom_node():
     )
 
 
-def test_custom_agent_react_loop_routes_back_to_custom_node_until_done():
+async def test_custom_agent_react_loop_routes_back_to_custom_node_until_done():
     wf = _workflow()
     rid = f"custom_agent:{uuid4()}"
 
@@ -177,7 +177,7 @@ def test_custom_agent_react_loop_routes_back_to_custom_node_until_done():
             AIMessage(content="Final answer."),
         ],
     }
-    assert wf._should_call_tools(done_state) == "end"
+    assert await wf._should_call_tools(done_state) == "end"
     # And a tool-calling response routes into the tools node.
     tool_state = {
         "selected_agent": rid,
@@ -185,7 +185,7 @@ def test_custom_agent_react_loop_routes_back_to_custom_node_until_done():
             AIMessage(content="", tool_calls=[{"id": "t2", "name": "tool_search", "args": {}}]),
         ],
     }
-    assert wf._should_call_tools(tool_state) == "tools"
+    assert await wf._should_call_tools(tool_state) == "tools"
 
 
 # --------------------------------------------------------------------------- #

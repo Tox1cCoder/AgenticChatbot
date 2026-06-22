@@ -49,7 +49,12 @@ from .agents.search_agent import SearchAgent
 from .custom_agent_runtime import build_custom_agent_runtime_spec, is_custom_runtime_id
 from .hand_off_tool import MAX_DELEGATION_DEPTH, create_hand_off_tool
 from .history import ConversationHistoryProvider
-from .hitl_config import build_interrupt_response, requires_human_approval
+from .hitl_config import (
+    any_call_requires_approval,
+    build_interrupt_response,
+    policy_from_context,
+)
+from .mcp_registry import get_global_mcp_manager
 from .memory import get_memory_manager
 from .rag_tool_actions import canonicalize_rag_tool_call, execute_search_documents_action
 from .schemas import (
@@ -1070,6 +1075,35 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         return payload
 
+    async def _needs_approval(
+        self,
+        state: GraphState,
+        normalized_calls: list[dict[str, Any]],
+        *,
+        agent: Any | None = None,
+        tool_map: dict[str, Any] | None = None,
+    ) -> bool:
+        """Resolve per-call provenance and apply the per-turn HITL policy."""
+        policy = policy_from_context(state.get("context"))
+        if not policy.get("master_enabled", True):
+            return False
+
+        mcp_manager = None
+        if tool_map is None and agent is not None:
+            view = GraphStateView(state)
+            tool_map = await ensure_agent_tool_map(
+                agent,
+                conversation_id=view.conversation_id(),
+                user_id=view.user_id(),
+                device_id=view.device_id(),
+            )
+        if tool_map is not None:
+            mcp_manager = await get_global_mcp_manager()
+
+        return any_call_requires_approval(
+            normalized_calls, policy=policy, tool_map=tool_map, mcp_manager=mcp_manager
+        )
+
     async def _prepare_interrupt_payload(
         self,
         state: GraphState,
@@ -1206,7 +1240,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         return state
 
-    def _should_call_tools(self, state: GraphState) -> str:
+    async def _should_call_tools(self, state: GraphState) -> str:
         messages = state.get("messages", [])
         if not messages:
             return "end"
@@ -1215,8 +1249,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return "end"
 
-        tool_names = [normalize_tool_call(tc).get("name") for tc in last_message.tool_calls]
-        if requires_human_approval(tool_names):
+        normalized_calls = [normalize_tool_call(tc) for tc in last_message.tool_calls]
+        selected_agent_name = state.get("selected_agent")
+        agent = self.agents.get(selected_agent_name) if selected_agent_name else None
+        if await self._needs_approval(state, normalized_calls, agent=agent):
             return "approval"
 
         return "tools"
@@ -2449,8 +2485,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         if non_search_tool_calls:
             tool_calls_to_execute = list(non_search_tool_calls)
 
-            tool_names = [tc.get("name") for tc in non_search_tool_calls]
-            if requires_human_approval(tool_names):
+            if await self._needs_approval(state, non_search_tool_calls, agent=agent):
                 interrupt_payload = await self._prepare_interrupt_payload(
                     state,
                     tool_calls=non_search_tool_calls,
@@ -2888,8 +2923,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 normalized_calls = [
                     canonicalize_rag_tool_call(normalize_tool_call(tc)) for tc in tool_calls
                 ]
-                tool_call_names = [tc.get("name") or "" for tc in normalized_calls]
-                if requires_human_approval(tool_call_names):
+                if await self._needs_approval(parent_state, normalized_calls, agent=agent):
                     if response.metadata is None:
                         response.metadata = {}
                     response.metadata["requires_approval"] = True
@@ -2992,8 +3026,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     response.tool_artifacts = existing
                 return response
 
-            tool_call_names = [normalize_tool_call(tc).get("name") or "" for tc in tool_calls]
-            if requires_human_approval(tool_call_names):
+            normalized_worker_calls = [normalize_tool_call(tc) for tc in tool_calls]
+            if await self._needs_approval(parent_state, normalized_worker_calls, agent=agent):
                 if response.metadata is None:
                     response.metadata = {}
                 response.metadata["requires_approval"] = True
@@ -3292,36 +3326,36 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         rejected_feedback: dict[str, str] = {}
         approved_external_calls = list(external_tool_calls)
 
-        if external_tool_calls:
-            ext_tool_names = [tc.get("name") for tc in external_tool_calls]
-            if requires_human_approval(ext_tool_names):
-                # Label the stop reason before yielding to the human.
-                _ctx = dict(state.get("context") or {})
-                _ctx["pause_reason"] = "awaiting_approval"
-                state["context"] = _ctx
+        if external_tool_calls and await self._needs_approval(
+            state, external_tool_calls, agent=self.planning_agent, tool_map=tool_map
+        ):
+            # Label the stop reason before yielding to the human.
+            _ctx = dict(state.get("context") or {})
+            _ctx["pause_reason"] = "awaiting_approval"
+            state["context"] = _ctx
 
-                interrupt_payload = await self._prepare_interrupt_payload(
-                    state,
-                    tool_calls=external_tool_calls,
-                    agent=self.planning_agent,
-                    tool_map=tool_map,
+            interrupt_payload = await self._prepare_interrupt_payload(
+                state,
+                tool_calls=external_tool_calls,
+                agent=self.planning_agent,
+                tool_map=tool_map,
+            )
+            human_decisions = interrupt(interrupt_payload)
+            _ctx = GraphStateView(state).context_copy()
+            _ctx.pop("pause_reason", None)
+            state["context"] = _ctx
+
+            if not human_decisions:
+                approved_external_calls, rejected_feedback = _apply_decisions(
+                    external_tool_calls, []
                 )
-                human_decisions = interrupt(interrupt_payload)
-                _ctx = GraphStateView(state).context_copy()
-                _ctx.pop("pause_reason", None)
-                state["context"] = _ctx
+            else:
+                approved_external_calls, rejected_feedback = _apply_decisions(
+                    external_tool_calls, human_decisions
+                )
 
-                if not human_decisions:
-                    approved_external_calls, rejected_feedback = _apply_decisions(
-                        external_tool_calls, []
-                    )
-                else:
-                    approved_external_calls, rejected_feedback = _apply_decisions(
-                        external_tool_calls, human_decisions
-                    )
-
-                for tc_id, feedback in rejected_feedback.items():
-                    rejected_tool_ids[tc_id] = feedback
+            for tc_id, feedback in rejected_feedback.items():
+                rejected_tool_ids[tc_id] = feedback
 
         # Emit rejection ToolMessages for rejected external calls
         for tc in external_tool_calls:
