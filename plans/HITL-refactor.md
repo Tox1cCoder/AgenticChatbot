@@ -1655,7 +1655,7 @@ This is the explicit "test HITL works with the client sidecar + deferred tool lo
 **Interfaces:**
 - Consumes: `resolve_call_identity`, `any_call_requires_approval` (Task 1); `MultiAgentWorkflow._needs_approval` (Task 5); `_prepare_interrupt_payload` (existing).
 
-- [ ] **Step 1: Write the behavioral guards — `tests/test_hitl_client_and_deferred.py`**
+- [x] **Step 1: Write the behavioral guards — `tests/test_hitl_client_and_deferred.py`**
 
 ```python
 """HITL fires correctly for client (sidecar) tools and deferred (search-loaded) tools."""
@@ -1724,12 +1724,12 @@ async def test_prepare_interrupt_payload_carries_client_provenance():
     assert entry["tool_origin"] == "client_mcp"
 ```
 
-- [ ] **Step 2: Run the guards**
+- [x] **Step 2: Run the guards**
 
 Run: `.conda\python.exe -m pytest tests/test_hitl_client_and_deferred.py -q`
 Expected: PASS with the Task-1/Task-5 implementation. If the `_prepare_interrupt_payload` provenance test fails, the metadata extraction at `graph.py:1109-1124` is the place to fix (it already reads `server_name`/`qualified_tool_id`/`tool_origin`) — bring it in line with the resolver rather than weakening the test.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```powershell
 git add tests/test_hitl_client_and_deferred.py app/ai/graph.py
@@ -2119,3 +2119,11 @@ git push
   - **Verified the dual-schema drift trap (`[[dual-workflow-request-schema-drift]]`):** `_to_ai_request` does `AIWorkflowExecutionRequest.model_validate(request.model_dump())`, which silently drops any field absent from the AI-layer schema. Test 3 is the guard — it passes only because the field was added to BOTH schemas, not just the service one.
   - **Fixed an I001 introduced in Task 4:** the `ToolApprovalSettingRepository` import was placed after `custom_agent` instead of after `tool_approval` (alphabetical), tripping ruff's import-sort. Task 4's plan steps had no ruff gate so it slipped through; corrected here via ruff's safe autofix (import reorder only — both symbols still imported, boot verified).
   - `_resolve_hitl_policy` returns `None` (not an empty policy) when no repo/user, so `policy_from_context` falls back to the global policy and legacy/test `MessageService` constructions (which omit the new param) keep working unchanged.
+
+### Task 7 — Client-sidecar + deferred-tool round-trip guards ✅ 2026-06-22
+
+- **Tests:** `tests/test_hitl_client_and_deferred.py` (3 cases: a client server rule gates a sidecar tool by name alone with no tool_map; a deferred server tool autoloaded this turn is gated via the MCP-manager server resolution; `_prepare_interrupt_payload` carries client provenance into `metadata.tool_provenance`).
+- **Verification:** `pytest tests/test_hitl_client_and_deferred.py -q` → **3 passed** on first run with the Task-1/Task-5 implementation — no graph.py change required. The `_prepare_interrupt_payload` provenance path (graph.py ~1109-1124) already emits `server_name`/`qualified_tool_id`/`tool_origin`, matching the resolver.
+- **Commit:** `test(hitl): guard client-sidecar + deferred-tool approval round-trips` (1 file, +64).
+- **Design decisions:**
+  - This task is the explicit "HITL works with the client sidecar + deferred tools" requirement. The two origins the old global-name list never modeled — client (`client__<server>__<tool>` resolved from the name even before a tool_map exists) and deferred server tools (bare name, server recovered through `McpManager.get_server_for_tool`) — are both proven gateable here, confirming the Task-1 resolver covers them end-to-end.
