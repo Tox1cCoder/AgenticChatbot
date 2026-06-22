@@ -206,12 +206,14 @@ class ConversationCustomAgentRead(_CamelModel):
 
 
 class CustomAgentOptions(_CamelModel):
-    """Selectable model providers, backend MCP tools, client tools, and skills."""
+    """Selectable model providers, backend MCP tools, client tools (with their
+    sidecar MCP servers grouped under ``client_servers``), and skills."""
 
     providers: list[dict[str, Any]] = Field(default_factory=list)
     server_default_tools: list[dict[str, Any]] = Field(default_factory=list)
     server_tools: list[dict[str, Any]] = Field(default_factory=list)
     client_tools: list[dict[str, Any]] = Field(default_factory=list)
+    client_servers: list[dict[str, Any]] = Field(default_factory=list)
     skills: list[dict[str, Any]] = Field(default_factory=list)
 
 

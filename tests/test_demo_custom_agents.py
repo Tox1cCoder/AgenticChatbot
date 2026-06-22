@@ -175,7 +175,7 @@ def test_build_tool_refs_expands_selected_mcp_server_to_all_server_tools(monkeyp
         [],
         server_tools,
         [],
-        selected_server_names=["calculator"],
+        selected_server_group_keys=["server::calculator"],
     )
 
     assert [ref["qualified_tool_id"] for ref in refs] == [
@@ -207,7 +207,7 @@ def test_build_tool_refs_deduplicates_server_group_and_individual_tool(monkeypat
         [demo._custom_agent_tool_option_key(calculate_tool)],
         server_tools,
         [],
-        selected_server_names=["calculator"],
+        selected_server_group_keys=["server::calculator"],
     )
 
     assert [ref["qualified_tool_id"] for ref in refs] == [
@@ -240,16 +240,216 @@ def test_custom_agent_edit_defaults_detect_all_tools_from_server(monkeypatch):
     ]
     tool_refs = [server_tools[0], server_tools[1], server_tools[2]]
 
-    selected_servers = demo._custom_agent_selected_server_names(tool_refs, server_tools)
+    selected_servers = demo._custom_agent_selected_server_group_keys(
+        tool_refs, server_tools, []
+    )
     selected_tool_keys = demo._custom_agent_selected_tool_keys(
         tool_refs,
         server_tools,
         [],
-        excluded_server_names=selected_servers,
+        excluded_group_keys=selected_servers,
     )
 
-    assert selected_servers == ["calculator"]
+    assert selected_servers == ["server::calculator"]
     assert selected_tool_keys == [demo._custom_agent_tool_option_key(server_tools[2])]
+
+
+def _desktop_commander_client_tools(count: int = 3) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "client",
+            "device_id": "device-1",
+            "session_id": "session-1",
+            "catalog_version": "5",
+            "tool_instance_id": f"instance-{i}",
+            "server_name": "desktop_commander",
+            "qualified_tool_id": f"desktop_commander::tool_{i}",
+            "tool_name": f"tool_{i}",
+        }
+        for i in range(count)
+    ]
+
+
+def _desktop_commander_client_servers(count: int = 3) -> list[dict[str, Any]]:
+    return [
+        {"server_name": "desktop_commander", "device_id": "device-1", "tool_count": count}
+    ]
+
+
+def test_server_groups_surface_sidecar_server_distinct_from_backend(monkeypatch):
+    """A sidecar MCP server is pickable as its own group, namespaced so it never
+    collides with a backend server of the same name."""
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    backend_tools = [
+        {
+            "type": "server_mcp",
+            "server_name": "desktop_commander",
+            "tool_name": "backend_a",
+            "qualified_tool_id": "desktop_commander::backend_a",
+        },
+        {
+            "type": "server_mcp",
+            "server_name": "desktop_commander",
+            "tool_name": "backend_b",
+            "qualified_tool_id": "desktop_commander::backend_b",
+        },
+    ]
+    client_tools = _desktop_commander_client_tools(3)
+    client_servers = _desktop_commander_client_servers(3)
+
+    groups = demo._custom_agent_server_groups(backend_tools, client_tools, client_servers)
+
+    assert set(groups) == {"server::desktop_commander", "client::device-1::desktop_commander"}
+    assert groups["client::device-1::desktop_commander"]["kind"] == "client"
+    assert (
+        demo._custom_agent_server_group_label("client::device-1::desktop_commander", groups)
+        == "[client] desktop_commander (all 3 tools)"
+    )
+
+
+def test_server_groups_fall_back_to_client_tools_without_client_servers(monkeypatch):
+    """If the backend omits clientServers (older build), groups are still derived
+    from the client tools themselves."""
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    client_tools = _desktop_commander_client_tools(3)
+
+    groups = demo._custom_agent_server_groups([], client_tools, [])
+
+    assert "client::device-1::desktop_commander" in groups
+
+
+def test_server_groups_omit_single_tool_sidecar_server(monkeypatch):
+    """A one-tool sidecar server is attached via the individual-tool picker, not
+    the 'all tools from server' group — matching backend behavior."""
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    client_tools = _desktop_commander_client_tools(1)
+    client_servers = _desktop_commander_client_servers(1)
+
+    groups = demo._custom_agent_server_groups([], client_tools, client_servers)
+
+    assert groups == {}
+
+
+def test_build_tool_refs_expands_selected_sidecar_server_to_all_client_tools(monkeypatch):
+    """Selecting a sidecar server group expands to one fully-scoped client ref per
+    tool (device/session/catalog/instance preserved)."""
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    client_tools = _desktop_commander_client_tools(3)
+    client_servers = _desktop_commander_client_servers(3)
+
+    refs = demo._build_tool_refs(
+        [],
+        [],
+        client_tools,
+        selected_server_group_keys=["client::device-1::desktop_commander"],
+        client_servers=client_servers,
+    )
+
+    assert [r["qualified_tool_id"] for r in refs] == [
+        "desktop_commander::tool_0",
+        "desktop_commander::tool_1",
+        "desktop_commander::tool_2",
+    ]
+    assert all(r["type"] == "client" for r in refs)
+    assert {r["device_id"] for r in refs} == {"device-1"}
+    assert {r["catalog_version"] for r in refs} == {"5"}
+    assert [r["tool_instance_id"] for r in refs] == ["instance-0", "instance-1", "instance-2"]
+
+
+def test_build_tool_refs_dedups_sidecar_group_and_individual_client_tool(monkeypatch):
+    """A client tool chosen both via its server group and individually appears once."""
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    client_tools = _desktop_commander_client_tools(3)
+    client_servers = _desktop_commander_client_servers(3)
+
+    refs = demo._build_tool_refs(
+        [demo._custom_agent_tool_option_key(client_tools[0])],
+        [],
+        client_tools,
+        selected_server_group_keys=["client::device-1::desktop_commander"],
+        client_servers=client_servers,
+    )
+
+    qids = [r["qualified_tool_id"] for r in refs]
+    assert qids == [
+        "desktop_commander::tool_0",
+        "desktop_commander::tool_1",
+        "desktop_commander::tool_2",
+    ]
+    assert len(qids) == len(set(qids))
+
+
+def test_selected_server_group_keys_detect_fully_selected_sidecar_server(monkeypatch):
+    """Editing an agent that already has every sidecar tool pre-selects the group."""
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    client_tools = _desktop_commander_client_tools(3)
+    client_servers = _desktop_commander_client_servers(3)
+
+    selected = demo._custom_agent_selected_server_group_keys(
+        list(client_tools), [], client_tools, client_servers
+    )
+
+    assert selected == ["client::device-1::desktop_commander"]
+
+
+def test_grouped_tool_keys_cover_selected_server_tools(monkeypatch):
+    """Selecting a whole server yields exactly that server's individual-tool
+    option keys, so the individual-tool list can drop them."""
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    server_tools = [
+        {
+            "type": "server_mcp",
+            "server_name": "calculator",
+            "tool_name": "add",
+            "qualified_tool_id": "calculator::add",
+        },
+        {
+            "type": "server_mcp",
+            "server_name": "calculator",
+            "tool_name": "subtract",
+            "qualified_tool_id": "calculator::subtract",
+        },
+    ]
+    client_tools = _desktop_commander_client_tools(3)
+    client_servers = _desktop_commander_client_servers(3)
+    server_groups = demo._custom_agent_server_groups(server_tools, client_tools, client_servers)
+
+    assert demo._custom_agent_grouped_tool_keys(server_groups, []) == set()
+
+    backend_covered = demo._custom_agent_grouped_tool_keys(server_groups, ["server::calculator"])
+    assert backend_covered == {demo._custom_agent_tool_option_key(t) for t in server_tools}
+
+    both_covered = demo._custom_agent_grouped_tool_keys(
+        server_groups, ["server::calculator", "client::device-1::desktop_commander"]
+    )
+    expected = {demo._custom_agent_tool_option_key(t) for t in (*server_tools, *client_tools)}
+    assert both_covered == expected
+
+
+def test_individual_tool_list_excludes_selected_server_tools(monkeypatch):
+    """End-to-end of the picker rule: with a server group selected, none of that
+    server's tools remain in the individual-tool option list."""
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    client_tools = _desktop_commander_client_tools(3)
+    client_servers = _desktop_commander_client_servers(3)
+    server_groups = demo._custom_agent_server_groups([], client_tools, client_servers)
+    tool_labels = {demo._custom_agent_tool_option_key(t): "x" for t in client_tools}
+
+    excluded = demo._custom_agent_grouped_tool_keys(
+        server_groups, ["client::device-1::desktop_commander"]
+    )
+    remaining = [key for key in tool_labels if key not in excluded]
+
+    assert remaining == []
+
+
+def test_retain_session_options_prunes_unavailable_picks(monkeypatch):
+    demo = _import_demo_with_ui_stubs(monkeypatch)
+    demo.st.session_state["ca_tools"] = ["a", "b", "c"]
+    demo._ca_retain_session_options("ca_tools", ["a", "c"])
+    assert demo.st.session_state["ca_tools"] == ["a", "c"]
+    # Missing key is a no-op (must not raise).
+    demo._ca_retain_session_options("ca_missing", ["x"])
 
 
 def test_custom_agent_edit_matches_reconnected_client_tool_by_stable_identity(monkeypatch):

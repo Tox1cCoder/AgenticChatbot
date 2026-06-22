@@ -163,3 +163,42 @@ async def test_subagent_events_map_to_data_subagent_chunks():
     assert subagent[1]["data"]["toolName"] == "search_documents"
     assert subagent[2]["data"]["subagent"]["status"] == "completed"
     assert subagent[2]["data"]["elapsedMs"] == 12
+
+
+@pytest.mark.asyncio
+async def test_terminal_assistant_message_projects_to_ui_message_metadata_shape():
+    async def source():
+        yield make_event(
+            "complete",
+            sequence=1,
+            data={
+                "message": {
+                    "id": "m-1",
+                    "sender": 2,
+                    "conversation_id": "conversation-1",
+                    "content": "Answer",
+                    "created_at": "2026-06-22T01:00:00Z",
+                    "updated_at": "2026-06-22T01:00:01Z",
+                    "message_metadata": {"context_window": {"display_state": "ok"}},
+                }
+            },
+        )
+
+    payloads = await _collect_payloads(source)
+    assistant_payload = next(
+        payload
+        for payload in payloads
+        if payload != "[DONE]" and payload.get("type") == "data-assistant-message"
+    )
+    message = assistant_payload["data"]["message"]
+
+    assert message["id"] == "m-1"
+    assert message["role"] == "assistant"
+    assert message["createdAt"] == "2026-06-22T01:00:00Z"
+    assert message["messageMetadata"] == {"context_window": {"display_state": "ok"}}
+    assert message["metadata"] == message["messageMetadata"]
+    assert message["message_metadata"] == message["messageMetadata"]
+    assert "content" not in message
+    assert "sender" not in message
+    assert "conversation_id" not in message
+    assert "updated_at" not in message

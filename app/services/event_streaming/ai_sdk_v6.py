@@ -383,17 +383,18 @@ class AISDKV6StreamAdapter:
             _is_v1_rich_items_message,
             _scrub_v1_legacy_image_fields,
             _selected_image_file_parts_from_rich_items,
+            project_ai_sdk_assistant_message_event,
             project_ai_sdk_message_for_capability,
         )
 
         state = self._state
         message = data.get("message") or {}
         if isinstance(message, dict):
-            message = _attach_image_parts_to_message(message)
             message = project_ai_sdk_message_for_capability(
                 message,
                 inline_rich_response_v1=state.inline_rich_response_v1,
             )
+            message = _attach_image_parts_to_message(message)
 
         if not state.any_text_delta:
             content = message.get("content") or "" if isinstance(message, dict) else ""
@@ -422,7 +423,7 @@ class AISDKV6StreamAdapter:
                 )
 
         if isinstance(message, dict) and message:
-            message_meta = {k: v for k, v in message.items() if k != "content"}
+            message_meta = project_ai_sdk_assistant_message_event(message)
             if _is_v1_rich_items_message(metadata):
                 _scrub_v1_legacy_image_fields(message_meta)
             # A message carrying only an id has no side-channel metadata worth a

@@ -40,14 +40,14 @@ Request fields:
 | `messages[].content` | string or parts array | Plain text, or parts-style content. |
 | `messages[].parts` | array | Optional. Text parts use `{ "type": "text", "text": "..." }`; file/image parts are supported. |
 | `messages[].attachments` | array | Optional image attachments. Also accepts `experimental_attachments` or `files`. |
-| `userId` | string, optional | Enables server-side user-aware features. |
+| `userId` | string, optional | Reserved/client hint only on authenticated deployments. The backend uses the authenticated user identity, not this body field, for ownership and user-aware features. |
 | `inlineRichResponseV1` | boolean, optional | Opt in to marker-positioned rich UI items and article-style inline placement. Also accepted as `inline_rich_response_v1`. |
 | `deviceId` | string, optional | Usually injected by the sidecar/client backend for local runtime tools. |
 
-The response is `text/event-stream` and includes:
+The response is `text/event-stream` and includes this header. Header names are case-insensitive; the backend currently emits it in lowercase.
 
 ```http
-X-Vercel-Ai-UI-Message-Stream: v1
+x-vercel-ai-ui-message-stream: v1
 ```
 
 Parse each `data:` line as JSON and switch on `type`. The stream ends with `data: [DONE]`.
@@ -100,10 +100,12 @@ Tool call:
 {
   "type": "tool-output-available",
   "toolCallId": "tool-call-id",
-  "output": {},
+  "output": "any JSON value",
   "render": {}
 }
 ```
+
+`tool-input-available.input` and `tool-output-available.output` may be any JSON-serializable value: object, array, string, number, boolean, or null.
 
 File/image part:
 
@@ -124,9 +126,9 @@ Assistant metadata:
     "message": {
       "id": "assistant-message-id",
       "role": "assistant",
-      "created_at": "ISO-8601 timestamp",
-      "message_metadata": {},
+      "createdAt": "ISO-8601 timestamp",
       "messageMetadata": {},
+      "message_metadata": {},
       "metadata": {},
       "parts": []
     }
@@ -137,7 +139,7 @@ Assistant metadata:
 Notes:
 
 - `data-assistant-message.data.message.content` is intentionally omitted on the stream because answer text already arrived as `text-delta`.
-- Metadata may appear under `message_metadata`, `messageMetadata`, and/or `metadata` depending on path/projection. Treat `messageMetadata ?? message_metadata ?? metadata` as the backend metadata.
+- Stream metadata is projected to the canonical `messageMetadata` field and mirrored to `metadata`; `message_metadata` is also included for backward compatibility. Treat `messageMetadata ?? message_metadata ?? metadata` as the backend metadata.
 - `parts` may contain generated image/file parts. For v1 rich responses, only selected images appear as file parts.
 - Article-style auto-placement can add final `<!--rich:<id>-->` markers at persistence time after text deltas have already streamed. For the AI SDK stream, use the persisted message from history after `finish` when you need the exact final marker layout.
 
@@ -426,7 +428,14 @@ The resume response uses the same AI SDK stream event format as chat.
 
 ## Message History Shape
 
-`GET /ai/conversations/{conversationId}/messages` returns:
+`GET /ai/conversations/{conversationId}/messages` returns AI SDK `UIMessage` objects.
+
+Query fields:
+
+| Field | Type | Notes |
+|---|---|---|
+| `page` / `limit` / `orderBy` / `orderDirection` | query | Standard pagination and ordering. |
+| `inlineRichResponseV1` | boolean, optional | Opt in to marker-bearing persisted rich-response content. Snake case `inline_rich_response_v1` is also accepted. Without this flag, standalone rich markers are stripped and `rich_items`, `rich_items_version`, and `rich_reference_warnings` are removed from metadata. |
 
 ```json
 {
@@ -447,7 +456,13 @@ The resume response uses the same AI SDK stream event format as chat.
         "createdAt": "ISO-8601 timestamp"
       }
     ],
-    "total": 1
+    "total": 1,
+    "meta": {
+      "total": 1,
+      "perPage": 20,
+      "currentPage": 1,
+      "lastPage": 1
+    }
   }
 }
 ```
@@ -458,7 +473,7 @@ Message fields:
 |---|---|---|
 | `id` | string | Message UUID. |
 | `role` | string | `user` or `assistant`. |
-| `content` | string | Markdown/plain text. For rich v1, may contain `<!--rich:<id>-->` markers only when client opts in. |
+| `content` | string | Markdown/plain text. For rich v1, may contain `<!--rich:<id>-->` markers only when the history request opts in with `inlineRichResponseV1=true` and the server rich-response setting is enabled. |
 | `parts` | array or null | AI SDK UI parts. Images are exposed as `file` parts. |
 | `parts[].type` | string | `text`, `file`, or `reasoning`. |
 | `parts[].text` | string | Text part content. |
@@ -538,6 +553,7 @@ Metadata compatibility rules:
 
 - Prefer `message.messageMetadata ?? message.message_metadata ?? message.metadata ?? {}`.
 - `messageMetadata` and `metadata` are mirrors on history responses; stream payloads may include all three shapes for compatibility.
+- `rich_items`, when present, is a field inside backend metadata at the same level as `live_widgets`, `images`, `tool_artifacts`, and `canvas_artifact`. It is not a top-level message field and is not nested under those legacy renderer fields.
 - Internal keys beginning with `_`, such as `_rich_item_candidates` and `_inline_rich_response_v1`, should not be persisted or rendered. Ignore them if seen from a non-production path.
 
 Core runtime/model fields:
@@ -783,7 +799,7 @@ Streaming note:
 
 - If the model wrote markers itself, those markers can appear in `text-delta`.
 - If the backend inserted markers during persistence, the earlier `text-delta` stream may not contain those markers.
-- The AI SDK `data-assistant-message` event intentionally omits `content`, so clients that need exact article placement during/after a live run should refetch `GET /ai/conversations/{conversationId}/messages` after `finish`, or use an application-level finalized message source if one is available.
+- The AI SDK `data-assistant-message` event intentionally omits `content`, so clients that need exact article placement during/after a live run should refetch `GET /ai/conversations/{conversationId}/messages?inlineRichResponseV1=true` after `finish`, or use an application-level finalized message source if one is available.
 
 ### Rich Image Item
 
@@ -951,7 +967,7 @@ Renderer algorithm:
 3. Accumulate `text-delta`.
 4. Split complete standalone `<!--rich:<id>-->` marker lines.
 5. Render known rich item at marker position.
-6. On final `data-assistant-message`, replace transient items with `backendMeta.rich_items`.
+6. On final `data-assistant-message`, replace transient items with `backendMeta.rich_items` when present. If exact auto-placed marker layout is required, refetch history with `inlineRichResponseV1=true` after `finish`.
 7. Append only unreferenced `inline_or_append` items. Never append `inline_only` images.
 
 ## Live Widgets

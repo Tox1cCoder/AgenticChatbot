@@ -598,3 +598,81 @@ async def test_options_include_all_backend_server_mcp_tools(env):
     assert qualified_ids == {"calculator::calculate", "spreadsheet::read_sheet"}
     assert all(t.get("type") == "server_mcp" for t in options.server_default_tools)
     assert options.server_tools == []
+
+
+@pytest.mark.asyncio
+async def test_options_group_client_tools_into_servers(env):
+    """Sidecar MCP servers surface as server-level entries (parallel to the
+    backend ``server_default_tools``) so a user can attach a whole sidecar MCP
+    server, not just hunt through individual client tool rows."""
+    options = await env.service.get_options(env.owner_id, device_id="desktop-1")
+
+    assert options.client_servers == [
+        {"server_name": "csv", "device_id": "desktop-1", "tool_count": 1}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_options_client_servers_empty_without_active_device(env):
+    options = await env.service.get_options(env.owner_id, device_id="not-connected")
+    assert options.client_servers == []
+
+
+def test_group_client_servers_counts_and_scopes_by_device():
+    """Grouping is keyed by (server_name, device_id): tools collapse into one
+    entry per server per device, counted, with server_name-less rows dropped."""
+    tools = [
+        {"server_name": "csv", "device_id": "d1", "qualified_tool_id": "client__csv__a"},
+        {"server_name": "csv", "device_id": "d1", "qualified_tool_id": "client__csv__b"},
+        {"server_name": "fs", "device_id": "d1", "qualified_tool_id": "client__fs__x"},
+        {"server_name": "csv", "device_id": "d2", "qualified_tool_id": "client__csv__a"},
+        {"device_id": "d1", "qualified_tool_id": "no_server_name"},
+    ]
+
+    assert CustomAgentService._group_client_servers(tools) == [
+        {"server_name": "csv", "device_id": "d1", "tool_count": 2},
+        {"server_name": "csv", "device_id": "d2", "tool_count": 1},
+        {"server_name": "fs", "device_id": "d1", "tool_count": 1},
+    ]
+
+
+def test_dedupe_tool_refs_collapses_group_and_individual_duplicates():
+    """A tool chosen both via its whole-server group and individually persists
+    once; client tools differing only by instance id stay distinct; order kept."""
+    refs = [
+        {"type": "server_mcp", "qualified_tool_id": "calc::add", "tool_name": "add"},
+        {"type": "server_mcp", "qualified_tool_id": "calc::add", "tool_name": "add"},
+        {"type": "server_mcp", "qualified_tool_id": "calc::sub", "tool_name": "sub"},
+        {
+            "type": "client",
+            "qualified_tool_id": "csv::p",
+            "device_id": "d1",
+            "session_id": "s1",
+            "tool_instance_id": "i1",
+        },
+        {
+            "type": "client",
+            "qualified_tool_id": "csv::p",
+            "device_id": "d1",
+            "session_id": "s1",
+            "tool_instance_id": "i1",
+        },
+        {
+            "type": "client",
+            "qualified_tool_id": "csv::p",
+            "device_id": "d1",
+            "session_id": "s1",
+            "tool_instance_id": "i2",
+        },
+    ]
+
+    result = CustomAgentService._dedupe_tool_refs(refs)
+
+    assert [
+        (r["type"], r.get("qualified_tool_id"), r.get("tool_instance_id")) for r in result
+    ] == [
+        ("server_mcp", "calc::add", None),
+        ("server_mcp", "calc::sub", None),
+        ("client", "csv::p", "i1"),
+        ("client", "csv::p", "i2"),
+    ]

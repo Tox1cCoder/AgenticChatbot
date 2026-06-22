@@ -110,7 +110,7 @@ class CustomAgentService:
             self._validate_model(owner_id, new_provider, new_model)
 
         if "tool_refs" in provided:
-            tool_refs = [r.model_dump() for r in (data.tool_refs or [])]
+            tool_refs = self._dedupe_tool_refs([r.model_dump() for r in (data.tool_refs or [])])
             self._validate_tool_refs(owner_id, tool_refs, device_id)
             fields["tool_refs"] = tool_refs
         if "skill_refs" in provided:
@@ -194,12 +194,46 @@ class CustomAgentService:
         uses, so the custom-agent picker shows the same (and freshest) catalog.
         """
         await self.refresh_server_tool_catalog()
+        client_tools = self._list_client_tool_refs(str(owner_id), device_id)
         return CustomAgentOptions(
             providers=await self._list_providers(owner_id),
             server_default_tools=list(self._list_server_tool_refs()),
             server_tools=[],
-            client_tools=self._list_client_tool_refs(str(owner_id), device_id),
+            client_tools=client_tools,
+            client_servers=self._group_client_servers(client_tools),
             skills=self._list_skill_refs(str(owner_id), device_id),
+        )
+
+    @staticmethod
+    def _group_client_servers(client_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Collapse per-tool client refs into server-level picker entries.
+
+        Sidecar MCP servers expose their tools individually in ``client_tools``;
+        the picker needs a server-level node (parallel to ``server_default_tools``)
+        so a user can attach a whole sidecar MCP server instead of hunting through
+        individual tool rows. Derived from the same ``client_tools`` snapshot so the
+        two views can never diverge. Keyed by ``(server_name, device_id)`` because the
+        same server name can be live on more than one device.
+        """
+        servers: dict[tuple[str, str], dict[str, Any]] = {}
+        for tool in client_tools:
+            server_name = tool.get("server_name")
+            if not server_name:
+                continue
+            device_id = tool.get("device_id")
+            key = (str(server_name), str(device_id or ""))
+            entry = servers.get(key)
+            if entry is None:
+                servers[key] = {
+                    "server_name": server_name,
+                    "device_id": device_id,
+                    "tool_count": 1,
+                }
+            else:
+                entry["tool_count"] += 1
+        return sorted(
+            servers.values(),
+            key=lambda item: (str(item["server_name"]), str(item["device_id"] or "")),
         )
 
     async def refresh_server_tool_catalog(self) -> None:
@@ -284,7 +318,7 @@ class CustomAgentService:
         self, owner_id: UUID, data: CustomAgentCreate, *, device_id: str | None
     ) -> dict[str, Any]:
         self._validate_model(owner_id, data.provider_type, data.model)
-        tool_refs = [r.model_dump() for r in data.tool_refs]
+        tool_refs = self._dedupe_tool_refs([r.model_dump() for r in data.tool_refs])
         skill_refs = [r.model_dump() for r in data.skill_refs]
         self._validate_tool_refs(owner_id, tool_refs, device_id)
         self._validate_skill_refs(owner_id, skill_refs, device_id)
@@ -301,6 +335,35 @@ class CustomAgentService:
             "skill_refs": skill_refs,
             "enabled": data.enabled,
         }
+
+    @staticmethod
+    def _dedupe_tool_refs(tool_refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Collapse duplicate tool refs, preserving first-seen order.
+
+        A tool selected both via its whole-server group and individually arrives
+        twice; this keeps a single ref so the stored selection mirrors what the
+        picker shows and no tool is bound twice. Server tools dedupe by qualified
+        id; client tools by their full exact identity (qualified id +
+        device/session/instance), matching the runtime client-tool match keys.
+        """
+        seen: set[tuple[Any, ...]] = set()
+        deduped: list[dict[str, Any]] = []
+        for ref in tool_refs:
+            if ref.get("type") == "client":
+                key: tuple[Any, ...] = (
+                    "client",
+                    ref.get("qualified_tool_id"),
+                    ref.get("device_id"),
+                    ref.get("session_id"),
+                    ref.get("tool_instance_id"),
+                )
+            else:
+                key = ("server", ref.get("qualified_tool_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(ref)
+        return deduped
 
     def _validate_model(self, owner_id: UUID, provider_type: str, model: str) -> None:
         try:

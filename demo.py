@@ -1275,12 +1275,15 @@ def render_custom_agents_manager() -> None:
     )
     server_tools = options.get("serverTools") or options.get("server_tools") or []
     client_tools = options.get("clientTools") or options.get("client_tools") or []
+    client_servers = options.get("clientServers") or options.get("client_servers") or []
     skills = options.get("skills") or []
     selectable_server_tools = [*server_default_tools, *server_tools]
-    server_tool_groups = _custom_agent_server_tool_groups(selectable_server_tools)
+    server_groups = _custom_agent_server_groups(
+        selectable_server_tools, client_tools, client_servers
+    )
     server_group_labels = {
-        server_name: _custom_agent_server_group_label(server_name, server_tool_groups)
-        for server_name in server_tool_groups
+        group_key: _custom_agent_server_group_label(group_key, server_groups)
+        for group_key in server_groups
     }
     tool_labels = {
         _custom_agent_tool_option_key(t): _custom_agent_tool_label(t)
@@ -1323,27 +1326,41 @@ def render_custom_agents_manager() -> None:
                 client_tools,
             )
             skill_refs_editable = _custom_agent_skill_refs_available(current_skill_refs, skills)
-            edit_server_names_default = _custom_agent_selected_server_names(
+            edit_server_group_keys_default = _custom_agent_selected_server_group_keys(
                 current_tool_refs,
                 selectable_server_tools,
+                client_tools,
+                client_servers,
             )
             edit_server_names = st.multiselect(
                 "All tools from MCP servers",
                 list(server_group_labels.keys()),
-                default=edit_server_names_default,
-                format_func=lambda name: server_group_labels.get(name, name),
+                default=edit_server_group_keys_default,
+                format_func=lambda key: server_group_labels.get(key, key),
                 disabled=not tool_refs_editable,
                 key=f"ca_edit_server_tools_{agent['id']}",
             )
-            edit_tool_ids = st.multiselect(
-                "Individual tools",
-                list(tool_labels.keys()),
-                default=_custom_agent_selected_tool_keys(
+            edit_excluded_tool_keys = _custom_agent_grouped_tool_keys(
+                server_groups, edit_server_names
+            )
+            edit_tool_options = [
+                key for key in tool_labels if key not in edit_excluded_tool_keys
+            ]
+            _ca_retain_session_options(f"ca_edit_tools_{agent['id']}", edit_tool_options)
+            edit_tool_default = [
+                key
+                for key in _custom_agent_selected_tool_keys(
                     current_tool_refs,
                     selectable_server_tools,
                     client_tools,
-                    excluded_server_names=edit_server_names_default,
-                ),
+                    excluded_group_keys=edit_server_names,
+                )
+                if key in edit_tool_options
+            ]
+            edit_tool_ids = st.multiselect(
+                "Individual tools",
+                edit_tool_options,
+                default=edit_tool_default,
                 format_func=lambda tid: tool_labels.get(tid, tid),
                 disabled=not tool_refs_editable,
                 key=f"ca_edit_tools_{agent['id']}",
@@ -1377,7 +1394,8 @@ def render_custom_agents_manager() -> None:
                             edit_tool_ids,
                             selectable_server_tools,
                             client_tools,
-                            selected_server_names=edit_server_names,
+                            selected_server_group_keys=edit_server_names,
+                            client_servers=client_servers,
                         )
                     if skill_refs_editable:
                         body["skill_refs"] = _build_skill_refs(edit_skill_keys, skills)
@@ -1410,6 +1428,18 @@ def render_custom_agents_manager() -> None:
     # which would otherwise leave the model list stale). Matches the Models tab.
     provider_type = st.selectbox("Provider", provider_names, key="ca_new_provider")
     model_choices = providers.get(provider_type, [])
+    # The server-group selector lives OUTSIDE the form (like Provider): st.form
+    # defers reruns until submit, but the individual-tool list must drop a
+    # server's tools the moment that whole server is selected.
+    selected_server_names = st.multiselect(
+        "All tools from MCP servers",
+        list(server_group_labels.keys()),
+        format_func=lambda key: server_group_labels.get(key, key),
+        key="ca_new_server_tools",
+    )
+    new_excluded_tool_keys = _custom_agent_grouped_tool_keys(server_groups, selected_server_names)
+    new_tool_options = [key for key in tool_labels if key not in new_excluded_tool_keys]
+    _ca_retain_session_options("ca_new_tools", new_tool_options)
 
     with st.form("create_custom_agent_form", clear_on_submit=False):
         name = st.text_input("Name", key="ca_new_name")
@@ -1423,15 +1453,9 @@ def render_custom_agents_manager() -> None:
             else st.text_input("Model", key="ca_new_model_text")
         )
         temperature = st.slider("Temperature", 0.0, 2.0, 1.0, 0.1, key="ca_new_temp")
-        selected_server_names = st.multiselect(
-            "All tools from MCP servers",
-            list(server_group_labels.keys()),
-            format_func=lambda name: server_group_labels.get(name, name),
-            key="ca_new_server_tools",
-        )
         selected_tool_ids = st.multiselect(
             "Individual tools",
-            list(tool_labels.keys()),
+            new_tool_options,
             format_func=lambda tid: tool_labels.get(tid, tid),
             key="ca_new_tools",
         )
@@ -1447,7 +1471,8 @@ def render_custom_agents_manager() -> None:
                 selected_tool_ids,
                 selectable_server_tools,
                 client_tools,
-                selected_server_names=selected_server_names,
+                selected_server_group_keys=selected_server_names,
+                client_servers=client_servers,
             )
             skill_refs = _build_skill_refs(selected_skill_keys, skills)
             body = {
@@ -1524,12 +1549,146 @@ def _custom_agent_server_tool_groups(
     }
 
 
-def _custom_agent_server_group_label(
-    server_name: str,
-    server_tool_groups: dict[str, list[dict[str, Any]]],
+def _custom_agent_server_group_key(
+    kind: str, server_name: str, device_id: str | None = None
 ) -> str:
-    tool_count = len(server_tool_groups.get(server_name, []))
-    return f"[server] {server_name} (all {tool_count} tools)"
+    """Namespaced key for a pickable MCP-server group.
+
+    Backend and client/sidecar servers share one keyspace in the picker, so the
+    key carries the kind (and, for client servers, the owning device) to keep a
+    backend server and a same-named sidecar server from colliding.
+    """
+    if kind == "client":
+        return f"client::{device_id or ''}::{server_name}"
+    return f"server::{server_name}"
+
+
+def _custom_agent_client_server_groups(
+    client_tools: list[dict[str, Any]],
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """Group client/sidecar tools by ``(device_id, server_name)``.
+
+    The client equivalent of :func:`_custom_agent_server_tool_groups`: it lets a
+    whole sidecar MCP server be attached at once. Deduped by qualified id within a
+    group; device id is part of the key because the same server name can be live
+    on more than one connected device.
+    """
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    seen_by_group: dict[tuple[str, str], set[str]] = {}
+    for tool in client_tools:
+        if str(_custom_agent_value(tool, "type") or "") != "client":
+            continue
+        server_name = _custom_agent_server_name(tool)
+        device_id = str(_custom_agent_value(tool, "device_id", "deviceId") or "").strip()
+        qualified_id = str(
+            _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId") or ""
+        ).strip()
+        if not server_name or not device_id or not qualified_id:
+            continue
+        group_key = (device_id, server_name)
+        seen = seen_by_group.setdefault(group_key, set())
+        if qualified_id in seen:
+            continue
+        seen.add(qualified_id)
+        groups.setdefault(group_key, []).append(tool)
+    return groups
+
+
+def _custom_agent_server_groups(
+    server_tools: list[dict[str, Any]],
+    client_tools: list[dict[str, Any]],
+    client_servers: list[dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Pickable MCP-server groups for the "all tools from server" selector.
+
+    Surfaces backend MCP servers (``server::<name>``) and client/sidecar MCP
+    servers (``client::<device_id>::<name>``) in one namespaced keyspace. The
+    sidecar servers to show come from ``client_servers`` (the backend's advertised
+    list) when present, falling back to whatever ``client_tools`` imply; their
+    member tools — which carry the full client identity needed to build refs —
+    always come from ``client_tools``. Single-tool servers are omitted (pick the
+    one tool individually), matching the backend grouping.
+    """
+    groups: dict[str, dict[str, Any]] = {}
+
+    for server_name, tools in _custom_agent_server_tool_groups(server_tools).items():
+        groups[_custom_agent_server_group_key("server", server_name)] = {
+            "kind": "server",
+            "server_name": server_name,
+            "device_id": None,
+            "tools": tools,
+        }
+
+    tools_by_client_group = _custom_agent_client_server_groups(client_tools)
+    if client_servers:
+        declared: list[tuple[str, str]] = []
+        for entry in client_servers:
+            server_name = str(_custom_agent_value(entry, "server_name", "serverName") or "").strip()
+            device_id = str(_custom_agent_value(entry, "device_id", "deviceId") or "").strip()
+            if server_name and device_id and (device_id, server_name) not in declared:
+                declared.append((device_id, server_name))
+    else:
+        declared = list(tools_by_client_group.keys())
+
+    for device_id, server_name in declared:
+        tools = tools_by_client_group.get((device_id, server_name), [])
+        if len(tools) <= 1:
+            continue
+        groups[_custom_agent_server_group_key("client", server_name, device_id)] = {
+            "kind": "client",
+            "server_name": server_name,
+            "device_id": device_id,
+            "tools": tools,
+        }
+
+    return groups
+
+
+def _custom_agent_server_group_label(
+    group_key: str,
+    server_groups: dict[str, dict[str, Any]],
+) -> str:
+    group = server_groups.get(group_key) or {}
+    kind = str(group.get("kind") or "server")
+    server_name = str(group.get("server_name") or group_key)
+    tool_count = len(group.get("tools") or [])
+    return f"[{kind}] {server_name} (all {tool_count} tools)"
+
+
+def _custom_agent_grouped_tool_keys(
+    server_groups: dict[str, dict[str, Any]],
+    selected_group_keys: list[str] | set[str] | tuple[str, ...] | None,
+) -> set[str]:
+    """Individual-tool option keys covered by the selected server groups.
+
+    When a whole MCP server is selected, its tools are dropped from the
+    individual-tool picker so a whole-server selection and a redundant individual
+    selection of the same tool can never coexist.
+    """
+    selected = {str(key) for key in selected_group_keys or []}
+    covered: set[str] = set()
+    for group_key, group in server_groups.items():
+        if group_key in selected:
+            for tool in group.get("tools") or []:
+                covered.add(_custom_agent_tool_option_key(tool))
+    return covered
+
+
+def _ca_retain_session_options(state_key: str, options: list[str]) -> None:
+    """Drop persisted multiselect picks that are no longer offered.
+
+    Streamlit raises when a widget's session-state value contains entries absent
+    from its current options. Pruning before the widget renders keeps the
+    individual-tool list stable when a whole server is selected and its tools
+    leave the list.
+    """
+    current = st.session_state.get(state_key)
+    if not isinstance(current, list):
+        return
+    allowed = set(options)
+    filtered = [value for value in current if value in allowed]
+    if len(filtered) != len(current):
+        st.session_state[state_key] = filtered
 
 
 def _custom_agent_client_tool_stable_key(tool: dict[str, Any]) -> tuple[str, str] | None:
@@ -1578,9 +1737,15 @@ def _custom_agent_selected_tool_keys(
     server_tools: list[dict[str, Any]],
     client_tools: list[dict[str, Any]],
     *,
-    excluded_server_names: list[str] | set[str] | tuple[str, ...] | None = None,
+    excluded_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> list[str]:
-    excluded_servers = {str(name) for name in excluded_server_names or []}
+    """Individual-tool selection keys for the picker default.
+
+    Tools whose whole server is already selected as a group (``excluded_group_keys``
+    — namespaced server/client group keys) are dropped so they are not shown
+    pre-checked in both the server picker and the individual-tool picker.
+    """
+    excluded = {str(key) for key in excluded_group_keys or []}
     server_key_by_qid = {
         str(_custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId")): (
             _custom_agent_tool_option_key(tool)
@@ -1598,13 +1763,19 @@ def _custom_agent_selected_tool_keys(
     for ref in tool_refs or []:
         ref_type = str(_custom_agent_value(ref, "type") or "")
         if ref_type == "client":
+            device_id = str(_custom_agent_value(ref, "device_id", "deviceId") or "").strip()
+            group_key = _custom_agent_server_group_key(
+                "client", _custom_agent_server_name(ref), device_id
+            )
+            if group_key in excluded:
+                continue
             stable_key = _custom_agent_client_tool_stable_key(ref)
             key = client_key_by_stable_key.get(stable_key) if stable_key else None
             if key and key not in selected:
                 selected.append(key)
             continue
 
-        if _custom_agent_server_name(ref) in excluded_servers:
+        if _custom_agent_server_group_key("server", _custom_agent_server_name(ref)) in excluded:
             continue
         qid = _custom_agent_value(ref, "qualified_tool_id", "qualifiedToolId")
         key = server_key_by_qid.get(str(qid))
@@ -1614,32 +1785,53 @@ def _custom_agent_selected_tool_keys(
     return selected
 
 
-def _custom_agent_selected_server_names(
+def _custom_agent_selected_server_group_keys(
     tool_refs: list[dict[str, Any]],
     server_tools: list[dict[str, Any]],
+    client_tools: list[dict[str, Any]],
+    client_servers: list[dict[str, Any]] | None = None,
 ) -> list[str]:
-    groups = _custom_agent_server_tool_groups(server_tools)
-    selected_qids_by_server: dict[str, set[str]] = {}
+    """Server group keys whose every member tool is present in ``tool_refs``.
+
+    Used to pre-select the "all tools from MCP servers" picker when editing an
+    agent. Spans both backend and client/sidecar servers.
+    """
+    groups = _custom_agent_server_groups(server_tools, client_tools, client_servers)
+
+    selected_server_qids: set[str] = set()
+    selected_client_keys: set[tuple[str, str]] = set()
     for ref in tool_refs or []:
         if str(_custom_agent_value(ref, "type") or "") == "client":
+            stable_key = _custom_agent_client_tool_stable_key(ref)
+            if stable_key is not None:
+                selected_client_keys.add(stable_key)
             continue
-        server_name = _custom_agent_server_name(ref)
         qualified_id = str(
             _custom_agent_value(ref, "qualified_tool_id", "qualifiedToolId") or ""
         ).strip()
-        if server_name and qualified_id:
-            selected_qids_by_server.setdefault(server_name, set()).add(qualified_id)
+        if qualified_id:
+            selected_server_qids.add(qualified_id)
 
-    selected_servers: list[str] = []
-    for server_name, tools in groups.items():
-        server_qids = {
-            str(_custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId"))
-            for tool in tools
-            if _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId")
-        }
-        if server_qids and server_qids <= selected_qids_by_server.get(server_name, set()):
-            selected_servers.append(server_name)
-    return selected_servers
+    selected: list[str] = []
+    for group_key, group in groups.items():
+        tools = group.get("tools") or []
+        if group.get("kind") == "client":
+            member_keys = {
+                stable_key
+                for tool in tools
+                if (stable_key := _custom_agent_client_tool_stable_key(tool)) is not None
+            }
+            if member_keys and member_keys <= selected_client_keys:
+                selected.append(group_key)
+        else:
+            member_qids = {
+                str(_custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId"))
+                for tool in tools
+                if _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId")
+            }
+            if member_qids and member_qids <= selected_server_qids:
+                selected.append(group_key)
+    return selected
 
 
 def _custom_agent_tool_refs_available(
@@ -1746,14 +1938,16 @@ def _build_tool_refs(
     server_default_tools: list[dict[str, Any]],
     client_tools: list[dict[str, Any]],
     *,
-    selected_server_names: list[str] | set[str] | tuple[str, ...] | None = None,
+    selected_server_group_keys: list[str] | set[str] | tuple[str, ...] | None = None,
+    client_servers: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     by_key_server = {_custom_agent_tool_option_key(t): t for t in server_default_tools}
     by_key_client = {_custom_agent_tool_option_key(t): t for t in client_tools}
-    server_tool_groups = _custom_agent_server_tool_groups(server_default_tools)
-    selected_server_set = {str(name) for name in selected_server_names or []}
+    server_groups = _custom_agent_server_groups(server_default_tools, client_tools, client_servers)
+    selected_group_keys = {str(key) for key in selected_server_group_keys or []}
     refs: list[dict[str, Any]] = []
     added_server_qids: set[str] = set()
+    added_client_keys: set[tuple[str, str]] = set()
 
     def append_server_ref(tool: dict[str, Any]) -> None:
         qid = _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId")
@@ -1774,33 +1968,40 @@ def _build_tool_refs(
             }
         )
 
-    for server_name, tools in server_tool_groups.items():
-        if server_name in selected_server_set:
-            for tool in tools:
-                append_server_ref(tool)
+    def append_client_ref(tool: dict[str, Any]) -> None:
+        stable_key = _custom_agent_client_tool_stable_key(tool)
+        if stable_key is None or stable_key in added_client_keys:
+            return
+        added_client_keys.add(stable_key)
+        qid = _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId")
+        refs.append(
+            {
+                "type": "client",
+                "device_id": _custom_agent_value(tool, "device_id", "deviceId"),
+                "session_id": _custom_agent_value(tool, "session_id", "sessionId"),
+                "catalog_version": str(
+                    _custom_agent_value(tool, "catalog_version", "catalogVersion") or ""
+                ),
+                "tool_instance_id": _custom_agent_value(tool, "tool_instance_id", "toolInstanceId"),
+                "server_name": _custom_agent_value(tool, "server_name", "serverName"),
+                "qualified_tool_id": qid,
+                "tool_name": _custom_agent_value(tool, "tool_name", "toolName"),
+            }
+        )
+
+    for group_key, group in server_groups.items():
+        if group_key not in selected_group_keys:
+            continue
+        appender = append_client_ref if group.get("kind") == "client" else append_server_ref
+        for tool in group.get("tools") or []:
+            appender(tool)
 
     for key in selected_tool_ids:
         if key in by_key_server:
             append_server_ref(by_key_server[key])
         elif key in by_key_client:
-            tool = by_key_client[key]
-            qid = _custom_agent_value(tool, "qualified_tool_id", "qualifiedToolId")
-            refs.append(
-                {
-                    "type": "client",
-                    "device_id": _custom_agent_value(tool, "device_id", "deviceId"),
-                    "session_id": _custom_agent_value(tool, "session_id", "sessionId"),
-                    "catalog_version": str(
-                        _custom_agent_value(tool, "catalog_version", "catalogVersion") or ""
-                    ),
-                    "tool_instance_id": _custom_agent_value(
-                        tool, "tool_instance_id", "toolInstanceId"
-                    ),
-                    "server_name": _custom_agent_value(tool, "server_name", "serverName"),
-                    "qualified_tool_id": qid,
-                    "tool_name": _custom_agent_value(tool, "tool_name", "toolName"),
-                }
-            )
+            append_client_ref(by_key_client[key])
+
     return refs
 
 

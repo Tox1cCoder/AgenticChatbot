@@ -66,6 +66,34 @@ def _build_assistant_message_with_context_window() -> SimpleNamespace:
     )
 
 
+def _build_assistant_message_with_rich_items() -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid4(),
+        sender=2,
+        content="Intro\n\n<!--rich:widget:w-1-->\n\nDone",
+        created_at=datetime.now(UTC),
+        message_metadata={
+            "rich_items_version": 1,
+            "rich_items": [
+                {
+                    "id": "widget:w-1",
+                    "type": "live_widget",
+                    "display_policy": "inline_or_append",
+                    "payload": {
+                        "widget_id": "w-1",
+                        "session_id": "conversation-1",
+                        "widget_type": "table",
+                        "status": "active",
+                        "version": 1,
+                        "connection_endpoint": "/widgets/w-1/connection",
+                    },
+                }
+            ],
+            "rich_reference_warnings": [],
+        },
+    )
+
+
 def _build_paginated_result(
     items: list[SimpleNamespace],
     *,
@@ -234,3 +262,47 @@ def test_ai_sdk_messages_metadata_keys_share_identity_for_assistant_messages():
     # And both must equal the originally persisted metadata dict (the
     # endpoint must not strip or rewrite fields).
     assert payload["messageMetadata"] == assistant_msg.message_metadata
+
+
+def test_ai_sdk_messages_strip_rich_v1_fields_without_capability():
+    assistant_msg = _build_assistant_message_with_rich_items()
+    message_service = _build_message_service([assistant_msg])
+
+    response = asyncio.run(
+        get_conversation_messages_ai_sdk(
+            uuid4(),
+            message_service,
+            uuid4(),
+            MessagePaginationParams(),
+        )
+    )
+
+    payload = response.data.messages[0].model_dump(by_alias=True)
+
+    assert "<!--rich:" not in payload["content"]
+    assert "rich_items" not in payload["messageMetadata"]
+    assert "rich_items_version" not in payload["messageMetadata"]
+    assert "rich_reference_warnings" not in payload["messageMetadata"]
+    assert payload["metadata"] == payload["messageMetadata"]
+
+
+def test_ai_sdk_messages_preserve_rich_v1_fields_with_capability():
+    assistant_msg = _build_assistant_message_with_rich_items()
+    message_service = _build_message_service([assistant_msg])
+
+    response = asyncio.run(
+        get_conversation_messages_ai_sdk(
+            uuid4(),
+            message_service,
+            uuid4(),
+            MessagePaginationParams(),
+            inline_rich_response_v1=True,
+        )
+    )
+
+    payload = response.data.messages[0].model_dump(by_alias=True)
+
+    assert "<!--rich:widget:w-1-->" in payload["content"]
+    assert payload["messageMetadata"]["rich_items_version"] == 1
+    assert payload["messageMetadata"]["rich_items"][0]["id"] == "widget:w-1"
+    assert payload["metadata"] == payload["messageMetadata"]

@@ -1023,7 +1023,7 @@ Heartbeat interval for SSE: **1 s**. `SUPPRESS_INTERNAL_STREAM_CHUNKS=true` drop
 
 ## Inline Rich Response (v1)
 
-The backend supports an **opt-in inline-rich-response contract** that lets agents place selected images, live widgets, tool renders, canvas artifacts, citations, and resource links at specific positions inside the markdown answer. Disabled by default — set `INLINE_RICH_RESPONSE_ENABLED=true` and have the client advertise the per-request capability to receive marker-bearing content.
+The backend supports an **opt-in inline-rich-response contract** that lets agents place selected images, live widgets, tool renders, canvas artifacts, citations, and resource links at specific positions inside the markdown answer. Enabled by default with `INLINE_RICH_RESPONSE_ENABLED=true`; keep the flag as a server-side kill switch and have each client advertise the per-request capability before receiving marker-bearing content.
 
 ### Marker syntax
 
@@ -1097,8 +1097,9 @@ Clients opt in per-request by setting `inline_rich_response_v1: true` (camelCase
 - `POST /messages` and `POST /messages/stream` body (`MessageCreate.inline_rich_response_v1`).
 - `POST /ai/chat/{conversation_id}` body extras (`inlineRichResponseV1` / `inline_rich_response_v1`).
 - `POST /messages/resume-interrupt` and `POST /ai/resume-interrupt` body (`InterruptResumeRequest.inline_rich_response_v1`).
+- `GET /ai/conversations/{conversation_id}/messages` query (`inlineRichResponseV1=true` / `inline_rich_response_v1=true`) when refetching marker-bearing history.
 
-Capability is then ANDed with `INLINE_RICH_RESPONSE_ENABLED` server-side. Non-capable AI SDK reads of a persisted v1 message receive a legacy projection: standalone marker lines are stripped from `content`, and `rich_items` / `rich_items_version` / `rich_reference_warnings` are removed from metadata.
+Capability is then ANDed with `INLINE_RICH_RESPONSE_ENABLED` server-side. AI SDK history reads without the read capability receive a legacy projection: standalone marker lines are stripped from `content`, and `rich_items` / `rich_items_version` / `rich_reference_warnings` are removed from metadata.
 
 ### Transient stream events
 
@@ -1124,7 +1125,7 @@ Image candidates are **never** streamed transiently — they only surface in the
 3. Accumulate `text-delta` content normally.
 4. Split the accumulated text only on standalone complete markers into blocks.
 5. Render a known typed item at that block position; while a streamed marker is waiting for its widget upsert, render a lightweight inline placeholder there.
-6. On final `data-assistant-message`, replace transient registry data with persisted `messageMetadata.rich_items` and final content (authoritative).
+6. On final `data-assistant-message`, replace transient registry data with persisted `messageMetadata.rich_items` when present. Refetch `GET /ai/conversations/{conversation_id}/messages?inlineRichResponseV1=true` after `finish` for the authoritative final content layout when auto-placement may have inserted markers during persistence.
 7. Append only unreferenced items whose `display_policy == "inline_or_append"`. Never build an image gallery from unreferenced image candidates or legacy `images`.
 
 ### Migration rules

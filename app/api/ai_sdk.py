@@ -1,10 +1,10 @@
 import base64
 import json
 from collections.abc import AsyncGenerator, Callable
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -589,6 +589,53 @@ def _attach_image_parts_to_message(message: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def project_ai_sdk_assistant_message_event(message: dict[str, Any]) -> dict[str, Any]:
+    """Project a persisted assistant message into a stream metadata side-channel.
+
+    The AI SDK stream has already delivered body text through ``text-delta``.
+    This projection keeps durable metadata and file parts while avoiding leakage
+    of database-only fields such as ``sender`` and ``conversation_id``.
+    """
+    if not isinstance(message, dict):
+        return {}
+
+    projected: dict[str, Any] = {}
+    message_id = message.get("id")
+    if message_id not in (None, ""):
+        projected["id"] = str(message_id)
+
+    role = message.get("role")
+    if not isinstance(role, str) or not role:
+        sender = message.get("sender")
+        if sender == 1 or sender == "1":
+            role = "user"
+        elif sender == 2 or sender == "2":
+            role = "assistant"
+    if isinstance(role, str) and role:
+        projected["role"] = role
+
+    created_at = message.get("createdAt") or message.get("created_at")
+    if isinstance(created_at, str) and created_at:
+        projected["createdAt"] = created_at
+
+    metadata = None
+    for key in ("messageMetadata", "message_metadata", "metadata"):
+        value = message.get(key)
+        if isinstance(value, dict):
+            metadata = value
+            break
+    if isinstance(metadata, dict):
+        projected["messageMetadata"] = metadata
+        projected["message_metadata"] = metadata
+        projected["metadata"] = metadata
+
+    parts = message.get("parts")
+    if isinstance(parts, list):
+        projected["parts"] = [part for part in parts if isinstance(part, dict)]
+
+    return projected
+
+
 def _clean_tool_output(value: Any) -> Any:
     """
     Clean tool output by extracting actual data from LangChain Content objects.
@@ -810,6 +857,8 @@ async def get_conversation_messages_ai_sdk(
     message_service: IMessageService,
     current_user_id: UUID,
     pagination: MessagePaginationParams,
+    inline_rich_response_v1: Annotated[bool, Query(alias="inlineRichResponseV1")] = False,
+    inline_rich_response_v1_snake: Annotated[bool, Query(alias="inline_rich_response_v1")] = False,
 ) -> ApiResponse[AISDKMessagesData]:
     """Get conversation messages in Vercel AI SDK UIMessage format."""
     paginated_result = message_service.get_conversation_messages(
@@ -820,6 +869,10 @@ async def get_conversation_messages_ai_sdk(
         order_by=pagination.order_by.to_snake_case(),
         order_direction=pagination.order_direction.value,
         include_feedback=False,
+    )
+    rich_response_capable = bool(
+        (inline_rich_response_v1 or inline_rich_response_v1_snake)
+        and getattr(settings, "inline_rich_response_enabled", False)
     )
 
     messages: list[AISDKUIMessage] = []
@@ -837,6 +890,10 @@ async def get_conversation_messages_ai_sdk(
             message_payload["metadata"] = msg.message_metadata
 
         if role == "assistant":
+            message_payload = project_ai_sdk_message_for_capability(
+                message_payload,
+                inline_rich_response_v1=rich_response_capable,
+            )
             message_payload = _attach_image_parts_to_message(message_payload)
 
         messages.append(AISDKUIMessage.model_validate(message_payload))

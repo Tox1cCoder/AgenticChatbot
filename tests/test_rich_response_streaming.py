@@ -285,6 +285,50 @@ async def test_non_capable_stream_does_not_receive_rich_data_parts():
     assert '"data-rich-items"' not in content
 
 
+@pytest.mark.asyncio
+async def test_non_capable_stream_does_not_receive_v1_selected_image_parts():
+    async def source() -> Any:
+        yield make_event(
+            "complete",
+            sequence=1,
+            data={
+                "message": {
+                    "id": "m-image",
+                    "sender": 2,
+                    "content": "Intro\n\n<!--rich:image:tool:c1:0-->",
+                    "message_metadata": {
+                        "rich_items_version": 1,
+                        "rich_items": [
+                            {
+                                "id": "image:tool:c1:0",
+                                "type": "image",
+                                "display_policy": "inline_only",
+                                "alt_text": "Selected",
+                                "payload": {
+                                    "url": "https://img.test/selected.png",
+                                    "mime_type": "image/png",
+                                },
+                            }
+                        ],
+                    },
+                }
+            },
+        )
+
+    state = StreamState(
+        message_id="m-image",
+        text_id="t-image",
+        reasoning_id="r-image",
+        inline_rich_response_v1=False,
+    )
+    response = _build_ui_message_stream_response(lambda: source(), state)
+    content = "".join([chunk async for chunk in response.body_iterator])
+
+    assert "<!--rich:" not in content
+    assert "selected.png" not in content
+    assert '"rich_items"' not in content
+
+
 def _message_row(*, conversation_id, sender: int, content: str) -> SimpleNamespace:
     now = datetime.now(timezone.utc)
     return SimpleNamespace(
