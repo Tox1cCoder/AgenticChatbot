@@ -20,6 +20,7 @@ from app.models.model_provider import ModelProvider
 from app.models.skill_setting import SkillSetting
 from app.models.task_plan import TaskPlan
 from app.models.tool_approval import DecisionType, ToolApproval
+from app.models.tool_approval_setting import ToolApprovalSetting
 from app.models.tool_result_blob import ToolResultBlob
 from app.models.user import User
 from app.models.user_memory import UserMemory
@@ -41,6 +42,7 @@ __all__ = [
     "DocumentImage",
     "ModelProvider",
     "ToolApproval",
+    "ToolApprovalSetting",
     "ToolResultBlob",
     "UserMemory",
     "DecisionType",
