@@ -3353,6 +3353,37 @@ def execute_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any
     return response.get("data") if response else None
 
 
+def get_hitl_settings() -> dict[str, Any] | None:
+    """Fetch this user's HITL approval settings (via the sidecar proxy)."""
+    response = make_api_request("GET", "/hitl/settings")
+    return response.get("data") if response else None
+
+
+def set_hitl_setting(
+    scope_type: str, scope_value: str, require_approval: bool
+) -> dict[str, Any] | None:
+    """Upsert one HITL approval rule (server- or tool-scoped)."""
+    payload = {
+        "items": [
+            {
+                "scopeType": scope_type,
+                "scopeValue": scope_value,
+                "requireApproval": require_approval,
+            }
+        ]
+    }
+    response = make_api_request("POST", "/hitl/settings", payload)
+    return response.get("data") if response else None
+
+
+def clear_hitl_setting(scope_type: str, scope_value: str) -> dict[str, Any] | None:
+    """Delete one HITL approval rule (revert to inherit/default)."""
+    response = make_api_request(
+        "DELETE", f"/hitl/settings?scope_type={scope_type}&scope_value={scope_value}"
+    )
+    return response.get("data") if response else None
+
+
 def render_json_output(data: Any, label: str = "JSON Output", expanded: bool | None = None) -> None:
     """Render JSON data with syntax highlighting in an expandable section.
 
@@ -7878,6 +7909,17 @@ def render_tools_tab():
         if not servers:
             st.info("No MCP servers configured.")
         else:
+            hitl_settings = get_hitl_settings() or {}
+            hitl_master = bool(hitl_settings.get("masterEnabled", True))
+            hitl_servers = {
+                s["scopeValue"]: s["requireApproval"]
+                for s in hitl_settings.get("servers", [])
+            }
+            if not hitl_master:
+                st.caption(
+                    ":material/info: Human-in-the-loop is globally disabled (admin setting); "
+                    "approval rules below are inactive until it is enabled."
+                )
             for server in servers:
                 server_name = server.get("name", "Unknown")
                 enabled = server.get("enabled", False)
@@ -7888,7 +7930,7 @@ def render_tools_tab():
                 status_icon = ":material/check_circle:" if enabled else ":material/cancel:"
                 status_text = "Enabled" if enabled else "Disabled"
 
-                col1, col2, col3 = st.columns([3, 1, 1])
+                col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
 
                 with col1:
                     st.markdown(
@@ -7914,6 +7956,18 @@ def render_tools_tab():
                             result = remove_mcp_server(server_name)
                             if result:
                                 st.success(f"Removed '{server_name}'")
+                                st.rerun()
+
+                with col4:
+                    server_gated = bool(hitl_servers.get(server_name, False))
+                    approval_label = "Approval: ON" if server_gated else "Approval: OFF"
+                    if st.button(
+                        approval_label,
+                        key=f"hitl_server_{server_name}",
+                        help="Require human approval for all tools from this server",
+                    ):
+                        with st.spinner("Updating approval rule..."):
+                            if set_hitl_setting("server", server_name, not server_gated) is not None:
                                 st.rerun()
 
                 st.markdown("---")
@@ -7949,23 +8003,31 @@ def render_tools_tab():
         st.warning(f"No tools match '{search_query}'")
         return
 
-    # Display tools as selectbox
-    selected_tool_name = st.selectbox(
+    # Display tools as selectbox, keyed by qualified id so duplicate tool names
+    # across servers each select their own rule (server::tool).
+    qualified_tool_options = {
+        f"{tool.get('serverName', '')}::{tool.get('name')}": tool
+        for tool in filtered_tools
+        if tool.get("name")
+    }
+    selected_tool_key = st.selectbox(
         "Select a tool to test",
-        options=[tool.get("name") for tool in filtered_tools],
-        format_func=lambda x: (
-            f"{x} ({next((t.get('serverName', '') for t in filtered_tools if t.get('name') == x), '')})"
+        options=list(qualified_tool_options.keys()),
+        format_func=lambda key: (
+            f"{qualified_tool_options[key].get('name')} "
+            f"({qualified_tool_options[key].get('serverName', '')})"
         ),
     )
 
-    if not selected_tool_name:
+    if not selected_tool_key:
         return
 
     # Get selected tool details
-    selected_tool = next((t for t in filtered_tools if t.get("name") == selected_tool_name), None)
+    selected_tool = qualified_tool_options.get(selected_tool_key)
 
     if not selected_tool:
         return
+    selected_tool_name = selected_tool.get("name")
 
     # Display tool details
     st.markdown("---")
@@ -7978,6 +8040,37 @@ def render_tools_tab():
         st.markdown("**Type:** Tool")
 
     st.markdown(f"**Description:** {selected_tool.get('description', 'No description available')}")
+
+    # Per-tool human-approval mode (tri-state: inherit server / always / never).
+    st.markdown("**Human approval**")
+    qualified_id = selected_tool_key
+    hitl_settings = get_hitl_settings() or {}
+    tool_rules = {
+        t["scopeValue"]: t["requireApproval"] for t in hitl_settings.get("tools", [])
+    }
+
+    if qualified_id in tool_rules:
+        current_mode = "Require" if tool_rules[qualified_id] else "Skip"
+    else:
+        current_mode = "Inherit"
+
+    modes = ["Inherit", "Require", "Skip"]
+    chosen = st.radio(
+        "Approval mode for this tool",
+        modes,
+        index=modes.index(current_mode),
+        key=f"hitl_tool_mode_{qualified_id}",
+        horizontal=True,
+        help="Inherit = follow the server rule; Require = always prompt; Skip = never prompt",
+    )
+    if chosen != current_mode:
+        with st.spinner("Updating tool approval..."):
+            if chosen == "Inherit":
+                result = clear_hitl_setting("tool", qualified_id)
+            else:
+                result = set_hitl_setting("tool", qualified_id, chosen == "Require")
+            if result is not None:
+                st.rerun()
 
     # Tool parameter form
     st.markdown("---")
