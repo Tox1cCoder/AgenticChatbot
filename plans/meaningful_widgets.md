@@ -1,5 +1,11 @@
 # Meaningful Live Widgets Implementation Plan
 
+> **SUPERSEDED (2026-06-22):** This historical plan describes the structured widget system
+> (`table`/`chart`/`dashboard`/`form`/`list`, `widget_quality.py`, `quality_guidance`) that has
+> been removed. Live widgets are now HTML-only — see
+> [`docs/superpowers/specs/2026-06-22-html-only-live-widgets-design.md`](../docs/superpowers/specs/2026-06-22-html-only-live-widgets-design.md)
+> and [`live-widgets-frontend-integration.md`](live-widgets-frontend-integration.md). Kept for history only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make live widgets read like article-quality inline visuals that explain the conversation, avoid low-value raw chart output, and behave consistently in both the AI SDK frontend path and the Streamlit `demo.py` path.

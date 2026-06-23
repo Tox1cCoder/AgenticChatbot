@@ -1,4 +1,9 @@
-"""Tests that the demo.py live widget HTML wires presentation, hover, and actions."""
+"""Tests that the demo.py live widget component is an HTML-only iframe renderer.
+
+After the HTML-only migration the Streamlit component must contain only the
+sandboxed-iframe rendering path: no structured renderers (table/chart/dashboard/
+form/list) and no state-field aliases.
+"""
 
 from __future__ import annotations
 
@@ -81,51 +86,56 @@ def _sample_widget() -> dict[str, Any]:
     return {
         "widget_id": "w-1",
         "session_id": "conv-1",
-        "widget_type": "chart",
-        "title": "Growth",
+        "widget_type": "html",
+        "title": "Harmonic Oscillation",
         "status": "active",
         "version": 1,
         "connection_endpoint": "/widgets/w-1/connection",
     }
 
 
-def test_live_widget_component_contains_hover_tooltip(monkeypatch):
+def test_live_widget_component_renders_sandboxed_iframe(monkeypatch):
     demo, _streamlit = _import_demo_with_ui_stubs(monkeypatch)
     markup = demo._build_live_widget_component_html(_sample_widget(), "token")
 
-    assert "lw-tooltip" in markup
-    assert "data-tooltip" in markup
+    assert "renderHtmlWidget" in markup
+    assert "<iframe" in markup
+    assert 'sandbox="allow-scripts' in markup
+    assert "srcdoc=" in markup
 
 
-def test_live_widget_component_includes_presentation_renderer(monkeypatch):
+def test_live_widget_component_keeps_websocket_connection_path(monkeypatch):
     demo, _streamlit = _import_demo_with_ui_stubs(monkeypatch)
     markup = demo._build_live_widget_component_html(_sample_widget(), "token")
 
-    assert "renderPresentation" in markup
-    assert "renderAnnotations" in markup
-    assert "lw-presentation" in markup
-    assert "lw-annotations" in markup
+    assert "WebSocket" in markup
+    assert "widget_state_sync" in markup
+    assert "connect(" in markup
 
 
-def test_live_widget_component_includes_action_hooks(monkeypatch):
+def test_live_widget_component_has_no_structured_renderers(monkeypatch):
     demo, _streamlit = _import_demo_with_ui_stubs(monkeypatch)
     markup = demo._build_live_widget_component_html(_sample_widget(), "token")
 
-    assert "renderActions" in markup
-    assert "data-widget-action" in markup
-    assert "runWidgetAction" in markup
-    assert "/widgets/" in markup
-    assert "/messages/stream" in markup
-    assert "inlineRichResponseV1" in markup
+    for removed in (
+        "renderTable",
+        "renderChart",
+        "renderDashboard",
+        "renderForm",
+        "renderList",
+        "normalizeChartPayload",
+        "renderControls",
+    ):
+        assert removed not in markup, f"structured renderer {removed} should be gone"
 
 
-def test_live_widget_component_uses_accessibility_titles_for_chart_points(monkeypatch):
+def test_live_widget_component_reads_only_contract_html_fields(monkeypatch):
     demo, _streamlit = _import_demo_with_ui_stubs(monkeypatch)
     markup = demo._build_live_widget_component_html(_sample_widget(), "token")
 
-    # SVG <title> tags provide accessibility fallback for chart hover values
-    assert "<title>" in markup
-    assert "aria-label" in markup
+    # The HTML renderer must read only the contract keys, not the old aliases.
+    for alias in ("data.document", "data.content", "data.srcdoc", "data.min_height", "data.minHeight"):
+        assert alias not in markup, f"alias {alias} must not be read by the HTML renderer"
 
 
 def test_live_widget_component_js_strings_have_no_raw_newlines(monkeypatch):

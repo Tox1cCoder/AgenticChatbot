@@ -23,7 +23,11 @@ if _project_root not in sys.path:
 
 from mcp.server.fastmcp import FastMCP
 
-from app.services.widget_quality import assess_widget_state
+from app.services.widget_contract import (
+    SUPPORTED_WIDGET_TYPE,
+    assert_supported_widget_type,
+    validate_html_widget_state,
+)
 from app.services.widget_runtime import get_widget_store
 
 mcp = FastMCP("widgets")
@@ -66,115 +70,73 @@ async def widget_create(
     initial_state: str,
     title: str = "",
 ) -> str:
-    """Create a new live widget that appears inside the chat conversation.
+    """Create a live HTML widget that appears inside the chat conversation.
 
-    Use this to show structured, interactive content such as:
-    - A live comparison table
-    - A chart or dashboard summarising results
-    - A structured form for collecting user choices
-    - A sortable/filterable data view
-    - A compact concept explainer for comparisons, taxonomies, timelines, or decision guides
-    - A compact bespoke micro-app rendered in a sandboxed iframe when the built-in widget types are too rigid
+    A live widget is a self-contained, sandboxed iframe micro-app — the one
+    supported `widget_type` is `"html"`. Reach for it when a concept is easier to
+    *show* than to describe: motion, changing variables, systems, physics, math,
+    processes, or any "show how it works" explanation. Build something the reader
+    can poke at:
 
-    Treat widgets like inline visuals in an article: provide a `presentation` block
-    (title, caption, axis labels, units, annotations) and place the widget marker
-    near the paragraph it supports. Soft guidance is returned in the response as
-    `quality_guidance` when the widget is accepted but could be improved.
+    - animation or manipulable visual state
+    - sliders or controls for the key parameters
+    - live numeric readouts
+    - canvas, SVG, or DOM diagrams/graphs when useful
+    - labels and captions in the user's language
+    - responsive inline CSS and vanilla JavaScript, with no external
+      dependencies, no auth assumptions, and no cross-window requirements
+
+    Place the widget's `<!--rich:widget:<id>-->` marker near the paragraph it
+    supports so it reads like an inline figure in an article.
 
     `initial_state` must be a valid JSON string — double-quoted keys and strings,
     lowercase `true`/`false`/`null`, no trailing commas, embedded quotes escaped
     as `\\"`. If the parser rejects the input, the error message includes the
     offending snippet so you can fix and retry on the next turn.
 
-    Objective validation rejects widgets that are clearly low-value, including:
-    - chart with fewer than two labels or non-numeric datasets
-    - line/area chart without an ordered/time/sequence `x_kind`
-    - donut/pie with negative values or multiple unrelated series
-    - empty dashboard with no panels or fallback metrics
-    - table with no rows/columns and no `empty_state`
-    - html widget with empty content or height outside 260..960
+    The state contract is minimal and strict:
+
+        {
+          "html": "<!doctype html>...self-contained responsive HTML/CSS/JS...",
+          "height": 620,
+          "caption": "Optional short caption"
+        }
+
+    Use the literal keys `html` and `height`; aliases such as `document`,
+    `content`, `srcdoc`, `min_height`, or `minHeight` are not accepted. `height`
+    must be a number between 260 and 960. Creation fails with a clear error for an
+    unsupported widget type, a non-object state, empty html, or a missing,
+    non-numeric, or out-of-range height.
+
+    Example — "explain simple harmonic motion" (label in Vietnamese when asked in
+    Vietnamese): animate the oscillator position `x(t)`, draw a time graph of
+    displacement, expose sliders for amplitude, angular frequency, and phase, add
+    pause/reset controls, and show live values for time and displacement — all
+    inside the single `html` document.
 
     Args:
         session_id: The conversation ID this widget belongs to.
-        widget_type: Widget kind — e.g. "table", "chart", "dashboard", "form", "list", or "html".
-            Use the structured kinds for durable data widgets that should be patchable and easy to
-            read back on later turns. Use "html" only when you need a more bespoke in-chat UI that
-            behaves more like a compact Canvas artifact.
-        initial_state: JSON string with the widget's initial data/configuration.
-            Preferred state conventions:
-            - table: {"columns": ["Column"], "rows": [["Value"]], "presentation": {"caption": "..."}}
-            - chart (article-style): {
-                "chart_type": "bar",
-                "labels": ["A", "B"],
-                "datasets": [{"label": "Score", "data": [1, 2]}],
-                "presentation": {
-                    "title": "Score by option",
-                    "caption": "B leads A by roughly 2x.",
-                    "x_label": "Option",
-                    "y_label": "Score",
-                    "unit": "points",
-                    "annotations": [{"label": "Best", "series": "Score", "point_index": 1}]
-                }
-              }
-            - line chart: include `"presentation": {"x_kind": "time"}` (or "ordered"/"sequence")
-            - dashboard: {"panels": [{"type": "metric", "title": "Total", "value": 42}, {"type": "chart", "title": "Trend", "data": {...}}]}
-            - form: {"fields": [{"key": "topic", "label": "Topic", "type": "text"}], "values": {"topic": "Widgets"}}
-            - list: {"items": [{"id": "a", "label": "Option A", "description": "Why it matters"}], "selection": "a"}
-            - html micro-app: {
-                "html": "<!doctype html>...self-contained responsive HTML/CSS/JS...",
-                "height": 540,
-                "caption": "Optional short note shown above the iframe"
-              }
-            - interactive views: {
-                "controls": [{"key": "metric", "label": "Metric", "type": "segmented", "options": [{"value": "revenue", "label": "Revenue"}, {"value": "profit", "label": "Profit"}], "value": "revenue"}],
-                "control_values": {"metric": "revenue"},
-                "views": {
-                    "metric=revenue": {"chart_type": "bar", "labels": ["Jan", "Feb"], "datasets": [{"label": "Revenue", "data": [12, 18]}]},
-                    "metric=profit": {"chart_type": "line", "labels": ["Jan", "Feb"], "datasets": [{"label": "Profit", "data": [3, 5]}], "presentation": {"x_kind": "time"}}
-                }
-              }
-            - alternative interactive shape: {
-                "controls": [...],
-                "control_values": {...},
-                "variants": [{"match": {"metric": "revenue"}, "state": {...}}, {"match": {"metric": "profit"}, "state": {...}}]
-              }
-            - assistant actions: {
-                "actions": [{
-                    "key": "explain_current_state",
-                    "label": "Explain current state",
-                    "type": "assistant_message",
-                    "message_template": "Explain the widget state for damping={{control_values.damping}} in the context of the current answer."
-                }]
-              }
-            Prefer putting reusable controls at the top level and per-view chart/table payloads in `views` or `variants`.
-            For dashboards, prefer layered, polished explainer layouts over a single raw chart:
-            combine hero metrics, supporting charts, ranked lists, and decision notes.
-            For html widgets:
-            - keep the experience compact and in-chat, not a full standalone website
-            - prefer self-contained HTML with inline CSS/JS
-            - make it responsive and visually polished
-            - avoid external auth assumptions or cross-window dependencies
+        widget_type: Must be `"html"`. Structured kinds (table, chart, dashboard,
+            form, list) and aliases (iframe, micro_app) are not supported.
+        initial_state: JSON string with `{"html": "...", "height": 620,
+            "caption": "..."}`. `caption` is optional. The whole experience —
+            controls, animation, graphs — lives inside the `html` document.
         title: Optional short human-readable title for the widget.
 
     Returns:
-        JSON object describing the created widget (widget_id, version, etc.), and a
-        `quality_guidance` list of soft recommendations when present.
+        JSON object describing the created widget (widget_id, version, etc.).
     """
+    assert_supported_widget_type(widget_type)
     store = get_widget_store()
     state = _parse_widget_state(initial_state, field="initial_state")
-    quality = assess_widget_state(widget_type, state)
-    if not quality.allowed:
-        raise ValueError("; ".join(quality.messages))
+    validate_html_widget_state(state)
     record = await store.create(
         session_id=session_id,
-        widget_type=widget_type,
+        widget_type=SUPPORTED_WIDGET_TYPE,
         initial_state=state,
         title=title or None,
     )
-    payload = record.to_dict()
-    if quality.soft_messages:
-        payload["quality_guidance"] = list(quality.soft_messages)
-    return json.dumps(payload, default=str)
+    return json.dumps(record.to_dict(), default=str)
 
 
 @mcp.tool()
@@ -183,18 +145,19 @@ async def widget_update(
     state: str,
     version: int = 0,
 ) -> str:
-    """Replace the full state of an existing live widget.
+    """Replace the full state of an existing live HTML widget.
 
-    Use this when the widget's data needs to change — for example after
-    fetching new search results or recalculating a dashboard. Keep the
-    overall state shape consistent with the original widget when possible
-    so the frontend can re-render smoothly. For interactive widgets, preserve
-    top-level `controls` / `control_values` / `views` or `variants` keys unless
-    you intentionally want to reset the available user interactions.
+    Use this when the micro-app's data needs to change — for example after
+    fetching new numbers to re-render inside the iframe. Pass the complete new
+    state (`html`, `height`, and optionally `caption`); the widget keeps its
+    original `html` type. The same minimal contract as `widget_create` applies,
+    and the update is rejected if the existing widget is a legacy structured type
+    rather than `html`.
 
     Args:
         widget_id: The widget to update (returned by widget_create).
-        state: JSON string with the new complete widget state.
+        state: JSON string with the new complete widget state
+            (`{"html": "...", "height": 620, "caption": "..."}`).
         version: Expected current version for optimistic concurrency (0 = skip check).
 
     Returns:
@@ -205,18 +168,14 @@ async def widget_update(
     existing = await store.get(widget_id)
     if existing is None:
         raise KeyError(f"Widget {widget_id} not found")
-    quality = assess_widget_state(existing.widget_type, new_state)
-    if not quality.allowed:
-        raise ValueError("; ".join(quality.messages))
+    assert_supported_widget_type(existing.widget_type)
+    validate_html_widget_state(new_state)
     record = await store.update(
         widget_id=widget_id,
         state=new_state,
         expected_version=version if version > 0 else None,
     )
-    payload = record.to_dict()
-    if quality.soft_messages:
-        payload["quality_guidance"] = list(quality.soft_messages)
-    return json.dumps(payload, default=str)
+    return json.dumps(record.to_dict(), default=str)
 
 
 @mcp.tool()

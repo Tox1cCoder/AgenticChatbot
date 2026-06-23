@@ -3,6 +3,11 @@
 Live widgets are interactive in-chat UI components created by the backend during a normal assistant turn.
 They are delivered through assistant message metadata, then hydrated over HTTP + WebSocket.
 
+Live widgets have **one supported type: `html`**. A widget is a self-contained micro-app
+(animation, sliders, live readouts, a small diagram/graph) authored by the model as a single
+HTML document. The frontend renders the widget state **only as a sandboxed iframe** from
+`state.html` — it never builds structured React renderers from the widget type.
+
 This guide is for frontend developers building against the AI SDK endpoints, including Next.js clients.
 
 ---
@@ -10,13 +15,13 @@ This guide is for frontend developers building against the AI SDK endpoints, inc
 ## Overview
 
 ```text
-AI agent calls widget_create()
+AI agent calls widget_create(widget_type="html")
         │
         ▼
 Assistant message metadata contains live_widgets[]
         │
         ▼
-Frontend renders widget cards / placeholders
+Frontend renders a widget card / placeholder
         │
         ▼
 Frontend POSTs /widgets/{id}/connection to mint a short-lived token
@@ -26,12 +31,15 @@ Frontend opens the returned ws_url
         │
         ▼
 Frontend receives widget_state_sync + widget_update events with full widget state
+        │
+        ▼
+Frontend renders state.html inside a sandboxed iframe
 ```
 
 Key point:
 
 - `live_widgets` metadata tells you that a widget exists.
-- The actual widget `state` arrives over the widget WebSocket.
+- The actual widget `state` (the HTML document, its height, an optional caption) arrives over the widget WebSocket.
 
 ---
 
@@ -58,8 +66,8 @@ This is the shape most frontend code should use after the AI SDK has materialize
       {
         "widget_id": "b3f2c1a0-...",
         "session_id": "sess-uuid",
-        "widget_type": "chart",
-        "title": "Revenue Explorer",
+        "widget_type": "html",
+        "title": "Harmonic Oscillation",
         "status": "active",
         "version": 1,
         "connection_endpoint": "/widgets/b3f2c1a0-.../connection"
@@ -86,8 +94,8 @@ If you consume the raw stream directly, the widget metadata is nested under `dat
           {
             "widget_id": "b3f2c1a0-...",
             "session_id": "sess-uuid",
-            "widget_type": "chart",
-            "title": "Revenue Explorer",
+            "widget_type": "html",
+            "title": "Harmonic Oscillation",
             "status": "active",
             "version": 1,
             "connection_endpoint": "/widgets/b3f2c1a0-.../connection"
@@ -114,22 +122,16 @@ Each widget entry has this shape:
 |---|---|---|
 | `widget_id` | `string` | Stable identifier for this widget instance |
 | `session_id` | `string` | Conversation / thread ID the widget belongs to |
-| `widget_type` | `string` | `"table"` \| `"chart"` \| `"dashboard"` \| `"form"` \| `"list"` \| `"html"` |
+| `widget_type` | `string` | Always `"html"` for new widgets |
 | `title` | `string \| null` | Optional human-readable title |
 | `status` | `string` | `"active"` or `"closed"` |
 | `version` | `number` | Current widget version |
 | `connection_endpoint` | `string` | Relative API path used to mint a short-lived widget connection token |
 
-Stable public widget types:
-
-- `table`
-- `chart`
-- `dashboard`
-- `form`
-- `list`
-- `html`
-
-Use `widget_type` to choose the frontend renderer.
+There is one supported `widget_type`: `html`. The removed structured types
+(`table`/`chart`/`dashboard`/`form`/`list`) and the former `iframe`/`micro_app` aliases are
+no longer created. Legacy persisted conversations may still surface a removed type — render
+those as an unsupported/legacy placeholder, not a structured renderer (see § 5).
 
 ---
 
@@ -151,8 +153,8 @@ Request body is empty.
 {
   "widget_id": "b3f2c1a0-...",
   "session_id": "sess-uuid",
-  "widget_type": "chart",
-  "title": "Revenue Explorer",
+  "widget_type": "html",
+  "title": "Harmonic Oscillation",
   "status": "active",
   "version": 1,
   "ws_url": "/widgets/b3f2c1a0-.../connect?session_id=sess-uuid&token=eyJ...",
@@ -192,7 +194,7 @@ For TLS, use `wss://`.
 | `widget_update` | Full state after any server-side change |
 | `widget_close` | Widget is now closed / read-only |
 | `ping` | Keepalive |
-| `error` | Protocol / auth / availability error |
+| `error` | Protocol / auth / availability / contract error |
 
 ### Event payload shape
 
@@ -202,12 +204,12 @@ For `widget_state_sync`, `widget_update`, and `widget_close`, the server sends:
 {
   "type": "widget_update",
   "widget_id": "b3f2c1a0-...",
-  "widget_type": "chart",
-  "title": "Revenue Explorer",
+  "widget_type": "html",
+  "title": "Harmonic Oscillation",
   "state": {
-    "chart_type": "bar",
-    "labels": ["Jan", "Feb"],
-    "datasets": [{ "label": "Revenue", "data": [12, 18] }]
+    "html": "<!doctype html>...",
+    "height": 620,
+    "caption": "Drag the sliders to change amplitude and frequency."
   },
   "status": "active",
   "version": 2
@@ -221,33 +223,20 @@ For `widget_state_sync`, `widget_update`, and `widget_close`, the server sends:
 | `user_state_patch` | Shallow-merge a UI patch into widget state | `patch` |
 | `pong` | Keepalive reply | none |
 
-Example:
-
-```json
-{ "type": "user_state_patch", "patch": { "table_ui": { "sort_by": "price", "sort_dir": "asc" } } }
-```
-
 Merge rule:
 
 - `user_state_patch` is a shallow merge against the current stored state.
-- After a successful patch, the widget version increments and a new `widget_update` is broadcast.
+- After a successful patch the widget version increments and a new `widget_update` is broadcast.
+- For an HTML widget, the server **re-validates the merged state against the HTML contract**
+  before storing it. A patch that would produce empty `html` or an out-of-range `height` is
+  rejected with an `error` event and is not applied. In practice an HTML micro-app manages its
+  own interactivity inside the iframe, so most clients never send `user_state_patch`.
 
 ---
 
 ## 5. Renderer strategy
 
-### Structured widgets
-
-For `table`, `chart`, `dashboard`, `form`, and `list`, build normal React renderers.
-
-Recommended approach:
-
-- Render a stable outer card from `live_widgets[]`
-- Connect lazily or eagerly depending on your UX
-- Re-render from the latest WebSocket `state`
-- Send `user_state_patch` for user-driven UI state changes
-
-### HTML widgets
+There is one renderer: a **sandboxed iframe**.
 
 For `widget_type="html"`, render the widget state as a sandboxed iframe micro-app.
 
@@ -256,7 +245,7 @@ Expected state shape:
 ```json
 {
   "html": "<!doctype html>...",
-  "height": 540,
+  "height": 620,
   "caption": "Optional note shown above the iframe"
 }
 ```
@@ -268,124 +257,57 @@ Recommended rendering:
   sandbox="allow-scripts allow-forms allow-modals allow-downloads"
   referrerPolicy="no-referrer"
   srcDoc={state.html}
-  style={{ width: "100%", height: `${state.height ?? 540}px`, border: "none" }}
+  style={{ width: "100%", height: `${state.height ?? 620}px`, border: "none" }}
 />
 ```
 
 Important:
 
-- Do not inject `state.html` directly into the chat DOM.
-- Use an iframe boundary.
-- `html` widgets are intended for bounded in-chat micro experiences, not full standalone websites.
-- There is currently no standardized iframe-to-parent `postMessage` contract for syncing arbitrary internal iframe UI events back into widget state. If you need that later, define it explicitly as a follow-up feature.
+- `state.html` is untrusted, executable content. **Do not inject it into the chat DOM.** Use an iframe boundary.
+- Read only the contract keys `html`, `height`, `caption`. The former aliases
+  (`document`/`content`/`srcdoc`/`min_height`/`minHeight`) are not part of the contract.
+- `html` widgets are bounded in-chat micro experiences, not full standalone websites.
+- There is currently no standardized iframe-to-parent `postMessage` contract for syncing
+  internal iframe UI events back into widget state. If you need that later, define it
+  explicitly as a follow-up feature.
+
+### Legacy structured widgets
+
+The structured types (`table`/`chart`/`dashboard`/`form`/`list`) are removed. New turns never
+create them. If a legacy conversation surfaces a widget whose `widget_type` is not `html`,
+render a small unsupported/legacy placeholder (e.g. "This widget type is no longer supported")
+rather than attempting a structured renderer. Do not branch the renderer on `widget_type`
+beyond this legacy guard.
 
 ---
 
-## 6. Recommended widget state conventions
-
-The `state` object is model-authored, so render defensively. The following conventions are the current preferred shapes.
-
-| `widget_type` | Typical top-level keys |
-|---|---|
-| `table` | `columns`, `rows` |
-| `chart` | `chart_type`, `labels`, `datasets` |
-| `dashboard` | `panels` |
-| `form` | `fields`, `values` |
-| `list` | `items`, `selection` |
-| `html` | `html`, optional `height`, optional `caption` |
-
-### Interactive wrapper conventions
-
-Structured widgets may also include an interactive control model:
-
-```json
-{
-  "controls": [
-    {
-      "key": "metric",
-      "label": "Metric",
-      "type": "segmented",
-      "options": [
-        { "value": "revenue", "label": "Revenue" },
-        { "value": "profit", "label": "Profit" }
-      ],
-      "value": "revenue"
-    }
-  ],
-  "control_values": {
-    "metric": "revenue"
-  },
-  "views": {
-    "metric=revenue": {
-      "chart_type": "bar",
-      "labels": ["Jan", "Feb"],
-      "datasets": [{ "label": "Revenue", "data": [12, 18] }]
-    },
-    "metric=profit": {
-      "chart_type": "line",
-      "labels": ["Jan", "Feb"],
-      "datasets": [{ "label": "Profit", "data": [3, 5] }]
-    }
-  }
-}
-```
-
-Equivalent alternative:
-
-```json
-{
-  "controls": [...],
-  "control_values": { "metric": "revenue" },
-  "variants": [
-    {
-      "match": { "metric": "revenue" },
-      "state": { "...": "..." }
-    },
-    {
-      "match": { "metric": "profit" },
-      "state": { "...": "..." }
-    }
-  ]
-}
-```
-
-Frontend guidance:
-
-- Resolve `controls` using `control_values`
-- Then resolve the active `views` / `variants` payload
-- Then render the resolved payload as the widget body
-- When users change controls, send back a shallow patch updating `control_values`
-
-Additional optional UI state conventions:
-
-- `table_ui`: search, sorting, pagination-like table view state
-- `chart_ui`: chart type overrides, hidden series, presentation controls
-
-These are still part of normal widget `state`.
-
----
-
-## 7. End-to-end TypeScript example
+## 6. End-to-end TypeScript example
 
 ```typescript
-type WidgetType = "table" | "chart" | "dashboard" | "form" | "list" | "html";
+type WidgetType = "html";
 
 interface LiveWidget {
   widget_id: string;
   session_id: string;
-  widget_type: WidgetType;
+  widget_type: string; // "html" for new widgets; legacy values may appear
   title: string | null;
   status: "active" | "closed";
   version: number;
   connection_endpoint: string;
 }
 
+interface HtmlWidgetState {
+  html: string;
+  height?: number;
+  caption?: string;
+}
+
 interface WidgetRealtimeEvent {
   type: "widget_state_sync" | "widget_update" | "widget_close" | "ping" | "error";
   widget_id?: string;
-  widget_type?: WidgetType;
+  widget_type?: string;
   title?: string | null;
-  state?: unknown;
+  state?: HtmlWidgetState;
   status?: "active" | "closed";
   version?: number;
   timestamp?: string;
@@ -423,40 +345,31 @@ async function connectWidget(widget: LiveWidget, accessToken: string) {
     }
   };
 
-  function applyUserPatch(patch: Record<string, unknown>) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "user_state_patch", patch }));
-    }
-  }
-
-  return { ws, applyUserPatch };
+  return { ws };
 }
 
 function renderWidget(
   widget: LiveWidget,
-  state: unknown,
+  state: HtmlWidgetState | undefined,
   version: number,
   status: "active" | "closed",
 ) {
-  console.log("render widget", widget.widget_id, widget.widget_type, version, status, state);
+  // Render state.html inside a sandboxed iframe (srcDoc). Never inject into the chat DOM.
+  console.log("render widget", widget.widget_id, version, status, state?.height);
 }
 ```
 
 ---
 
-## 8. Parsing `live_widgets` from the stream
+## 7. Parsing `live_widgets` from the stream
 
 ### If you use AI SDK message objects
-
-Read:
 
 ```ts
 const widgets = message.messageMetadata?.live_widgets ?? [];
 ```
 
 ### If you consume the raw side-channel event
-
-Read:
 
 ```ts
 if (event.type === "data-assistant-message") {
@@ -467,8 +380,6 @@ if (event.type === "data-assistant-message") {
 
 ### If you load message history from the API
 
-Read:
-
 ```ts
 const widgets = message.messageMetadata?.live_widgets ?? [];
 ```
@@ -477,7 +388,7 @@ The history API also mirrors metadata under `metadata`, but `messageMetadata` sh
 
 ---
 
-## 9. Token expiry and reconnection
+## 8. Token expiry and reconnection
 
 Widget tokens expire after 5 minutes.
 
@@ -495,24 +406,22 @@ Recommended:
 
 ---
 
-## 10. Checklist for implementers
+## 9. Checklist for implementers
 
 - [ ] Parse `messageMetadata.live_widgets`
-- [ ] Support the stable public widget types: `table`, `chart`, `dashboard`, `form`, `list`, `html`
-- [ ] Render structured widgets with normal React components
-- [ ] Render `html` widgets in a sandboxed iframe, not inline HTML
+- [ ] Treat `html` as the only live widget type; render a legacy placeholder for any other type
+- [ ] Render `html` widgets in a sandboxed iframe from `state.html`, never inline in the chat DOM
+- [ ] Read only the contract keys `html`, `height`, `caption`
 - [ ] Call `POST /widgets/{id}/connection` before opening the widget socket
 - [ ] Handle `widget_state_sync`, `widget_update`, and `widget_close`
 - [ ] Reply with `pong` to every `ping`
-- [ ] Treat `user_state_patch` as a shallow-merge patch contract
-- [ ] Support the interactive wrapper conventions: `controls`, `control_values`, `views` / `variants`
 - [ ] Reconnect with a fresh token when the widget token expires
 
 ## Migration note (2026-05-25): inline rich response v1
 
 The inline rich response v1 contract (`response_format.md`) extends widget delivery with optional **inline placement**:
 
-- Capable assistant messages now persist `messageMetadata.rich_items[]` alongside the existing `live_widgets[]` field. A widget appears with id `widget:<widget_id>` and `display_policy: inline_or_append`.
+- Capable assistant messages persist `messageMetadata.rich_items[]` alongside the existing `live_widgets[]` field. A widget appears with id `widget:<widget_id>` and `display_policy: inline_or_append`.
 - When the assistant body contains a standalone marker `<!--rich:widget:<widget_id>-->`, render that widget at the marker position. The marker is model-authored placement data; the backend does not invent a position when it is omitted. While a streamed marker is waiting for its item upsert, reserve that inline position with a lightweight widget placeholder.
 - The widget WebSocket protocol, token minting, and mount metadata are unchanged. Both `live_widgets[]` (legacy) and `tool_artifacts[]` (audit) continue to be persisted, so widget recovery and ownership checks remain identical.
 - Frontend consumers wanting the inline experience should:
@@ -524,110 +433,52 @@ The inline rich response v1 contract (`response_format.md`) extends widget deliv
 
 See [`README.md`](../README.md) → "Inline Rich Response (v1)" for the full contract.
 
-## 11. Meaningful Widgets — Shared State Contract (2026-05-28)
+## 10. HTML widget state contract (2026-06-22)
 
-Live widgets now read like article-quality inline visuals. All renderers (AI SDK clients **and** the Streamlit demo) should consume the same enriched state contract when present. Legacy widget shapes remain valid.
-
-### State envelope
+The one supported widget state shape:
 
 ```json
 {
-  "presentation": {
-    "title": "Phase-space intuition",
-    "caption": "The same oscillator becomes easier to read when position and velocity are viewed together.",
-    "layout": "article",
-    "x_label": "Position",
-    "y_label": "Velocity",
-    "unit": "normalized",
-    "x_kind": "time",
-    "annotations": [
-      {"label": "Stable orbit", "series": "Trajectory", "point_index": 8}
-    ]
-  },
-  "chart_type": "line",
-  "labels": ["t0", "t1", "t2"],
-  "datasets": [{"label": "Trajectory", "data": [0.1, 0.4, 0.9]}],
-  "controls": [
-    {"key": "damping", "label": "Damping", "type": "slider", "min": 0, "max": 1, "step": 0.05, "value": 0.2}
-  ],
-  "control_values": {"damping": 0.2},
-  "views": {
-    "damping=0.2": {"chart_type": "line", "labels": ["t0", "t1", "t2"], "datasets": [{"label": "Trajectory", "data": [0.1, 0.4, 0.9]}]}
-  },
-  "actions": [
-    {
-      "key": "explain_current_state",
-      "label": "Explain current state",
-      "type": "assistant_message",
-      "message_template": "Explain the widget state for damping={{control_values.damping}} in the context of the current answer."
-    }
-  ]
+  "html": "<!doctype html>...self-contained responsive HTML/CSS/JS...",
+  "height": 620,
+  "caption": "Optional short caption"
 }
 ```
 
-### Required frontend behavior
+- `html` — a complete, self-contained document. It owns all of its own interactivity
+  (animation, sliders, live readouts, canvas/SVG diagrams) with vanilla JS and inline CSS;
+  no external dependencies, auth assumptions, or cross-window requirements.
+- `height` — a number between 260 and 960. The iframe is rendered at this pixel height.
+- `caption` — optional short note rendered above the iframe.
 
-- Opt into `inlineRichResponseV1` on chat/resume requests.
-- Read **transient** widgets from `data-rich-items` SSE events as they stream.
-- Read **final** widgets from `messageMetadata.rich_items` after `data-assistant-message`.
-- Hydrate widget state through `POST /widgets/{id}/connection` and the widget WebSocket. **No widget state is embedded in `rich_items` — state always arrives over the WebSocket.**
-- Render `presentation`, `controls`, `views`/`variants`, chart hover values, and `actions` using the same conventions the Streamlit demo uses.
-- For action buttons, call `POST /widgets/{id}/actions/{action_key}` with optional `state_patch` and `input_values`. Submit the returned `content` through the normal AI SDK chat stream (do **not** invoke the assistant directly from the action endpoint — that endpoint only renders the message).
+The backend enforces this contract at `widget_create` / `widget_update` time and again when an
+action `state_patch` or a WebSocket `user_state_patch` is applied. Invalid state never reaches
+the frontend.
 
-### Action endpoint contract
+### Action endpoint (optional)
 
-Request body (`POST /widgets/{widget_id}/actions/{action_key}`):
+An HTML widget's state may include a top-level `actions[]` array of
+`type: "assistant_message"` entries. `POST /widgets/{widget_id}/actions/{action_key}`:
+
+- applies an optional `state_patch` (re-validated against the HTML contract before storing),
+- renders the action's `message_template` from the widget state (supports `{{state.<path>}}`
+  and `{{input_values.<key>}}`),
+- records `last_action` on the widget state,
+- returns `{widget_id, session_id, action_key, content}`.
+
+Request body:
 
 ```json
 {
   "input_values": {"note": "optional user input"},
-  "state_patch": {"control_values": {"damping": 0.4}}
+  "state_patch": {"caption": "updated caption"}
 }
 ```
 
-Both fields are optional. `state_patch` is applied as a shallow merge to widget state **before** the action template is rendered.
-
-Response:
-
-```json
-{
-  "widget_id": "w-1",
-  "session_id": "conversation-id",
-  "action_key": "explain_current_state",
-  "content": "Explain the widget state for damping=0.4 in the context of the current answer."
-}
-```
+Both fields are optional. Submit the returned `content` through the normal AI SDK chat stream —
+the endpoint does **not** invoke the assistant directly.
 
 Errors:
 - `404` — widget or action not found
-- `400` — action is not of type `assistant_message`, or has no `message_template`
+- `400` — action is not `assistant_message`, has no `message_template`, or the merged state breaks the HTML contract
 - `403` — access denied (widget belongs to another conversation)
-
-The endpoint also records the latest action in `widget.state.last_action` so a subsequent `widget_get_state` call from the agent can inspect user intent.
-
-### Hover values
-
-Bars, line points, and donut slices include both `data-tooltip` (custom hover) and SVG `<title>` (accessibility fallback). The tooltip payload is the pipe-delimited string `series|label|value` (donut slices use `series||value`). Frontends are free to ignore the custom format and rely on `<title>` + `aria-label`, but the recommendation is to mirror the demo's `.lw-tooltip` floating box for consistent UX.
-
-### Reference snippet — running a widget action
-
-```ts
-async function runWidgetAction(widgetId: string, actionKey: string, statePatch: unknown) {
-  const response = await fetch(`/widgets/${widgetId}/actions/${actionKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ state_patch: statePatch }),
-  });
-  if (!response.ok) throw new Error(`Widget action failed: ${response.status}`);
-  const payload = await response.json();
-  sendMessage({ text: payload.content }); // submit through the normal chat stream
-}
-```
-
-### Implementer checklist
-
-- [ ] Render `presentation.title`, `caption`, `x_label`, `y_label`, `unit` near the widget body, not as a heavy header card
-- [ ] Render `presentation.annotations` as callouts/markers when their target series + point_index resolves
-- [ ] Attach hover values to bars, line points, and donut slices (custom tooltip **or** SVG `<title>` minimum)
-- [ ] Render `actions` of type `assistant_message` as buttons; submit returned `content` through the AI SDK chat stream with `inlineRichResponseV1: true`
-- [ ] For repeated widget markers, mount the WebSocket once; later occurrences should focus/open the existing widget

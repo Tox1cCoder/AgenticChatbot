@@ -840,7 +840,7 @@ Exactly one of `payload.url` or `payload.data` is present. Allowed MIME types ar
   "payload": {
     "widget_id": "widget-id",
     "session_id": "conversation-id",
-    "widget_type": "table",
+    "widget_type": "html",
     "status": "active",
     "version": 1,
     "connection_endpoint": "/widgets/widget-id/connection"
@@ -972,6 +972,27 @@ Renderer algorithm:
 
 ## Live Widgets
 
+Live widgets have one supported type: `html`. A widget is a self-contained micro-app.
+The frontend renders the widget **state only as a sandboxed iframe** from `state.html` —
+never inject `state.html` into the main chat DOM. `state.html` is untrusted, executable
+content; treat it with the same safety boundary as a canvas artifact (`sandbox` iframe,
+`referrerpolicy="no-referrer"`).
+
+Expected widget state (delivered over the WebSocket, see below):
+
+```json
+{
+  "html": "<!doctype html>...",
+  "height": 620,
+  "caption": "Optional short caption"
+}
+```
+
+`height` is a number between 260 and 960; `caption` is optional. There are no structured
+widget renderers (`table`/`chart`/`dashboard`/`form`/`list`) — do **not** choose a React
+renderer by `widget_type`. Legacy persisted metadata may still carry a removed structured
+type; render those as an unsupported/legacy placeholder rather than a structured renderer.
+
 Live widgets can appear in two places:
 
 1. Legacy metadata: `backendMeta.live_widgets[]`
@@ -983,7 +1004,7 @@ Legacy `live_widgets[]` shape:
 {
   "widget_id": "widget-id",
   "session_id": "conversation-id",
-  "widget_type": "table",
+  "widget_type": "html",
   "title": "Widget title",
   "status": "active",
   "version": 1,
@@ -997,7 +1018,7 @@ Fields:
 |---|---|---|
 | `widget_id` | string | Widget identifier. |
 | `session_id` | string | Conversation/session id. |
-| `widget_type` | string | Renderer type, such as `table`, `chart`, or a custom widget type. |
+| `widget_type` | string | Always `html` — the only supported live widget type. Legacy metadata may carry a removed structured type; render those as a legacy placeholder. |
 | `title` | string or null | Optional title. |
 | `status` | string | `active` or `closed`. |
 | `version` | number | Incrementing state version. |
@@ -1008,8 +1029,8 @@ Mount flow:
 1. Render placeholder from metadata.
 2. POST `connection_endpoint` with normal auth.
 3. Open the returned `ws_url`.
-4. Render `widget_state_sync.state`.
-5. Apply future `widget_update.state`.
+4. Render `widget_state_sync.state.html` inside a sandboxed iframe (`srcdoc`).
+5. Apply future `widget_update.state` by re-rendering the iframe.
 
 Connection response:
 
@@ -1017,7 +1038,7 @@ Connection response:
 {
   "widget_id": "widget-id",
   "session_id": "conversation-id",
-  "widget_type": "table",
+  "widget_type": "html",
   "title": "Widget title",
   "status": "active",
   "version": 1,
@@ -1033,7 +1054,7 @@ Widget WebSocket server events:
 {
   "type": "widget_state_sync",
   "widget_id": "widget-id",
-  "widget_type": "table",
+  "widget_type": "html",
   "title": "Widget title",
   "state": {},
   "status": "active",
@@ -1045,7 +1066,7 @@ Widget WebSocket server events:
 {
   "type": "widget_update",
   "widget_id": "widget-id",
-  "widget_type": "table",
+  "widget_type": "html",
   "title": "Widget title",
   "state": {},
   "status": "active",
@@ -1057,7 +1078,7 @@ Widget WebSocket server events:
 {
   "type": "widget_close",
   "widget_id": "widget-id",
-  "widget_type": "table",
+  "widget_type": "html",
   "title": "Widget title",
   "state": {},
   "status": "closed",

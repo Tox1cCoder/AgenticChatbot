@@ -797,59 +797,57 @@ class TestPromptUpdates:
         assert "LiveUI widgets are for compact in-chat aids" in ROUTER_SYSTEM_PROMPT
         assert "Do not route to canvas_agent merely because a widget" in ROUTER_SYSTEM_PROMPT
 
-    def test_prompt_mentions_article_style_widget_quality(self):
+    def test_prompt_mentions_html_micro_app_widgets(self):
         from app.ai.prompts import CHAT_SYSTEM_PROMPT
 
         prompt = CHAT_SYSTEM_PROMPT.lower()
-        assert "article" in prompt
-        assert "annotations" in prompt
-        assert "choose chart type" in prompt
+        assert "html" in prompt
+        assert "micro-app" in prompt
+        assert "slider" in prompt
+        assert "animation" in prompt
+
+    def test_prompt_drops_structured_widget_guidance(self):
+        from app.ai.prompts import CHAT_SYSTEM_PROMPT
+
+        prompt = CHAT_SYSTEM_PROMPT.lower()
+        assert "chart_type" not in prompt
+        assert "dashboard" not in prompt
+        assert "presentation block" not in prompt
+
+
+_VALID_HTML_STATE = {
+    "html": "<!doctype html><div>hi</div>",
+    "height": 540,
+    "caption": "demo",
+}
 
 
 # ---------------------------------------------------------------------------
-# Widget tool quality enforcement
+# Widget tool HTML-only contract enforcement
 # ---------------------------------------------------------------------------
-class TestWidgetToolQualityEnforcement:
-    async def test_widget_create_rejects_empty_chart(self, monkeypatch):
+class TestWidgetToolHtmlContract:
+    @pytest.mark.parametrize(
+        "widget_type",
+        ["table", "chart", "dashboard", "form", "list", "iframe", "micro_app", "bogus"],
+    )
+    async def test_widget_create_rejects_unsupported_types(self, monkeypatch, widget_type):
         import app.services.widget_runtime as widget_runtime
         from app.ai.mcp_servers import widgets_server
 
         store = InMemoryWidgetStore()
         monkeypatch.setattr(widget_runtime, "_widget_store", store)
 
-        with pytest.raises(ValueError, match="chart requires at least two labels"):
+        with pytest.raises(ValueError, match="unsupported widget type"):
             await widgets_server.widget_create(
                 session_id="conv-1",
-                widget_type="chart",
-                initial_state=json.dumps({"chart_type": "bar", "labels": [], "datasets": []}),
-                title="Empty",
+                widget_type=widget_type,
+                initial_state=json.dumps(_VALID_HTML_STATE),
+                title="Nope",
             )
 
-        listed = await store.list_by_session("conv-1")
-        assert listed == []
+        assert await store.list_by_session("conv-1") == []
 
-    async def test_widget_create_rejects_donut_with_negative_values(self, monkeypatch):
-        import app.services.widget_runtime as widget_runtime
-        from app.ai.mcp_servers import widgets_server
-
-        store = InMemoryWidgetStore()
-        monkeypatch.setattr(widget_runtime, "_widget_store", store)
-
-        with pytest.raises(ValueError, match="non-negative"):
-            await widgets_server.widget_create(
-                session_id="conv-1",
-                widget_type="chart",
-                initial_state=json.dumps(
-                    {
-                        "chart_type": "donut",
-                        "labels": ["A", "B"],
-                        "datasets": [{"label": "Share", "data": [5, -1]}],
-                    }
-                ),
-                title="Bad donut",
-            )
-
-    async def test_widget_create_allows_valid_bar_chart(self, monkeypatch):
+    async def test_widget_create_accepts_valid_html(self, monkeypatch):
         import app.services.widget_runtime as widget_runtime
         from app.ai.mcp_servers import widgets_server
 
@@ -858,21 +856,58 @@ class TestWidgetToolQualityEnforcement:
 
         result = await widgets_server.widget_create(
             session_id="conv-2",
-            widget_type="chart",
-            initial_state=json.dumps(
-                {
-                    "chart_type": "bar",
-                    "labels": ["A", "B"],
-                    "datasets": [{"label": "Score", "data": [1, 2]}],
-                }
-            ),
-            title="Good chart",
+            widget_type="html",
+            initial_state=json.dumps(_VALID_HTML_STATE),
+            title="Oscillator",
         )
 
         payload = json.loads(result)
-        assert payload["widget_type"] == "chart"
+        assert payload["widget_type"] == "html"
         assert payload["status"] == "active"
-        assert payload.get("quality_guidance"), "expected soft guidance for missing caption/labels"
+        assert "quality_guidance" not in payload
+
+    @pytest.mark.parametrize(
+        "bad_state,match",
+        [
+            ("\"just-a-string\"", "JSON object"),
+            ('{"html": "", "height": 540}', "html content"),
+            ('{"html": "<div>hi</div>"}', "height"),
+            ('{"html": "<div>hi</div>", "height": "tall"}', "numeric"),
+            ('{"html": "<div>hi</div>", "height": 50}', "between"),
+            ('{"html": "<div>hi</div>", "height": 5000}', "between"),
+        ],
+    )
+    async def test_widget_create_rejects_invalid_html_state(self, monkeypatch, bad_state, match):
+        import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+
+        with pytest.raises(ValueError, match=match):
+            await widgets_server.widget_create(
+                session_id="conv-bad",
+                widget_type="html",
+                initial_state=bad_state,
+            )
+
+        assert await store.list_by_session("conv-bad") == []
+
+    async def test_widget_create_rejects_state_field_aliases(self, monkeypatch):
+        import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+
+        # `document` and `min_height` are former aliases that the new contract
+        # must not accept in place of `html`/`height`.
+        with pytest.raises(ValueError, match="html content"):
+            await widgets_server.widget_create(
+                session_id="conv-alias",
+                widget_type="html",
+                initial_state=json.dumps({"document": "<div>hi</div>", "min_height": 540}),
+            )
 
     async def test_widget_create_accepts_python_style_literal_fallback(self, monkeypatch):
         import app.services.widget_runtime as widget_runtime
@@ -883,16 +918,16 @@ class TestWidgetToolQualityEnforcement:
 
         # Python-style literal: True instead of true, single quotes. json.loads
         # rejects this; ast.literal_eval recovers it.
-        python_style = "{'chart_type': 'bar', 'labels': ['A', 'B'], 'datasets': [{'label': 'S', 'data': [1, 2]}], 'is_demo': True}"
+        python_style = "{'html': '<div>hi</div>', 'height': 540, 'is_demo': True}"
 
         result = await widgets_server.widget_create(
             session_id="conv-py",
-            widget_type="chart",
+            widget_type="html",
             initial_state=python_style,
         )
 
         payload = json.loads(result)
-        assert payload["widget_type"] == "chart"
+        assert payload["widget_type"] == "html"
         assert payload["status"] == "active"
 
     async def test_widget_create_malformed_json_returns_helpful_error(self, monkeypatch):
@@ -903,12 +938,12 @@ class TestWidgetToolQualityEnforcement:
         monkeypatch.setattr(widget_runtime, "_widget_store", store)
 
         # Truly malformed — neither valid JSON nor a valid Python literal
-        broken = '{"chart_type": "bar" "labels": ["A", "B"]}'  # missing comma
+        broken = '{"html": "<div>hi</div>" "height": 540}'  # missing comma
 
         with pytest.raises(ValueError) as exc_info:
             await widgets_server.widget_create(
                 session_id="conv-broken",
-                widget_type="chart",
+                widget_type="html",
                 initial_state=broken,
             )
 
@@ -919,7 +954,7 @@ class TestWidgetToolQualityEnforcement:
         assert "double-quoted" in message
         assert "true/false/null" in message
 
-    async def test_widget_update_rejects_invalid_state(self, monkeypatch):
+    async def test_widget_update_rejects_invalid_html_state(self, monkeypatch):
         import app.services.widget_runtime as widget_runtime
         from app.ai.mcp_servers import widgets_server
 
@@ -928,21 +963,55 @@ class TestWidgetToolQualityEnforcement:
 
         created = await widgets_server.widget_create(
             session_id="conv-3",
-            widget_type="chart",
-            initial_state=json.dumps(
-                {
-                    "chart_type": "bar",
-                    "labels": ["A", "B"],
-                    "datasets": [{"label": "Score", "data": [1, 2]}],
-                }
-            ),
+            widget_type="html",
+            initial_state=json.dumps(_VALID_HTML_STATE),
         )
         widget_id = json.loads(created)["widget_id"]
 
-        with pytest.raises(ValueError, match="at least two labels"):
+        with pytest.raises(ValueError, match="html content"):
             await widgets_server.widget_update(
                 widget_id=widget_id,
-                state=json.dumps({"chart_type": "bar", "labels": [], "datasets": []}),
+                state=json.dumps({"html": "", "height": 540}),
+            )
+
+    async def test_widget_update_preserves_existing_html_type(self, monkeypatch):
+        import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+
+        created = await widgets_server.widget_create(
+            session_id="conv-4",
+            widget_type="html",
+            initial_state=json.dumps(_VALID_HTML_STATE),
+        )
+        widget_id = json.loads(created)["widget_id"]
+
+        result = await widgets_server.widget_update(
+            widget_id=widget_id,
+            state=json.dumps({**_VALID_HTML_STATE, "caption": "updated"}),
+        )
+        payload = json.loads(result)
+        assert payload["widget_type"] == "html"
+        assert payload["version"] == 2
+        assert "quality_guidance" not in payload
+
+    async def test_widget_update_rejects_legacy_structured_widget(self, monkeypatch):
+        import app.services.widget_runtime as widget_runtime
+        from app.ai.mcp_servers import widgets_server
+
+        store = InMemoryWidgetStore()
+        monkeypatch.setattr(widget_runtime, "_widget_store", store)
+
+        # A legacy structured widget recovered into the store cannot be updated
+        # under the HTML-only contract.
+        legacy = await store.create("conv-5", "chart", {"labels": ["A", "B"]})
+
+        with pytest.raises(ValueError, match="unsupported widget type"):
+            await widgets_server.widget_update(
+                widget_id=legacy.widget_id,
+                state=json.dumps(_VALID_HTML_STATE),
             )
 
 

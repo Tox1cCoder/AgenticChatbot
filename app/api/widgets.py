@@ -23,7 +23,11 @@ from sqlalchemy import Text, cast, select
 
 from app.core.auth import get_current_user_id
 from app.models.message import Message
-from app.services.widget_quality import resolve_widget_action_message
+from app.services.widget_contract import (
+    SUPPORTED_WIDGET_TYPE,
+    resolve_widget_action_message,
+    validate_html_widget_state,
+)
 from app.services.widget_runtime import (
     get_widget_connection_manager,
     get_widget_store,
@@ -322,6 +326,23 @@ def _widget_record_signature(record: Any | None) -> tuple[int, str, float]:
     )
 
 
+def _html_patch_contract_error(record: Any, patch: dict[str, Any]) -> str | None:
+    """Return an error string if shallow-merging ``patch`` into an HTML widget's
+    state would break the minimal HTML contract; otherwise ``None``.
+
+    Legacy non-HTML widgets are out of scope — they are a read/restore-only
+    compatibility concern, so no contract is enforced on their patches.
+    """
+    if getattr(record, "widget_type", "") != SUPPORTED_WIDGET_TYPE:
+        return None
+    base_state = record.state if isinstance(getattr(record, "state", None), dict) else {}
+    try:
+        validate_html_widget_state({**base_state, **patch})
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
 def _widget_event_payload(event_type: str, record: Any) -> dict[str, Any]:
     return {
         "type": event_type,
@@ -499,6 +520,12 @@ async def widget_action(
         )
 
     if request_body.state_patch:
+        contract_error = _html_patch_contract_error(record, request_body.state_patch)
+        if contract_error:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": contract_error},
+            )
         try:
             record = await store.patch(widget_id, request_body.state_patch)
         except (KeyError, ValueError) as exc:
@@ -633,6 +660,18 @@ async def widget_connect(
                 patch_data = msg.get("patch")
                 if not isinstance(patch_data, dict):
                     continue
+                if record.widget_type == SUPPORTED_WIDGET_TYPE:
+                    current = await store.get(widget_id)
+                    contract_error = _html_patch_contract_error(
+                        current if current is not None else record, patch_data
+                    )
+                    if contract_error:
+                        await _send_widget_event(
+                            websocket,
+                            {"type": "error", "message": contract_error},
+                            send_lock,
+                        )
+                        continue
                 try:
                     updated = await store.patch(widget_id, patch_data)
                     last_seen["value"] = _widget_record_signature(updated)

@@ -80,10 +80,9 @@ def widget_test_client(monkeypatch):
 
 def _seed_widget(store, *, actions=None, state_overrides=None):
     base_state = {
-        "chart_type": "bar",
-        "labels": ["A", "B"],
-        "datasets": [{"label": "S", "data": [1, 2]}],
-        "control_values": {"damping": 0.2},
+        "html": "<!doctype html><div>Oscillator</div>",
+        "height": 540,
+        "caption": "demo",
         "actions": actions
         if actions is not None
         else [
@@ -92,7 +91,7 @@ def _seed_widget(store, *, actions=None, state_overrides=None):
                 "label": "Explain",
                 "type": "assistant_message",
                 "message_template": (
-                    "Explain damping={{control_values.damping}} note={{input_values.note}}"
+                    "Explain caption={{state.caption}} note={{input_values.note}}"
                 ),
             }
         ],
@@ -102,7 +101,7 @@ def _seed_widget(store, *, actions=None, state_overrides=None):
     return asyncio.run(
         store.create(
             TEST_SESSION_ID,
-            "chart",
+            "html",
             base_state,
             title="Oscillator",
         )
@@ -123,7 +122,7 @@ def test_widget_action_returns_rendered_message(widget_test_client):
     assert payload["widget_id"] == record.widget_id
     assert payload["session_id"] == TEST_SESSION_ID
     assert payload["action_key"] == "explain_current_state"
-    assert payload["content"] == "Explain damping=0.2 note=demo"
+    assert payload["content"] == "Explain caption=demo note=demo"
 
 
 def test_widget_action_applies_state_patch_before_rendering(widget_test_client):
@@ -134,19 +133,34 @@ def test_widget_action_applies_state_patch_before_rendering(widget_test_client):
         f"/widgets/{record.widget_id}/actions/explain_current_state",
         json={
             "input_values": {"note": "ramp"},
-            "state_patch": {"control_values": {"damping": 0.4}},
+            "state_patch": {"caption": "ramped"},
         },
     )
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["content"] == "Explain damping=0.4 note=ramp"
+    assert payload["content"] == "Explain caption=ramped note=ramp"
 
     refreshed = asyncio.run(store.get(record.widget_id))
     assert refreshed is not None
-    assert refreshed.state["control_values"]["damping"] == 0.4
+    assert refreshed.state["caption"] == "ramped"
     assert refreshed.state["last_action"]["action_key"] == "explain_current_state"
-    assert refreshed.state["last_action"]["content"] == "Explain damping=0.4 note=ramp"
+    assert refreshed.state["last_action"]["content"] == "Explain caption=ramped note=ramp"
+
+
+def test_widget_action_rejects_contract_breaking_state_patch(widget_test_client):
+    """A state_patch that pushes the merged HTML state out of contract (e.g. a
+    height outside the iframe range) must be rejected, not silently stored."""
+    client, store = widget_test_client
+    record = _seed_widget(store)
+
+    response = client.post(
+        f"/widgets/{record.widget_id}/actions/explain_current_state",
+        json={"state_patch": {"height": 50}},
+    )
+
+    assert response.status_code == 400
+    assert "height" in response.json()["error"]
 
 
 def test_widget_action_missing_widget_returns_404(widget_test_client):
@@ -217,4 +231,4 @@ def test_widget_action_empty_body_allowed(widget_test_client):
     )
 
     assert response.status_code == 200
-    assert response.json()["content"] == "Explain damping=0.2 note="
+    assert response.json()["content"] == "Explain caption=demo note="

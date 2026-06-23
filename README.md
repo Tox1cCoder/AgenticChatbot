@@ -815,28 +815,42 @@ Widgets are interactive UI elements rendered by the frontend but driven by the a
 
 Widget state is Redis-backed (see startup banner `"Widget runtime: Redis-backed storage active"`). Without Redis, widget flows degrade; a warning is logged at startup.
 
-### Meaningful Widgets contract
+### HTML widget contract
 
-Live widgets read like article-quality inline visuals. The shared state envelope is identical between the AI SDK frontend path and the Streamlit `demo.py` path; agents create widgets through the `widgets` MCP server using a unified shape:
+Live widgets have one supported type: `html`. A widget is a self-contained,
+sandboxed-iframe micro-app — agents create it through the `widgets` MCP server with
+`widget_type="html"` and a minimal state envelope shared by the AI SDK frontend path and
+the Streamlit `demo.py` path:
 
-- `presentation` — `title`, `caption`, `x_label`, `y_label`, `unit`, `x_kind` (`time`/`ordered`/`sequence`), and `annotations[]` for callouts. Rendered inline near the chart body, not as a heavy header.
-- `controls` + `control_values` — local interaction (sliders, segmented controls, filters, chart-type pickers) that only update widget state.
-- `views` / `variants` — pre-computed scenario payloads keyed by control values.
-- `actions[]` — assistant-triggering controls. Each action of `type: "assistant_message"` declares a `message_template` that can reference `{{control_values.<key>}}`, `{{input_values.<key>}}`, `{{state.<path>}}`, or `{{presentation.<key>}}`.
+```json
+{ "html": "<!doctype html>...", "height": 620, "caption": "Optional short caption" }
+```
 
-Quality enforcement happens at widget-tool time (`app/services/widget_quality.py`). Objective failures — empty chart labels, line/area charts without an ordered `x_kind`, donut charts with negative values, html widgets with empty content or out-of-range height — block the create/update. Soft guidance is returned in the response as `quality_guidance: [...]` so the model can iterate.
+Frontends render the state **only** as a sandboxed iframe from `state.html` — never inject
+`state.html` into the main chat DOM. `state.html` is untrusted, executable content.
 
-Action resolution endpoint: `POST /widgets/{widget_id}/actions/{action_key}` applies an optional `state_patch`, renders the action template, records `last_action` on widget state, and returns `{widget_id, session_id, action_key, content}`. Frontends submit the returned `content` through the normal chat stream — the endpoint does not invoke the assistant directly.
+Contract validation happens at widget-tool time (`app/services/widget_contract.py`). The
+checks are shape, not editorial quality: unsupported widget type (anything but `html`,
+including the removed `table`/`chart`/`dashboard`/`form`/`list` and the `iframe`/`micro_app`
+aliases), non-object state, empty `html`, or a missing / non-numeric / out-of-range
+`height` (260–960) all block create/update with a clear, model-readable error. There is no
+`quality_guidance`.
+
+Action resolution endpoint: `POST /widgets/{widget_id}/actions/{action_key}` applies an
+optional `state_patch` (re-validated against the HTML contract before it is stored), renders
+an action `message_template` from the widget state, records `last_action`, and returns
+`{widget_id, session_id, action_key, content}`. Frontends submit the returned `content`
+through the normal chat stream — the endpoint does not invoke the assistant directly.
 
 Test commands:
 
 ```bash
-pytest tests/test_widget_quality.py tests/test_widget_runtime.py tests/test_widgets_api.py tests/test_widget_actions_api.py
+pytest tests/test_widget_contract.py tests/test_widget_runtime.py tests/test_widgets_api.py tests/test_widget_actions_api.py
 pytest tests/test_demo_meaningful_widgets.py tests/test_demo_plan_widget.py tests/test_demo_rich_response.py
 pytest tests/client_backend/test_widget_action_proxy.py
 ```
 
-See [`plans/live-widgets-frontend-integration.md`](plans/live-widgets-frontend-integration.md) § 11 for the full AI SDK renderer contract and reference snippets.
+See [`plans/live-widgets-frontend-integration.md`](plans/live-widgets-frontend-integration.md) §§ 5 and 10 for the full AI SDK HTML-widget renderer contract and reference snippets.
 
 ---
 
