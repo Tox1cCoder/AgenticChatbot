@@ -19,6 +19,7 @@ from uuid import uuid4
 from PIL import Image
 
 from app.schemas.document_image import DocumentImageCreate
+from app.services.document_parse_service import DocumentParseService
 from app.services.document_processing_service import DocumentProcessingService
 
 
@@ -231,6 +232,73 @@ def test_build_chunks_for_indexing_preserves_table_metadata(tmp_path):
     assert len(built_chunks) == 1
     assert built_chunks[0].metadata["has_tables"] is True
     assert built_chunks[0].metadata["table_count"] == 2
+
+
+def test_mineru_content_list_table_body_is_indexed_as_searchable_text(tmp_path):
+    """MinerU table_body values must reach DocumentChunk.content for RAG search."""
+    service = _build_service(tmp_path)
+    parse_service = DocumentParseService(settings=service.settings)
+
+    chunks_with_metadata = parse_service._create_chunks_with_page_metadata(
+        [
+            {"type": "text", "text": "Quarterly financial report", "page_idx": 0},
+            {
+                "type": "table",
+                "page_idx": 0,
+                "table_caption": ["Revenue by segment"],
+                "table_body": (
+                    "| Segment | Revenue |\n"
+                    "|---|---|\n"
+                    "| Cloud | 12345 |\n"
+                    "| Devices | 67890 |"
+                ),
+                "table_footnote": [],
+            },
+        ],
+        page_to_images={},
+    )
+
+    built_chunks = service._build_chunks_for_indexing(chunks_with_metadata)
+    indexed_text = "\n".join(chunk.content for chunk in built_chunks)
+
+    assert "Revenue by segment" in indexed_text
+    assert "Cloud" in indexed_text
+    assert "12345" in indexed_text
+    assert built_chunks[0].metadata["has_tables"] is True
+
+
+def test_build_chunks_for_indexing_recovers_table_body_from_parse_metadata(tmp_path):
+    """Existing parse artifacts may carry table bodies only in tables metadata."""
+    service = _build_service(tmp_path)
+
+    built_chunks = service._build_chunks_for_indexing(
+        [
+            {
+                "text": "Quarterly financial report\n[Table: Revenue by segment]",
+                "page_start": 0,
+                "page_end": 0,
+                "has_tables": True,
+                "table_count": 1,
+                "tables": [
+                    {
+                        "caption": ["Revenue by segment"],
+                        "body": (
+                            "| Segment | Revenue |\n"
+                            "|---|---|\n"
+                            "| Cloud | 12345 |\n"
+                            "| Devices | 67890 |"
+                        ),
+                    }
+                ],
+            }
+        ]
+    )
+
+    indexed_text = "\n".join(chunk.content for chunk in built_chunks)
+
+    assert "Cloud" in indexed_text
+    assert "12345" in indexed_text
+    assert indexed_text.count("Cloud") == 1
 
 
 def test_process_document_parses_xlsx_without_mineru(tmp_path):

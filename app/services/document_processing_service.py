@@ -496,6 +496,17 @@ class DocumentProcessingService:
         for index, chunk_data in enumerate(chunks_with_metadata):
             if isinstance(chunk_data, dict):
                 text = str(chunk_data.get("text", "") or "")
+                tables = chunk_data.get("tables") or []
+                if isinstance(tables, list):
+                    table_texts = []
+                    for table in tables:
+                        if not isinstance(table, dict):
+                            continue
+                        body = str(table.get("body") or table.get("table_body") or "").strip()
+                        if body and body not in text:
+                            table_texts.append(body)
+                    if table_texts:
+                        text = "\n".join([part for part in [text.rstrip(), *table_texts] if part])
                 page_start = chunk_data.get("page_start")
                 page_end = chunk_data.get("page_end")
                 metadata = {

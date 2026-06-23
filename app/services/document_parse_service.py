@@ -689,12 +689,22 @@ class DocumentParseService:
                 current_tables.append(table_entry)
                 captions = block.get("table_caption", [])
                 footnotes = block.get("table_footnote", [])
-                if captions:
-                    text = "[Table: " + " ".join(captions) + "]"
-                elif footnotes:
-                    text = "[Table] " + " ".join(str(note) for note in footnotes if note)
+                caption_items = captions if isinstance(captions, list) else [captions]
+                footnote_items = footnotes if isinstance(footnotes, list) else [footnotes]
+                caption_text = " ".join(str(caption) for caption in caption_items if caption)
+                footnote_text = " ".join(str(note) for note in footnote_items if note)
+                table_body = str(block.get("table_body", "") or "").strip()
+
+                table_parts = []
+                if caption_text:
+                    table_parts.append(f"[Table: {caption_text}]")
                 else:
-                    text = "[Table]"
+                    table_parts.append("[Table]")
+                if table_body:
+                    table_parts.append(table_body)
+                if footnote_text:
+                    table_parts.append(f"[Table footnote: {footnote_text}]")
+                text = "\n".join(table_parts)
             elif block_type == "image":
                 image_entry = {
                     "page": page_idx,
