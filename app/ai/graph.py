@@ -1076,6 +1076,48 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         return payload
 
+    @staticmethod
+    def _interrupt_payload_from_pending_interrupts(snapshot: Any) -> dict[str, Any] | None:
+        """Recover the live interrupt payload from the checkpoint's pending interrupts.
+
+        A node suspends *before* its writes land in the checkpoint, so the
+        ``pending_action_requests`` that ``_prepare_interrupt_payload`` stashes in
+        ``state["context"]`` right before ``interrupt()`` is never committed at pause
+        time. Worse, once the first approval cycle resolves (the node returns normally)
+        a now-stale value gets committed and would be reused for every later interrupt
+        on the thread. Reading it back from ``snapshot.values`` therefore yields tool
+        calls whose ids no longer match the resumed node's ``last_message.tool_calls``.
+
+        The interrupt's own value, however, IS checkpointed and current. Prefer it so
+        the action_requests (and provenance metadata) presented to the human always
+        line up with the tool calls the graph will apply decisions to on resume.
+        """
+        interrupts = list(getattr(snapshot, "interrupts", None) or ())
+        if not interrupts:
+            for task in getattr(snapshot, "tasks", None) or ():
+                interrupts.extend(getattr(task, "interrupts", None) or ())
+
+        action_requests: list[Any] = []
+        metadata: dict[str, Any] = {}
+        for item in interrupts:
+            value = getattr(item, "value", None)
+            if not isinstance(value, dict):
+                continue
+            requests = value.get("action_requests")
+            if isinstance(requests, list):
+                action_requests.extend(requests)
+            value_metadata = value.get("metadata")
+            if isinstance(value_metadata, dict):
+                metadata.update(value_metadata)
+
+        if not action_requests:
+            return None
+
+        payload: dict[str, Any] = {"action_requests": action_requests}
+        if metadata:
+            payload["metadata"] = metadata
+        return payload
+
     async def _needs_approval(
         self,
         state: GraphState,
@@ -4560,7 +4602,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                         and hasattr(last_msg, "tool_calls")
                         and last_msg.tool_calls
                     ):
-                        interrupt_payload = self._get_interrupt_payload_from_state(
+                        interrupt_payload = self._interrupt_payload_from_pending_interrupts(
+                            snapshot
+                        ) or self._get_interrupt_payload_from_state(
                             snapshot.values,
                             last_msg.tool_calls,
                         )
@@ -4792,7 +4836,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                             and hasattr(last_msg, "tool_calls")
                             and last_msg.tool_calls
                         ):
-                            interrupt_payload = self._get_interrupt_payload_from_state(
+                            interrupt_payload = self._interrupt_payload_from_pending_interrupts(
+                                snapshot
+                            ) or self._get_interrupt_payload_from_state(
                                 snapshot.values,
                                 last_msg.tool_calls,
                             )

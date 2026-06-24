@@ -21,3 +21,10 @@ def test_demo_renders_per_server_and_per_tool_controls():
     assert "Approval: ON" in src              # per-server toggle label
     assert "hitl_tool_mode_" in src           # per-tool tri-state widget key prefix
     assert "qualified_tool_options" in src    # duplicate tool names select by server::tool
+
+
+def test_demo_uses_shared_hitl_decision_builder():
+    src = _demo_source()
+    assert "from app.ui.hitl_decisions import" in src
+    assert "build_interrupt_decision(" in src
+    assert "interrupt_request_target_ids(" in src

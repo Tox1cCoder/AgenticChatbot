@@ -336,8 +336,8 @@ Important HITL fields:
 | `action_requests[].action` | string | Tool/action name. |
 | `action_requests[].args` | object | Original tool arguments. Use this to show what will run. |
 | `action_requests[].description` | string or null | Optional human-readable tool description. |
-| `action_requests[].tool_call_id` | string or null | Preferred decision target. Send back as `toolCallId`. |
-| `action_requests[].task_id` | string or null | Fallback decision target if `tool_call_id` is missing. |
+| `action_requests[].tool_call_id` | string or null | Primary decision target. If present, send it back as `toolCallId` on the matching decision. |
+| `action_requests[].task_id` | string or null | UI/request identifier. Send as `taskId` if useful, but do not use it instead of `toolCallId` when `tool_call_id` is present. It is only the decision target when `tool_call_id` is missing. |
 | `action_requests[].allowed_decisions` | array or null | If present, restrict UI buttons to these decisions. |
 | `data.interrupt.metadata` | object | Display/recovery metadata for the whole interrupt. See below. |
 
@@ -390,10 +390,17 @@ Decision fields:
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `type` | string | yes | `approve`, `edit`, `reject`, or `respond`. |
-| `toolCallId` | string | recommended | Target tool call ID. Snake case `tool_call_id` is also accepted. |
-| `taskId` | string | optional | Fallback target ID. Snake case `task_id` is also accepted. |
+| `toolCallId` | string | conditionally required | Required whenever the corresponding `action_requests[]` item has `tool_call_id`. Snake case `tool_call_id` is also accepted. |
+| `taskId` | string | optional | UI/request identifier. Snake case `task_id` is also accepted. Fallback target only when `toolCallId`/`tool_call_id` is unavailable. |
 | `action` | string | optional | Tool/action name. Useful for audit/debug display. |
 | `args` | object | optional | Meaning depends on decision type. |
+
+Resume coverage rules:
+
+- Send exactly one decision for every item in `data.interrupt.action_requests[]`.
+- If an action request contains `tool_call_id`, the matching decision must include the same value as `toolCallId` (or `tool_call_id`).
+- `taskId` may be included for UI correlation/back-compat, but `taskId` alone is not sufficient when the pending request has a distinct `tool_call_id`.
+- The backend rejects incomplete coverage with `422 INTERRUPT_INCOMPLETE_DECISIONS`; retrying the same already-claimed interrupt can return `409 INTERRUPT_ALREADY_RESOLVED`, so build the complete decision set before the first resume request.
 
 Decision behavior:
 

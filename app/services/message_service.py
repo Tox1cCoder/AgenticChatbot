@@ -359,14 +359,16 @@ class MessageService(IMessageService):
                 continue
 
             request_keys: list[str] = []
-            for key in ("tool_call_id", "task_id"):
-                value = request.get(key)
-                if value not in (None, ""):
-                    request_keys.append(str(value))
-
-            action = request.get("action")
-            if action not in (None, "") and action_counts.get(str(action)) == 1:
-                request_keys.append(str(action))
+            tool_call_id = request.get("tool_call_id")
+            task_id = request.get("task_id")
+            if tool_call_id not in (None, ""):
+                request_keys.append(str(tool_call_id))
+            elif task_id not in (None, ""):
+                request_keys.append(str(task_id))
+            else:
+                action = request.get("action")
+                if action not in (None, "") and action_counts.get(str(action)) == 1:
+                    request_keys.append(str(action))
 
             if request_keys and not any(key in decision_keys for key in request_keys):
                 missing.append(request_keys[0])

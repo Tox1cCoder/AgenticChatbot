@@ -21,6 +21,13 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from app.services.event_streaming.compat import infer_tool_state, normalize_tool_phase
+from app.ui.hitl_decisions import (
+    approval_tool_label,
+    attach_stream_context,
+    build_interrupt_decision,
+    interrupt_request_target_ids,
+    interrupt_stream_context,
+)
 from app.ui.rag_artifacts import (
     RAGArtifactView,
     RAGChunkView,
@@ -7117,6 +7124,16 @@ def render_interrupt_approval_ui():
     if interrupt_message:
         st.warning(f"**{interrupt_message}**", icon=":material/pause_circle:")
 
+    # Surface the reasoning/partial answer the agent streamed before pausing.
+    # On an interrupt turn no assistant message is persisted, so without this the
+    # streamed thinking/content is lost on the rerun into this approval view.
+    agent_thinking, agent_partial_content = interrupt_stream_context(interrupt_info)
+    if agent_partial_content:
+        st.markdown(agent_partial_content)
+    if agent_thinking:
+        with st.expander("Agent reasoning", icon=":material/neurology:"):
+            st.markdown(agent_thinking)
+
     if not action_requests:
         if st.button("Cancel"):
             st.session_state.pop("pending_interrupt", None)
@@ -7127,6 +7144,10 @@ def render_interrupt_approval_ui():
     if decisions_key not in st.session_state:
         st.session_state[decisions_key] = {}
 
+    # Tools arrive one interrupt at a time; offset numbering by tools already
+    # resolved this turn so the sequence reads Tool 1, Tool 2, ... not Tool 1 each.
+    step_base = int(st.session_state.get("hitl_step_base", 0))
+
     for idx, action_request in enumerate(action_requests):
         tool_name = (
             action_request.get("action")
@@ -7136,12 +7157,7 @@ def render_interrupt_approval_ui():
         )
         tool_args = action_request.get("args", {})
         description = action_request.get("description", "")
-        tool_call_id = (
-            action_request.get("tool_call_id")
-            or action_request.get("toolCallId")
-            or action_request.get("id")
-        )
-        task_id = action_request.get("task_id") or action_request.get("taskId") or tool_call_id
+        task_id, tool_call_id = interrupt_request_target_ids(action_request)
 
         # Determine which decision types are allowed for this tool
         allowed_raw = action_request.get("allowed_decisions") or action_request.get(
@@ -7155,7 +7171,7 @@ def render_interrupt_approval_ui():
         # Check if this tool already has a decision
         current_decision = st.session_state[decisions_key].get(task_id)
 
-        st.markdown(f"### Tool {idx + 1}: `{tool_name}`")
+        st.markdown(f"### {approval_tool_label(step_base, idx, tool_name)}")
         if description:
             st.markdown(f"**Description:** {description}")
         if task_id:
@@ -7192,12 +7208,12 @@ def render_interrupt_approval_ui():
                     width="stretch",
                     type="primary",
                 ):
-                    st.session_state[decisions_key][task_id] = {
-                        "type": "approve",
-                        "task_id": task_id,
-                        "action": tool_name,
-                        "args": None,
-                    }
+                    st.session_state[decisions_key][task_id] = build_interrupt_decision(
+                        "approve",
+                        action_request,
+                        action=tool_name,
+                        args=None,
+                    )
                     st.rerun()
 
             with col2:
@@ -7211,12 +7227,12 @@ def render_interrupt_approval_ui():
                 if "reject" in allowed_decisions and st.button(
                     "Reject", key=f"reject_{idx}", width="stretch"
                 ):
-                    st.session_state[decisions_key][task_id] = {
-                        "type": "reject",
-                        "task_id": task_id,
-                        "action": tool_name,
-                        "args": {},
-                    }
+                    st.session_state[decisions_key][task_id] = build_interrupt_decision(
+                        "reject",
+                        action_request,
+                        action=tool_name,
+                        args={},
+                    )
                     st.rerun()
 
             # Show edit form if editing
@@ -7238,12 +7254,14 @@ def render_interrupt_approval_ui():
                         ):
                             try:
                                 edited_args = json.loads(edited_args_text)
-                                st.session_state[decisions_key][task_id] = {
-                                    "type": "edit",
-                                    "task_id": task_id,
-                                    "action": tool_name,
-                                    "args": edited_args,
-                                }
+                                st.session_state[decisions_key][task_id] = (
+                                    build_interrupt_decision(
+                                        "edit",
+                                        action_request,
+                                        action=tool_name,
+                                        args=edited_args,
+                                    )
+                                )
                                 st.session_state.pop(f"editing_tool_{idx}", None)
                                 st.rerun()
                             except json.JSONDecodeError:
@@ -7260,13 +7278,7 @@ def render_interrupt_approval_ui():
     # Check if all tools have decisions
     all_task_ids = set()
     for req in action_requests:
-        task_id = (
-            req.get("task_id")
-            or req.get("taskId")
-            or req.get("tool_call_id")
-            or req.get("toolCallId")
-            or req.get("id")
-        )
+        task_id, _tool_call_id = interrupt_request_target_ids(req)
         if task_id:
             all_task_ids.add(task_id)
 
@@ -7298,40 +7310,26 @@ def render_interrupt_approval_ui():
         if st.button("Approve All", width="stretch"):
             # Auto-approve all remaining tools
             for req in action_requests:
-                task_id = (
-                    req.get("task_id")
-                    or req.get("taskId")
-                    or req.get("tool_call_id")
-                    or req.get("toolCallId")
-                    or req.get("id")
-                )
+                task_id, _tool_call_id = interrupt_request_target_ids(req)
                 if task_id and task_id not in st.session_state[decisions_key]:
-                    st.session_state[decisions_key][task_id] = {
-                        "type": "approve",
-                        "task_id": task_id,
-                        "action": req.get("action"),
-                        "args": None,
-                    }
+                    st.session_state[decisions_key][task_id] = build_interrupt_decision(
+                        "approve",
+                        req,
+                        args=None,
+                    )
             submit_resume = True
 
     with col_cancel:
         if st.button("Cancel All", width="stretch"):
             # Reject all tools
             for req in action_requests:
-                task_id = (
-                    req.get("task_id")
-                    or req.get("taskId")
-                    or req.get("tool_call_id")
-                    or req.get("toolCallId")
-                    or req.get("id")
-                )
+                task_id, _tool_call_id = interrupt_request_target_ids(req)
                 if task_id:
-                    st.session_state[decisions_key][task_id] = {
-                        "type": "reject",
-                        "task_id": task_id,
-                        "action": req.get("action"),
-                        "args": {},
-                    }
+                    st.session_state[decisions_key][task_id] = build_interrupt_decision(
+                        "reject",
+                        req,
+                        args={},
+                    )
             submit_resume = True
 
     if submit_resume:
@@ -7425,6 +7423,13 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
 
             if event_type == "interrupt":
                 next_interrupt = event.get("interrupt")
+                # Carry the reasoning/partial answer streamed during this resume
+                # turn onto the follow-up interrupt so it shows in the next prompt.
+                attach_stream_context(
+                    next_interrupt,
+                    thinking=accumulated_thinking,
+                    content=accumulated_content,
+                )
                 interrupt_message = extract_interrupt_message(next_interrupt)
                 if interrupt_message:
                     status.update(label=interrupt_message, state="running")
@@ -7452,6 +7457,12 @@ def _submit_interrupt_decisions(thread_id, interrupt_id, action_requests, decisi
             return
 
         if next_interrupt:
+            # The just-resolved interrupt's tools are now done; advance the
+            # cumulative counter so the follow-up interrupt numbers its tools
+            # after these (Tool 1 → Tool 2 → ...) instead of restarting at 1.
+            st.session_state.hitl_step_base = int(
+                st.session_state.get("hitl_step_base", 0)
+            ) + len(action_requests or [])
             st.session_state.pending_interrupt = next_interrupt
             st.session_state.interrupt_conversation_id = conversation_id
             next_interrupt_message = extract_interrupt_message(next_interrupt)
@@ -7969,6 +7980,9 @@ def render_chat_view():
                     st.session_state.stream_partial_text = ""
                     st.session_state.stream_partial_thinking = ""
                     st.session_state.stream_selected_agent = None
+                    # New turn → restart the multi-interrupt approval counter so
+                    # tool numbering reflects this turn's sequence (Tool 1, 2, ...).
+                    st.session_state.hitl_step_base = 0
                     _reset_stream_trace_state(expanded=True)
 
                     # Render stop button into the placeholder that lives
@@ -8050,8 +8064,15 @@ def render_chat_view():
                             if interrupt_message:
                                 status.update(label=interrupt_message, state="running")
 
-                            # Store interrupt state in session for the approval UI
+                            # Store interrupt state in session for the approval UI.
+                            # Carry the reasoning/partial answer streamed before the
+                            # pause so it survives the rerun into the approval view.
                             if interrupt_data:
+                                attach_stream_context(
+                                    interrupt_data,
+                                    thinking=accumulated_thinking,
+                                    content=accumulated_content,
+                                )
                                 st.session_state.pending_interrupt = interrupt_data
                                 st.session_state.interrupt_conversation_id = conversation_id
                             else:

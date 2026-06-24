@@ -176,3 +176,61 @@ def test_interrupt_resume_rejects_incomplete_multi_tool_decisions():
 
     assert exc_info.value.error_code == "INTERRUPT_INCOMPLETE_DECISIONS"
     assert transitions == []
+
+
+def test_interrupt_resume_requires_tool_call_id_when_task_id_differs():
+    conversation_id = uuid4()
+    user_id = uuid4()
+    interrupt_record = SimpleNamespace(
+        interrupt_id="interrupt-1",
+        conversation_id=conversation_id,
+        thread_id="thread-1",
+        user_id=user_id,
+        device_id=None,
+        status=HITLInterruptStatus.PENDING,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        action_requests_json=[
+            {
+                "task_id": "approval-row-1",
+                "tool_call_id": "tool-1",
+                "action": "client__first",
+                "args": {},
+            },
+        ],
+        interrupt_metadata_json={},
+        session_id=None,
+        catalog_version=None,
+        tool_instance_id=None,
+    )
+    transitions: list[str] = []
+    service = MessageService(
+        message_repository=SimpleNamespace(),
+        conversation_validation_utils=SimpleNamespace(
+            validate_conversation_access=lambda _user_id, _conversation_id: None,
+        ),
+        message_validation_utils=SimpleNamespace(),
+        ai_service=SimpleNamespace(),
+        hitl_interrupt_repository=SimpleNamespace(
+            get_by_id=lambda _interrupt_id: interrupt_record,
+            try_transition_to_resolving=lambda **_kwargs: transitions.append("claimed") or True,
+        ),
+    )
+    service.redis_client = None
+
+    with pytest.raises(CustomHTTPException) as exc_info:
+        service._validate_and_claim_interrupt_resume(
+            thread_id="thread-1",
+            conversation_id=conversation_id,
+            user_id=user_id,
+            interrupt_id="interrupt-1",
+            device_id=None,
+            decisions=[
+                InterruptDecision(
+                    type=InterruptDecisionType.APPROVE,
+                    task_id="approval-row-1",
+                )
+            ],
+        )
+
+    assert exc_info.value.error_code == "INTERRUPT_INCOMPLETE_DECISIONS"
+    assert transitions == []
