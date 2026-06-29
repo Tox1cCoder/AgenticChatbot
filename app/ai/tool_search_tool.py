@@ -739,8 +739,9 @@ async def tool_search(
     When deferred MCP loading is enabled, do not guess tool names first.
     Use tool_search with a specific query to find and autoload the tool you need,
     then call the discovered tool by name.
-    If no specialized tool for that action is already bound, call tool_search first
-    for real environment actions. Do not skip discovery because the task sounds common.
+    If a suitable specialized tool is already bound, use it directly.
+    Use tool_search when the needed capability is missing, ambiguous,
+    or not currently bound.
 
     For named integrations:
     - If you do not yet know the exact server identifier, call tool_search()
@@ -817,8 +818,9 @@ def create_tool_search_tool(
         When deferred MCP loading is enabled, do not guess tool names first.
         Use tool_search with a specific query to find and autoload the tool you need,
         then call the discovered tool by name.
-        If no specialized tool for that action is already bound, call tool_search first
-        for real environment actions. Do not skip discovery because the task sounds common.
+        If a suitable specialized tool is already bound, use it directly.
+        Use tool_search when the needed capability is missing, ambiguous,
+        or not currently bound.
 
         For named integrations, identify the exact server first with
         tool_search(), then inspect that server with tool_search(server_name="...")

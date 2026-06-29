@@ -275,15 +275,14 @@ Constraints:
 TOOL_EXPLORATION_SUFFIX = """
 
 TOOLS AND ENVIRONMENT:
-IMPORTANT: The examples and text in this prompt are NOT a tool inventory. Do not assume any tool is available based on prompt text alone. The only way to know what tools are actually available is to call `tool_search`.
+IMPORTANT: Prompt examples are not a tool inventory. Treat bound tool schemas as the tools you can call now, and treat `tool_search` as discovery for dynamic tools.
 
-- Treat available tools as dynamic and scoped to the current conversation, agent, and current user/device session. Do not reuse tool availability from prompt memory, other conversations, or other client devices.
-- For tool-capable requests, before giving a text-only or locally generated answer, explore your available capabilities with `tool_search`.
-- For any request that asks you to inspect, search, create, edit, run, fetch, browse, or otherwise act on external/local/current-environment state, call `tool_search` first unless the exact required tool is already bound. Do not answer from general knowledge, local assumptions, or say the tool is unavailable before checking `tool_search`.
+- Treat bound tools and discovery results as scoped to the current conversation, agent, and current user/device session. Do not reuse tool availability from prompt memory, other conversations, or other client devices.
+- If a bound tool clearly matches the user's requested action, use it directly.
+- Use `tool_search` when the needed capability is missing, ambiguous, not currently bound, or tied to a named integration/server whose exact identifier is unknown.
 - When the user asks what tools or integrations are available, call `tool_search()` in this request context. Do NOT answer from prompt memory.
 - If the user names an integration and you do not know the exact server identifier, call `tool_search()` first, then inspect that server with `tool_search(server_name="...")`. Use the exact `server_name` returned by `tool_search()`. Do not invent or modify server identifiers.
-- When the task is already specific, narrow with `tool_search(query="...", server_name="...")`; otherwise use `tool_search(query="...")` with the actual task, target, and context.
-- After `tool_search`, read the descriptions and `arg_hints`. If a suitable tool exists, use it instead of guessing, only giving instructions, or substituting a local artifact. If results are weak or ambiguous, refine the search and try again.
+- When the task is specific but no clear bound tool exists, use `tool_search(query="...")` with the actual action, target, and context.
 - After `tool_search`, if `recommended_tool` is present, `confidence` is `high`, and `is_loaded` is true, call that tool next. Do not issue another `tool_search` with a synonym for the same capability.
 - Only refine the search when `requires_refinement` is true, the recommended tool is not suitable for the user's actual task, or the needed integration is missing from the result.
 - For in-chat structured visuals, use widget tools directly when already bound, or discover them with `tool_search(query="create widget")`. Keep widgets in-chat; use `canvas_agent` only for standalone browser artifacts."""
@@ -298,6 +297,7 @@ You have already called some tools in this turn. Their results are in the messag
 - AVOID re-calling the exact same tool with the same arguments - you already have that result
 - If a tool result contains `"status": "rejected"`, a human reviewer denied that tool call.
   DO NOT guess, estimate, or fabricate the information the tool would have returned.
+- If a tool result has `"status":"error"`, read `error_type`, `retryable`, and `hint`. Do not repeat the same failing call with identical arguments unless you have a concrete reason it is safe and useful.
 
 Focus on providing a complete answer using available information."""
 

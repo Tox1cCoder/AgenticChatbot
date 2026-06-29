@@ -2,7 +2,7 @@
 
 Verifies that TOOL_EXPLORATION_SUFFIX:
 - Contains no hard-coded MCP server names
-- Contains the phrase 'tool_search' (forces discovery)
+- Keeps `tool_search` available for dynamic discovery while preferring clear bound tools
 - Explicitly states prompt text is not inventory
 """
 
@@ -27,11 +27,12 @@ def test_tool_exploration_suffix_contains_no_hard_coded_server_names():
         )
 
 
-def test_tool_exploration_suffix_mentions_tool_search():
-    """TOOL_EXPLORATION_SUFFIX must reference 'tool_search' to force discovery."""
-    assert "tool_search" in TOOL_EXPLORATION_SUFFIX, (
-        "TOOL_EXPLORATION_SUFFIX must mention 'tool_search' so agents know to use it."
-    )
+def test_tool_exploration_suffix_mentions_tool_search_without_forcing_every_task():
+    """TOOL_EXPLORATION_SUFFIX should describe discovery while preferring clear bound tools."""
+    lower_suffix = TOOL_EXPLORATION_SUFFIX.lower()
+    assert "tool_search" in lower_suffix
+    assert "bound tool" in lower_suffix
+    assert "clearly matches" in lower_suffix
 
 
 def test_tool_exploration_suffix_says_prompt_is_not_inventory():
@@ -71,29 +72,26 @@ def test_tool_exploration_suffix_forbids_inventing_server_identifiers():
     )
 
 
-def test_tool_exploration_suffix_encourages_capability_exploration_before_text_fallback():
-    """The shared prompt should make the model explore dynamic capabilities
-    before committing to a text-only/local answer for tool-relevant requests."""
+def test_tool_exploration_suffix_prefers_bound_direct_tool_before_discovery():
     lower_suffix = TOOL_EXPLORATION_SUFFIX.lower()
-    assert "before giving a text-only or locally generated answer" in lower_suffix
-    assert "explore your available capabilities" in lower_suffix
+    assert "if a bound tool clearly matches" in lower_suffix
+    assert "use it directly" in lower_suffix
+    assert "use `tool_search` when" in lower_suffix
 
 
-def test_tool_exploration_suffix_requires_discovery_for_real_environment_actions():
-    """Real-environment work should explicitly push discovery unless the needed
-    tool is already bound, so auto tool-choice models do not answer directly."""
+def test_tool_exploration_suffix_uses_discovery_when_tool_is_missing_or_ambiguous():
     lower_suffix = TOOL_EXPLORATION_SUFFIX.lower()
-    assert "inspect, search, create, edit, run, fetch, browse" in lower_suffix
-    assert "unless the exact required tool is already bound" in lower_suffix
-    assert "do not answer from general knowledge" in lower_suffix
+    assert "missing" in lower_suffix
+    assert "ambiguous" in lower_suffix
+    assert "not currently bound" in lower_suffix
 
 
-def test_tool_search_description_discourages_skipping_deferred_discovery():
-    """The exposed tool description is part of model selection, so it should
-    discourage skipping discovery for common real-environment actions."""
+def test_tool_search_description_respects_already_bound_tools():
     description = f"{tool_search.description} {create_tool_search_tool().description}".lower()
-    assert "no specialized tool for that action is already bound" in description
-    assert "do not skip discovery" in description
+    assert "already bound" in description
+    assert "missing" in description
+    assert "ambiguous" in description
+    assert "not currently bound" in description
 
 
 def test_tool_exploration_suffix_uses_recommended_tool_without_synonym_search():
