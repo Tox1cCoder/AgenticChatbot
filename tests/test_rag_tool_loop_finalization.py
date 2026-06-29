@@ -380,3 +380,31 @@ def test_rag_repeated_error_forces_final_response(monkeypatch):
     assert decision == "rag_agent"
     assert state["context"]["rag_force_final_response"] is True
     assert "repeated tool errors" in state["context"]["rag_tool_budget_notice"].lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_search_documents_action_returns_compact_error_for_unknown_action():
+    import json
+    from types import SimpleNamespace
+
+    from app.ai.rag_tool_actions import execute_search_documents_action
+
+    result, action, evidence = await execute_search_documents_action(
+        rag_agent=SimpleNamespace(),
+        conversation_id="conv-1",
+        user_id="user-1",
+        tool_args={"action": "not_a_real_action"},
+        context={},
+        max_agentic_images=3,
+    )
+
+    payload = json.loads(result)
+    assert action == "not_a_real_action"
+    assert evidence == {}
+    assert payload == {
+        "status": "error",
+        "error_type": "validation",
+        "retryable": False,
+        "message": "search_documents rejected the requested action.",
+        "hint": "Use one of the supported document exploration actions from the tool schema.",
+    }

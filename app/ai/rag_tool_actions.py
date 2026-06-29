@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any
@@ -11,10 +12,33 @@ from ..core.rich_response import (
     RichItemType,
 )
 from .schemas import DocumentAction
+from .tool_error_policy import ToolErrorKind, ToolErrorSummary
 
 logger = logging.getLogger(__name__)
 
 _RAG_ACTION_TOOL_NAMES = {action.value for action in DocumentAction}
+
+
+def compact_rag_tool_error(
+    *,
+    error_type: str,
+    message: str,
+    hint: str,
+    retryable: bool = False,
+) -> str:
+    """Render a compact JSON error payload for RAG document tool failures.
+
+    Matches the model-facing contract produced by ``tool_error_policy`` so the
+    model sees one consistent error shape across all tool surfaces.
+    """
+    summary = ToolErrorSummary(
+        error_type=error_type,
+        retryable=retryable,
+        message=message,
+        hint=hint,
+        attempts=1,
+    )
+    return json.dumps(summary.model_dict(), ensure_ascii=False, separators=(",", ":"))
 
 
 def canonicalize_rag_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
@@ -256,7 +280,11 @@ async def execute_search_documents_action(
             if conversation_id:
                 result = await rag_agent.scan_all_documents(conversation_id, user_id=user_id)
             else:
-                result = "Error: No conversation_id available for scan"
+                result = compact_rag_tool_error(
+                    error_type=ToolErrorKind.VALIDATION.value,
+                    message="search_documents has no conversation context to scan.",
+                    hint="Retry within an active conversation that has uploaded documents.",
+                )
 
         elif action == DocumentAction.READ_DOCUMENT.value:
             document_ref = _tool_document_reference(tool_args)
@@ -268,7 +296,11 @@ async def execute_search_documents_action(
                     user_id=user_id,
                 )
                 if not document_id:
-                    result = f"Document {document_ref} not found or empty"
+                    result = compact_rag_tool_error(
+                        error_type=ToolErrorKind.NOT_FOUND.value,
+                        message=f"Document {document_ref} was not found.",
+                        hint="List available documents first, then read one by its exact id.",
+                    )
                     return result, action, evidence
 
                 content = await rag_agent.get_document_full_content(
@@ -285,9 +317,17 @@ async def execute_search_documents_action(
                     if str(document_ref) != document_id:
                         evidence["document"]["requested_reference"] = str(document_ref)
                 else:
-                    result = f"Document {document_id} not found or empty"
+                    result = compact_rag_tool_error(
+                        error_type=ToolErrorKind.NOT_FOUND.value,
+                        message=f"Document {document_id} was found but has no readable content.",
+                        hint="Try another document or use search_chunks for relevant passages.",
+                    )
             else:
-                result = "Error: document_id required for READ_DOCUMENT"
+                result = compact_rag_tool_error(
+                    error_type=ToolErrorKind.ARGUMENT.value,
+                    message="read_document requires a document_id.",
+                    hint="Provide the document_id, or list documents first to find it.",
+                )
 
         elif action == DocumentAction.SEARCH_CHUNKS.value:
             query = tool_args.get("query")
@@ -380,7 +420,11 @@ async def execute_search_documents_action(
                 else:
                     result = "No search results found"
             else:
-                result = "Error: query required for SEARCH_CHUNKS"
+                result = compact_rag_tool_error(
+                    error_type=ToolErrorKind.ARGUMENT.value,
+                    message="search_chunks requires a query.",
+                    hint="Provide a non-empty query describing what to find.",
+                )
 
         elif action == DocumentAction.GREP_DOCUMENT.value:
             document_id = tool_args.get("document_id")
@@ -393,7 +437,11 @@ async def execute_search_documents_action(
                     conversation_id=conversation_id,
                 )
             else:
-                result = "Error: document_id and pattern required for GREP_DOCUMENT"
+                result = compact_rag_tool_error(
+                    error_type=ToolErrorKind.ARGUMENT.value,
+                    message="grep_document requires both document_id and pattern.",
+                    hint="Provide the document_id and a valid regex pattern.",
+                )
 
         elif action == DocumentAction.LIST_DOCUMENTS.value:
             if conversation_id:
@@ -421,7 +469,11 @@ async def execute_search_documents_action(
                 else:
                     result = "No documents found in this conversation"
             else:
-                result = "Error: No conversation_id available"
+                result = compact_rag_tool_error(
+                    error_type=ToolErrorKind.VALIDATION.value,
+                    message="search_documents has no conversation context.",
+                    hint="Retry within an active conversation that has uploaded documents.",
+                )
 
         elif action == DocumentAction.VIEW_IMAGES.value:
             document_id = tool_args.get("document_id")
@@ -451,10 +503,18 @@ async def execute_search_documents_action(
                 else:
                     result = f"No images found for document {document_id}"
             else:
-                result = "Error: document_id required for VIEW_IMAGES"
+                result = compact_rag_tool_error(
+                    error_type=ToolErrorKind.ARGUMENT.value,
+                    message="view_images requires a document_id.",
+                    hint="Provide the document_id, or list documents first to find it.",
+                )
 
         else:
-            result = f"Unknown action: {action}"
+            result = compact_rag_tool_error(
+                error_type=ToolErrorKind.VALIDATION.value,
+                message="search_documents rejected the requested action.",
+                hint="Use one of the supported document exploration actions from the tool schema.",
+            )
 
     except Exception as exc:
         result = f"Error executing {action}: {str(exc)}"

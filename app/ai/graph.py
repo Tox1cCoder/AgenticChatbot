@@ -2700,7 +2700,13 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 user_id=state.get("user_id"),
             )
 
-            error = result if result.startswith("Error") else None
+            parsed_error: dict[str, Any] | None = None
+            if isinstance(result, str):
+                with contextlib.suppress(Exception):
+                    candidate = json.loads(result)
+                    if isinstance(candidate, dict) and candidate.get("status") == "error":
+                        parsed_error = candidate
+            error = result if parsed_error or result.startswith("Error") else None
             public_text, blob_info = apply_tool_output_offload(
                 output_text=result,
                 tool_call_id=tool_id,
@@ -2715,6 +2721,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 output_text=public_text,
                 error=error,
             )
+            if parsed_error:
+                artifact["error_type"] = parsed_error.get("error_type")
+                artifact["retryable"] = bool(parsed_error.get("retryable"))
             if blob_info:
                 artifact.update(blob_info)
             if evidence:
@@ -3072,7 +3081,16 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                             max_agentic_images=max_agentic_images,
                             user_id=user_id,
                         )
-                        error = result if result.startswith("Error") else None
+                        parsed_error: dict[str, Any] | None = None
+                        if isinstance(result, str):
+                            with contextlib.suppress(Exception):
+                                candidate = json.loads(result)
+                                if (
+                                    isinstance(candidate, dict)
+                                    and candidate.get("status") == "error"
+                                ):
+                                    parsed_error = candidate
+                        error = result if parsed_error or result.startswith("Error") else None
                         public_text, blob_info = apply_tool_output_offload(
                             output_text=result,
                             tool_call_id=tool_id,
@@ -3087,6 +3105,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                             output_text=public_text,
                             error=error,
                         )
+                        if parsed_error:
+                            artifact["error_type"] = parsed_error.get("error_type")
+                            artifact["retryable"] = bool(parsed_error.get("retryable"))
                         if blob_info:
                             artifact.update(blob_info)
                         if evidence:
