@@ -519,7 +519,7 @@ The agent workflow is a **LangGraph state machine** defined in [`app/ai/graph.py
 2. **Hydrate prompt memory** — `ConversationHistoryProvider` (`app/ai/history.py`) returns the durable summary plus recent unsummarized DB messages after the summary cursor. Soft-deleted rows and empty paused/interrupt placeholders are filtered. Per-agent budgets (`chat_history_max_messages` / `_tokens`, …) trim the result.
 3. **Router** — [`Router`](app/ai/agents/router.py) invokes Gemini with `ROUTER_SYSTEM_PROMPT` plus server-generated runtime time context and returns one of `chat_agent` / `rag_agent` / `search_agent` / `image_generator_agent` / `planning_agent` / `canvas_agent`. (The legacy `summarize` node is kept as a no-op; `START` connects directly to `route`.)
 4. **Agent execution** — the selected agent runs a ReAct-style loop with deferred tool binding, HITL gating, streaming, and the same runtime time context in its system prompt. Configure the local time anchor with `RUNTIME_TIME_CONTEXT_TIMEZONE`; UTC is always included.
-5. **Tool execution** — `tool_execution.execute_tool_calls` runs each tool with per-tool timeout, retries, validation, and truncated `ToolMessage` bodies (full artifacts preserved for the UI).
+5. **Tool execution** — `tool_execution.execute_tool_calls` runs each tool with bounded per-tool timeout, conservative retry for retry-safe transient failures, compact model-facing error summaries, and truncated `ToolMessage` bodies (full artifacts preserved for the UI).
 6. **Auto-continue** — on hitting iteration limits, continuation rounds run until user-configured caps (`auto_continue_max_rounds`, `auto_continue_max_total_iterations`, `auto_continue_timeout_seconds`).
 7. **Stream** — every token, reasoning chunk, tool call, artifact, and interrupt is serialized as a structured SSE event.
 8. **Persist assistant reply, refresh durable summary, compact checkpoint** — once the terminal `complete` event is received, the service persists the assistant message, schedules a non-blocking durable summary refresh, then compacts the checkpoint transcript with `RemoveMessage` so it does not drift from DB truth.
@@ -541,7 +541,7 @@ The agent workflow is a **LangGraph state machine** defined in [`app/ai/graph.py
 
 ### Deferred tool search
 
-When `MCP_TOOL_SEARCH_ENABLED=true`, only the lightweight [`tool_search`](app/ai/tool_search_tool.py) tool and `MCP_TOOL_SEARCH_PINNED_TOOLS` are bound at start. The agent discovers further tools semantically, with intent-aware scoring in [`tool_search_scoring.py`](app/ai/tool_search_scoring.py), conservative autoload of the single high-confidence recommended tool, TTL eviction, and a per-conversation loaded-tools cap.
+When `MCP_TOOL_SEARCH_ENABLED=true`, only lightweight discovery, pinned tools, already-loaded deferred tools, internal tools, and device-scoped loaded client tools are bound at start. Agents should use a clearly matching bound tool directly and use [`tool_search`](app/ai/tool_search_tool.py) when capability is missing, ambiguous, or tied to an unknown integration/server identifier — with intent-aware scoring in [`tool_search_scoring.py`](app/ai/tool_search_scoring.py), conservative autoload of the single high-confidence recommended tool, TTL eviction, and a per-conversation loaded-tools cap.
 
 Run the deterministic tool-search accuracy checks before changing ranking:
 
