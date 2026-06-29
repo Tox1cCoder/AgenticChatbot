@@ -21,6 +21,8 @@ from .client_runtime_tools import (
     is_client_tool,
 )
 from .tool_error_policy import (
+    ToolErrorKind,
+    ToolErrorSummary,
     build_tool_error_payloads,
     classify_tool_error,
     should_auto_retry_tool,
@@ -1139,31 +1141,28 @@ async def execute_tool_calls(
         tool_args = tool_call.get("args", {})
         tool_args = _bind_widget_session_args(tool_name or "", tool_args, conversation_id)
 
-        if not tool_name:
-            error_msg = "Error: Tool name missing"
-            normalized_result = normalize_tool_result_for_rendering(
-                error_msg,
+        # ``normalize_tool_call`` substitutes the sentinel "unknown" when no name
+        # was provided, so an absent/blank name surfaces as that sentinel rather
+        # than a falsy value.
+        if not tool_name or tool_name == "unknown":
+            summary = ToolErrorSummary(
+                error_type=ToolErrorKind.ARGUMENT.value,
+                retryable=False,
+                message="Tool name is missing.",
+                hint="Provide the tool name to call, or inspect available tools if unsure.",
+                attempts=1,
+            )
+            model_content, artifact_detail = build_tool_error_payloads(
+                summary,
                 tool_name=tool_name or "unknown",
-                error=error_msg,
+                exception=ValueError("Tool name is missing."),
             )
-            outputs.append(
-                {
-                    "tool_call_id": tool_id,
-                    "name": tool_name or "unknown",
-                    "content": normalized_result.model_content,
-                    "render": normalized_result.render,
-                }
-            )
-            artifacts.append(
-                build_tool_artifact(
-                    tool_call_id=tool_id,
-                    tool_name=tool_name or "unknown",
-                    tool_args=tool_args,
-                    output_text=normalized_result.model_content,
-                    error=error_msg,
-                    max_output_chars=artifact_max_output_chars,
-                    render=normalized_result.render,
-                )
+            _append_tool_error_output(
+                tool_call_id=tool_id,
+                tool_name=tool_name or "unknown",
+                tool_args=tool_args,
+                model_content=model_content,
+                artifact_detail=artifact_detail,
             )
             continue
 
@@ -1179,74 +1178,69 @@ async def execute_tool_calls(
                 tool_scope=tool_scope,
             )
         if not tool:
-            if settings.mcp_tool_search_enabled:
-                # Check if this looks like a client tool name that isn't available
-                if tool_name.startswith(CLIENT_TOOL_PREFIX):
-                    error_msg = (
-                        f"Error: Client tool {tool_name} not found. "
-                        "This tool may not be available from the current device, "
-                        "or the device may have disconnected."
-                    )
-                else:
-                    error_msg = (
-                        f"Error: Tool {tool_name} not found. "
-                        "Use tool_search first to discover and load the correct tool, "
-                        "then call the discovered tool by name."
-                    )
-            else:
-                error_msg = f"Error: Tool {tool_name} not found"
-            normalized_result = normalize_tool_result_for_rendering(
-                error_msg,
-                tool_name=tool_name,
-                error=error_msg,
-            )
-            outputs.append(
-                {
-                    "tool_call_id": tool_id,
-                    "name": tool_name,
-                    "content": normalized_result.model_content,
-                    "render": normalized_result.render,
-                }
-            )
-            artifacts.append(
-                build_tool_artifact(
-                    tool_call_id=tool_id,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    output_text=normalized_result.model_content,
-                    error=error_msg,
-                    max_output_chars=artifact_max_output_chars,
-                    render=normalized_result.render,
+            if tool_name.startswith(CLIENT_TOOL_PREFIX):
+                summary = ToolErrorSummary(
+                    error_type=ToolErrorKind.NOT_FOUND.value,
+                    retryable=False,
+                    message=(
+                        f"Client tool {tool_name} is not available for the current "
+                        "device session."
+                    ),
+                    hint=(
+                        "The device may be disconnected. Ask the user to reconnect, "
+                        "or use another available tool."
+                    ),
+                    attempts=1,
                 )
+            else:
+                summary = ToolErrorSummary(
+                    error_type=ToolErrorKind.NOT_FOUND.value,
+                    retryable=False,
+                    message=f"Tool {tool_name} is not currently bound.",
+                    hint=(
+                        "Use a currently bound suitable tool if one exists. If the needed "
+                        "capability is missing or ambiguous, use tool_search to discover it."
+                    ),
+                    attempts=1,
+                )
+            model_content, artifact_detail = build_tool_error_payloads(
+                summary,
+                tool_name=tool_name,
+                exception=LookupError(summary.message),
+            )
+            _append_tool_error_output(
+                tool_call_id=tool_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                model_content=model_content,
+                artifact_detail=artifact_detail,
             )
             continue
 
         # Validate client tool device binding before execution
         device_error = _validate_client_tool_device_binding(tool, device_id, tool_name)
         if device_error:
-            normalized_result = normalize_tool_result_for_rendering(
-                f"Error: {device_error}",
+            summary = ToolErrorSummary(
+                error_type=ToolErrorKind.PERMISSION.value,
+                retryable=False,
+                message=(
+                    f"Client tool {tool_name} cannot execute from the current "
+                    "device session."
+                ),
+                hint="Ask the user to use the bound device, or choose another available tool.",
+                attempts=1,
+            )
+            model_content, artifact_detail = build_tool_error_payloads(
+                summary,
                 tool_name=tool_name,
-                error=device_error,
+                exception=PermissionError(device_error),
             )
-            outputs.append(
-                {
-                    "tool_call_id": tool_id,
-                    "name": tool_name,
-                    "content": normalized_result.model_content,
-                    "render": normalized_result.render,
-                }
-            )
-            artifacts.append(
-                build_tool_artifact(
-                    tool_call_id=tool_id,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    output_text=normalized_result.model_content,
-                    error=device_error,
-                    max_output_chars=artifact_max_output_chars,
-                    render=normalized_result.render,
-                )
+            _append_tool_error_output(
+                tool_call_id=tool_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                model_content=model_content,
+                artifact_detail=artifact_detail,
             )
             continue
 

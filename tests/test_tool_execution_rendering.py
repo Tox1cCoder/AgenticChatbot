@@ -91,18 +91,21 @@ async def test_execute_tool_calls_preserves_mcp_image_content_blocks():
 
 
 @pytest.mark.asyncio
-async def test_execute_tool_calls_missing_tool_does_not_double_prefix_error():
-    """Tool-not-found passes an already-prefixed error_msg; render must not double-prefix."""
+async def test_execute_tool_calls_missing_tool_uses_compact_error_payload():
+    import json
+
     outputs, artifacts, _ = await execute_tool_calls(
         tool_calls=[{"id": "tc-missing", "name": "nope_tool", "args": {}}],
         tool_map={},
     )
 
-    assert outputs[0]["content"].startswith("Error: Tool nope_tool not found")
-    assert not outputs[0]["content"].startswith("Error: Error:")
+    payload = json.loads(outputs[0]["content"])
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "not_found"
+    assert not outputs[0]["content"].startswith("Error:")
     assert outputs[0]["render"]["type"] == "error"
-    assert not outputs[0]["render"]["error"].lower().startswith("error:")
     assert artifacts[0]["status"] == "error"
+    assert artifacts[0]["error_type"] == "not_found"
 
 
 @pytest.mark.asyncio

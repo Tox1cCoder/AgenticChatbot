@@ -260,3 +260,64 @@ async def test_execute_tool_calls_does_not_auto_retry_unknown_side_effect_tool(m
     assert payload["error_type"] == "network"
     assert payload["retryable"] is True
     assert artifacts[0]["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_empty_tool_map_returns_error_for_each_call(monkeypatch):
+    monkeypatch.setattr(settings, "mcp_tool_search_enabled", False)
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[
+            {"id": "call-1", "name": "missing_one", "args": {}},
+            {"id": "call-2", "name": "missing_two", "args": {}},
+        ],
+        tool_map={},
+    )
+
+    assert [output["tool_call_id"] for output in outputs] == ["call-1", "call-2"]
+    assert all(json.loads(output["content"])["status"] == "error" for output in outputs)
+    assert all(artifact["status"] == "error" for artifact in artifacts)
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_missing_tool_name_returns_compact_argument_error():
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "args": {"query": "x"}}],
+        tool_map={},
+    )
+
+    payload = json.loads(outputs[0]["content"])
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "argument"
+    assert payload["retryable"] is False
+    assert artifacts[0]["status"] == "error"
+    assert artifacts[0]["error_type"] == "argument"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_client_device_mismatch_returns_compact_error(monkeypatch):
+    class _ClientTool:
+        name = "client__desktop__read_file"
+        metadata = {}
+
+        async def ainvoke(self, args):
+            return "never"
+
+    monkeypatch.setattr("app.ai.tool_execution.is_client_tool", lambda _tool: True)
+    monkeypatch.setattr(
+        "app.ai.tool_execution.get_client_tool_device_id",
+        lambda _tool: "device-a",
+    )
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "client__desktop__read_file", "args": {}}],
+        tool_map={"client__desktop__read_file": _ClientTool()},
+        device_id="device-b",
+    )
+
+    payload = json.loads(outputs[0]["content"])
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "permission"
+    assert payload["retryable"] is False
+    assert artifacts[0]["status"] == "error"
+    assert artifacts[0]["error_type"] == "permission"

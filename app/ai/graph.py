@@ -889,8 +889,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             user_id=state.get("user_id"),
             device_id=state.get("device_id"),
         )
-        if not tool_map:
-            return state
 
         tool_outputs, tool_artifacts, all_images = await self._execute_agent_tool_calls(
             state=state,
@@ -1828,8 +1826,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 user_id=user_id,
                 device_id=device_id,
             )
-        if not tool_map:
-            return [], [], []
 
         with tool_execution_context(
             conversation_id,

@@ -202,3 +202,42 @@ async def test_base_agent_ainvoke_with_retries_forwards_run_config():
     )
 
     assert fake_llm.config is run_config
+
+
+@pytest.mark.asyncio
+async def test_tool_node_resolves_pending_calls_when_tool_map_empty(monkeypatch):
+    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+
+    class _Agent:
+        agent_config_key = "chat"
+        tool_state_key = "chat"
+
+    graph._resolve_runtime_agent = lambda state, selected: _Agent()
+
+    async def _empty_tool_map(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", _empty_tool_map)
+
+    state = {
+        "selected_agent": "chat_agent",
+        "messages": [
+            HumanMessage(content="run something"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "name": "missing_tool",
+                        "args": {},
+                    }
+                ],
+            ),
+        ],
+    }
+
+    updated = await graph._tool_node(state)
+
+    assert isinstance(updated["messages"][-1], ToolMessage)
+    assert updated["messages"][-1].tool_call_id == "call-1"
+    assert "missing_tool" in updated["messages"][-1].content
