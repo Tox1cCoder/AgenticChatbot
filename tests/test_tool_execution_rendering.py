@@ -107,17 +107,21 @@ async def test_execute_tool_calls_missing_tool_does_not_double_prefix_error():
 
 @pytest.mark.asyncio
 async def test_execute_tool_calls_preserves_error_render_artifact():
+    import json
+
     outputs, artifacts, images = await execute_tool_calls(
         tool_calls=[{"id": "tool-call-err", "name": "failing_tool", "args": {}}],
         tool_map={"failing_tool": _FailingTool()},
     )
 
-    assert outputs[0]["content"] == "Error: permission denied"
+    payload = json.loads(outputs[0]["content"])
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "validation"
     assert outputs[0]["render"]["type"] == "error"
     assert artifacts[0]["status"] == "error"
-    assert artifacts[0]["output"] == "Error: permission denied"
+    assert artifacts[0]["output"] == outputs[0]["content"]
     assert artifacts[0]["render"]["type"] == "error"
-    assert artifacts[0]["render"]["error"] == "permission denied"
+    assert artifacts[0]["error_type"] == "validation"
     assert images == []
 
 
@@ -139,3 +143,32 @@ def test_lookup_tool_render_payload_from_state_context():
 
     assert render["type"] == "mcp_app"
     assert render["template_uri"] == "ui://canva/presentation-viewer.html"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_structured_error_render_stays_compact(monkeypatch):
+    import json
+
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "tool_execution_timeout", 1)
+    monkeypatch.setattr(settings, "tool_execution_max_retries", 0)
+
+    class _BrokenTool:
+        name = "broken_tool"
+        metadata = {}
+
+        async def ainvoke(self, args):
+            raise PermissionError("permission denied for a very sensitive path")
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "broken_tool", "args": {}}],
+        tool_map={"broken_tool": _BrokenTool()},
+    )
+
+    payload = json.loads(outputs[0]["content"])
+    assert payload["status"] == "error"
+    assert len(outputs[0]["content"]) < 500
+    assert outputs[0]["render"]["type"] == "error"
+    assert artifacts[0]["status"] == "error"
+    assert artifacts[0]["render"]["type"] == "error"

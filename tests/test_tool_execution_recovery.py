@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from app.ai.tool_execution import execute_tool_calls
+from app.core.config import settings
 
 
 @pytest.mark.asyncio
@@ -177,3 +180,83 @@ async def test_recover_missing_tool_does_not_bind_unloaded_server_tool(monkeypat
         assert "delete_everything" not in tool_map
     finally:
         reset_deferred_tool_state()
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_times_out_slow_tool(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_timeout", 0.01)
+    monkeypatch.setattr(settings, "tool_execution_max_retries", 0)
+
+    class _SlowTool:
+        name = "slow_tool"
+        metadata = {}
+
+        async def ainvoke(self, args):
+            await asyncio.sleep(1)
+            return "too late"
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "slow_tool", "args": {}}],
+        tool_map={"slow_tool": _SlowTool()},
+    )
+
+    payload = json.loads(outputs[0]["content"])
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "timeout"
+    assert payload["retryable"] is True
+    assert artifacts[0]["status"] == "error"
+    assert artifacts[0]["error_type"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_retries_retry_safe_transient_failure(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_timeout", 1)
+    monkeypatch.setattr(settings, "tool_execution_max_retries", 1)
+    calls = 0
+
+    class _RetrySafeTool:
+        name = "safe_reader"
+        metadata = {"retry_safe": True}
+
+        async def ainvoke(self, args):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ConnectionError("connection reset")
+            return "ok"
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "safe_reader", "args": {}}],
+        tool_map={"safe_reader": _RetrySafeTool()},
+    )
+
+    assert calls == 2
+    assert outputs[0]["content"] == "ok"
+    assert artifacts[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_does_not_auto_retry_unknown_side_effect_tool(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_timeout", 1)
+    monkeypatch.setattr(settings, "tool_execution_max_retries", 2)
+    calls = 0
+
+    class _MaybeSideEffectTool:
+        name = "send_message"
+        metadata = {}
+
+        async def ainvoke(self, args):
+            nonlocal calls
+            calls += 1
+            raise ConnectionError("connection reset")
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "send_message", "args": {"body": "hi"}}],
+        tool_map={"send_message": _MaybeSideEffectTool()},
+    )
+
+    payload = json.loads(outputs[0]["content"])
+    assert calls == 1
+    assert payload["error_type"] == "network"
+    assert payload["retryable"] is True
+    assert artifacts[0]["attempts"] == 1

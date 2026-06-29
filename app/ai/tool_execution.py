@@ -20,6 +20,11 @@ from .client_runtime_tools import (
     get_client_tool_device_id,
     is_client_tool,
 )
+from .tool_error_policy import (
+    build_tool_error_payloads,
+    classify_tool_error,
+    should_auto_retry_tool,
+)
 from .tool_result_rendering import normalize_tool_result_for_rendering
 from .tool_scope import is_client_only_scope
 from .tool_search_tool import create_tool_search_tool
@@ -952,6 +957,93 @@ async def invoke_tool(tool: Any, tool_args: Any) -> Any:
     raise TypeError("Tool has no invoke/ainvoke and is not callable")
 
 
+def _tool_execution_timeout_seconds() -> float:
+    value = getattr(settings, "tool_execution_timeout", 30) or 30
+    try:
+        parsed = float(value)
+    except Exception:
+        return 30.0
+    return max(0.001, parsed)
+
+
+def _tool_execution_max_retries() -> int:
+    value = getattr(settings, "tool_execution_max_retries", 0) or 0
+    try:
+        parsed = int(value)
+    except Exception:
+        return 0
+    return max(0, parsed)
+
+
+async def invoke_tool_with_policy(
+    tool: Any,
+    tool_args: Any,
+    *,
+    tool_name: str,
+) -> tuple[Any | None, dict[str, Any] | None, str | None]:
+    """Invoke a tool with a bounded timeout and conservative automatic retries.
+
+    Returns ``(result, None, None)`` on success. On a handled failure it returns
+    ``(None, artifact_detail, model_content)`` where ``model_content`` is compact
+    JSON for the ToolMessage and ``artifact_detail`` carries full diagnostics.
+
+    Session errors (``ClosedResourceError`` / ``BrokenResourceError``) are
+    re-raised so the caller's MCP reconnect path can run.
+    """
+    timeout_seconds = _tool_execution_timeout_seconds()
+    max_retries = _tool_execution_max_retries()
+    attempts = 0
+    last_exc: BaseException | None = None
+
+    while attempts <= max_retries:
+        attempts += 1
+        try:
+            result = await asyncio.wait_for(
+                invoke_tool(tool, tool_args),
+                timeout=timeout_seconds,
+            )
+            return result, None, None
+        except asyncio.TimeoutError:
+            last_exc = TimeoutError(f"Tool timed out after {timeout_seconds}s")
+        except (ClosedResourceError, BrokenResourceError):
+            raise
+        except Exception as exc:
+            last_exc = exc
+
+        summary = classify_tool_error(
+            last_exc,
+            tool_name=tool_name,
+            timeout_seconds=timeout_seconds,
+            attempts=attempts,
+        )
+        if attempts > max_retries or not should_auto_retry_tool(
+            tool,
+            summary,
+            tool_name=tool_name,
+            retry_safe_tool_names=TOOL_LOADING_TOOLS,
+        ):
+            model_content, artifact_detail = build_tool_error_payloads(
+                summary,
+                tool_name=tool_name,
+                exception=last_exc,
+            )
+            return None, artifact_detail, model_content
+
+    fallback_exc = last_exc or RuntimeError("Tool failed")
+    summary = classify_tool_error(
+        fallback_exc,
+        tool_name=tool_name,
+        timeout_seconds=timeout_seconds,
+        attempts=attempts,
+    )
+    model_content, artifact_detail = build_tool_error_payloads(
+        summary,
+        tool_name=tool_name,
+        exception=fallback_exc,
+    )
+    return None, artifact_detail, model_content
+
+
 async def execute_tool_calls(
     *,
     tool_calls: list[Any],
@@ -998,6 +1090,47 @@ async def execute_tool_calls(
     outputs: list[dict[str, Any]] = []
     artifacts: list[dict[str, Any]] = []
     images: list[dict[str, str]] = []
+
+    def _append_tool_error_output(
+        *,
+        tool_call_id: str | None,
+        tool_name: str,
+        tool_args: Any,
+        model_content: str,
+        artifact_detail: dict[str, Any],
+    ) -> None:
+        """Append a compact-error output/artifact pair with an error render.
+
+        Shared by missing-name, missing-tool, device-binding, policy-timeout,
+        and exception failures so every error path renders identically.
+        """
+        normalized = normalize_tool_result_for_rendering(model_content, tool_name=tool_name)
+        render = dict(normalized.render)
+        render["type"] = "error"
+        render["error"] = str(
+            artifact_detail.get("diagnostic")
+            or artifact_detail.get("error_type")
+            or "Tool execution failed"
+        )
+        outputs.append(
+            {
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": model_content,
+                "render": render,
+            }
+        )
+        artifact = build_tool_artifact(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            output_text=model_content,
+            error=str(artifact_detail.get("diagnostic") or artifact_detail.get("error_type")),
+            max_output_chars=artifact_max_output_chars,
+            render=render,
+        )
+        artifact.update(artifact_detail)
+        artifacts.append(artifact)
 
     for raw_tool_call in tool_calls:
         tool_call = normalize_tool_call(raw_tool_call)
@@ -1118,7 +1251,21 @@ async def execute_tool_calls(
             continue
 
         try:
-            result = await invoke_tool(tool, tool_args)
+            result, error_detail, error_content = await invoke_tool_with_policy(
+                tool,
+                tool_args,
+                tool_name=tool_name,
+            )
+            if error_detail is not None:
+                _append_tool_error_output(
+                    tool_call_id=tool_id,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    model_content=error_content,
+                    artifact_detail=error_detail,
+                )
+                continue
+
             normalized_result = normalize_tool_result_for_rendering(
                 result,
                 tool_name=tool_name,
@@ -1184,7 +1331,10 @@ async def execute_tool_calls(
                 if fresh_tool:
                     # Update tool_map so later calls in the same batch also use it
                     tool_map[tool_name] = fresh_tool
-                    result = await invoke_tool(fresh_tool, tool_args)
+                    result = await asyncio.wait_for(
+                        invoke_tool(fresh_tool, tool_args),
+                        timeout=_tool_execution_timeout_seconds(),
+                    )
                     normalized_result = normalize_tool_result_for_rendering(
                         result,
                         tool_name=tool_name,
@@ -1228,32 +1378,23 @@ async def execute_tool_calls(
                 )
 
             if not reconnected:
-                reason = (
-                    f"MCP session lost for tool {tool_name}. Reconnection failed. Please try again."
-                )
-                normalized_result = normalize_tool_result_for_rendering(
-                    f"Error: {reason}",
+                summary = classify_tool_error(
+                    session_exc,
                     tool_name=tool_name,
-                    error=reason,
+                    timeout_seconds=_tool_execution_timeout_seconds(),
+                    attempts=1,
                 )
-                outputs.append(
-                    {
-                        "tool_call_id": tool_id,
-                        "name": tool_name,
-                        "content": normalized_result.model_content,
-                        "render": normalized_result.render,
-                    }
+                model_content, artifact_detail = build_tool_error_payloads(
+                    summary,
+                    tool_name=tool_name,
+                    exception=session_exc,
                 )
-                artifacts.append(
-                    build_tool_artifact(
-                        tool_call_id=tool_id,
-                        tool_name=tool_name,
-                        tool_args=tool_args,
-                        output_text=normalized_result.model_content,
-                        error=reason,
-                        max_output_chars=artifact_max_output_chars,
-                        render=normalized_result.render,
-                    )
+                _append_tool_error_output(
+                    tool_call_id=tool_id,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    model_content=model_content,
+                    artifact_detail=artifact_detail,
                 )
         except Exception as exc:
             error_msg = f"Error: {exc}"
