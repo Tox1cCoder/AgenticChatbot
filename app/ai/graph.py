@@ -3020,8 +3020,30 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             tool_context: list[str] = []
             accumulated_artifacts: list[dict[str, Any]] = []
             rag_tool_map: dict[str, Any] | None = None
+            rag_worker_iterations = 0
+            rag_worker_error_signature: dict[str, str] | None = None
+            rag_worker_error_count = 0
+            rag_worker_error_limit = max(
+                1,
+                int(getattr(settings, "tool_execution_consecutive_errors_limit", 3) or 3),
+            )
+            rag_worker_iteration_limit = max(
+                1, int(getattr(settings, "agentic_max_iterations", 50) or 50)
+            )
 
             while True:
+                rag_worker_iterations += 1
+                if rag_worker_iterations > rag_worker_iteration_limit:
+                    return AgentResponse(
+                        agent_type=getattr(agent, "agent_type", AgentType.RAG),
+                        agent_id=agent_name,
+                        message=AgentMessage(
+                            role=MessageRole.ASSISTANT,
+                            content="Worker stopped after reaching its tool iteration limit.",
+                        ),
+                        metadata={"pause_reason": "worker_max_iterations"},
+                        tool_artifacts=list(accumulated_artifacts),
+                    )
                 agent_msg = AgentMessage(
                     role=MessageRole.USER,
                     content=task_prompt,
@@ -3067,6 +3089,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                         response.tool_artifacts = accumulated_artifacts
                     return response
 
+                rag_iteration_start = len(accumulated_artifacts)
                 for tool_call_data in normalized_calls:
                     tool_name = tool_call_data.get("name")
                     tool_id = tool_call_data.get("id")
@@ -3139,13 +3162,72 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     for output in outputs:
                         tool_context.append(output.get("content", ""))
 
+                rag_error_artifacts = [
+                    artifact
+                    for artifact in accumulated_artifacts[rag_iteration_start:]
+                    if isinstance(artifact, dict) and artifact.get("status") == "error"
+                ]
+                if rag_error_artifacts:
+                    signature = self._tool_error_signature(rag_error_artifacts[0])
+                    if signature == rag_worker_error_signature:
+                        rag_worker_error_count += 1
+                    else:
+                        rag_worker_error_signature = signature
+                        rag_worker_error_count = 1
+                    if rag_worker_error_count >= rag_worker_error_limit:
+                        return AgentResponse(
+                            agent_type=getattr(agent, "agent_type", AgentType.RAG),
+                            agent_id=agent_name,
+                            message=AgentMessage(
+                                role=MessageRole.ASSISTANT,
+                                content=(
+                                    "Worker stopped after repeated tool errors. Use the "
+                                    "available tool results to explain the blocker."
+                                ),
+                            ),
+                            metadata={
+                                "pause_reason": "consecutive_tool_errors",
+                                "tool_error_streak": {
+                                    "count": rag_worker_error_count,
+                                    "limit": rag_worker_error_limit,
+                                    "signature": signature,
+                                },
+                            },
+                            tool_artifacts=list(accumulated_artifacts),
+                        )
+                else:
+                    rag_worker_error_signature = None
+                    rag_worker_error_count = 0
+
         # Generic agent worker: tool-loop until final response, approval, or error.
 
         worker_messages: list[Any] = [worker_message]
         tool_map: dict[str, Any] | None = None
         accumulated_worker_artifacts: list[dict[str, Any]] = []
+        worker_iterations = 0
+        worker_error_signature: dict[str, str] | None = None
+        worker_error_count = 0
+        worker_error_limit = max(
+            1,
+            int(getattr(settings, "tool_execution_consecutive_errors_limit", 3) or 3),
+        )
+        worker_iteration_limit = max(
+            1, int(getattr(settings, "react_agent_max_iterations", 50) or 50)
+        )
 
         while True:
+            worker_iterations += 1
+            if worker_iterations > worker_iteration_limit:
+                return AgentResponse(
+                    agent_type=getattr(agent, "agent_type", AgentType.CHAT),
+                    agent_id=agent_name,
+                    message=AgentMessage(
+                        role=MessageRole.ASSISTANT,
+                        content="Worker stopped after reaching its tool iteration limit.",
+                    ),
+                    metadata={"pause_reason": "worker_max_iterations"},
+                    tool_artifacts=list(accumulated_worker_artifacts),
+                )
             response = await agent.invoke_model_with_history(
                 messages=list(worker_messages),
                 conversation_history=[],
@@ -3224,6 +3306,43 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
             accumulated_worker_artifacts.extend(artifacts)
             response.tool_artifacts = list(accumulated_worker_artifacts)
+
+            error_artifacts = [
+                artifact
+                for artifact in artifacts
+                if isinstance(artifact, dict) and artifact.get("status") == "error"
+            ]
+            if error_artifacts:
+                signature = self._tool_error_signature(error_artifacts[0])
+                if signature == worker_error_signature:
+                    worker_error_count += 1
+                else:
+                    worker_error_signature = signature
+                    worker_error_count = 1
+                if worker_error_count >= worker_error_limit:
+                    return AgentResponse(
+                        agent_type=getattr(agent, "agent_type", AgentType.CHAT),
+                        agent_id=agent_name,
+                        message=AgentMessage(
+                            role=MessageRole.ASSISTANT,
+                            content=(
+                                "Worker stopped after repeated tool errors. Use the available "
+                                "tool results to explain the blocker."
+                            ),
+                        ),
+                        metadata={
+                            "pause_reason": "consecutive_tool_errors",
+                            "tool_error_streak": {
+                                "count": worker_error_count,
+                                "limit": worker_error_limit,
+                                "signature": signature,
+                            },
+                        },
+                        tool_artifacts=list(accumulated_worker_artifacts),
+                    )
+            else:
+                worker_error_signature = None
+                worker_error_count = 0
 
     def _build_planning_internal_tools(
         self,

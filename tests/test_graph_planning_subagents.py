@@ -768,7 +768,7 @@ async def test_run_agent_in_isolated_context_drives_rag_search_loop(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_run_agent_in_isolated_context_has_no_subagent_iteration_cap(monkeypatch):
+async def test_run_agent_in_isolated_context_allows_generic_worker_under_iteration_cap(monkeypatch):
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
 
     call_count = 0
@@ -834,7 +834,7 @@ async def test_run_agent_in_isolated_context_has_no_subagent_iteration_cap(monke
 
 
 @pytest.mark.asyncio
-async def test_run_agent_in_isolated_context_rag_has_no_subagent_iteration_cap(monkeypatch):
+async def test_run_agent_in_isolated_context_allows_rag_worker_under_iteration_cap(monkeypatch):
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
 
     call_count = 0
@@ -1901,3 +1901,168 @@ def test_should_continue_planning_routes_handoff_to_custom_agent():
     }
 
     assert workflow._should_continue_planning(state) == "custom_agent"
+
+
+def test_worker_loop_uses_tool_error_limit_from_settings(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_consecutive_errors_limit", 4, raising=False)
+    assert settings.tool_execution_consecutive_errors_limit == 4
+
+
+@pytest.mark.asyncio
+async def test_generic_worker_stops_after_repeated_tool_errors(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_consecutive_errors_limit", 2, raising=False)
+
+    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+
+    class _LoopingAgent:
+        agent_config_key = "chat"
+        tool_state_key = "chat"
+        agent_type = AgentType.CHAT
+        agent_id = "chat_agent"
+
+        async def invoke_model_with_history(self, **kwargs):
+            return AgentResponse(
+                agent_type=AgentType.CHAT,
+                agent_id="chat_agent",
+                message=AgentMessage(
+                    role=MessageRole.ASSISTANT,
+                    content="",
+                    tool_calls=[{"id": "call-1", "name": "missing_tool", "args": {}}],
+                ),
+                metadata={},
+            )
+
+    graph.agents = {"chat_agent": _LoopingAgent()}
+
+    async def _empty_map(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", _empty_map)
+
+    response = await graph._run_agent_in_isolated_context(
+        parent_state={"conversation_id": "conv-1", "user_id": "user-1"},
+        agent_name="chat_agent",
+        task_prompt="try missing tool",
+    )
+
+    assert response.metadata["pause_reason"] == "consecutive_tool_errors"
+
+
+@pytest.mark.asyncio
+async def test_generic_worker_stops_after_iteration_limit(monkeypatch):
+    monkeypatch.setattr(settings, "react_agent_max_iterations", 2)
+
+    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    call_count = 0
+
+    class _LoopingAgent:
+        agent_config_key = "chat"
+        tool_state_key = "chat"
+        agent_type = AgentType.CHAT
+        agent_id = "chat_agent"
+
+        async def invoke_model_with_history(self, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return AgentResponse(
+                agent_type=AgentType.CHAT,
+                agent_id="chat_agent",
+                message=AgentMessage(
+                    role=MessageRole.ASSISTANT,
+                    content="",
+                    tool_calls=[{"id": f"call-{call_count}", "name": "lookup", "args": {}}],
+                ),
+                metadata={},
+            )
+
+    graph.agents = {"chat_agent": _LoopingAgent()}
+
+    class _Lookup:
+        name = "lookup"
+
+        async def ainvoke(self, args):
+            return "ok"
+
+    async def _tool_map(*args, **kwargs):
+        return {"lookup": _Lookup()}
+
+    monkeypatch.setattr("app.ai.graph.ensure_agent_tool_map", _tool_map)
+
+    response = await graph._run_agent_in_isolated_context(
+        parent_state={"conversation_id": "conv-1", "user_id": "user-1"},
+        agent_name="chat_agent",
+        task_prompt="loop until capped",
+    )
+
+    assert response.metadata["pause_reason"] == "worker_max_iterations"
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_rag_worker_stops_after_iteration_limit(monkeypatch):
+    monkeypatch.setattr(settings, "agentic_max_iterations", 2)
+
+    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    call_count = 0
+
+    async def fake_process_message(message, conversation_id):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 3:
+            return AgentResponse(
+                agent_type=AgentType.RAG,
+                agent_id="rag_agent",
+                message=AgentMessage(
+                    role=MessageRole.ASSISTANT,
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": f"rag-call-{call_count}",
+                            "name": "search_documents",
+                            "args": {"action": "scan_all"},
+                        }
+                    ],
+                ),
+                metadata={},
+            )
+        return AgentResponse(
+            agent_type=AgentType.RAG,
+            agent_id="rag_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="final answer"),
+            metadata={},
+        )
+
+    rag_agent = type(
+        "RagWorker",
+        (),
+        {
+            "agent_config_key": "rag",
+            "tool_state_key": "rag",
+            "agent_type": AgentType.RAG,
+            "agent_id": "rag_agent",
+            "process_message": staticmethod(fake_process_message),
+        },
+    )()
+    graph.rag_agent = rag_agent
+    graph.agents = {"rag_agent": rag_agent}
+
+    async def fake_execute_search_documents_action(**kwargs):
+        return "SEARCH RESULT", "scan_all", {}
+
+    monkeypatch.setattr(
+        "app.ai.graph.execute_search_documents_action",
+        fake_execute_search_documents_action,
+    )
+    monkeypatch.setattr(
+        "app.ai.graph.apply_tool_output_offload",
+        lambda **kwargs: (kwargs["output_text"], None),
+    )
+
+    response = await graph._run_agent_in_isolated_context(
+        parent_state={"conversation_id": "conv-1", "user_id": "user-1", "context": {}},
+        agent_name="rag_agent",
+        task_prompt="loop document search until capped",
+    )
+
+    assert response.metadata["pause_reason"] == "worker_max_iterations"
+    assert call_count == 2
