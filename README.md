@@ -297,12 +297,13 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | `RAG_SCORE_THRESHOLD` | `0.2` |
 | `ENABLE_RERANKING` | `true` |
 | `RAG_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
-| `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
 | `RERANK_TOP_K` | `10` |
 | `RAG_CHUNK_TARGET_TOKENS` | `400` |
 | `RAG_CHUNK_OVERLAP_TOKENS` | `40` |
 | `RAG_CHUNK_MAX_TOKENS` | `800` |
-| `RAG_INDEX_BATCH_SIZE` | `16` |
+| `RAG_EMBEDDING_BATCH_SIZE` | `32` |
+| `RAG_EMBEDDING_MAX_CONCURRENCY` | `4` |
+| `QDRANT_UPSERT_BATCH_SIZE` | `1000` |
 
 `GEMINI_API_KEY` is required when `RAG_EMBEDDING_PROVIDER=gemini`. The
 `sentence_transformers` fallback is for offline development; switching
@@ -389,14 +390,17 @@ The server accepts either a fully-formed URL (`REDIS_URL`) or a hostname + conve
 | `CLIENT_SERVER_API_BASE_URL` | `http://localhost:8000` |
 | `CLIENT_SERVER_API_TIMEOUT_SECONDS` | `60` |
 | `CLIENT_BACKEND_HOST` / `CLIENT_BACKEND_PORT` | `127.0.0.1` / `8100` |
-| `CLIENT_ENVIRONMENT` | `production` |
+| `CLIENT_ENVIRONMENT` | `development` |
 | `CLIENT_PROFILE_ROOT` | *(OS-default — `%LOCALAPPDATA%\CodexDesktop` on Windows)* |
 | `CLIENT_DEVICE_NAME` | — |
 | `CLIENT_SKILLS_ROOTS` | comma-separated absolute paths for local skill scanning |
+| `CLIENT_WORKSPACE_ROOTS` | comma-separated absolute paths for local filesystem tools |
 | `CLIENT_MCP_CONFIG_PATH` | optional explicit path |
+| `CLIENT_MCP_STARTUP_TIMEOUT_SECONDS` | `30` |
 | `CLIENT_TOOL_CALL_TIMEOUT_SECONDS` | `60` |
 | `CLIENT_HEARTBEAT_INTERVAL_SECONDS` | `30` |
 | `CLIENT_RECONNECT_DELAY_SECONDS` / `CLIENT_MAX_RECONNECT_ATTEMPTS` | `5` / `10` |
+| `CLIENT_LOCAL_SESSION_SECRET` / `CLIENT_LOCAL_SESSION_EXPIRE_MINUTES` | auto-generated / `1440` |
 | `CLIENT_LOG_LEVEL` / `CLIENT_LOG_TO_FILE` | `INFO` / `true` |
 
 ---
