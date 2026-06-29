@@ -73,7 +73,10 @@ def classify_tool_error(
             error_type=ToolErrorKind.SESSION.value,
             retryable=True,
             message="Tool session was interrupted.",
-            hint="The runtime may reconnect. If it still fails, use another available tool or ask the user.",
+            hint=(
+                "The runtime may reconnect. If it still fails, use another "
+                "available tool or ask the user."
+            ),
             attempts=attempts,
         )
 
@@ -82,7 +85,10 @@ def classify_tool_error(
             error_type=ToolErrorKind.ARGUMENT.value,
             retryable=False,
             message="Tool arguments did not match the expected schema.",
-            hint="Read the tool schema or prior error, then call the tool again only with corrected arguments.",
+            hint=(
+                "Read the tool schema or prior error, then call the tool again "
+                "only with corrected arguments."
+            ),
             attempts=attempts,
         )
 
@@ -109,16 +115,25 @@ def classify_tool_error(
             error_type=ToolErrorKind.NOT_FOUND.value,
             retryable=False,
             message=_clean_text(exc) or "Requested resource was not found.",
-            hint="Verify the target exists, adjust the query/path, or ask the user for the correct target.",
+            hint=(
+                "Verify the target exists, adjust the query/path, or ask the "
+                "user for the correct target."
+            ),
             attempts=attempts,
         )
 
-    if any(token in raw for token in ("connection", "network", "temporarily", "reset", "unavailable")):
+    if any(
+        token in raw
+        for token in ("connection", "network", "temporarily", "reset", "unavailable")
+    ):
         return ToolErrorSummary(
             error_type=ToolErrorKind.NETWORK.value,
             retryable=True,
             message="Tool failed because the connection or service was unavailable.",
-            hint="Retry only if the tool is safe to repeat; otherwise use another tool or ask the user.",
+            hint=(
+                "Retry only if the tool is safe to repeat; otherwise use "
+                "another tool or ask the user."
+            ),
             attempts=attempts,
         )
 
