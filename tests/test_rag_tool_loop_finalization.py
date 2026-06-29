@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from app.ai.agents.rag_agent import RAGAgent
 from app.ai.graph import MultiAgentWorkflow
 from app.ai.schemas import AgentMessage, AgentResponse, AgentType, MessageRole
+from app.core.config import settings
 
 
 def _make_workflow():
@@ -310,3 +312,71 @@ def test_rag_action_named_tool_call_is_canonicalized_to_search_documents(monkeyp
     tool_message = state["messages"][-1]
     assert isinstance(tool_message, ToolMessage)
     assert tool_message.name == "search_documents"
+
+
+@pytest.mark.asyncio
+async def test_rag_tools_node_tracks_document_tool_error_streak(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_consecutive_errors_limit", 2, raising=False)
+    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    graph.rag_agent = object()
+    graph.agents = {}
+
+    async def fake_execute_search_documents_action(**kwargs):
+        return "Error: Unknown action: nope", "nope", {}
+
+    monkeypatch.setattr(
+        "app.ai.graph.execute_search_documents_action",
+        fake_execute_search_documents_action,
+    )
+    monkeypatch.setattr(
+        "app.ai.graph.apply_tool_output_offload",
+        lambda **kwargs: (kwargs["output_text"], None),
+    )
+
+    state = {
+        "conversation_id": "conv-1",
+        "user_id": "user-1",
+        "context": {},
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "rag-call-1",
+                        "name": "search_documents",
+                        "args": {"action": "nope"},
+                    }
+                ],
+            )
+        ],
+    }
+
+    await graph._rag_tools_node(state)
+
+    streak = state["context"]["tool_error_streak"]
+    assert streak["count"] == 1
+    assert streak["signature"]["tool"] == "search_documents"
+
+
+def test_rag_repeated_error_forces_final_response(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_consecutive_errors_limit", 2, raising=False)
+    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    state = {
+        "context": {
+            "tool_error_streak": {
+                "count": 2,
+                "limit": 2,
+                "signature": {
+                    "tool": "search_documents",
+                    "error_type": "validation",
+                    "args": '{"action":"not_a_real_action"}',
+                },
+            }
+        }
+    }
+
+    decision = graph._should_continue_rag(state)
+
+    assert decision == "rag_agent"
+    assert state["context"]["rag_force_final_response"] is True
+    assert "repeated tool errors" in state["context"]["rag_tool_budget_notice"].lower()

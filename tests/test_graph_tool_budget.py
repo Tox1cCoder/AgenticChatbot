@@ -241,3 +241,35 @@ async def test_tool_node_resolves_pending_calls_when_tool_map_empty(monkeypatch)
     assert isinstance(updated["messages"][-1], ToolMessage)
     assert updated["messages"][-1].tool_call_id == "call-1"
     assert "missing_tool" in updated["messages"][-1].content
+
+
+def test_apply_tool_outputs_tracks_same_error_streak(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_consecutive_errors_limit", 2, raising=False)
+    graph = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    state = {"messages": [], "context": {}}
+
+    artifact = {
+        "tool_call_id": "call-1",
+        "tool": "read_file",
+        "args": {"path": "missing.txt"},
+        "status": "error",
+        "error_type": "not_found",
+        "output": "missing",
+    }
+
+    graph._apply_tool_outputs_to_state(
+        state,
+        tool_outputs=[{"tool_call_id": "call-1", "name": "read_file", "content": "missing"}],
+        tool_artifacts=[artifact],
+    )
+    graph._apply_tool_outputs_to_state(
+        state,
+        tool_outputs=[{"tool_call_id": "call-2", "name": "read_file", "content": "missing"}],
+        tool_artifacts=[{**artifact, "tool_call_id": "call-2"}],
+    )
+
+    streak = state["context"]["tool_error_streak"]
+    assert streak["count"] == 2
+    assert streak["limit"] == 2
+    assert streak["signature"]["tool"] == "read_file"
+    assert streak["signature"]["args"] == '{"path":"missing.txt"}'

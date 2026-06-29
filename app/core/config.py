@@ -663,6 +663,13 @@ class Settings(BaseSettings):
         default=2,
         description="Maximum retry attempts for failed tool executions",
     )
+    tool_execution_consecutive_errors_limit: int = Field(
+        default=3,
+        description=(
+            "Maximum repeated same tool/error/argument outputs before forcing "
+            "final no-tools synthesis."
+        ),
+    )
     tool_validation_enabled: bool = Field(
         default=True,
         description="Enable/disable Pydantic validation for tool arguments and results",
@@ -1063,6 +1070,7 @@ class Settings(BaseSettings):
         "auto_continue_max_total_iterations",
         "auto_continue_timeout_seconds",
         "planning_consecutive_errors_limit",
+        "tool_execution_consecutive_errors_limit",
         "celery_worker_concurrency",
         "celery_worker_prefetch_multiplier",
         "celery_worker_max_tasks_per_child",

@@ -1315,6 +1315,27 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             selected_agent != "end" and self._last_message_is_tool_output(state)
         )
 
+        streak = (state_view.context() or {}).get("tool_error_streak")
+        if isinstance(streak, dict) and streak.get("count", 0) >= streak.get("limit", 3):
+            if can_route_for_final_response:
+                self._mark_force_final_response(
+                    state,
+                    reason="consecutive_tool_errors",
+                    scope="runtime",
+                    count=int(streak.get("count") or 0),
+                    limit=int(streak.get("limit") or 0),
+                )
+                return self._route_target_for(state, selected_agent)
+            self._set_continuation_signal(
+                state,
+                should_continue=False,
+                reason="consecutive_tool_errors",
+                scope="runtime",
+                count=int(streak.get("count") or 0),
+                limit=int(streak.get("limit") or 0),
+            )
+            return "end"
+
         # Soft-limit: if auto-continue is enabled, trigger continuation at
         # a fraction of the budget so the outer loop can start a new round
         # before the hard LangGraph recursion limit is hit.
@@ -2005,6 +2026,54 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 event_payload["render"] = render_payload
             yield event_payload
 
+    @staticmethod
+    def _tool_error_signature(artifact: dict[str, Any]) -> dict[str, str]:
+        try:
+            args_key = json.dumps(
+                make_json_safe(artifact.get("args") or {}),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except Exception:
+            args_key = "{}"
+        return {
+            "tool": str(artifact.get("tool") or "unknown"),
+            "error_type": str(artifact.get("error_type") or "unknown"),
+            "args": args_key[:500],
+        }
+
+    def _update_tool_error_streak(
+        self,
+        state: GraphState,
+        tool_artifacts: list[dict[str, Any]] | None,
+    ) -> None:
+        context = GraphStateView(state).context_copy()
+        errors = [
+            artifact
+            for artifact in tool_artifacts or []
+            if isinstance(artifact, dict) and artifact.get("status") == "error"
+        ]
+        if not errors:
+            context.pop("tool_error_streak", None)
+            state["context"] = context
+            return
+
+        signature = self._tool_error_signature(errors[0])
+        prior = context.get("tool_error_streak")
+        prior_signature = prior.get("signature") if isinstance(prior, dict) else None
+        try:
+            prior_count = int(prior.get("count", 0)) if isinstance(prior, dict) else 0
+        except Exception:
+            prior_count = 0
+        count = prior_count + 1 if prior_signature == signature else 1
+        limit = max(1, int(getattr(settings, "tool_execution_consecutive_errors_limit", 3) or 3))
+        context["tool_error_streak"] = {
+            "count": count,
+            "limit": limit,
+            "signature": signature,
+        }
+        state["context"] = context
+
     def _apply_tool_outputs_to_state(
         self,
         state: GraphState,
@@ -2095,6 +2164,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             if existing_candidates:
                 context["rich_item_candidates"] = existing_candidates
         state["context"] = context
+
+        self._update_tool_error_streak(state, tool_artifacts)
 
         if mirror_to_response:
             response = state.get("response")
@@ -2690,6 +2761,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             existing_images.extend(all_images)
             context["tool_images"] = existing_images
 
+        state["context"] = context
+        self._update_tool_error_streak(state, tool_artifacts)
+
         return state
 
     def _should_call_rag_tools(self, state: GraphState) -> str:
@@ -2722,6 +2796,19 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         """
         context = state.get("context", {})
         agentic_iteration = context.get("agentic_rag_iteration", 0)
+
+        streak = context.get("tool_error_streak")
+        if isinstance(streak, dict) and streak.get("count", 0) >= streak.get("limit", 3):
+            if context.get("rag_force_final_response"):
+                return "end"
+            context["rag_force_final_response"] = True
+            context["rag_tool_budget_notice"] = (
+                "Repeated tool errors occurred. Produce the best final answer from the "
+                "document evidence already available, explain the blocker briefly, and "
+                "do not call tools."
+            )
+            state["context"] = context
+            return "rag_agent"
 
         max_iterations = settings.agentic_max_iterations
         if agentic_iteration >= max_iterations:
