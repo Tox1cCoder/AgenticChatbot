@@ -32,6 +32,10 @@ _FILE_SEARCH_TERMS = {"search", "find", "grep", "pattern", "contents", "content"
 _FILE_EDIT_TERMS = {"edit", "patch", "apply", "replace", "modify", "surgical"}
 _FILE_WRITE_TERMS = {"write", "create", "append", "save"}
 _CONFIG_TERMS = {"config", "configuration", "settings", "blockedcommands"}
+_WEB_SEARCH_TERMS = {"web", "search", "current", "recent", "news", "source", "sources"}
+_WEB_EXTRACT_TERMS = {"extract", "url", "urls", "page", "article", "content", "source"}
+_WEB_MAP_TERMS = {"map", "sitemap", "site", "structure", "pages", "urls", "discover"}
+_WEB_CRAWL_TERMS = {"crawl", "site", "website", "docs", "documentation", "section", "pages"}
 
 
 def infer_query_intent(query: str | None) -> QueryIntent:
@@ -53,6 +57,14 @@ def infer_query_intent(query: str | None) -> QueryIntent:
         capabilities.add("file_write")
     if tokens & _CONFIG_TERMS:
         capabilities.add("config_read")
+    if tokens & _WEB_SEARCH_TERMS and tokens & {"web", "search", "current", "recent", "news"}:
+        capabilities.add("web_search")
+    if tokens & _WEB_EXTRACT_TERMS and tokens & {"url", "urls", "extract", "page", "article"}:
+        capabilities.add("web_extract")
+    if tokens & _WEB_MAP_TERMS and tokens & {"map", "sitemap", "structure", "discover", "urls"}:
+        capabilities.add("web_map")
+    if tokens & _WEB_CRAWL_TERMS and tokens & {"crawl", "site", "website", "docs", "documentation"}:
+        capabilities.add("web_crawl")
 
     action_verbs.update(
         tokens & (_SHELL_TERMS | _FILE_SEARCH_TERMS | _FILE_EDIT_TERMS | _FILE_WRITE_TERMS)
@@ -106,6 +118,15 @@ def infer_tool_profile(
         capabilities.add("config_write")
     if "interact" in name_tokens and "process" in name_tokens:
         capabilities.add("process_interaction")
+    if "tavily" in server_name.lower():
+        if "search" in name_tokens:
+            capabilities.add("web_search")
+        if "extract" in name_tokens:
+            capabilities.add("web_extract")
+        if "map" in name_tokens:
+            capabilities.add("web_map")
+        if "crawl" in name_tokens:
+            capabilities.add("web_crawl")
 
     purpose = _compact_purpose(tool_name, capabilities, description, all_tokens)
     return ToolCapabilityProfile(
@@ -126,6 +147,14 @@ def _compact_purpose(
     description: str,
     all_tokens: set[str],
 ) -> str:
+    if "web_search" in capabilities:
+        return "Search the web for current facts, news, and source discovery."
+    if "web_extract" in capabilities:
+        return "Extract content from one or more known web page URLs."
+    if "web_map" in capabilities:
+        return "Discover URLs and structure for a website."
+    if "web_crawl" in capabilities:
+        return "Crawl a bounded site section and return page content."
     if "shell_exec" in capabilities:
         return "Start a shell command or local process."
     if "file_search" in capabilities:

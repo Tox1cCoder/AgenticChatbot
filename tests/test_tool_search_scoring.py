@@ -328,3 +328,58 @@ def test_score_metadata_marks_weak_description_only_matches_low_confidence():
     assert ranked[1].tool.tool_name == "get_config"
     assert ranked[1].confidence in {"low", "medium"}
     assert ranked[1].autoload_eligible is False
+
+
+def test_web_url_query_prefers_extract_over_search():
+    from app.ai.mcp_tool_catalog import ToolDescriptor
+    from app.ai.tool_search_scoring import rank_tool_candidates
+
+    tools = [
+        ToolDescriptor(
+            "tavily_search", "tavily", "Search the web broadly.", ["query"], ["query"], "fp1"
+        ),
+        ToolDescriptor(
+            "tavily_extract",
+            "tavily",
+            "Extract page content from known URLs.",
+            ["urls"],
+            ["urls"],
+            "fp2",
+        ),
+        ToolDescriptor(
+            "tavily_crawl", "tavily", "Crawl a bounded site section.", ["url"], ["url"], "fp3"
+        ),
+    ]
+
+    ranked = rank_tool_candidates(
+        query="extract this URL https://example.com/pricing", candidates=tools
+    )
+
+    assert ranked[0].tool.tool_name == "tavily_extract"
+    assert ranked[0].confidence == "high"
+    assert ranked[0].autoload_eligible is True
+
+
+def test_site_structure_query_prefers_map_over_crawl():
+    from app.ai.mcp_tool_catalog import ToolDescriptor
+    from app.ai.tool_search_scoring import rank_tool_candidates
+
+    tools = [
+        ToolDescriptor(
+            "tavily_map", "tavily", "Discover URLs on a website.", ["url"], ["url"], "fp-map"
+        ),
+        ToolDescriptor(
+            "tavily_crawl",
+            "tavily",
+            "Crawl pages and return content.",
+            ["url"],
+            ["url"],
+            "fp-crawl",
+        ),
+    ]
+
+    ranked = rank_tool_candidates(
+        query="map the docs site and list API pages", candidates=tools
+    )
+
+    assert ranked[0].tool.tool_name == "tavily_map"

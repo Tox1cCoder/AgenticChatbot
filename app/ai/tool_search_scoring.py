@@ -292,6 +292,32 @@ def _capability_specific_adjustment(
     if "config_read" in intent.capabilities and "config_read" in profile.capabilities:
         score += 25.0
 
+    if "web_search" in intent.capabilities:
+        if "web_search" in profile.capabilities:
+            score += 30.0
+        if "web_extract" in profile.capabilities:
+            score -= 8.0
+        if "web_crawl" in profile.capabilities:
+            score -= 15.0
+
+    if "web_extract" in intent.capabilities:
+        if "web_extract" in profile.capabilities:
+            score += 35.0
+        if "web_search" in profile.capabilities and {"url", "urls"} & intent.tokens:
+            score -= 12.0
+
+    if "web_map" in intent.capabilities:
+        if "web_map" in profile.capabilities:
+            score += 35.0
+        if "web_crawl" in profile.capabilities and "crawl" not in intent.tokens:
+            score -= 12.0
+
+    if "web_crawl" in intent.capabilities:
+        if "web_crawl" in profile.capabilities:
+            score += 35.0
+        if "web_map" in profile.capabilities and "content" in intent.tokens:
+            score -= 8.0
+
     return score
 
 
