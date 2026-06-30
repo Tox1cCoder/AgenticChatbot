@@ -4,7 +4,54 @@
 
 from __future__ import annotations
 
-from app.ui.rich_response import build_rich_response_view
+from app.ui.rich_response import build_inline_image_html, build_rich_response_view
+
+# ---------------------------------------------------------------------------
+# Inline image HTML (fixes oversized/blurry Streamlit inline images)
+# ---------------------------------------------------------------------------
+
+
+def test_inline_image_html_caps_width_and_never_upscales():
+    out = build_inline_image_html("https://img.test/a.png", caption="A figure")
+    # Capped at an article width but responsive, and never wider than the source
+    # (no forced full width) so small images are not upscaled into blur.
+    assert "max-width:min(480px, 100%)" in out
+    assert "height:auto" in out
+    assert "width:auto" in out
+    assert "width:100%" not in out
+    # No width/height attributes that would force a resize (only CSS controls it).
+    assert "width=" not in out
+    assert "height=" not in out
+    # Not full-bleed stretch.
+    assert "stretch" not in out
+
+
+def test_inline_image_html_uses_lightbox_class_for_full_resolution():
+    out = build_inline_image_html("https://img.test/a.png", caption=None)
+    # The page-level lightbox opens the native-resolution src on click.
+    assert 'class="img-thumb"' in out
+
+
+def test_inline_image_html_centers_image_and_caption():
+    out = build_inline_image_html("https://img.test/a.png", caption="A figure")
+    # The image is horizontally centered (block element with auto side margins).
+    assert "margin-left:auto" in out
+    assert "margin-right:auto" in out
+    # The figure centers its content so the caption is centered too.
+    assert "text-align:center" in out
+
+
+def test_inline_image_html_escapes_src_and_caption():
+    out = build_inline_image_html('https://x/a.png?q="b"&c=1', caption="<b>cap</b>")
+    assert '"b"' not in out  # raw quote escaped out of the attribute
+    assert "&quot;" in out
+    assert "&lt;b&gt;cap&lt;/b&gt;" in out  # caption shown as text, not HTML
+
+
+def test_inline_image_html_supports_data_uri_and_omits_empty_caption():
+    out = build_inline_image_html("data:image/png;base64,QUJD", caption=None)
+    assert "data:image/png;base64,QUJD" in out
+    assert "figcaption" not in out
 
 metadata_with_selected_image = {
     "rich_items_version": 1,

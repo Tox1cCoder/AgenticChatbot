@@ -6144,6 +6144,7 @@ def _render_inline_rich_item(
 ) -> None:
     """Render a single rich-item record at its inline marker position."""
     from app.core.rich_response import GENERIC_IMAGE_ALT_TEXT
+    from app.ui.rich_response import build_inline_image_html
 
     item_type = item.get("type")
     payload = item.get("payload") or {}
@@ -6155,13 +6156,15 @@ def _render_inline_rich_item(
         if alt_text == GENERIC_IMAGE_ALT_TEXT:
             alt_text = None
         caption = item.get("title") or alt_text
-        if url:
-            st.image(url, caption=caption, width="stretch")
-        elif data:
-            st.image(
-                f"data:{mime};base64,{data}",
-                caption=caption,
-                width="stretch",
+        src = url if url else (f"data:{mime};base64,{data}" if data else None)
+        if src:
+            # Render at a capped article width without upscaling (st.image
+            # width="stretch" blew small images up to full width and blurred
+            # them). The img-thumb class opens the full-resolution source in the
+            # page-level lightbox on click.
+            st.markdown(
+                build_inline_image_html(src, caption=caption),
+                unsafe_allow_html=True,
             )
     elif item_type == "live_widget":
         # Reuse existing widget renderer with a single-item metadata shape so

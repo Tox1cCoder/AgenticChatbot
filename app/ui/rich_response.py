@@ -10,6 +10,7 @@ See response_format.md Task 6.
 
 from __future__ import annotations
 
+import html as _html
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,6 +19,48 @@ from app.core.rich_response import (
     RichDisplayPolicy,
     parse_inline_rich_references,
 )
+
+#: Maximum display width for an inline article image. Images render at their
+#: natural size up to this cap and are never upscaled, so small source images
+#: stay crisp instead of being stretched to the full chat-column width.
+INLINE_IMAGE_MAX_WIDTH_PX: int = 480
+
+
+def build_inline_image_html(
+    src: str,
+    *,
+    caption: str | None = None,
+    max_width_px: int = INLINE_IMAGE_MAX_WIDTH_PX,
+) -> str:
+    """Return responsive HTML for one inline article image.
+
+    The image is shown at its intrinsic width (``width:auto``) capped at
+    ``max_width_px`` (and never wider than the container). Because there is no
+    forced ``width:100%`` and no width/height attribute, a small source image is
+    never upscaled — fixing the oversized, blurry rendering produced by
+    ``st.image(..., width="stretch")``. The ``img-thumb`` class wires the image
+    into the page-level lightbox so the native-resolution source is one click
+    away.
+    """
+    escaped_src = _html.escape(src or "", quote=True)
+    escaped_caption = _html.escape(caption, quote=True) if caption else ""
+    img_style = (
+        f"max-width:min({int(max_width_px)}px, 100%);width:auto;height:auto;"
+        "display:block;margin-left:auto;margin-right:auto;"
+        "border-radius:8px;cursor:zoom-in;"
+    )
+    img = (
+        f'<img src="{escaped_src}" alt="{escaped_caption}" class="img-thumb" '
+        f'loading="lazy" title="Click to view full size" style="{img_style}" '
+        "onerror=\"this.style.display='none'\" />"
+    )
+    caption_html = (
+        f'<figcaption style="color:#64748b;font-size:13px;margin-top:4px;">'
+        f"{escaped_caption}</figcaption>"
+        if escaped_caption
+        else ""
+    )
+    return f'<figure style="margin:8px 0;text-align:center;">{img}{caption_html}</figure>'
 
 # ---------------------------------------------------------------------------
 # Public view model
