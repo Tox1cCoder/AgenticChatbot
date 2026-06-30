@@ -268,7 +268,7 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 | Variable | Default | Purpose |
 |---|---|---|
 | `GEMINI_API_KEY` | — | Default provider; still supported via env |
-| `TAVILY_API_KEY` | — | Web search |
+| `TAVILY_API_KEY` | — | Tavily Search, Extract, Map, and Crawl |
 | `BRAVE_SEARCH_API_KEY` | — | Brave Image Search (visual references) |
 | `BRAVE_IMAGE_SEARCH_DEFAULT_COUNT` | `6` | Default image results per call |
 | `BRAVE_IMAGE_SEARCH_MAX_COUNT` | `10` | Hard cap on image results per call |
@@ -651,7 +651,7 @@ The bundled in-process MCP servers are under [`app/ai/mcp_servers/`](app/ai/mcp_
 |---|---|
 | `calculator_server.py` | Arithmetic |
 | `time_server.py` | Current time with timezone handling |
-| `tavily_server.py` | Web search adapter |
+| `tavily_server.py` | Tavily Search, Extract, Map, and Crawl web retrieval tools |
 | `brave_image_search_server.py` | Brave Image Search adapter — normalized inline image candidates |
 | `widgets_server.py` | Emits interactive widget state + mints tokens |
 | `form_filler_server.py` | Structured-form population |
@@ -660,6 +660,14 @@ The bundled in-process MCP servers are under [`app/ai/mcp_servers/`](app/ai/mcp_
 The same endpoints are exposed by `client_backend` at `/mcp/*` so a desktop UI can configure MCP both globally (server) and per-device (client).
 
 **Global default tools.** Enabled servers in [`app/ai/mcp_config.json`](app/ai/mcp_config.json) are by definition global-default tools, visible to every client (currently `time`, `tavily`, `widgets`, `brave_image_search` — enforced by `tests/test_mcp_global_allowlist.py`). `brave_image_search` is pinned by default for the chat and search agents; other agents can discover it via `tool_search`. Anything machine-specific (e.g. desktop-commander, excel) belongs in a sidecar's local MCP config (`<profile>/mcp/mcp_config.json`, same `mcpServers` JSON shape), where it becomes a device-scoped `client__` tool.
+
+`tavily` is one global server with multiple retrieval tools. Only `tavily_search` is pinned for the search agent; `tavily_extract`, `tavily_map`, and `tavily_crawl` are discovered through `tool_search` when needed.
+
+Tavily defaults keep broad search cheap and site-level operations bounded.
+Use `TAVILY_SEARCH_DEFAULT_DEPTH=basic` unless you need advanced search by
+default. Use existing HITL settings or per-user approval policy to require
+approval for `tavily::tavily_crawl` in production deployments where crawl cost
+or external traffic needs review.
 
 ### Deferred tool binding
 

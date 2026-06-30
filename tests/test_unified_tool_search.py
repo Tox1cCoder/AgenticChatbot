@@ -91,6 +91,31 @@ def test_server_inventory_includes_server_descriptions():
     ]
 
 
+def test_tavily_inventory_can_report_multiple_retrieval_tools():
+    catalog = McpToolCatalog(mcp_manager=object())
+    catalog._tools_by_server = {
+        "tavily": [
+            ToolDescriptor("tavily_search", "tavily", "Search web.", ["query"], ["query"], "fp1"),
+            ToolDescriptor(
+                "tavily_extract", "tavily", "Extract URL content.", ["urls"], ["urls"], "fp2"
+            ),
+            ToolDescriptor("tavily_map", "tavily", "Map site URLs.", ["url"], ["url"], "fp3"),
+            ToolDescriptor(
+                "tavily_crawl", "tavily", "Crawl site content.", ["url"], ["url"], "fp4"
+            ),
+        ]
+    }
+    catalog._server_descriptions = {"tavily": "Tavily web retrieval tools"}
+
+    assert catalog.get_server_inventory() == [
+        {
+            "server_name": "tavily",
+            "description": "Tavily web retrieval tools",
+            "tool_count": 4,
+        }
+    ]
+
+
 def test_resolve_server_name_fuzzy_matches_tokenized_variant():
     """Server resolution should recover from plausible identifier variants
     without requiring hard-coded aliases."""

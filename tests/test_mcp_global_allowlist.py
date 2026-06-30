@@ -28,3 +28,10 @@ def test_brave_image_search_is_a_reserved_managed_server():
     from app.ai.mcp_integration import MCPManager
 
     assert "brave_image_search" in MCPManager.DEFAULT_SERVERS
+
+
+def test_tavily_remains_one_global_server_with_multiple_tools():
+    servers = _load_config()["mcp_servers"]
+
+    assert servers["tavily"]["enabled"] is True
+    assert "tavily_server.py" in " ".join(servers["tavily"]["args"])
