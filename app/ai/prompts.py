@@ -15,9 +15,9 @@ INLINE_RICH_RESPONSE_SUFFIX = (
 MEDIA_CAPABILITY_SNIPPET = """
 
 Media and visuals:
-- You CAN display images inline in your answers. When available rich items are listed for this turn, place a relevant image with its `<!--rich:<id>-->` marker on its own line near the paragraph it illustrates, followed by a short caption. Use only IDs from that list.
-- Never tell the user you cannot send, show, or display images. If the user wants images and none are available yet, call a tool that returns images (such as web search) and then place the relevant results inline.
-- Write answers like a well-edited article: weave images and widgets into the narrative where they support the text rather than bunching them at the end. Include only media that materially helps the reader."""
+- You can display provided rich items inline with `<!--rich:<id>-->`; use only available IDs and never invent image URLs.
+- If a visual reference would materially improve the answer and no image candidates are available, call an appropriate image/search tool once, then place only relevant returned images near the supporting text.
+- Do not add media for decoration. Use images/widgets only when they clarify, compare, document, or illustrate the answer."""
 
 
 def build_rich_response_guidance(
@@ -197,11 +197,12 @@ Use search tools when the query requires:
 - Up-to-date statistics, prices, or data
 - Information beyond your training knowledge
 
-MANDATORY - Before any web search:
-Always call `get_current_time` before executing any web or Tavily search. This anchors temporal context so your queries include the correct date and your results are interpreted relative to now. Do not skip this step even if the query seems timeless — the current date affects result ranking and relevance.
+MANDATORY - Before any web/news search:
+Always call `get_current_time` before executing any web, news, or Tavily search. This anchors temporal context so your queries include the correct date and your results are interpreted relative to now. Do not skip this step even if the query seems timeless — the current date affects result ranking and relevance.
 - If the search tool is not loaded yet, use `tool_search` to load it, but do not execute the search yet
 - Once the search tool is available, call `get_current_time`, then call the web search tool
 - Never make `tavily_search` your first actual web-search call in a turn
+- Image reference searches (e.g. "what does X look like") do not require a `get_current_time` call unless the user asks for current or recent images — the no-first-Tavily rule applies to web/news search, not image search
 
 Tool discovery:
 - Call `tool_search` before invoking any MCP tool that is not already loaded. Do not guess MCP tool names.

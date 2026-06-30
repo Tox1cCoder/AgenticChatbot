@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-GLOBAL_DEFAULT_SERVERS = {"widgets", "tavily", "time"}
+GLOBAL_DEFAULT_SERVERS = {"widgets", "tavily", "time", "brave_image_search"}
 MACHINE_SPECIFIC_SERVERS = ("desktop-commander", "mcp-server-for-revit", "excel")
 
 
@@ -22,3 +22,9 @@ def test_machine_specific_servers_are_not_in_the_server_config():
     servers = _load_config()["mcp_servers"]
     for name in MACHINE_SPECIFIC_SERVERS:
         assert name not in servers
+
+
+def test_brave_image_search_is_a_reserved_managed_server():
+    from app.ai.mcp_integration import MCPManager
+
+    assert "brave_image_search" in MCPManager.DEFAULT_SERVERS

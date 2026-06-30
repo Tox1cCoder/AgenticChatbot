@@ -121,6 +121,18 @@ def build_image_candidates_from_tool_result(
         if description:
             payload["description"] = str(description)
         candidate_id_base = tool_call_id or tool_name or "tool"
+        provenance: dict[str, Any] = {
+            "tool_call_id": tool_call_id,
+            "tool": tool_name,
+            "index": index,
+        }
+        # Provider-specific metadata (Brave thumbnails/dimensions/source domain)
+        # is not part of the narrow public ImagePayload schema, so it is kept in
+        # provenance rather than risking forbidden payload extras.
+        for meta_key in ("thumbnail_url", "width", "height", "source_domain", "provider"):
+            meta_value = image.get(meta_key)
+            if meta_value is not None:
+                provenance[meta_key] = meta_value
         candidates.append(
             {
                 "id": f"image:tool:{candidate_id_base}:{index}",
@@ -130,11 +142,7 @@ def build_image_candidates_from_tool_result(
                 "alt_text": str(description or image.get("alt") or GENERIC_IMAGE_ALT_TEXT),
                 "title": image.get("title"),
                 "payload": payload,
-                "provenance": {
-                    "tool_call_id": tool_call_id,
-                    "tool": tool_name,
-                    "index": index,
-                },
+                "provenance": provenance,
             }
         )
     return candidates

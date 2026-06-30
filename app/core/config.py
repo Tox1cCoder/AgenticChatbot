@@ -150,6 +150,28 @@ class Settings(BaseSettings):
         default="",
         description="Smithery API Key for MCP server access",
     )
+    brave_search_api_key: str = Field(
+        default="",
+        description="Brave Search API Key for image search (X-Subscription-Token)",
+    )
+
+    # Brave Image Search budget/safety limits (operational, not behavior hardcoding)
+    brave_image_search_default_count: int = Field(
+        default=6,
+        description="Default number of image results requested from Brave Image Search.",
+    )
+    brave_image_search_max_count: int = Field(
+        default=10,
+        description="Hard cap on image results returned per Brave Image Search call.",
+    )
+    brave_image_search_timeout_seconds: float = Field(
+        default=2.5,
+        description="HTTP timeout for a single Brave Image Search request, in seconds.",
+    )
+    brave_image_search_default_safesearch: str = Field(
+        default="strict",
+        description="Default Brave safesearch level. Brave supports 'off' and 'strict'.",
+    )
 
     # Multi-Provider Configuration
     model_encryption_key: str = Field(
@@ -1078,6 +1100,8 @@ class Settings(BaseSettings):
         "celery_worker_soft_time_limit",
         "celery_broker_health_check_interval",
         "celery_broker_visibility_timeout",
+        "brave_image_search_default_count",
+        "brave_image_search_max_count",
         mode="before",
     )
     @classmethod
@@ -1086,6 +1110,25 @@ class Settings(BaseSettings):
         if v <= 0:
             raise ValueError("Value must be positive")
         return v
+
+    @field_validator("brave_image_search_timeout_seconds", mode="before")
+    @classmethod
+    def _positive_float(cls, v: float) -> float:
+        v = float(v)
+        if v <= 0:
+            raise ValueError("Value must be positive")
+        return v
+
+    @field_validator("brave_image_search_default_safesearch", mode="before")
+    @classmethod
+    def _validate_brave_safesearch(cls, v: str) -> str:
+        allowed = {"off", "strict"}
+        value = str(v).strip().lower()
+        if value not in allowed:
+            raise ValueError(
+                f"brave_image_search_default_safesearch must be one of {sorted(allowed)}"
+            )
+        return value
 
     @field_validator(
         "chat_history_max_messages",

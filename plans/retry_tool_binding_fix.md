@@ -2089,3 +2089,12 @@ Inline execution via `superpowers:executing-plans`. Each task follows the TDD lo
 8. `docs: document resilient tool execution policy`
 9. `style: wrap long lines in tool error policy hints`
 
+### Post-Implementation Review Follow-Ups
+
+Verification on 2026-06-29 confirms the main retry/tool-binding refactor works, but there are three follow-up items before calling this fully production-polished:
+
+1. `app/ai/rag_tool_actions.py`: the broad `except Exception` fallback still returns legacy free-form text (`Error executing {action}: ...`). Normal validation paths are compact JSON, but unexpected RAG helper exceptions should also use `compact_rag_tool_error(...)` so the model and loop breaker receive `status`, `error_type`, `retryable`, and `hint`.
+2. `app/ai/tool_execution.py`: if MCP reconnect succeeds but the post-reconnect retry fails, the final compact error is classified from the original session exception rather than the retry exception. Preserve the final retry exception and build the model/artifact error from that failure so diagnostics match the actual terminal failure.
+3. `app/ai/tool_search_tool.py` / `app/core/config.py`: normal discovery output is compact enough by default (`top_k=3`, descriptions truncated, match reasons capped), but inventory mode can still be noisy in real MCP environments (`inventory_default_top_k=20`, max 50). Reduce the default inventory size to around 8-10 or add a compact/default output mode that returns `recommended_tool` plus top candidates, with match reasons only when refinement is required or debug scoring is enabled.
+
+These are follow-ups, not blockers for the implemented retry surface: the focused regression suite still passes (`116 passed`), and the full-suite blocker remains the pre-existing live document upload contract failure.

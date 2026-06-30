@@ -117,7 +117,7 @@ Both services speak the same schemas (`app/schemas/`). The **client backend** ex
 ├── app/                              Canonical server backend (FastAPI)
 │   ├── ai/                           LangGraph workflow, agents, MCP, skills, tools
 │   │   ├── agents/                   chat / rag / search / image / planning / canvas / router
-│   │   ├── mcp_servers/              Built-in MCP servers (calculator, tavily, time, widgets, form_filler, boring_reader)
+│   │   ├── mcp_servers/              Built-in MCP servers (calculator, tavily, brave_image_search, time, widgets, form_filler, boring_reader)
 │   │   ├── graph.py                  MultiAgentWorkflow + streaming + HITL
 │   │   ├── memory.py                 Conversation memory manager
 │   │   ├── summarization_middleware.py   Rolling summarisation
@@ -182,7 +182,7 @@ At least one **LLM provider credential** is required for real AI execution:
 - `GEMINI_API_KEY` — the default provider, wired via `langchain-google-genai`
 - per-user OpenAI / Anthropic keys managed through [`/providers`](app/api/providers.py) once `MODEL_ENCRYPTION_KEY` is set
 
-Optional: `TAVILY_API_KEY` for web search agent, `SMITHERY_API_KEY` for hosted MCP servers, `LANGSMITH_API_KEY` for tracing.
+Optional: `TAVILY_API_KEY` for web search agent, `BRAVE_SEARCH_API_KEY` for image search, `SMITHERY_API_KEY` for hosted MCP servers, `LANGSMITH_API_KEY` for tracing.
 
 ---
 
@@ -269,6 +269,11 @@ The full schema lives in [`app/core/config.py`](app/core/config.py). Selected hi
 |---|---|---|
 | `GEMINI_API_KEY` | — | Default provider; still supported via env |
 | `TAVILY_API_KEY` | — | Web search |
+| `BRAVE_SEARCH_API_KEY` | — | Brave Image Search (visual references) |
+| `BRAVE_IMAGE_SEARCH_DEFAULT_COUNT` | `6` | Default image results per call |
+| `BRAVE_IMAGE_SEARCH_MAX_COUNT` | `10` | Hard cap on image results per call |
+| `BRAVE_IMAGE_SEARCH_TIMEOUT_SECONDS` | `2.5` | Per-request timeout for image search |
+| `BRAVE_IMAGE_SEARCH_DEFAULT_SAFESEARCH` | `strict` | Brave safesearch level (`off` or `strict`) |
 | `SMITHERY_API_KEY` | — | Hosted MCP registry |
 | `MODEL_ENCRYPTION_KEY` | — | Fernet key for per-user provider credentials |
 | `RAG_AGENT_MODEL` | `gemini-3.1-pro-preview` | |
@@ -528,9 +533,9 @@ The agent workflow is a **LangGraph state machine** defined in [`app/ai/graph.py
 
 | Agent | Responsibility | Key tools |
 |---|---|---|
-| `chat_agent` | General chat + tool use | MCP tools, `tool_search`, skills, handoff |
+| `chat_agent` | General chat + tool use | MCP tools, `tool_search`, Brave image search, skills, handoff |
 | `rag_agent` | Document-grounded QA with citation verification | `search_documents`, optional reranker, agentic RAG phases |
-| `search_agent` | Web/news answers | Tavily, time-context helpers |
+| `search_agent` | Web/news answers | Tavily, Brave image search, time-context helpers |
 | `image_generator_agent` | Gemini image generation | Aspect-ratio / count controls |
 | `planning_agent` | Creates / edits task plans | `write_todos`, plan tools |
 | `canvas_agent` | Produces canvas/artifact replies | Custom canvas writers |
@@ -647,13 +652,14 @@ The bundled in-process MCP servers are under [`app/ai/mcp_servers/`](app/ai/mcp_
 | `calculator_server.py` | Arithmetic |
 | `time_server.py` | Current time with timezone handling |
 | `tavily_server.py` | Web search adapter |
+| `brave_image_search_server.py` | Brave Image Search adapter — normalized inline image candidates |
 | `widgets_server.py` | Emits interactive widget state + mints tokens |
 | `form_filler_server.py` | Structured-form population |
 | `boring_servers/boring_reader_server.py` | Local PDF/image/OCR exploration (ships its own Tesseract + YOLO artifacts under `boring_servers/`) |
 
 The same endpoints are exposed by `client_backend` at `/mcp/*` so a desktop UI can configure MCP both globally (server) and per-device (client).
 
-**Global default tools.** Enabled servers in [`app/ai/mcp_config.json`](app/ai/mcp_config.json) are by definition global-default tools, visible to every client (currently `time`, `tavily`, `widgets` — enforced by `tests/test_mcp_global_allowlist.py`). Anything machine-specific (e.g. desktop-commander, excel) belongs in a sidecar's local MCP config (`<profile>/mcp/mcp_config.json`, same `mcpServers` JSON shape), where it becomes a device-scoped `client__` tool.
+**Global default tools.** Enabled servers in [`app/ai/mcp_config.json`](app/ai/mcp_config.json) are by definition global-default tools, visible to every client (currently `time`, `tavily`, `widgets`, `brave_image_search` — enforced by `tests/test_mcp_global_allowlist.py`). `brave_image_search` is pinned by default for the chat and search agents; other agents can discover it via `tool_search`. Anything machine-specific (e.g. desktop-commander, excel) belongs in a sidecar's local MCP config (`<profile>/mcp/mcp_config.json`, same `mcpServers` JSON shape), where it becomes a device-scoped `client__` tool.
 
 ### Deferred tool binding
 

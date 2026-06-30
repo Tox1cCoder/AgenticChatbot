@@ -76,18 +76,38 @@ _SEARCH_AGENT_PINNED_SPECS = (
     "time::get_current_time",
     "tavily::tavily_search",
 )
+_IMAGE_SEARCH_PINNED_AGENT_KEYS = {"chat", "search"}
+_IMAGE_SEARCH_PINNED_SPEC = "brave_image_search::brave_image_search"
+
+
+def _get_required_pinned_specs(agent_key: str | None) -> list[str]:
+    """System-required pins for an agent.
+
+    These are always eligible for binding and must never be dropped by the
+    user-configurable ``mcp_tool_search_max_pinned_tools`` cap (which limits only
+    optional/user-provided pins).
+    """
+    specs: list[str] = []
+    if agent_key == "search":
+        specs.extend(_SEARCH_AGENT_PINNED_SPECS)
+    if agent_key in _IMAGE_SEARCH_PINNED_AGENT_KEYS:
+        specs.append(_IMAGE_SEARCH_PINNED_SPEC)
+    if agent_key in _WIDGET_PINNED_AGENT_KEYS:
+        specs.extend(_WIDGET_PINNED_SPECS)
+    return specs
 
 
 def _get_pinned_specs(agent_key: str | None) -> list[str]:
+    """Combined pin specs (user-configured + system-required), de-duplicated.
+
+    Retained for inspection and tests. Binding selection in
+    :func:`get_pinned_tools` treats required and optional pins separately so the
+    cap cannot silently drop a required agent pin.
+    """
     pinned_specs = list(settings.mcp_tool_search_pinned_tools or [])
-    if agent_key == "search":
-        for spec in _SEARCH_AGENT_PINNED_SPECS:
-            if spec not in pinned_specs:
-                pinned_specs.append(spec)
-    if agent_key in _WIDGET_PINNED_AGENT_KEYS:
-        for spec in _WIDGET_PINNED_SPECS:
-            if spec not in pinned_specs:
-                pinned_specs.append(spec)
+    for spec in _get_required_pinned_specs(agent_key):
+        if spec not in pinned_specs:
+            pinned_specs.append(spec)
     return pinned_specs
 
 
@@ -111,15 +131,24 @@ def get_pinned_tools(
     Returns:
         List of BaseTool objects for pinned tools
     """
-    pinned_specs = _get_pinned_specs(agent_key)
+    required_specs = _get_required_pinned_specs(agent_key)
+    user_specs = [
+        spec
+        for spec in (settings.mcp_tool_search_pinned_tools or [])
+        if spec not in required_specs
+    ]
     max_pinned = settings.mcp_tool_search_max_pinned_tools
+
+    # The cap limits only optional/user-configured pins. System-required agent
+    # pins are always eligible so a small cap can't drop tools the agent needs.
+    pinned_specs = [*required_specs, *user_specs[:max_pinned]]
 
     if not pinned_specs:
         return []
 
     pinned_tools: list[BaseTool] = []
 
-    for spec in pinned_specs[:max_pinned]:  # Enforce max
+    for spec in pinned_specs:
         if "::" in spec:
             # Server-qualified: "server_name::tool_name"
             server_name, tool_name = spec.split("::", 1)

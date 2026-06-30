@@ -1,7 +1,9 @@
-"""Answer-producing prompts must state the inline media capability.
+"""The shared media snippet must stay compact, capability-oriented, and free of
+hardcoded visual-topic routing (image_search.md Phase 5).
 
-Guards against the model claiming it "cannot send images": every prompt that
-produces user-facing answers carries one shared capability snippet.
+It tells the model it can place provided rich items inline using available IDs
+only, to call an image/search tool when a visual would materially help, and not
+to add decorative media. It must not enumerate a visual-topic taxonomy.
 """
 
 from app.ai import prompts
@@ -14,17 +16,32 @@ ANSWER_PROMPTS = (
     prompts.SEARCH_WITH_RESULTS_SYSTEM_PROMPT,
 )
 
+# Topic words that would signal a reintroduced hardcoded taxonomy.
+TAXONOMY_WORDS = ("architecture", "fashion", "cuisine", "brutalist", "gothic")
+
 
 def test_snippet_defined_once_and_compact():
     snippet = prompts.MEDIA_CAPABILITY_SNIPPET
-    assert "You CAN display images inline" in snippet
-    assert len(snippet) < 1200, "media snippet must stay compact — do not bloat prompts"
+    assert "Media and visuals:" in snippet
+    assert len(snippet) < 900, "media snippet must stay compact — do not bloat prompts"
+
+
+def test_snippet_uses_available_ids_only_and_forbids_invention():
+    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+    assert "available ids" in snippet
+    assert "never invent" in snippet
+
+
+def test_snippet_has_no_hardcoded_visual_topic_list():
+    snippet = prompts.MEDIA_CAPABILITY_SNIPPET.lower()
+    for word in TAXONOMY_WORDS:
+        assert word not in snippet, f"snippet must not hardcode visual topics: found {word!r}"
 
 
 def test_all_answer_prompts_carry_media_capability():
     for prompt in ANSWER_PROMPTS:
-        assert "You CAN display images inline" in prompt
-        assert "Never tell the user you cannot" in prompt
+        assert "Media and visuals:" in prompt
+        assert "available IDs" in prompt
 
 
 def test_non_answer_prompts_unchanged():
@@ -34,4 +51,4 @@ def test_non_answer_prompts_unchanged():
         prompts.PLANNING_EXECUTION_PROMPT,
         prompts.IMAGE_GENERATOR_SYSTEM_PROMPT,
     ):
-        assert "You CAN display images inline" not in prompt
+        assert "Media and visuals:" not in prompt

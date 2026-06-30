@@ -9,6 +9,16 @@ from app.api.ai_sdk import AISDKChatRequest, chat_ui_message_stream
 from app.services.event_streaming.events import make_event
 
 
+def test_chat_request_schema_documents_inline_rich_response_capability():
+    schema = AISDKChatRequest.model_json_schema(by_alias=True)
+
+    field = schema["properties"].get("inlineRichResponseV1")
+
+    assert field is not None
+    assert field["default"] is False
+    assert "inline rich-response v1" in field["description"]
+
+
 @pytest.mark.asyncio
 async def test_chat_endpoint_returns_assistant_ui_stream():
     conversation_id = uuid4()
@@ -81,3 +91,39 @@ async def test_chat_endpoint_accepts_single_message_request_body():
     assert message_create.content == "hello"
     assert called_user_id == user_id
     assert "bot_message_id" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_chat_endpoint_passes_inline_rich_response_capability_to_message_service():
+    conversation_id = uuid4()
+    user_id = uuid4()
+
+    class FakeMessageService:
+        def __init__(self):
+            self.calls = []
+
+        def create_message_stream(self, message_create, current_user_id, **kwargs):
+            self.calls.append((message_create, current_user_id, kwargs))
+
+            async def source():
+                yield make_event("complete", sequence=1, data={"message": {"id": "m-1"}})
+
+            return source()
+
+    message_service = FakeMessageService()
+
+    response = await chat_ui_message_stream(
+        conversation_id=conversation_id,
+        payload=AISDKChatRequest(
+            messages=[{"role": "user", "parts": [{"type": "text", "text": "hello"}]}],
+            inlineRichResponseV1=True,
+        ),
+        message_service=message_service,
+        current_user_id=user_id,
+    )
+    body = "".join([chunk async for chunk in response.body_iterator])
+
+    assert body.rstrip().endswith("data: [DONE]")
+    assert len(message_service.calls) == 1
+    message_create, _called_user_id, _kwargs = message_service.calls[0]
+    assert message_create.inline_rich_response_v1 is True

@@ -36,6 +36,15 @@
       ],
       "description": "Current time lookup utility with timezone support"
     },
+    "brave_image_search": {
+      "enabled": true,
+      "transport": "stdio",
+      "command": "python",
+      "args": [
+        "app/ai/mcp_servers/brave_image_search_server.py"
+      ],
+      "description": "Image search using Brave Search API for visual references and article-style inline image candidates"
+    },
     "form_filler": {
       "enabled": false,
       "transport": "stdio",

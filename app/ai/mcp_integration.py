@@ -38,7 +38,7 @@ logging.getLogger("langchain_google_genai._function_utils").setLevel(logging.ERR
 class MCPManager:
     """Manages MCP server connections and tool loading"""
 
-    DEFAULT_SERVERS = {"calculator", "tavily", "time", "widgets"}
+    DEFAULT_SERVERS = {"calculator", "tavily", "time", "widgets", "brave_image_search"}
 
     def __init__(self, config_path: str | None = None):
         """
@@ -160,6 +160,8 @@ class MCPManager:
     async def initialize(self) -> None:
         if settings.tavily_api_key:
             os.environ["TAVILY_API_KEY"] = settings.tavily_api_key
+        if settings.brave_search_api_key:
+            os.environ["BRAVE_SEARCH_API_KEY"] = settings.brave_search_api_key
 
         self.config = self._load_config()
         server_config = self._build_server_config()

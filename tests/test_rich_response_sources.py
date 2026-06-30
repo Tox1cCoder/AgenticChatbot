@@ -118,6 +118,76 @@ def test_image_candidates_default_mime_when_absent():
 
 
 # ---------------------------------------------------------------------------
+# Brave Image Search candidates (image_search.md Phase 6)
+# ---------------------------------------------------------------------------
+
+
+def _brave_payload():
+    return json.dumps(
+        {
+            "query": "spain architecture",
+            "provider": "brave_image_search",
+            "images": [
+                {
+                    "url": "https://img.test/direct-1.jpg",
+                    "thumbnail_url": "https://img.test/thumb-1.jpg",
+                    "source_url": "https://example.com/page",
+                    "title": "Sagrada Familia exterior",
+                    "description": "Sagrada Familia exterior",
+                    "mime_type": "image/jpeg",
+                    "width": 1200,
+                    "height": 800,
+                    "source_domain": "example.com",
+                    "provider": "brave_image_search",
+                }
+            ],
+            "total_results": 1,
+        }
+    )
+
+
+def test_brave_image_candidate_identity_and_payload():
+    candidates = build_image_candidates_from_tool_result(
+        _brave_payload(), tool_call_id="call_b", tool_name="brave_image_search"
+    )
+    assert len(candidates) == 1
+    cand = candidates[0]
+    assert cand["type"] == "image"
+    # Provider identity lives in provenance; source may remain the generic value.
+    assert cand["provenance"]["tool"] == "brave_image_search"
+    assert cand["source"] == "tool_image"
+    # source_url stays in the public payload (ImagePayload accepts it).
+    assert cand["payload"]["url"] == "https://img.test/direct-1.jpg"
+    assert cand["payload"]["source_url"] == "https://example.com/page"
+
+
+def test_brave_image_candidate_keeps_extra_metadata_in_provenance_only():
+    [cand] = build_image_candidates_from_tool_result(
+        _brave_payload(), tool_call_id="call_b", tool_name="brave_image_search"
+    )
+    prov = cand["provenance"]
+    assert prov["thumbnail_url"] == "https://img.test/thumb-1.jpg"
+    assert prov["width"] == 1200
+    assert prov["height"] == 800
+    assert prov["source_domain"] == "example.com"
+    assert prov["provider"] == "brave_image_search"
+    # These must never leak into the public payload (ImagePayload forbids extras).
+    for forbidden in ("thumbnail_url", "width", "height", "source_domain", "provider"):
+        assert forbidden not in cand["payload"]
+
+
+def test_brave_image_candidate_validates_against_public_schema():
+    from app.core.rich_response import validate_public_rich_item
+
+    [cand] = build_image_candidates_from_tool_result(
+        _brave_payload(), tool_call_id="call_b", tool_name="brave_image_search"
+    )
+    # Passes the discriminated-union validation only if payload has no forbidden
+    # extras and the mime/url contract holds.
+    validate_public_rich_item(cand)
+
+
+# ---------------------------------------------------------------------------
 # Tool render candidates
 # ---------------------------------------------------------------------------
 

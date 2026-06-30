@@ -40,12 +40,22 @@ class AISDKChatRequest(BaseModel):
     - messages: the UI message history
     - message: optional latest UI message for custom AI SDK transports
     - userId: optional (enables server-side memory features)
+    - inlineRichResponseV1: optional client capability flag for rich response v1
     """
 
     messages: list[dict[str, Any]] = Field(default_factory=list)
     message: Any | None = None
     content: Any | None = None
     user_id: UUID | None = Field(default=None, alias="userId")
+    inline_rich_response_v1: bool = Field(
+        default=False,
+        alias="inlineRichResponseV1",
+        description=(
+            "When true, the client declares it can render the inline rich-response v1 "
+            "contract: HTML-comment rich markers in assistant content, transient "
+            "`data-rich-items` stream parts, and persisted `rich_items` metadata."
+        ),
+    )
 
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
@@ -968,7 +978,9 @@ async def chat_ui_message_stream(
 
     extra = getattr(payload, "model_extra", {}) or {}
     inline_rich_response_v1 = bool(
-        extra.get("inline_rich_response_v1") or extra.get("inlineRichResponseV1")
+        getattr(payload, "inline_rich_response_v1", False)
+        or extra.get("inline_rich_response_v1")
+        or extra.get("inlineRichResponseV1")
     )
     state = StreamState(
         message_id=str(bot_message_id),
