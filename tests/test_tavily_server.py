@@ -73,3 +73,42 @@ def test_search_uses_configured_basic_depth_and_preserves_images(monkeypatch):
     assert payload["images"][0]["url"] == "https://example.com/a.jpg"
     assert payload["results"][0]["raw_content"] == "Full text"
     assert payload["usage"] == {"credits": 1}
+
+
+class _FakeExtractClient:
+    def __init__(self):
+        self.calls = []
+
+    def extract(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "results": [
+                {
+                    "url": "https://example.com/a",
+                    "raw_content": "# Title\nBody",
+                    "images": ["https://example.com/a.png"],
+                    "favicon": "https://example.com/favicon.ico",
+                }
+            ],
+            "failed_results": [],
+            "usage": {"credits": 1},
+            "request_id": "req-extract",
+        }
+
+
+def test_extract_accepts_string_url_and_query_rerank(monkeypatch):
+    client = _FakeExtractClient()
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+    monkeypatch.setattr(tavily_server.settings, "tavily_extract_max_urls", 5, raising=False)
+
+    payload = json.loads(
+        tavily_server.tavily_extract("https://example.com/a", query="pricing", include_images=True)
+    )
+
+    assert client.calls[0]["urls"] == ["https://example.com/a"]
+    assert client.calls[0]["query"] == "pricing"
+    assert client.calls[0]["extract_depth"] == "basic"
+    assert client.calls[0]["format"] == "markdown"
+    assert payload["operation"] == "extract"
+    assert payload["results"][0]["raw_content"] == "# Title\nBody"
+    assert payload["results"][0]["images"] == ["https://example.com/a.png"]

@@ -69,6 +69,17 @@ def _choice(value: str | None, *, default: str, allowed: set[str]) -> str:
     return candidate if candidate in allowed else default
 
 
+def _coerce_urls(urls: str | list[str], *, maximum: int) -> list[str]:
+    if isinstance(urls, str):
+        raw_urls = [urls]
+    elif isinstance(urls, list):
+        raw_urls = urls
+    else:
+        raw_urls = []
+    cleaned = [str(url).strip() for url in raw_urls if str(url or "").strip()]
+    return cleaned[:maximum]
+
+
 @mcp.tool()
 def tavily_search(
     query: str,
@@ -155,6 +166,76 @@ def _normalize_search_response(*, query: str, response: Any) -> dict[str, Any]:
         "total_results": len(results),
     }
     for key in ("auto_parameters", "usage", "request_id", "response_time"):
+        if key in response:
+            payload[key] = response[key]
+    return payload
+
+
+@mcp.tool()
+def tavily_extract(
+    urls: str | list[str],
+    query: str | None = None,
+    include_images: bool = False,
+    extract_depth: str | None = None,
+    format: str | None = None,
+) -> str:
+    """Extract page content from one or more known URLs.
+
+    Use this when the user provides URL(s), when search found a source but
+    snippets are insufficient, or when detailed source-grounded page content is
+    needed. Use `tavily_search` first when you still need to discover URLs.
+    """
+    operation = "extract"
+    max_urls = min(int(getattr(settings, "tavily_extract_max_urls", 5) or 5), 20)
+    cleaned_urls = _coerce_urls(urls, maximum=max_urls)
+    if not cleaned_urls:
+        return _error("At least one URL is required for extraction.", operation=operation)
+    try:
+        client = _make_client()
+    except Exception as exc:
+        return _error(str(exc), operation=operation)
+
+    params: dict[str, Any] = {
+        "urls": cleaned_urls,
+        "include_images": include_images,
+        "extract_depth": _choice(
+            extract_depth,
+            default=str(getattr(settings, "tavily_extract_default_depth", "basic") or "basic"),
+            allowed=SUPPORTED_EXTRACT_DEPTHS,
+        ),
+        "format": _choice(
+            format,
+            default=str(
+                getattr(settings, "tavily_extract_default_format", "markdown") or "markdown"
+            ),
+            allowed=SUPPORTED_FORMATS,
+        ),
+        "timeout": float(getattr(settings, "tavily_extract_timeout_seconds", 20.0) or 20.0),
+        "include_usage": True,
+    }
+    if query:
+        params["query"] = query
+        params["chunks_per_source"] = 3
+    try:
+        response = client.extract(**params)
+    except TimeoutError as exc:
+        return _error(str(exc), operation=operation, retryable=True)
+    except Exception as exc:
+        return _error(f"Extract failed: {exc}", operation=operation)
+    return _json(_normalize_extract_response(urls=cleaned_urls, response=response))
+
+
+def _normalize_extract_response(*, urls: list[str], response: Any) -> dict[str, Any]:
+    response = response if isinstance(response, dict) else {}
+    payload = {
+        "provider": "tavily",
+        "operation": "extract",
+        "urls": urls,
+        "results": response.get("results") or [],
+        "failed_results": response.get("failed_results") or [],
+        "total_results": len(response.get("results") or []),
+    }
+    for key in ("usage", "request_id", "response_time"):
         if key in response:
             payload[key] = response[key]
     return payload
