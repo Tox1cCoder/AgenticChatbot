@@ -8,6 +8,7 @@ project_root = current_dir.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 import contextlib  # noqa: E402
+from typing import Any  # noqa: E402
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 from tavily import TavilyClient  # noqa: E402
@@ -15,6 +16,32 @@ from tavily import TavilyClient  # noqa: E402
 from app.core.config import settings  # noqa: E402
 
 mcp = FastMCP("Tavily")
+
+
+def _json(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _error(message: str, *, operation: str, retryable: bool = False) -> str:
+    return _json(
+        {
+            "error": message,
+            "provider": "tavily",
+            "operation": operation,
+            "retryable": retryable,
+        }
+    )
+
+
+def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    if value is None:
+        parsed = default
+    else:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+    return max(minimum, min(parsed, maximum))
 
 
 @mcp.tool()

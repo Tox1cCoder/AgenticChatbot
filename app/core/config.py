@@ -173,6 +173,56 @@ class Settings(BaseSettings):
         description="Default Brave safesearch level. Brave supports 'off' and 'strict'.",
     )
 
+    # Tavily retrieval budget/safety limits (operational, not behavior hardcoding)
+    tavily_search_default_max_results: int = Field(
+        default=5,
+        description="Default Tavily search result count.",
+    )
+    tavily_search_max_results: int = Field(
+        default=10,
+        description="Hard cap on Tavily search results returned per call.",
+    )
+    tavily_search_default_depth: str = Field(
+        default="basic",
+        description="Default Tavily search depth: basic, fast, ultra-fast, or advanced.",
+    )
+    tavily_search_include_images: bool = Field(
+        default=True,
+        description="Include Tavily search image candidates by default.",
+    )
+    tavily_search_include_image_descriptions: bool = Field(
+        default=True,
+        description="Include Tavily image descriptions when search images are enabled.",
+    )
+    tavily_search_auto_parameters: bool = Field(
+        default=False,
+        description="Allow Tavily to auto-select search parameters. May increase credit use.",
+    )
+    tavily_extract_max_urls: int = Field(
+        default=5,
+        description="Hard cap on URLs accepted by Tavily extract per call.",
+    )
+    tavily_extract_default_depth: str = Field(
+        default="basic",
+        description="Default Tavily extract depth: basic or advanced.",
+    )
+    tavily_extract_default_format: str = Field(
+        default="markdown",
+        description="Default Tavily extract format: markdown or text.",
+    )
+    tavily_extract_timeout_seconds: float = Field(
+        default=20.0,
+        description="Timeout sent to Tavily Extract, in seconds.",
+    )
+    tavily_map_max_depth: int = Field(default=2, description="Maximum Tavily map depth.")
+    tavily_map_max_breadth: int = Field(default=20, description="Maximum Tavily map breadth.")
+    tavily_map_limit: int = Field(default=50, description="Maximum Tavily map URL count.")
+    tavily_map_timeout_seconds: float = Field(default=30.0, description="Tavily Map timeout.")
+    tavily_crawl_max_depth: int = Field(default=1, description="Maximum Tavily crawl depth.")
+    tavily_crawl_max_breadth: int = Field(default=10, description="Maximum Tavily crawl breadth.")
+    tavily_crawl_limit: int = Field(default=20, description="Maximum Tavily crawl page count.")
+    tavily_crawl_timeout_seconds: float = Field(default=45.0, description="Tavily Crawl timeout.")
+
     # Multi-Provider Configuration
     model_encryption_key: str = Field(
         default="",
@@ -1128,6 +1178,53 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"brave_image_search_default_safesearch must be one of {sorted(allowed)}"
             )
+        return value
+
+    @field_validator(
+        "tavily_search_default_max_results",
+        "tavily_search_max_results",
+        "tavily_extract_max_urls",
+        "tavily_map_max_depth",
+        "tavily_map_max_breadth",
+        "tavily_map_limit",
+        "tavily_crawl_max_depth",
+        "tavily_crawl_max_breadth",
+        "tavily_crawl_limit",
+        mode="before",
+    )
+    @classmethod
+    def validate_positive_tavily_int(cls, v):
+        if v in (None, ""):
+            return v
+        parsed = int(v)
+        if parsed < 1:
+            raise ValueError("Tavily numeric settings must be positive")
+        return parsed
+
+    @field_validator("tavily_search_default_depth", mode="before")
+    @classmethod
+    def validate_tavily_search_depth(cls, v):
+        value = str(v or "basic").strip().lower()
+        if value not in {"basic", "fast", "ultra-fast", "advanced"}:
+            raise ValueError(
+                "TAVILY_SEARCH_DEFAULT_DEPTH must be basic, fast, ultra-fast, or advanced"
+            )
+        return value
+
+    @field_validator("tavily_extract_default_depth", mode="before")
+    @classmethod
+    def validate_tavily_extract_depth(cls, v):
+        value = str(v or "basic").strip().lower()
+        if value not in {"basic", "advanced"}:
+            raise ValueError("TAVILY_EXTRACT_DEFAULT_DEPTH must be basic or advanced")
+        return value
+
+    @field_validator("tavily_extract_default_format", mode="before")
+    @classmethod
+    def validate_tavily_extract_format(cls, v):
+        value = str(v or "markdown").strip().lower()
+        if value not in {"markdown", "text"}:
+            raise ValueError("TAVILY_EXTRACT_DEFAULT_FORMAT must be markdown or text")
         return value
 
     @field_validator(
