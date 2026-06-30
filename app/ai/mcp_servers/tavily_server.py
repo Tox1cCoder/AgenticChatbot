@@ -80,6 +80,13 @@ def _coerce_urls(urls: str | list[str], *, maximum: int) -> list[str]:
     return cleaned[:maximum]
 
 
+def _clean_string_list(values: list[str] | None) -> list[str] | None:
+    if not isinstance(values, list):
+        return None
+    cleaned = [str(value).strip() for value in values if str(value or "").strip()]
+    return cleaned or None
+
+
 @mcp.tool()
 def tavily_search(
     query: str,
@@ -234,6 +241,143 @@ def _normalize_extract_response(*, urls: list[str], response: Any) -> dict[str, 
         "results": response.get("results") or [],
         "failed_results": response.get("failed_results") or [],
         "total_results": len(response.get("results") or []),
+    }
+    for key in ("usage", "request_id", "response_time"):
+        if key in response:
+            payload[key] = response[key]
+    return payload
+
+
+@mcp.tool()
+def tavily_map(
+    url: str,
+    instructions: str | None = None,
+    max_depth: int | None = None,
+    limit: int | None = None,
+    select_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+    allow_external: bool = False,
+) -> str:
+    """Discover URLs on a website without extracting full page bodies.
+
+    Use this to inspect site structure, find relevant docs/pricing/legal/support
+    pages, or choose URLs before extraction. Use `tavily_crawl` only when the
+    task requires content from multiple pages.
+    """
+    operation = "map"
+    if not str(url or "").strip():
+        return _error("A root URL is required for mapping.", operation=operation)
+    try:
+        client = _make_client()
+    except Exception as exc:
+        return _error(str(exc), operation=operation)
+
+    params: dict[str, Any] = {
+        "url": str(url).strip(),
+        "max_depth": _clamp_int(
+            max_depth,
+            default=int(getattr(settings, "tavily_map_max_depth", 2) or 2),
+            minimum=1,
+            maximum=int(getattr(settings, "tavily_map_max_depth", 2) or 2),
+        ),
+        "max_breadth": int(getattr(settings, "tavily_map_max_breadth", 20) or 20),
+        "limit": _clamp_int(
+            limit,
+            default=int(getattr(settings, "tavily_map_limit", 50) or 50),
+            minimum=1,
+            maximum=int(getattr(settings, "tavily_map_limit", 50) or 50),
+        ),
+        "allow_external": allow_external,
+        "timeout": float(getattr(settings, "tavily_map_timeout_seconds", 30.0) or 30.0),
+        "include_usage": True,
+    }
+    for key, value in {"select_paths": select_paths, "exclude_paths": exclude_paths}.items():
+        cleaned = _clean_string_list(value)
+        if cleaned:
+            params[key] = cleaned
+    if instructions:
+        params["instructions"] = instructions
+    try:
+        response = client.map(**params)
+    except TimeoutError as exc:
+        return _error(str(exc), operation=operation, retryable=True)
+    except Exception as exc:
+        return _error(f"Map failed: {exc}", operation=operation)
+    return _json(_normalize_site_response(operation=operation, response=response))
+
+
+@mcp.tool()
+def tavily_crawl(
+    url: str,
+    instructions: str | None = None,
+    max_depth: int | None = None,
+    limit: int | None = None,
+    select_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+    include_images: bool = False,
+    allow_external: bool = False,
+) -> str:
+    """Crawl a bounded website section and return extracted page content.
+
+    Use this for multi-page site or docs research when the user asks for a
+    bounded set of pages. Prefer `tavily_map` for URL discovery and
+    `tavily_extract` for one or a few known URLs.
+    """
+    operation = "crawl"
+    if not str(url or "").strip():
+        return _error("A root URL is required for crawling.", operation=operation)
+    try:
+        client = _make_client()
+    except Exception as exc:
+        return _error(str(exc), operation=operation)
+
+    params: dict[str, Any] = {
+        "url": str(url).strip(),
+        "max_depth": _clamp_int(
+            max_depth,
+            default=int(getattr(settings, "tavily_crawl_max_depth", 1) or 1),
+            minimum=1,
+            maximum=int(getattr(settings, "tavily_crawl_max_depth", 1) or 1),
+        ),
+        "max_breadth": int(getattr(settings, "tavily_crawl_max_breadth", 10) or 10),
+        "limit": _clamp_int(
+            limit,
+            default=int(getattr(settings, "tavily_crawl_limit", 20) or 20),
+            minimum=1,
+            maximum=int(getattr(settings, "tavily_crawl_limit", 20) or 20),
+        ),
+        "allow_external": allow_external,
+        "include_images": include_images,
+        "extract_depth": str(getattr(settings, "tavily_extract_default_depth", "basic") or "basic"),
+        "format": str(getattr(settings, "tavily_extract_default_format", "markdown") or "markdown"),
+        "timeout": float(getattr(settings, "tavily_crawl_timeout_seconds", 45.0) or 45.0),
+        "include_usage": True,
+    }
+    for key, value in {"select_paths": select_paths, "exclude_paths": exclude_paths}.items():
+        cleaned = _clean_string_list(value)
+        if cleaned:
+            params[key] = cleaned
+    if instructions:
+        params["instructions"] = instructions
+        params["chunks_per_source"] = 3
+    try:
+        response = client.crawl(**params)
+    except TimeoutError as exc:
+        return _error(str(exc), operation=operation, retryable=True)
+    except Exception as exc:
+        return _error(f"Crawl failed: {exc}", operation=operation)
+    return _json(_normalize_site_response(operation=operation, response=response))
+
+
+def _normalize_site_response(*, operation: str, response: Any) -> dict[str, Any]:
+    response = response if isinstance(response, dict) else {}
+    results = response.get("results") or []
+    payload = {
+        "provider": "tavily",
+        "operation": operation,
+        "base_url": response.get("base_url", ""),
+        "results": results,
+        "total_results": len(results),
     }
     for key in ("usage", "request_id", "response_time"):
         if key in response:

@@ -112,3 +112,56 @@ def test_extract_accepts_string_url_and_query_rerank(monkeypatch):
     assert payload["operation"] == "extract"
     assert payload["results"][0]["raw_content"] == "# Title\nBody"
     assert payload["results"][0]["images"] == ["https://example.com/a.png"]
+
+
+class _FakeSiteClient:
+    def __init__(self):
+        self.map_calls = []
+        self.crawl_calls = []
+
+    def map(self, **kwargs):
+        self.map_calls.append(kwargs)
+        return {
+            "base_url": kwargs["url"],
+            "results": ["https://docs.example.com/a"],
+            "usage": {"credits": 1},
+        }
+
+    def crawl(self, **kwargs):
+        self.crawl_calls.append(kwargs)
+        return {
+            "base_url": kwargs["url"],
+            "results": [{"url": "https://docs.example.com/a", "raw_content": "A"}],
+            "usage": {"credits": 1},
+        }
+
+
+def test_map_clamps_site_traversal(monkeypatch):
+    client = _FakeSiteClient()
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    payload = json.loads(
+        tavily_server.tavily_map("https://docs.example.com", max_depth=5, limit=999)
+    )
+
+    assert client.map_calls[0]["max_depth"] == 2
+    assert client.map_calls[0]["limit"] == 50
+    assert payload["operation"] == "map"
+    assert payload["results"] == ["https://docs.example.com/a"]
+
+
+def test_crawl_clamps_site_traversal_and_disables_external_by_default(monkeypatch):
+    client = _FakeSiteClient()
+    monkeypatch.setattr(tavily_server, "_make_client", lambda: client)
+
+    payload = json.loads(
+        tavily_server.tavily_crawl(
+            "https://docs.example.com", instructions="Find API pages", max_depth=5, limit=999
+        )
+    )
+
+    assert client.crawl_calls[0]["max_depth"] == 1
+    assert client.crawl_calls[0]["limit"] == 20
+    assert client.crawl_calls[0]["allow_external"] is False
+    assert payload["operation"] == "crawl"
+    assert payload["results"][0]["raw_content"] == "A"
