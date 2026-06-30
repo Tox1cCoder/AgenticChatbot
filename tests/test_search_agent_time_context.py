@@ -140,9 +140,10 @@ def test_search_agent_binding_exposes_time_and_tavily_tools(monkeypatch):
 
 def test_search_prompt_orders_tool_search_time_then_web_search():
     assert "If the search tool is not loaded yet, use `tool_search`" in SEARCH_SYSTEM_PROMPT
-    assert "call `get_current_time`, then call the web search tool" in SEARCH_SYSTEM_PROMPT
-    assert "Never make `tavily_search` your first actual web-search call in a turn" in (
-        SEARCH_SYSTEM_PROMPT
+    assert "call `get_current_time`, then call that search tool" in SEARCH_SYSTEM_PROMPT
+    assert (
+        "Do not make a web/news search your first actual web retrieval call in a turn"
+        in SEARCH_SYSTEM_PROMPT
     )
 
 
@@ -160,4 +161,26 @@ def test_search_prompt_exempts_image_reference_search_from_time_lookup():
     assert "Image reference searches" in prompt
     assert "do not require" in prompt
     # The time rule is still present for actual web/news search.
-    assert "call `get_current_time`, then call the web search tool" in prompt
+    assert "call `get_current_time`, then call that search tool" in prompt
+
+
+def test_search_agent_does_not_pin_heavy_tavily_tools(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "mcp_tool_search_pinned_tools", [], raising=False)
+
+    pinned_specs = _get_pinned_specs("search")
+
+    assert "tavily::tavily_search" in pinned_specs
+    assert "tavily::tavily_extract" not in pinned_specs
+    assert "tavily::tavily_map" not in pinned_specs
+    assert "tavily::tavily_crawl" not in pinned_specs
+
+
+def test_search_prompt_allows_extract_map_and_crawl_via_tool_search():
+    prompt = SEARCH_SYSTEM_PROMPT
+
+    assert "specific URL" in prompt
+    assert "site structure" in prompt
+    assert "bounded site" in prompt
+    assert "Never make `tavily_search` your first actual web-search call" not in prompt
