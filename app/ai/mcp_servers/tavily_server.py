@@ -11,11 +11,14 @@ import contextlib  # noqa: E402
 from typing import Any  # noqa: E402
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
-from tavily import TavilyClient  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
 
 mcp = FastMCP("Tavily")
+
+SUPPORTED_SEARCH_DEPTHS = {"basic", "fast", "ultra-fast", "advanced"}
+SUPPORTED_EXTRACT_DEPTHS = {"basic", "advanced"}
+SUPPORTED_FORMATS = {"markdown", "text"}
 
 
 def _json(payload: dict[str, Any]) -> str:
@@ -33,6 +36,23 @@ def _error(message: str, *, operation: str, retryable: bool = False) -> str:
     )
 
 
+def _resolve_api_key() -> str | None:
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        with contextlib.suppress(Exception):
+            api_key = settings.tavily_api_key
+    return api_key or None
+
+
+def _make_client():
+    api_key = _resolve_api_key()
+    if not api_key:
+        raise RuntimeError("TAVILY_API_KEY not configured. Set it in environment or config.py")
+    from tavily import TavilyClient
+
+    return TavilyClient(api_key=api_key)
+
+
 def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     if value is None:
         parsed = default
@@ -44,103 +64,100 @@ def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(parsed, maximum))
 
 
+def _choice(value: str | None, *, default: str, allowed: set[str]) -> str:
+    candidate = str(value or default).strip().lower()
+    return candidate if candidate in allowed else default
+
+
 @mcp.tool()
-def tavily_search(query: str, max_results: int = 5) -> str:
-    """Search the web for current news, recent events, or information you don't know.
+def tavily_search(
+    query: str,
+    max_results: int | None = None,
+    search_depth: str | None = None,
+    include_raw_content: bool = False,
+) -> str:
+    """Search the web for current facts, news, recent information, or source discovery.
 
-    USE THIS TOOL WHEN:
-    - User asks about recent news, current events, or today's information
-    - User asks about something you're uncertain about or don't have knowledge of
-    - User asks about real-time data (stock prices, weather, sports scores, etc.)
-    - User wants to verify or fact-check information
-
-    DO NOT USE THIS TOOL WHEN:
-    - You already have the information from your training or previous tool results
-    - The question is about general knowledge that doesn't require current data
-    - You're asked for opinions, advice, or creative tasks
-
-    Args:
-        query: The search query - be specific and include relevant context
-        max_results: Number of results to return (default: 5)
-
-    Returns:
-        JSON with search results including titles, URLs, content snippets, and relevance scores
+    Use this for broad web discovery. If the user provides a specific URL or the
+    search snippets are not enough, use `tavily_extract` after search discovers the
+    URL. For site structure use `tavily_map`; for bounded multi-page content use
+    `tavily_crawl`.
     """
+    operation = "search"
     try:
-        # Try to get API key from environment first
-        api_key = os.getenv("TAVILY_API_KEY")
+        client = _make_client()
+    except Exception as exc:
+        return _error(str(exc), operation=operation)
 
-        if not api_key:
-            with contextlib.suppress(Exception):
-                api_key = settings.tavily_api_key
+    result_count = _clamp_int(
+        max_results,
+        default=int(getattr(settings, "tavily_search_default_max_results", 5) or 5),
+        minimum=1,
+        maximum=min(int(getattr(settings, "tavily_search_max_results", 10) or 10), 20),
+    )
+    depth = _choice(
+        search_depth,
+        default=str(getattr(settings, "tavily_search_default_depth", "basic") or "basic"),
+        allowed=SUPPORTED_SEARCH_DEPTHS,
+    )
+    params: dict[str, Any] = {
+        "query": query,
+        "max_results": result_count,
+        "search_depth": depth,
+        "include_images": bool(getattr(settings, "tavily_search_include_images", True)),
+        "include_image_descriptions": bool(
+            getattr(settings, "tavily_search_include_image_descriptions", True)
+        ),
+        "include_raw_content": include_raw_content,
+        "auto_parameters": bool(getattr(settings, "tavily_search_auto_parameters", False)),
+        "include_usage": True,
+    }
+    try:
+        response = client.search(**params)
+    except TimeoutError as exc:
+        return _error(str(exc), operation=operation, retryable=True)
+    except Exception as exc:
+        return _error(f"Search failed: {exc}", operation=operation)
+    return _json(_normalize_search_response(query=query, response=response))
 
-        if not api_key:
-            return json.dumps(
-                {
-                    "error": "TAVILY_API_KEY not configured. Please set it in environment or config.py"
-                }
-            )
 
-        # Initialize Tavily client
-        tavily_client = TavilyClient(api_key=api_key)
+def _normalize_search_response(*, query: str, response: Any) -> dict[str, Any]:
+    response = response if isinstance(response, dict) else {}
+    results = []
+    for idx, result in enumerate(response.get("results") or [], 1):
+        if not isinstance(result, dict):
+            continue
+        item = {
+            "index": idx,
+            "title": result.get("title", ""),
+            "url": result.get("url", ""),
+            "content": result.get("content", ""),
+            "score": result.get("score", 0),
+        }
+        if result.get("raw_content"):
+            item["raw_content"] = result.get("raw_content")
+        if result.get("favicon"):
+            item["favicon"] = result.get("favicon")
+        results.append(item)
 
-        # Perform search
-        response = tavily_client.search(
-            query=query,
-            max_results=max_results,
-            search_depth="advanced",
-            include_images=True,
-            include_image_descriptions=True,
-        )
+    images = []
+    for image in response.get("images") or []:
+        if isinstance(image, dict) and image.get("url"):
+            images.append({"url": image.get("url"), "description": image.get("description", "")})
 
-        # Format results
-        if "results" in response:
-            formatted_results = []
-            for idx, result in enumerate(response["results"], 1):
-                formatted_results.append(
-                    {
-                        "index": idx,
-                        "title": result.get("title", ""),
-                        "url": result.get("url", ""),
-                        "content": result.get("content", ""),
-                        "score": result.get("score", 0),
-                    }
-                )
-
-            # Extract images from response
-            images = []
-            if "images" in response:
-                for img in response["images"]:
-                    images.append(
-                        {
-                            "url": img.get("url", ""),
-                            "description": img.get("description", ""),
-                        }
-                    )
-
-            return json.dumps(
-                {
-                    "query": query,
-                    "answer": response.get("answer", ""),
-                    "images": images,
-                    "results": formatted_results,
-                    "total_results": len(formatted_results),
-                },
-                indent=2,
-            )
-        else:
-            return json.dumps(
-                {
-                    "query": query,
-                    "answer": "",
-                    "images": [],
-                    "results": [],
-                    "total_results": 0,
-                }
-            )
-
-    except Exception as e:
-        return json.dumps({"error": f"Search failed: {str(e)}"})
+    payload = {
+        "provider": "tavily",
+        "operation": "search",
+        "query": query,
+        "answer": response.get("answer", ""),
+        "images": images,
+        "results": results,
+        "total_results": len(results),
+    }
+    for key in ("auto_parameters", "usage", "request_id", "response_time"):
+        if key in response:
+            payload[key] = response[key]
+    return payload
 
 
 if __name__ == "__main__":
