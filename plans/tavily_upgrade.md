@@ -1669,3 +1669,57 @@ Verification:
 2. **Optional full interactive smoke (Task 8 Step 5).** Run the app with a real
    `TAVILY_API_KEY` and walk the four conversation prompts in the plan to confirm
    the agent discovers extract/map/crawl via `tool_search` as intended.
+
+### 2026-07-01 — Full re-verification pass (no code changes) — ALL GREEN
+
+Re-ran every task's verification loop against the committed implementation
+(`584a0ad`→`373003d`) using the app runtime `.venv/Scripts/python.exe`. The plan
+was already fully implemented and committed in the 2026-06-30 session; this pass
+confirms the committed state still matches every acceptance criterion. No source
+was modified — verification only.
+
+Results per task:
+
+- **Task 1:** `pytest tests/test_tavily_server.py` → 6 passed. `ruff check config.py`
+  → 42 errors, all pre-existing E501 baseline; cross-checked error line numbers
+  (229, 311, … 1306) against the Tavily field range (177–224) and validator range
+  (1184–1224) — zero overlap, so zero new errors.
+- **Task 2:** `pytest test_tavily_server + test_rich_response_sources` → 24 passed
+  (rich-response image regression green). Ruff on `tavily_server.py` + test → clean.
+- **Tasks 3–4:** same test file (6 passed) + ruff clean. Source confirms all four
+  `@mcp.tool()` functions registered: `tavily_search` (L91), `tavily_extract`
+  (L182), `tavily_map` (L252), `tavily_crawl` (L310).
+- **Task 5:** `pytest test_tool_search_scoring + test_unified_tool_search` → 29
+  passed. `scripts/evaluate_tool_search_accuracy.py` → all 6 shell/file/config
+  scenarios resolve to the expected tool at high confidence (no regression). Ruff
+  on the 3 touched files → clean. (Log noted 28 previously; now 29 — a test was
+  added upstream, still all-green, no regression.)
+- **Task 6:** `pytest test_search_agent_time_context + test_tool_search_prompt_guidance`
+  → 21 passed. Ruff clean. `deferred_tool_binding.py:75-77` confirms pins remain
+  `("time::get_current_time", "tavily::tavily_search")` only.
+- **Task 7:** `pytest test_mcp_global_allowlist + test_unified_tool_search` → 19
+  passed. README confirmed updated at lines 271 (env-table purpose), 654
+  (server-table row), 664 (one-global-server prose).
+- **Task 8:** combined focused + discovery + image/rich suites (8 files) → **80
+  passed**, 1 unrelated `langchain-community` deprecation warning. Ruff on all 8
+  touched app/test files → clean.
+
+Design decisions this session:
+
+1. **Verify, don't re-implement.** The git log and progress log showed all 8 tasks
+   already committed. Re-running the TDD steps (write failing test → implement)
+   would have been destructive to working, committed code. Per the executing-plans
+   skill's "review critically first" step, the correct action was to run each
+   task's verification loop and confirm outputs still match expectations. They do.
+2. **Runtime pinned to `.venv`.** Used `.venv/Scripts/python.exe` explicitly (not
+   the system Python 3.13 on PATH) because the app runtime lives in `.venv` and the
+   other interpreters have drifted langchain/langgraph pins.
+3. **`.env.example` still blocked, now stat-verified.** Still cannot read/write/
+   `git add` it (global security guard blocks all `.env.*`). `git diff --stat`
+   (which exposes no content) reports **18 insertions**, matching the 18 Tavily
+   keys the plan's Task 1 Step 4 documents — so the working-tree change is present
+   and correctly sized. It remains the sole uncommitted change; the user must
+   `git add .env.example` manually.
+4. **Manual interactive smoke (Task 8 Step 5) still deferred.** Requires an
+   interactive session with a real `TAVILY_API_KEY`; unchanged from the prior
+   session's note. All automated coverage passes.
