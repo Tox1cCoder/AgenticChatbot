@@ -340,6 +340,14 @@ class AISDKV6StreamAdapter:
         message = data.get("message")
         if isinstance(message, str) and message.strip():
             yield _sse({"type": "text-delta", "id": state.text_id, "delta": message.strip()})
+        projected_message = message
+        if isinstance(message, dict):
+            from app.api.ai_sdk import project_ai_sdk_assistant_message_event
+
+            projected_message = project_ai_sdk_assistant_message_event(
+                message,
+                include_content=True,
+            )
         if state.text_started:
             yield _sse({"type": "text-end", "id": state.text_id})
         if state.reasoning_started:
@@ -352,7 +360,7 @@ class AISDKV6StreamAdapter:
                     "next": data.get("next"),
                     "pendingToolCalls": data.get("pending_tool_calls"),
                     "interrupt": data.get("interrupt"),
-                    "message": data.get("message"),
+                    "message": projected_message,
                 },
             }
         )

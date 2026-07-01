@@ -115,7 +115,7 @@ def _split_body_into_segments(
     """
     if not body:
         return [], set()
-    from app.core.rich_response import _MARKER_LINE_RE, _strip_fenced_code_blocks
+    from app.core.rich_response import _iter_inline_rich_marker_matches, _strip_fenced_code_blocks
 
     normalized = body.replace("\r\n", "\n").replace("\r", "\n")
     lines = normalized.split("\n")
@@ -141,18 +141,28 @@ def _split_body_into_segments(
         if line.startswith("    ") or line.startswith("\t"):
             buffer.append(line)
             continue
-        match = _MARKER_LINE_RE.match(line)
-        if not match:
+        matches = list(_iter_inline_rich_marker_matches(line))
+        if not matches:
             buffer.append(line)
             continue
-        candidate_id = match.group(1)
-        _flush_markdown()
-        referenced.add(candidate_id)
-        item = items_by_id.get(candidate_id)
-        if item is not None:
-            segments.append(RichSegment(kind="rich", item=item))
-        else:
-            segments.append(RichSegment(kind="unavailable", item_id=candidate_id))
+
+        cursor = 0
+        for match in matches:
+            before = line[cursor : match.start()]
+            if before:
+                buffer.append(before)
+            _flush_markdown()
+            candidate_id = match.group(1)
+            referenced.add(candidate_id)
+            item = items_by_id.get(candidate_id)
+            if item is not None:
+                segments.append(RichSegment(kind="rich", item=item))
+            else:
+                segments.append(RichSegment(kind="unavailable", item_id=candidate_id))
+            cursor = match.end()
+        trailing = line[cursor:]
+        if trailing:
+            buffer.append(trailing)
     _flush_markdown()
     return segments, referenced
 

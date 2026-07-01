@@ -127,9 +127,8 @@ Assistant metadata:
       "id": "assistant-message-id",
       "role": "assistant",
       "createdAt": "ISO-8601 timestamp",
-      "messageMetadata": {},
-      "message_metadata": {},
       "metadata": {},
+      "messageMetadata": {},
       "parts": []
     }
   }
@@ -139,7 +138,7 @@ Assistant metadata:
 Notes:
 
 - `data-assistant-message.data.message.content` is intentionally omitted on the stream because answer text already arrived as `text-delta`.
-- Stream metadata is projected to the canonical `messageMetadata` field and mirrored to `metadata`; `message_metadata` is also included for backward compatibility. Treat `messageMetadata ?? message_metadata ?? metadata` as the backend metadata.
+- Stream metadata is projected to the AI SDK `metadata` field and mirrored to `messageMetadata` for existing client code. `message_metadata` is not emitted on AI SDK stream messages.
 - `parts` may contain generated image/file parts. For v1 rich responses, only selected images appear as file parts.
 - Article-style auto-placement can add final `<!--rich:<id>-->` markers at persistence time after text deltas have already streamed. For the AI SDK stream, use the persisted message from history after `finish` when you need the exact final marker layout.
 
@@ -251,7 +250,7 @@ Pause/reason fields are not the same as decision types:
 
 | Field/value | Meaning | Resume behavior |
 |---|---|---|
-| `message_metadata.pause_reason = "tool_approval_required"` | Persisted assistant message is paused for HITL tool approval. | Use the persisted `interrupt` payload to rebuild approval UI. |
+| `metadata.pause_reason = "tool_approval_required"` | Persisted assistant message is paused for HITL tool approval. | Use the persisted `interrupt` payload to rebuild approval UI. |
 | `pause_reason = "awaiting_approval"` | Workflow/subagent stopped because a tool needs approval. | Prefer the `interrupt` object if present. Without `interrupt`, show blocked state only. |
 | `pause_reason = "max_iterations_reached"` | Planning loop hit its iteration/budget limit. | No HITL decision. Let the user send another message to continue. |
 | `pause_reason = "consecutive_errors_limit"` | Planning loop stopped after repeated errors. | No HITL decision. Show retry/continue affordance. |
@@ -312,7 +311,7 @@ Decision types are the user actions sent back on resume: `approve`, `edit`,
     "message": {
       "id": "paused-assistant-message-id",
       "content": "",
-      "message_metadata": {
+      "metadata": {
         "interrupt": {},
         "paused": true,
         "pause_reason": "tool_approval_required",
@@ -487,8 +486,8 @@ Message fields:
 | `parts[].url` | string | File URL, data URL, remote URL, or blob URL. |
 | `parts[].mediaType` | string | MIME type for file part. |
 | `parts[].reasoning` | string | Reasoning content for reasoning parts, if present. |
-| `metadata` | object or null | Mirror of backend metadata for UI compatibility. |
-| `messageMetadata` | object or null | Canonical AI SDK metadata field. Same content as `metadata` for assistant messages. |
+| `metadata` | object or null | Canonical AI SDK UI message metadata field. |
+| `messageMetadata` | object or null | Compatibility mirror of `metadata` for existing assistant-message consumers. |
 | `createdAt` | string or null | ISO-8601 timestamp. |
 
 ## Assistant Metadata Shape
@@ -497,7 +496,7 @@ Use:
 
 ```ts
 const backendMeta =
-  message.messageMetadata ?? message.message_metadata ?? message.metadata ?? {};
+  message.metadata ?? message.messageMetadata ?? {};
 ```
 
 Common `backendMeta` fields:
@@ -558,8 +557,8 @@ All fields are optional. Frontend should ignore unknown keys.
 
 Metadata compatibility rules:
 
-- Prefer `message.messageMetadata ?? message.message_metadata ?? message.metadata ?? {}`.
-- `messageMetadata` and `metadata` are mirrors on history responses; stream payloads may include all three shapes for compatibility.
+- Prefer `message.metadata ?? message.messageMetadata ?? {}`.
+- `metadata` and `messageMetadata` are mirrors on history and final stream assistant-message side-channel payloads. The old `message_metadata` wire alias is not emitted by the AI SDK response path.
 - `rich_items`, when present, is a field inside backend metadata at the same level as `live_widgets`, `images`, `tool_artifacts`, and `canvas_artifact`. It is not a top-level message field and is not nested under those legacy renderer fields.
 - Internal keys beginning with `_`, such as `_rich_item_candidates` and `_inline_rich_response_v1`, should not be persisted or rendered. Ignore them if seen from a non-production path.
 
@@ -800,7 +799,7 @@ new rich item types. It changes when markers can appear:
 - When `rich_auto_place_enabled` is enabled, the backend may insert markers for relevant unreferenced image candidates and live widgets into the final persisted assistant markdown.
 - Auto-placement is deterministic and bounded by server settings. Current defaults: at most 3 auto-placed images per answer, one placed item per paragraph, and a minimum keyword-overlap score of 0.25. Widget placement is not capped by the image limit.
 - Images still use `display_policy: "inline_only"`. Unplaced image candidates are dropped/scrubbed from v1 legacy image fields; clients should not render a separate gallery from hidden candidates.
-- The final authoritative layout is the pair of persisted `message.content` plus `messageMetadata.rich_items`.
+- The final authoritative layout is the pair of persisted `message.content` plus `metadata.rich_items`.
 
 Streaming note:
 
@@ -1249,8 +1248,7 @@ Canvas responses can include legacy metadata:
   "canvas_artifact": {
     "content": "<full self-contained HTML / SVG document>",
     "language": "html",
-    "title": "Short title",
-    "editable": true
+    "title": "Short title"
   }
 }
 ```
@@ -1262,7 +1260,6 @@ Legacy canvas fields:
 | `content` | string | Full artifact source. Same safety boundary as rich canvas `payload.content`. |
 | `language` | string | Renderer/editor hint. `CanvasAgent` emits `html`, `svg`, or `react`; see Rich Canvas Artifact Item for normalization rules. |
 | `title` | string | Short display title. Derived from `<title>` when available. |
-| `editable` | boolean | Whether the artifact can be edited/replaced by a follow-up canvas turn. Currently `true` for `CanvasAgent` artifacts. |
 
 Rich v1 may also expose this as a `canvas_artifact` rich item. If both legacy
 metadata and a rich item are present for the same assistant message, prefer
@@ -1354,7 +1351,7 @@ Recommended detection:
 
 ```ts
 function getBackendMeta(message: any) {
-  return message?.messageMetadata ?? message?.message_metadata ?? message?.metadata ?? {};
+  return message?.metadata ?? message?.messageMetadata ?? {};
 }
 
 function isHitlEvent(event: any) {

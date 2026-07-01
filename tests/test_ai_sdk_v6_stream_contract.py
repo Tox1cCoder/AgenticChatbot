@@ -124,6 +124,36 @@ async def test_interrupt_terminates_ui_stream():
 
 
 @pytest.mark.asyncio
+async def test_interrupt_projects_paused_message_metadata_shape():
+    async def source():
+        yield make_event(
+            "interrupt",
+            sequence=1,
+            data={
+                "thread_id": "thread-1",
+                "pending_tool_calls": [],
+                "interrupt": {"interrupt_id": "int-1"},
+                "message": {
+                    "id": "paused-1",
+                    "content": "",
+                    "message_metadata": {"paused": True, "pause_reason": "tool_approval_required"},
+                },
+            },
+        )
+
+    payloads = await _collect_payloads(source)
+    interrupt_payload = next(
+        payload for payload in payloads if payload != "[DONE]" and payload["type"] == "data-interrupt"
+    )
+    message = interrupt_payload["data"]["message"]
+
+    assert message["id"] == "paused-1"
+    assert message["metadata"] == {"paused": True, "pause_reason": "tool_approval_required"}
+    assert message["messageMetadata"] == message["metadata"]
+    assert "message_metadata" not in message
+
+
+@pytest.mark.asyncio
 async def test_subagent_events_map_to_data_subagent_chunks():
     async def source():
         yield make_event(
@@ -195,9 +225,9 @@ async def test_terminal_assistant_message_projects_to_ui_message_metadata_shape(
     assert message["id"] == "m-1"
     assert message["role"] == "assistant"
     assert message["createdAt"] == "2026-06-22T01:00:00Z"
-    assert message["messageMetadata"] == {"context_window": {"display_state": "ok"}}
-    assert message["metadata"] == message["messageMetadata"]
-    assert message["message_metadata"] == message["messageMetadata"]
+    assert message["metadata"] == {"context_window": {"display_state": "ok"}}
+    assert message["messageMetadata"] == message["metadata"]
+    assert "message_metadata" not in message
     assert "content" not in message
     assert "sender" not in message
     assert "conversation_id" not in message

@@ -30,7 +30,10 @@ class MessageCreate(BaseModel):
     )
     attachments: list[dict[str, str]] | None = Field(
         default=None,
-        description="Optional image attachments with structure {name: str, mime: str, data: str (base64)}",
+        description=(
+            "Optional image attachments with structure "
+            "{name: str, mime: str, data: str (base64)}"
+        ),
     )
     model_config_field: dict[str, Any] | None = Field(
         default=None,
@@ -124,8 +127,7 @@ class MessageRead(BaseModel):
           {
             "content":  "<full self-contained HTML / SVG document>",
             "language": "html" | "svg" | "react",
-            "title":    "Short human-readable title",
-            "editable": true
+            "title":    "Short human-readable title"
           }
         """,
     )

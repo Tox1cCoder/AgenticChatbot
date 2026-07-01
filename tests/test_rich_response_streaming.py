@@ -255,6 +255,16 @@ def test_non_capable_history_projection_removes_standalone_markers():
     assert "<!--rich:" not in projected["content"]
 
 
+def test_non_capable_history_projection_removes_embedded_markers():
+    message = {
+        "content": "* **Review:** <!--rich:image:tool:c1:0--> Fastest drive.",
+        "messageMetadata": {"rich_items_version": 1, "rich_items": []},
+    }
+    projected = project_ai_sdk_message_for_capability(message, inline_rich_response_v1=False)
+    assert projected["content"] == "* **Review:**  Fastest drive."
+    assert "<!--rich:" not in projected["content"]
+
+
 def test_capable_projection_preserves_markers():
     message = {
         "content": "Intro\n\n<!--rich:image:tool:c1:0-->\n\nConclusion",

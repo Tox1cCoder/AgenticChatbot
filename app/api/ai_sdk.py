@@ -477,9 +477,6 @@ def _selected_image_file_parts_from_rich_items(
     return file_parts
 
 
-_RICH_MARKER_LINE_PATTERN = None  # Compiled lazily inside the projection helper.
-
-
 def project_ai_sdk_message_for_capability(
     message: dict[str, Any],
     *,
@@ -500,15 +497,9 @@ def project_ai_sdk_message_for_capability(
     projected = dict(message)
     content = projected.get("content")
     if isinstance(content, str) and "<!--rich:" in content:
-        import re
+        from app.core.rich_response import strip_inline_rich_markers
 
-        global _RICH_MARKER_LINE_PATTERN
-        if _RICH_MARKER_LINE_PATTERN is None:
-            _RICH_MARKER_LINE_PATTERN = re.compile(
-                r"^[ ]{0,3}<!--rich:[A-Za-z0-9_\-.:]+-->[ \t]*$",
-                re.MULTILINE,
-            )
-        projected["content"] = _RICH_MARKER_LINE_PATTERN.sub("", content)
+        projected["content"] = strip_inline_rich_markers(content)
     for meta_key in ("message_metadata", "messageMetadata", "metadata"):
         meta = projected.get(meta_key)
         if isinstance(meta, dict):
@@ -599,7 +590,11 @@ def _attach_image_parts_to_message(message: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def project_ai_sdk_assistant_message_event(message: dict[str, Any]) -> dict[str, Any]:
+def project_ai_sdk_assistant_message_event(
+    message: dict[str, Any],
+    *,
+    include_content: bool = False,
+) -> dict[str, Any]:
     """Project a persisted assistant message into a stream metadata side-channel.
 
     The AI SDK stream has already delivered body text through ``text-delta``.
@@ -628,6 +623,11 @@ def project_ai_sdk_assistant_message_event(message: dict[str, Any]) -> dict[str,
     if isinstance(created_at, str) and created_at:
         projected["createdAt"] = created_at
 
+    if include_content:
+        content = message.get("content")
+        if isinstance(content, str):
+            projected["content"] = content
+
     metadata = None
     for key in ("messageMetadata", "message_metadata", "metadata"):
         value = message.get(key)
@@ -635,9 +635,8 @@ def project_ai_sdk_assistant_message_event(message: dict[str, Any]) -> dict[str,
             metadata = value
             break
     if isinstance(metadata, dict):
-        projected["messageMetadata"] = metadata
-        projected["message_metadata"] = metadata
         projected["metadata"] = metadata
+        projected["messageMetadata"] = metadata
 
     parts = message.get("parts")
     if isinstance(parts, list):

@@ -17,8 +17,7 @@ canvas_artifact shape (stored in AgentResponse.metadata["canvas_artifact"]):
   {
     "content":  "<full self-contained HTML string>",
     "language": "html" | "svg" | "react",
-    "title":    "Short human-readable title",
-    "editable": true
+    "title":    "Short human-readable title"
   }
 """
 
@@ -167,7 +166,6 @@ def _extract_artifact(text: str) -> dict[str, Any] | None:
         "content": code,
         "language": language,
         "title": title,
-        "editable": True,
     }
 
 

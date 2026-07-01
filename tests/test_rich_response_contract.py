@@ -87,6 +87,18 @@ def test_marker_duplicate_ids_preserve_order():
     assert parse_inline_rich_references(body) == ["widget:1", "widget:1"]
 
 
+def test_embedded_markers_are_recognized_outside_inline_code():
+    body = (
+        "* **Review:** <!--rich:image:tool:c1:0--> Strong option.\n"
+        "See `<!--rich:image:tool:hidden:0-->` for the marker grammar.\n"
+        "* **Review:** <!--rich:image:tool:c1:1--> Better value."
+    )
+    assert parse_inline_rich_references(body) == [
+        "image:tool:c1:0",
+        "image:tool:c1:1",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Display-policy filters
 # ---------------------------------------------------------------------------

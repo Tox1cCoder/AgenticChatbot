@@ -97,6 +97,38 @@ def test_build_view_interleaves_markdown_and_selected_image():
     assert view.append_items == []
 
 
+def test_build_view_resolves_embedded_markers_in_list_items():
+    metadata = {
+        "rich_items_version": 1,
+        "rich_items": [
+            {
+                "id": "image:tool:c1:0",
+                "type": "image",
+                "display_policy": "inline_only",
+                "alt_text": "First image",
+                "payload": {"url": "https://img.test/first.png", "mime_type": "image/png"},
+            },
+            {
+                "id": "image:tool:c1:1",
+                "type": "image",
+                "display_policy": "inline_only",
+                "alt_text": "Second image",
+                "payload": {"url": "https://img.test/second.png", "mime_type": "image/png"},
+            },
+        ],
+    }
+    body = (
+        "*   **Review:** <!--rich:image:tool:c1:0--> Fastest drive.\n\n"
+        "*   **Review:** <!--rich:image:tool:c1:1--> Better value."
+    )
+    view = build_rich_response_view(body, metadata)
+
+    rich_ids = [segment.item["id"] for segment in view.segments if segment.kind == "rich"]
+    markdown = "\n".join(segment.text or "" for segment in view.segments)
+    assert rich_ids == ["image:tool:c1:0", "image:tool:c1:1"]
+    assert "<!--rich:" not in markdown
+
+
 def test_build_view_hides_unreferenced_image_and_appends_unreferenced_widget():
     view = build_rich_response_view("Answer", metadata_with_image_and_widget)
     # Unreferenced image is hidden (inline_only policy).

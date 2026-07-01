@@ -6,9 +6,10 @@ feature described in ``response_format.md``.
 
 The contract is intentionally narrow:
 
-* Assistant ``content`` remains markdown. Rich items are placed using a
-  block-level HTML-comment marker of the form ``<!--rich:<id>-->`` on its own
-  line.
+* Assistant ``content`` remains markdown. Rich items are placed using an
+  HTML-comment marker of the form ``<!--rich:<id>-->``. Prompt guidance asks
+  models to put markers on their own line, while parsers also tolerate markers
+  embedded in prose so malformed-but-valid model output does not leak.
 * The ``rich_items`` registry is type-validated through a discriminated union.
   Each item type accepts only the fields its renderer consumes; everything else
   is rejected with ``extra="forbid"``.
@@ -253,11 +254,61 @@ def validate_public_rich_item(
 
 
 # Match a standalone HTML-comment marker line with up to three leading spaces
-# and optional trailing whitespace. The id portion is captured for validation
-# against the registry rules.
+# and optional trailing whitespace. Kept for callers that still need to
+# distinguish canonical block placement from the tolerant inline parser below.
 _MARKER_LINE_RE = re.compile(
     r"^[ ]{0,3}<!--rich:([A-Za-z0-9_\-.:]+)-->[ \t]*$",
 )
+_MARKER_RE = re.compile(r"<!--rich:([A-Za-z0-9_\-.:]+)-->")
+_BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+def _inline_code_ranges(line: str) -> list[tuple[int, int]]:
+    """Return simple inline-code span ranges for one markdown line.
+
+    The rich marker parser only needs to protect normal backtick-delimited
+    code spans such as `` `<!--rich:...-->` ``. Unmatched backticks are treated
+    as ordinary text, matching markdown's fallback behavior.
+    """
+    ranges: list[tuple[int, int]] = []
+    pos = 0
+    while True:
+        opener = _BACKTICK_RUN_RE.search(line, pos)
+        if opener is None:
+            return ranges
+        ticks = opener.group(0)
+        closer_start = line.find(ticks, opener.end())
+        if closer_start < 0:
+            pos = opener.end()
+            continue
+        closer_end = closer_start + len(ticks)
+        ranges.append((opener.start(), closer_end))
+        pos = closer_end
+
+
+def _overlaps_any_range(start: int, end: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(start < range_end and end > range_start for range_start, range_end in ranges)
+
+
+def _iter_inline_rich_marker_matches(line: str) -> Iterable[re.Match[str]]:
+    """Yield valid rich marker matches from one non-code markdown line.
+
+    Markers may be standalone or embedded in surrounding prose. Matches inside
+    inline backtick code spans are ignored so examples of the marker grammar do
+    not become rich references.
+    """
+    if "<!--rich:" not in line:
+        return
+    code_ranges = _inline_code_ranges(line)
+    for match in _MARKER_RE.finditer(line):
+        if _overlaps_any_range(match.start(), match.end(), code_ranges):
+            continue
+        candidate = match.group(1)
+        if len(candidate) > RICH_ITEM_ID_MAX_LENGTH:
+            continue
+        if not _ITEM_ID_PATTERN.match(candidate):
+            continue
+        yield match
 
 
 def _strip_fenced_code_blocks(lines: list[str]) -> list[bool]:
@@ -320,11 +371,12 @@ def _is_indented_code(line: str) -> bool:
 
 
 def parse_inline_rich_references(markdown: str) -> list[str]:
-    """Return ordered list of rich-item ids referenced as standalone block
-    markers in ``markdown``.
+    """Return ordered list of rich-item ids referenced by markers in
+    ``markdown``.
 
-    Markers inside fenced or indented code blocks, inline code, or with invalid
-    id characters/lengths are ignored. Duplicate references are preserved in
+    Markers may be standalone block markers or embedded in prose. Markers
+    inside fenced or indented code blocks, inline code, or with invalid id
+    characters/lengths are ignored. Duplicate references are preserved in
     occurrence order.
     """
     if not markdown:
@@ -339,16 +391,42 @@ def parse_inline_rich_references(markdown: str) -> list[str]:
             continue
         if _is_indented_code(line):
             continue
-        match = _MARKER_LINE_RE.match(line)
-        if not match:
-            continue
-        candidate = match.group(1)
-        if len(candidate) > RICH_ITEM_ID_MAX_LENGTH:
-            continue
-        if not _ITEM_ID_PATTERN.match(candidate):
-            continue
-        refs.append(candidate)
+        refs.extend(match.group(1) for match in _iter_inline_rich_marker_matches(line))
     return refs
+
+
+def strip_inline_rich_markers(markdown: str) -> str:
+    """Remove rich marker comments from markdown outside code contexts.
+
+    This is used for clients that did not opt into the rich-response contract
+    so marker comments cannot leak as visible text. Code fences, indented code,
+    and inline code spans are preserved.
+    """
+    if not markdown or "<!--rich:" not in markdown:
+        return markdown
+    normalized = markdown.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    in_fence = _strip_fenced_code_blocks(lines)
+    changed = False
+    out: list[str] = []
+    for line, inside in zip(lines, in_fence, strict=False):
+        if inside or _is_indented_code(line):
+            out.append(line)
+            continue
+        pieces: list[str] = []
+        cursor = 0
+        line_changed = False
+        for match in _iter_inline_rich_marker_matches(line):
+            pieces.append(line[cursor : match.start()])
+            cursor = match.end()
+            line_changed = True
+            changed = True
+        if line_changed:
+            pieces.append(line[cursor:])
+            out.append("".join(pieces))
+        else:
+            out.append(line)
+    return "\n".join(out) if changed else markdown
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +655,7 @@ __all__ = [
     "parse_inline_rich_references",
     "select_append_fallback_items",
     "select_transient_upsert_items",
+    "strip_inline_rich_markers",
     "validate_rich_references",
     "validate_public_rich_item",
 ]

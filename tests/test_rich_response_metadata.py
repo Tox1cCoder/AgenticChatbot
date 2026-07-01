@@ -54,6 +54,47 @@ def test_build_bot_metadata_persists_only_inline_selected_images():
     assert metadata["rich_items_version"] == 1
 
 
+def test_build_bot_metadata_persists_embedded_selected_images():
+    response = WorkflowResponse(
+        message=WorkflowResponseMessage(
+            content=(
+                "* **Review:** <!--rich:image:tool:c1:0--> Fastest drive.\n\n"
+                "* **Review:** <!--rich:image:tool:c1:1--> Better value."
+            )
+        ),
+        metadata={
+            "_rich_item_candidates": [
+                {
+                    "id": "image:tool:c1:0",
+                    "type": "image",
+                    "display_policy": "inline_only",
+                    "alt_text": "Fastest drive",
+                    "payload": {
+                        "url": "https://img.test/first.png",
+                        "mime_type": "image/png",
+                    },
+                },
+                {
+                    "id": "image:tool:c1:1",
+                    "type": "image",
+                    "display_policy": "inline_only",
+                    "alt_text": "Better value",
+                    "payload": {
+                        "url": "https://img.test/second.png",
+                        "mime_type": "image/png",
+                    },
+                },
+            ]
+        },
+    )
+
+    metadata = build_bot_metadata(response)
+
+    image_ids = [item["id"] for item in metadata["rich_items"] if item["type"] == "image"]
+    assert image_ids == ["image:tool:c1:0", "image:tool:c1:1"]
+    assert metadata["rich_reference_warnings"] == []
+
+
 def test_unreferenced_widget_is_kept_for_appended_compatibility():
     response = WorkflowResponse(
         message=WorkflowResponseMessage(content="The comparison widget is available below."),
