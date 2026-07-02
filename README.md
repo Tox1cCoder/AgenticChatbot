@@ -1113,12 +1113,12 @@ Capable assistant messages persist:
 }
 ```
 
-Item types: `image`, `live_widget`, `tool_render`, `canvas_artifact`, `citation`, `resource_link`. Payloads are type-validated through a Pydantic discriminated union with `extra="forbid"`; only renderer-consumed fields are accepted. Image payloads accept exactly one of `url` (https / dev-only http) or `data` (base64 of an allowed raster MIME).
+Item types emitted today: `image`, `live_widget`, `tool_render`, `canvas_artifact`. The schema also reserves `citation` and `resource_link` for forward compatibility, but no backend path constructs them yet. Payloads are type-validated through a Pydantic discriminated union with `extra="forbid"`; only renderer-consumed fields are accepted, and items are serialized with null-valued keys omitted. Image payloads accept exactly one of `url` (https / dev-only http) or `data` (base64 of an allowed raster MIME).
 
 ### Display policy
 
 - `inline_only` — render only at its marker. Image items use this policy and are **never** appended as a gallery. Unreferenced image candidates are dropped entirely.
-- `inline_or_append` — render inline when referenced, otherwise append below the body. Used by `live_widget`, `tool_render`, `canvas_artifact`, `resource_link`.
+- `inline_or_append` — render inline when referenced, otherwise append below the body. Used by `live_widget`, `tool_render`, `canvas_artifact` (and the reserved `citation`/`resource_link` types).
 
 For capable responses, widget placement is authored dynamically in the response body: a `<!--rich:widget:<widget_id>-->` marker selects its position. The server does not insert a marker when the response omits one.
 

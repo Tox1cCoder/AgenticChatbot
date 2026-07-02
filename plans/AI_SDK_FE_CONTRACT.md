@@ -748,33 +748,39 @@ Rules:
 | Max ID length | 128 chars. |
 | Code blocks | Markers inside fenced or 4-space indented code blocks are literal markdown. |
 
-`backendMeta.rich_items` item shape:
+### What the backend actually emits
 
-```json
-{
-  "id": "widget:widget-id",
-  "type": "live_widget",
-  "source": "widget_tool",
-  "display_policy": "inline_or_append",
-  "title": "Optional title",
-  "alt_text": "Optional alt text",
-  "provenance": {},
-  "payload": {}
-}
-```
+Read this before the per-type sections — two rules remove most confusion:
 
-Common fields:
+1. **Serialization omits empty values.** Rich items are serialized with
+   null-valued keys dropped. A key is either present with a real value or
+   absent — you will never receive `"title": null` or `"data": null`. Check
+   for presence, not for null.
+2. **Only four types are emitted today.** `citation` and `resource_link`
+   exist in the schema for forward compatibility but no backend code
+   constructs them; render unknown types as an ignorable placeholder.
 
-| Field | Type | Notes |
+| `type` | Emitted? | `id` format | `display_policy` | Arrives via |
+|---|---|---|---|---|
+| `image` | Yes | `image:tool:<tool-call-id>:<index>` (web/tool images), `image:document:<image-id>` (RAG documents) | `inline_only` | Final `data-assistant-message` / history only. |
+| `live_widget` | Yes | `widget:<widget-id>` | `inline_or_append` | Transient `data-rich-items` **and** final/history. |
+| `tool_render` | Yes | `tool:<tool-call-id>` | `inline_or_append` | Transient `data-rich-items` **and** final/history. |
+| `canvas_artifact` | Yes | `canvas:main` | `inline_or_append` | Final `data-assistant-message` / history only. |
+| `citation` | No — reserved | — | — | Never emitted today. |
+| `resource_link` | No — reserved | — | — | Never emitted today. |
+
+Common fields (a field marked "optional" is absent when it has no value):
+
+| Field | Presence | Notes |
 |---|---|---|
-| `id` | string | Stable marker target. |
-| `type` | string | `image`, `live_widget`, `tool_render`, `canvas_artifact`, `citation`, or `resource_link`. |
-| `source` | string or null | Origin, such as `widget_tool`, `tool`, `web_search`, `tool_image`. |
-| `display_policy` | string | `inline_only` or `inline_or_append`. |
-| `title` | string or null | Display title. |
-| `alt_text` | string or null | Accessibility text. Required for image rich items. |
-| `provenance` | object | Optional origin metadata. |
-| `payload` | object | Type-specific payload. |
+| `id` | always | Stable marker target. |
+| `type` | always | One of the emitted types above. |
+| `source` | optional | Origin: `web_search` / `tool_image` / `rag_document` (images), `widget_tool` (widgets), `tool` (tool renders). Absent on canvas items. |
+| `display_policy` | always | `inline_only` or `inline_or_append`. |
+| `title` | optional | Display title. Always present on canvas items; on others only when the source had one. |
+| `alt_text` | image only | Accessibility text; always present on image items, absent on all other types. |
+| `provenance` | always | Origin metadata; `{}` when there is none (canvas). See per-type sections. |
+| `payload` | always | Type-specific payload. |
 
 Display policies:
 
@@ -810,10 +816,8 @@ Streaming note:
   "source": "tool_image",
   "display_policy": "inline_only",
   "alt_text": "Image from tool result",
-  "title": "Optional title",
   "payload": {
     "url": "https://example.com/image.png",
-    "data": null,
     "mime_type": "image/png",
     "source_url": "https://example.com/source",
     "description": "Optional description"
@@ -826,7 +830,21 @@ Streaming note:
 }
 ```
 
-Exactly one of `payload.url` or `payload.data` is present. Allowed MIME types are `image/png`, `image/jpeg`, `image/webp`, and `image/gif`.
+Payload rules:
+
+- Exactly one of `payload.url` or `payload.data` (raw base64) is present —
+  never both, and the unused key is absent, not null.
+- `payload.mime_type` is always present. Allowed MIME types are `image/png`,
+  `image/jpeg`, `image/webp`, and `image/gif`.
+- `payload.source_url` and `payload.description` appear only when the source
+  provided them. Item-level `title` likewise.
+- `source` is `web_search` for Tavily results, `tool_image` for other tool
+  images, and `rag_document` for document images (ids of the form
+  `image:document:<image-id>`, provenance `{document_image_id, page_number}`,
+  `title` of the form `"Page 5"` when the page is known).
+- `provenance` on tool images may carry additional provider metadata
+  (`thumbnail_url`, `width`, `height`, `source_domain`, `provider`) —
+  audit/debug only, not for primary rendering.
 
 ### Rich Live Widget Item
 
@@ -837,6 +855,7 @@ Exactly one of `payload.url` or `payload.data` is present. Allowed MIME types ar
   "source": "widget_tool",
   "display_policy": "inline_or_append",
   "title": "Widget title",
+  "provenance": {},
   "payload": {
     "widget_id": "widget-id",
     "session_id": "conversation-id",
@@ -848,6 +867,10 @@ Exactly one of `payload.url` or `payload.data` is present. Allowed MIME types ar
 }
 ```
 
+All payload keys are always present. The payload never contains widget
+`state` — state arrives over the widget WebSocket (see Live Widgets).
+`title` is absent when the widget was created without one.
+
 ### Rich Tool Render Item
 
 ```json
@@ -856,7 +879,6 @@ Exactly one of `payload.url` or `payload.data` is present. Allowed MIME types ar
   "type": "tool_render",
   "source": "tool",
   "display_policy": "inline_or_append",
-  "title": "Optional title",
   "payload": {
     "render": {
       "version": 1,
@@ -872,7 +894,7 @@ Exactly one of `payload.url` or `payload.data` is present. Allowed MIME types ar
 }
 ```
 
-`payload.render` is renderer-specific. Known examples include `mcp_app`, `image`, `json`, `text`, `error`, `live_widget`, and `subagent_dispatch`. Only meaningful non-widget app renders become `tool_render` rich items.
+`payload.render` is renderer-specific. Known examples include `mcp_app`, `image`, `json`, `text`, `error`, `live_widget`, and `subagent_dispatch`. Only meaningful non-widget app renders become `tool_render` rich items — widget renders use the dedicated `live_widget` type and error/text renders are not promoted. `title` is present only when the render carries one.
 
 ### Rich Canvas Artifact Item
 
@@ -938,40 +960,17 @@ Canvas payload fields:
 | `payload.language` | string | Renderer/editor hint. Current emitted values are `html`, `svg`, and `react`. |
 | `payload.title` | string | Display title. Often derived from the HTML `<title>` tag; fallback is `Canvas`. |
 | `payload.content` | string | Full artifact source. Treat as executable/untrusted browser content and render only inside the approved sandbox boundary. |
-| `payload.preferred_height` | number or null | Optional rich-item height hint in pixels. Legacy `canvas_artifact` does not currently emit this field. |
+| `payload.preferred_height` | number | Optional height hint in pixels — accepted by the schema but never emitted today (absent, not null). Fall back to your default frame height. |
 
-### Rich Citation Item
+### Reserved Types (not emitted)
 
-```json
-{
-  "id": "citation:assistant-message-id:0",
-  "type": "citation",
-  "display_policy": "inline_or_append",
-  "title": "Optional title",
-  "payload": {
-    "source": "report.pdf",
-    "document_id": "document-id",
-    "page_number": 5,
-    "chunk_index": 12
-  }
-}
-```
-
-### Rich Resource Link Item
-
-```json
-{
-  "id": "resource:0",
-  "type": "resource_link",
-  "display_policy": "inline_or_append",
-  "title": "Optional title",
-  "payload": {
-    "url": "https://example.com",
-    "title": "Example",
-    "description": "Optional description"
-  }
-}
-```
+`citation` and `resource_link` are defined in the rich-item schema for
+forward compatibility, but **no backend path constructs them today** — you
+will not receive them on any stream or history response. Do not build
+renderers for them yet; if a future item type (these or any other) appears,
+render an ignorable placeholder. RAG citations are delivered through
+`backendMeta.documents_cited` / `backendMeta.citations` instead (see RAG
+Citations).
 
 Renderer algorithm:
 
