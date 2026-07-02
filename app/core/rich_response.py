@@ -483,15 +483,17 @@ def select_append_fallback_items(
 
 def select_transient_upsert_items(
     items: Iterable[RichItem | BaseModel | dict[str, Any]],
-) -> list[RichItem | dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Return the subset of ``items`` that may be streamed as transient
     ``rich_items`` upserts before final selection.
 
     The initial implementation streams only safe created non-image records.
     Image candidates, payloads carrying raw inline data, and canvas source are
-    excluded entirely.
+    excluded entirely. Returned items use the same public serialization as
+    finalized rich items: null-valued keys are omitted and default fields such
+    as ``provenance`` are materialized.
     """
-    safe: list[Any] = []
+    safe: list[dict[str, Any]] = []
     for item in items:
         item_type = _get_type(item)
         if item_type is None or item_type == RichItemType.image.value:
@@ -502,7 +504,11 @@ def select_transient_upsert_items(
             continue
         if _payload_has_inline_binary(item):
             continue
-        safe.append(item)
+        try:
+            public_item = validate_public_rich_item(item)
+        except Exception:
+            continue
+        safe.append(public_item.model_dump(mode="json", exclude_none=True))
     return safe
 
 
@@ -529,7 +535,32 @@ def _payload_has_inline_binary(item: Any) -> bool:
         return False
     if payload.get("data"):
         return True
-    return bool(payload.get("content") and _get_type(item) == RichItemType.canvas_artifact.value)
+    if payload.get("content") and _get_type(item) == RichItemType.canvas_artifact.value:
+        return True
+    return _contains_nested_inline_binary(payload)
+
+
+def _contains_nested_inline_binary(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_contains_nested_inline_binary(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+
+    block_type = str(value.get("type") or "").lower()
+    for key, nested in value.items():
+        normalized_key = str(key)
+        if normalized_key in {"base64", "b64_data"} and isinstance(nested, str) and nested.strip():
+            return True
+        if (
+            normalized_key == "data"
+            and isinstance(nested, str)
+            and nested.strip()
+            and block_type in {"image", "audio", "file", "resource"}
+        ):
+            return True
+        if _contains_nested_inline_binary(nested):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------

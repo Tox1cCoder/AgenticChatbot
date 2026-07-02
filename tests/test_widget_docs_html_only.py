@@ -32,6 +32,20 @@ def test_ai_sdk_contract_documents_html_state_and_iframe():
     assert '"height": 620' in doc
 
 
+def test_ai_sdk_contract_clarifies_image_and_canvas_channels():
+    doc = _read("plans/AI_SDK_FE_CONTRACT.md")
+    assert "exclusively as `file` parts" not in doc
+    assert "Selected images are represented twice" in doc
+    assert "normal `message.metadata.rich_items`" in doc
+    assert "Legacy `metadata.canvas_artifact`" in doc
+
+
+def test_ai_sdk_contract_documents_embedded_rich_markers():
+    doc = _read("plans/AI_SDK_FE_CONTRACT.md")
+    assert "standalone line or embedded in prose" in doc
+    assert "Split content on rich markers outside code" in doc
+
+
 # ---------------------------------------------------------------------------
 # plans/live-widgets-frontend-integration.md
 # ---------------------------------------------------------------------------

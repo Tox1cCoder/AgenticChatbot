@@ -152,7 +152,11 @@ def test_transient_upserts_exclude_image_items_entirely():
 
 def test_transient_upserts_include_safe_widget_records():
     widget = _make_widget()
-    assert select_transient_upsert_items([widget]) == [widget]
+    [item] = select_transient_upsert_items([widget])
+    assert item["id"] == widget.id
+    assert item["type"] == "live_widget"
+    assert item["provenance"] == {}
+    assert item["payload"]["widget_id"] == "w-1"
 
 
 def test_unselected_image_data_is_not_serialized_for_streaming():
@@ -164,6 +168,55 @@ def test_unselected_image_data_is_not_serialized_for_streaming():
         payload={"data": "QUJDRA==", "mime_type": "image/png"},
     )
     assert select_transient_upsert_items([image]) == []
+
+
+def test_transient_upserts_exclude_nested_inline_binary_data():
+    tool_render = {
+        "id": "tool:call-1",
+        "type": "tool_render",
+        "source": "tool",
+        "display_policy": "inline_or_append",
+        "payload": {
+            "render": {
+                "version": 1,
+                "type": "image",
+                "content": [
+                    {
+                        "type": "image",
+                        "data": "QUJDRA==",
+                        "mimeType": "image/png",
+                    }
+                ],
+            }
+        },
+        "provenance": {"tool_call_id": "call-1", "tool": "custom_tool"},
+    }
+
+    assert select_transient_upsert_items([tool_render]) == []
+
+
+def test_transient_upserts_omit_null_keys_and_default_provenance():
+    widget = {
+        "id": "widget:w-1",
+        "type": "live_widget",
+        "source": "widget_tool",
+        "display_policy": "inline_or_append",
+        "title": None,
+        "payload": {
+            "widget_id": "w-1",
+            "session_id": "conv-1",
+            "widget_type": "html",
+            "status": "active",
+            "version": 1,
+            "connection_endpoint": "/widgets/w-1/connection",
+        },
+    }
+
+    [item] = select_transient_upsert_items([widget])
+
+    assert "title" not in item
+    assert item["provenance"] == {}
+    assert item["source"] == "widget_tool"
 
 
 def test_image_record_rejects_append_display_policy():

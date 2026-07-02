@@ -1,10 +1,5 @@
 # AI SDK Frontend Contract
 
-The wire contract for the AI SDK-compatible chat path. Every shape in this
-document is the exact serialized output of the current backend, verified
-against code and live responses on 2026-07-02. Fields not listed for a shape
-are not sent. Removed legacy fields are listed in [Not on the Wire](#not-on-the-wire).
-
 ## Endpoints
 
 | Endpoint | Purpose |
@@ -194,14 +189,17 @@ Rich item upsert (only for requests that sent `inlineRichResponseV1: true`):
 
 | Item type | Streams transiently? | Delivered via |
 |---|---|---|
-| `live_widget`, `tool_render` | Yes, as each tool completes. | Upsert **and** final `data-assistant-message.metadata.rich_items`. |
-| `image` | Never. | Final `data-assistant-message` / history only. |
-| `canvas_artifact` | Never. | Final `data-assistant-message` / history only. |
-| Any item whose payload carries inline binary `data` | Never. | Final / history only. |
+| `live_widget`, `tool_render` | Yes, as each safe tool completes. | Upsert **and** final `data-assistant-message.metadata.rich_items`. |
+| `image` | Never. | Final `data-assistant-message.metadata.rich_items` / history for placement, plus selected image `file` parts for media. |
+| `canvas_artifact` | Never. | Final `data-assistant-message.metadata.rich_items` / history only. |
+| Any item whose payload carries inline binary `data` / `base64`, including nested renderer content | Never. | Final / history only. |
 
 A turn with zero `data-rich-items` events is normal (canvas-only,
 image-only, or no rich activity). The authoritative registry is always
 `metadata.rich_items` on the final `data-assistant-message` and on history.
+Transient upserts use the same public rich-item serialization as final metadata:
+null-valued keys are omitted, and `provenance` is `{}` when there is no origin
+metadata.
 A marker streamed in `text-delta` whose item has not arrived yet renders as a
 pending placeholder until `finish`.
 
@@ -556,11 +554,11 @@ Renderer/media fields:
 |---|---|---|
 | `tool_artifacts` | array | Persisted tool execution records (see Tool Artifacts). |
 | `rich_items_version` | number | `1`. Present only on messages with rich-item activity. |
-| `rich_items` | array | The authoritative rich-item registry. The only source for widgets, canvas artifacts, and tool renders. |
+| `rich_items` | array | The authoritative rich-item registry for widgets, canvas artifacts, tool renders, and selected image placement. |
 | `rich_reference_warnings` | array | `{code, id}` validation warnings: `unknown_rich_item`, `invalid_rich_item`. |
 | `documents_cited` / `citations` | array | RAG citation metadata (see RAG Citations). |
 | `chunks_retrieved` / `documents_found` | number | RAG retrieval counters. |
-| `canvas_artifact` (persisted only) | — | Never on the AI SDK wire. Canvas is delivered as a rich item. |
+| `canvas_artifact` (persisted only) | — | Legacy `metadata.canvas_artifact` is never on the AI SDK wire. Canvas is delivered as a normal `message.metadata.rich_items` item. |
 
 Planning/UX fields:
 
@@ -583,11 +581,11 @@ Planning/UX fields:
 
 ### Assistant Images
 
-Assistant images are delivered exclusively as `file` parts: streamed `file`
-events during generation, `parts[].type === "file"` on history and on the
-final `data-assistant-message`. For v1 rich messages the file parts are
-exactly the selected images; unselected candidates are never exposed. Do not
-build an image gallery from metadata.
+Selected images are represented twice for v1 rich messages: `image` entries in
+`metadata.rich_items` provide placement/provenance, and AI SDK `file` events /
+`parts[].type === "file"` provide the renderable media payload. The file parts
+are exactly the selected images; unselected candidates are never exposed. Do not
+build an image gallery from legacy metadata.
 
 ## Rich Response v1
 
@@ -640,10 +638,10 @@ Display policies:
 
 | Rule | Value |
 |---|---|
-| Placement | The marker resolves when it is a standalone line (up to 3 leading spaces). |
+| Placement | The marker resolves as a standalone line or embedded in prose, outside code contexts. Standalone lines (up to 3 leading spaces) are preferred. |
 | ID charset | ASCII letters, digits, `_`, `-`, `.`, `:`. |
 | Max ID length | 128. |
-| Code blocks | Markers inside fenced or 4-space-indented code blocks are literal text. |
+| Code contexts | Markers inside fenced, 4-space-indented, or inline-code spans are literal text. |
 
 ### Rich Image Item
 
@@ -787,7 +785,7 @@ You will not receive them. RAG citations are delivered through
 1. Send `inlineRichResponseV1: true`.
 2. Maintain an `items_by_id` map; apply `data-rich-items` upserts into it.
 3. Accumulate `text-delta`.
-4. Split content on standalone `<!--rich:<id>-->` marker lines.
+4. Split content on rich markers outside code (standalone line or embedded in prose).
 5. Render known items at their markers; render a pending placeholder for
    markers whose item has not arrived.
 6. On the final `data-assistant-message`, replace the map with
