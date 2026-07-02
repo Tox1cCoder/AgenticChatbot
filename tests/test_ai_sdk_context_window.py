@@ -2,17 +2,9 @@
 
 This test pins the contract that ``GET .../messages`` (handled by
 ``app.api.ai_sdk.get_conversation_messages_ai_sdk``) exposes the persisted
-``context_window`` metadata on assistant messages under BOTH:
-
-- ``messageMetadata`` (the canonical AI SDK ``UIMessage`` field, used by
-  ``useChat()`` for client-side metadata access), and
-- ``metadata``       (a mirrored generic key kept for UI compatibility with
-  components that read a flat ``metadata`` blob).
-
-The mirroring is performed by ``get_conversation_messages_ai_sdk`` at the
-point where ``msg.message_metadata`` is copied onto the response payload.
-Breaking either key would silently strip context-window data from the
-frontend's history view, so we lock both down here.
+``context_window`` metadata on assistant messages under ``metadata`` — the
+canonical AI SDK ``UIMessage`` field. The legacy ``messageMetadata`` mirror
+was removed in the 2026-07-02 response-format cleanup and must stay absent.
 
 Scope note — Live streaming context-window updates (i.e. emitting
 context-window deltas mid-SSE on the chat stream endpoint) are explicitly
@@ -133,15 +125,14 @@ def test_ai_sdk_messages_route_signature_exposes_pagination_dependency():
     assert isinstance(pagination_param.default, Depends)
 
 
-def test_ai_sdk_messages_expose_context_window_on_both_metadata_keys():
+def test_ai_sdk_messages_expose_context_window_on_metadata():
     """``context_window`` persisted on assistant messages must round-trip
-    through the AI SDK message history endpoint under both
-    ``messageMetadata`` and ``metadata``.
+    through the AI SDK message history endpoint under ``metadata``.
 
     This is the contract the Next.js client relies on to render the
-    context-window indicator from the existing history view. Removing the
-    mirror, filtering the metadata dict, or dropping the ``context_window``
-    sub-key would break the indicator silently — hence this regression test.
+    context-window indicator from the existing history view. Filtering the
+    metadata dict or dropping the ``context_window`` sub-key would break the
+    indicator silently — hence this regression test.
     """
 
     assistant_msg = _build_assistant_message_with_context_window()
@@ -170,31 +161,27 @@ def test_ai_sdk_messages_expose_context_window_on_both_metadata_keys():
     ui_message = response.data.messages[0]
     assert ui_message.role == "assistant"
 
-    # ``messageMetadata`` is exposed via the alias on ``AISDKUIMessage``.
     # ``model_dump(by_alias=True)`` materializes the camelCase wire shape the
     # Next.js client actually consumes.
     payload = ui_message.model_dump(by_alias=True)
 
-    assert "messageMetadata" in payload, (
-        "AI SDK response must expose `messageMetadata` (canonical UIMessage field)"
-    )
     assert "metadata" in payload, (
-        "AI SDK response must also mirror metadata to `metadata` for UI compatibility"
+        "AI SDK response must expose `metadata` (canonical UIMessage field)"
+    )
+    assert "messageMetadata" not in payload, (
+        "the legacy `messageMetadata` mirror must not come back"
     )
 
-    expected_cw = assistant_msg.message_metadata["context_window"]
-
-    assert payload["messageMetadata"]["context_window"] == expected_cw
-    assert payload["metadata"]["context_window"] == expected_cw
+    cw = payload["metadata"]["context_window"]
+    assert cw == assistant_msg.message_metadata["context_window"]
 
     # Spot-check critical sub-fields explicitly so a future refactor that
     # subtly mangles values (rather than dropping the key entirely) still
     # trips this test.
-    cw_via_message_metadata = payload["messageMetadata"]["context_window"]
-    assert cw_via_message_metadata["known"] is True
-    assert cw_via_message_metadata["context_window_tokens"] == 128000
-    assert cw_via_message_metadata["used_tokens"] == 12000
-    assert cw_via_message_metadata["display_state"] == "ok"
+    assert cw["known"] is True
+    assert cw["context_window_tokens"] == 128000
+    assert cw["used_tokens"] == 12000
+    assert cw["display_state"] == "ok"
 
 
 def test_ai_sdk_messages_forwards_pagination_to_message_service():
@@ -228,17 +215,16 @@ def test_ai_sdk_messages_forwards_pagination_to_message_service():
         order_direction="desc",
         include_feedback=False,
     )
-    assert response.data.total == 9
     assert response.data.meta.total == 9
     assert response.data.meta.current_page == 2
     assert response.data.meta.per_page == 1
 
 
-def test_ai_sdk_messages_metadata_keys_share_identity_for_assistant_messages():
-    """The two metadata keys must reference the same persisted dict — i.e.
-    ``metadata`` is a true mirror, not a filtered/stripped subset. Future
-    refactors that only forward a curated allowlist would break the
-    context-window indicator's access to fields it doesn't know about yet.
+def test_ai_sdk_messages_preserve_unknown_metadata_fields():
+    """``metadata`` must pass through persisted fields the endpoint does not
+    know about (only the legacy renderer fields are scrubbed). A curated
+    allowlist would break the context-window indicator's access to fields it
+    doesn't know about yet.
     """
 
     assistant_msg = _build_assistant_message_with_context_window()
@@ -256,12 +242,91 @@ def test_ai_sdk_messages_metadata_keys_share_identity_for_assistant_messages():
     ui_message = response.data.messages[0]
     payload = ui_message.model_dump(by_alias=True)
 
-    assert payload["messageMetadata"] == payload["metadata"], (
-        "`metadata` must be a full mirror of `messageMetadata`, not a subset"
+    assert payload["metadata"] == assistant_msg.message_metadata
+
+
+def test_ai_sdk_messages_scrub_legacy_renderer_fields():
+    """Legacy renderer fields must not reach AI SDK clients; images surface
+    as ``file`` parts instead, and a leading ``text`` part is guaranteed."""
+
+    now = datetime.now(UTC)
+    assistant_msg = SimpleNamespace(
+        id=uuid4(),
+        sender=2,
+        content="Answer with an image.",
+        created_at=now,
+        message_metadata={
+            "provider": "openai",
+            "images": [{"url": "https://img.test/a.png", "mime": "image/png"}],
+            "has_images": True,
+            "images_count": 1,
+            "agentic_images_count": 1,
+            "live_widgets": [{"widget_id": "w-1"}],
+            "canvas_artifact": {"content": "<html></html>", "language": "html"},
+            "pending_tool_calls": [],
+            "_rich_item_candidates": [],
+        },
     )
-    # And both must equal the originally persisted metadata dict (the
-    # endpoint must not strip or rewrite fields).
-    assert payload["messageMetadata"] == assistant_msg.message_metadata
+    user_msg = SimpleNamespace(
+        id=uuid4(),
+        sender=1,
+        content="show me",
+        created_at=now,
+        message_metadata=None,
+    )
+    message_service = _build_message_service([user_msg, assistant_msg])
+
+    response = asyncio.run(
+        get_conversation_messages_ai_sdk(
+            uuid4(),
+            message_service,
+            uuid4(),
+            MessagePaginationParams(),
+        )
+    )
+
+    user_payload = response.data.messages[0].model_dump(by_alias=True)
+    assistant_payload = response.data.messages[1].model_dump(by_alias=True)
+
+    assert assistant_payload["metadata"] == {"provider": "openai"}
+    assert assistant_payload["parts"][0] == {
+        "type": "text",
+        "text": "Answer with an image.",
+    }
+    assert {
+        "type": "file",
+        "url": "https://img.test/a.png",
+        "mediaType": "image/png",
+    } in assistant_payload["parts"]
+    assert user_payload["parts"] == [{"type": "text", "text": "show me"}]
+
+
+def test_ai_sdk_messages_hide_v1_image_candidates_without_capability():
+    """A v1 message must never fall back to legacy ``images`` for file parts,
+    even for non-capable clients where the capability projection has already
+    stripped ``rich_items_version`` (regression: hidden candidates leaked as
+    file parts through exactly that ordering)."""
+
+    assistant_msg = _build_assistant_message_with_rich_items()
+    assistant_msg.message_metadata = {
+        **assistant_msg.message_metadata,
+        "images": [{"url": "https://img.test/hidden-candidate.png", "mime": "image/png"}],
+    }
+    message_service = _build_message_service([assistant_msg])
+
+    response = asyncio.run(
+        get_conversation_messages_ai_sdk(
+            uuid4(),
+            message_service,
+            uuid4(),
+            MessagePaginationParams(),
+        )
+    )
+
+    payload = response.data.messages[0].model_dump(by_alias=True)
+
+    assert all(part["type"] != "file" for part in payload["parts"])
+    assert "images" not in payload["metadata"]
 
 
 def test_ai_sdk_messages_strip_rich_v1_fields_without_capability():
@@ -280,10 +345,9 @@ def test_ai_sdk_messages_strip_rich_v1_fields_without_capability():
     payload = response.data.messages[0].model_dump(by_alias=True)
 
     assert "<!--rich:" not in payload["content"]
-    assert "rich_items" not in payload["messageMetadata"]
-    assert "rich_items_version" not in payload["messageMetadata"]
-    assert "rich_reference_warnings" not in payload["messageMetadata"]
-    assert payload["metadata"] == payload["messageMetadata"]
+    assert "rich_items" not in payload["metadata"]
+    assert "rich_items_version" not in payload["metadata"]
+    assert "rich_reference_warnings" not in payload["metadata"]
 
 
 def test_ai_sdk_messages_preserve_rich_v1_fields_with_capability():
@@ -303,6 +367,5 @@ def test_ai_sdk_messages_preserve_rich_v1_fields_with_capability():
     payload = response.data.messages[0].model_dump(by_alias=True)
 
     assert "<!--rich:widget:w-1-->" in payload["content"]
-    assert payload["messageMetadata"]["rich_items_version"] == 1
-    assert payload["messageMetadata"]["rich_items"][0]["id"] == "widget:w-1"
-    assert payload["metadata"] == payload["messageMetadata"]
+    assert payload["metadata"]["rich_items_version"] == 1
+    assert payload["metadata"]["rich_items"][0]["id"] == "widget:w-1"

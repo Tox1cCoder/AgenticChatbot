@@ -13,13 +13,21 @@ import json
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
-from app.core.config import settings
+from app.core.rich_response import select_transient_upsert_items
 
+from .ai_sdk_projection import (
+    attach_image_parts_to_message,
+    clean_tool_output,
+    coerce_json_object,
+    find_message_metadata,
+    is_v1_rich_items_message,
+    project_ai_sdk_message_event,
+    project_ai_sdk_message_for_capability,
+    visible_image_file_parts,
+)
 from .events import SUBAGENT_PHASE_BY_EVENT, V3StreamEvent, make_event
 
-_AI_SDK_HEARTBEAT_INTERVAL_SECONDS = float(
-    getattr(settings, "ai_sdk_heartbeat_interval_seconds", 15.0) or 15.0
-)
+_AI_SDK_HEARTBEAT_INTERVAL_SECONDS = 15.0
 
 
 def _sse(data: dict[str, Any]) -> str:
@@ -184,10 +192,13 @@ class AISDKV6StreamAdapter:
             return
 
         if etype == "user_message_created":
+            message = data.get("message")
+            if isinstance(message, dict):
+                message = project_ai_sdk_message_event(message, include_content=True)
             yield _sse(
                 {
                     "type": "data-user-message",
-                    "data": {"message": data.get("message")},
+                    "data": {"message": message},
                     "transient": True,
                 }
             )
@@ -256,8 +267,6 @@ class AISDKV6StreamAdapter:
         return f"tool_{state.tool_seq}"
 
     async def _tool_input(self, event: V3StreamEvent) -> AsyncGenerator[str, None]:
-        from app.api.ai_sdk import _clean_tool_output, _coerce_json_object
-
         state = self._state
         tool_call_id = self._resolve_tool_call_id(event, is_end=False)
         tool_name = event.tool_name or "unknown"
@@ -269,13 +278,11 @@ class AISDKV6StreamAdapter:
                 "type": "tool-input-available",
                 "toolCallId": tool_call_id,
                 "toolName": tool_name,
-                "input": _coerce_json_object(_clean_tool_output((event.data or {}).get("args"))),
+                "input": coerce_json_object(clean_tool_output((event.data or {}).get("args"))),
             }
         )
 
     async def _tool_output(self, event: V3StreamEvent) -> AsyncGenerator[str, None]:
-        from app.api.ai_sdk import _clean_tool_output, _coerce_json_object
-
         state = self._state
         tool_call_id = self._resolve_tool_call_id(event, is_end=True)
         if tool_call_id in state.pending_tool_call_ids:
@@ -285,7 +292,7 @@ class AISDKV6StreamAdapter:
         payload: dict[str, Any] = {
             "type": "tool-output-available",
             "toolCallId": tool_call_id,
-            "output": _coerce_json_object(_clean_tool_output(data.get("output"))),
+            "output": coerce_json_object(clean_tool_output(data.get("output"))),
         }
         render = data.get("render")
         if isinstance(render, dict):
@@ -295,8 +302,6 @@ class AISDKV6StreamAdapter:
     async def _rich_items(self, data: dict[str, Any]) -> AsyncGenerator[str, None]:
         if not self._state.inline_rich_response_v1:
             return
-        from app.core.rich_response import select_transient_upsert_items
-
         safe_items = select_transient_upsert_items(data.get("items") or [])
         if not safe_items:
             return
@@ -342,12 +347,7 @@ class AISDKV6StreamAdapter:
             yield _sse({"type": "text-delta", "id": state.text_id, "delta": message.strip()})
         projected_message = message
         if isinstance(message, dict):
-            from app.api.ai_sdk import project_ai_sdk_assistant_message_event
-
-            projected_message = project_ai_sdk_assistant_message_event(
-                message,
-                include_content=True,
-            )
+            projected_message = project_ai_sdk_message_event(message, include_content=True)
         if state.text_started:
             yield _sse({"type": "text-end", "id": state.text_id})
         if state.reasoning_started:
@@ -358,7 +358,6 @@ class AISDKV6StreamAdapter:
                 "data": {
                     "threadId": data.get("thread_id"),
                     "next": data.get("next"),
-                    "pendingToolCalls": data.get("pending_tool_calls"),
                     "interrupt": data.get("interrupt"),
                     "message": projected_message,
                 },
@@ -376,6 +375,8 @@ class AISDKV6StreamAdapter:
         if state.reasoning_started:
             yield _sse({"type": "reasoning-end", "id": state.reasoning_id})
         message = data.get("message")
+        if isinstance(message, dict):
+            message = project_ai_sdk_message_event(message, include_content=True)
         if message:
             yield _sse(
                 {"type": "data-error-message", "data": {"message": message}, "transient": True}
@@ -385,24 +386,19 @@ class AISDKV6StreamAdapter:
         yield "data: [DONE]\n\n"
 
     async def _complete(self, data: dict[str, Any]) -> AsyncGenerator[str, None]:
-        from app.api.ai_sdk import (
-            _attach_image_parts_to_message,
-            _extract_image_file_parts_from_message,
-            _is_v1_rich_items_message,
-            _scrub_v1_legacy_image_fields,
-            _selected_image_file_parts_from_rich_items,
-            project_ai_sdk_assistant_message_event,
-            project_ai_sdk_message_for_capability,
-        )
-
         state = self._state
         message = data.get("message") or {}
+        is_v1 = False
         if isinstance(message, dict):
+            # v1-ness is decided on the original metadata so hidden image
+            # candidates cannot fall back onto legacy `images` after the
+            # capability projection strips the rich keys.
+            is_v1 = is_v1_rich_items_message(find_message_metadata(message))
             message = project_ai_sdk_message_for_capability(
                 message,
                 inline_rich_response_v1=state.inline_rich_response_v1,
             )
-            message = _attach_image_parts_to_message(message)
+            message = attach_image_parts_to_message(message, is_v1=is_v1)
 
         if not state.any_text_delta:
             content = message.get("content") or "" if isinstance(message, dict) else ""
@@ -410,18 +406,10 @@ class AISDKV6StreamAdapter:
                 state.any_text_delta = True
                 yield _sse({"type": "text-delta", "id": state.text_id, "delta": content})
 
-        metadata = None
         if isinstance(message, dict):
-            for key in ("message_metadata", "messageMetadata", "metadata"):
-                value = message.get(key)
-                if isinstance(value, dict):
-                    metadata = value
-                    break
-            if _is_v1_rich_items_message(metadata):
-                file_parts = _selected_image_file_parts_from_rich_items(metadata)
-            else:
-                file_parts = _extract_image_file_parts_from_message(message)
-            for file_part in file_parts:
+            # File parts are sourced before the projection scrubs legacy image
+            # metadata off the wire payload.
+            for file_part in visible_image_file_parts(message, is_v1=is_v1):
                 yield _sse(
                     {
                         "type": "file",
@@ -431,9 +419,7 @@ class AISDKV6StreamAdapter:
                 )
 
         if isinstance(message, dict) and message:
-            message_meta = project_ai_sdk_assistant_message_event(message)
-            if _is_v1_rich_items_message(metadata):
-                _scrub_v1_legacy_image_fields(message_meta)
+            message_meta = project_ai_sdk_message_event(message)
             # A message carrying only an id has no side-channel metadata worth a
             # dedicated data part (the streamed text already conveyed the body).
             if message_meta and any(key != "id" for key in message_meta):

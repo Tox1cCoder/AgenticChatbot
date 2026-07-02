@@ -14,11 +14,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.api.ai_sdk import (
-    StreamState,
-    _build_ui_message_stream_response,
-    project_ai_sdk_message_for_capability,
-)
+from app.api.ai_sdk import StreamState, _build_ui_message_stream_response
 from app.core.config import settings
 from app.core.rich_response import select_transient_upsert_items
 from app.models.enums import MessageRole
@@ -30,6 +26,9 @@ from app.schemas.workflow import (
     WorkflowResponseMessage,
 )
 from app.services.ai_service import AIService
+from app.services.event_streaming.ai_sdk_projection import (
+    project_ai_sdk_message_for_capability,
+)
 from app.services.event_streaming.events import make_event
 from app.services.event_streaming.internal_sse import legacy_event_from_v3
 from app.services.message_service import MessageService

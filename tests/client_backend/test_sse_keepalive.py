@@ -51,10 +51,10 @@ async def test_ai_sdk_stream_emits_heartbeats_during_slow_source():
 
     state = StreamState(message_id="msg-1", text_id="txt-1", reasoning_id="rsn-1")
 
-    import app.api.ai_sdk as ai_sdk_module
+    import app.services.event_streaming.ai_sdk_v6 as ai_sdk_v6_module
 
-    original_interval = ai_sdk_module._AI_SDK_HEARTBEAT_INTERVAL_SECONDS
-    ai_sdk_module._AI_SDK_HEARTBEAT_INTERVAL_SECONDS = 0.01
+    original_interval = ai_sdk_v6_module._AI_SDK_HEARTBEAT_INTERVAL_SECONDS
+    ai_sdk_v6_module._AI_SDK_HEARTBEAT_INTERVAL_SECONDS = 0.01
 
     try:
         response = _build_ui_message_stream_response(slow_event_source, state)
@@ -62,7 +62,7 @@ async def test_ai_sdk_stream_emits_heartbeats_during_slow_source():
         async for chunk in response.body_iterator:
             collected.append(chunk)
     finally:
-        ai_sdk_module._AI_SDK_HEARTBEAT_INTERVAL_SECONDS = original_interval
+        ai_sdk_v6_module._AI_SDK_HEARTBEAT_INTERVAL_SECONDS = original_interval
 
     all_text = "".join(collected)
     events = [line[6:] for line in all_text.split("\n") if line.startswith("data: ")]

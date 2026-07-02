@@ -143,14 +143,17 @@ async def test_interrupt_projects_paused_message_metadata_shape():
 
     payloads = await _collect_payloads(source)
     interrupt_payload = next(
-        payload for payload in payloads if payload != "[DONE]" and payload["type"] == "data-interrupt"
+        payload
+        for payload in payloads
+        if payload != "[DONE]" and payload["type"] == "data-interrupt"
     )
     message = interrupt_payload["data"]["message"]
 
     assert message["id"] == "paused-1"
     assert message["metadata"] == {"paused": True, "pause_reason": "tool_approval_required"}
-    assert message["messageMetadata"] == message["metadata"]
+    assert "messageMetadata" not in message
     assert "message_metadata" not in message
+    assert "pendingToolCalls" not in interrupt_payload["data"]
 
 
 @pytest.mark.asyncio
@@ -226,9 +229,88 @@ async def test_terminal_assistant_message_projects_to_ui_message_metadata_shape(
     assert message["role"] == "assistant"
     assert message["createdAt"] == "2026-06-22T01:00:00Z"
     assert message["metadata"] == {"context_window": {"display_state": "ok"}}
-    assert message["messageMetadata"] == message["metadata"]
+    assert "messageMetadata" not in message
     assert "message_metadata" not in message
     assert "content" not in message
+    assert "sender" not in message
+    assert "conversation_id" not in message
+    assert "updated_at" not in message
+
+
+@pytest.mark.asyncio
+async def test_terminal_assistant_message_scrubs_legacy_renderer_fields():
+    async def source():
+        yield make_event(
+            "complete",
+            sequence=1,
+            data={
+                "message": {
+                    "id": "m-1",
+                    "sender": 2,
+                    "content": "Answer",
+                    "message_metadata": {
+                        "provider": "openai",
+                        "images": [{"url": "https://img.test/a.png", "mime": "image/png"}],
+                        "has_images": True,
+                        "images_count": 1,
+                        "agentic_images_count": 1,
+                        "live_widgets": [{"widget_id": "w-1"}],
+                        "canvas_artifact": {"content": "<html></html>"},
+                        "pending_tool_calls": [],
+                        "_rich_item_candidates": [],
+                    },
+                }
+            },
+        )
+
+    payloads = await _collect_payloads(source)
+    assistant_payload = next(
+        payload
+        for payload in payloads
+        if payload != "[DONE]" and payload.get("type") == "data-assistant-message"
+    )
+    metadata = assistant_payload["data"]["message"]["metadata"]
+
+    assert metadata == {"provider": "openai"}
+    # Legacy images still surface as AI SDK file parts, extracted before the scrub.
+    file_payloads = [
+        payload for payload in payloads if payload != "[DONE]" and payload.get("type") == "file"
+    ]
+    assert [payload["url"] for payload in file_payloads] == ["https://img.test/a.png"]
+
+
+@pytest.mark.asyncio
+async def test_user_message_event_projects_wire_safe_payload():
+    async def source():
+        yield make_event(
+            "user_message_created",
+            sequence=1,
+            data={
+                "message": {
+                    "id": "u-1",
+                    "sender": 1,
+                    "conversation_id": "conversation-1",
+                    "content": "hi",
+                    "created_at": "2026-07-02T01:00:00Z",
+                    "updated_at": "2026-07-02T01:00:01Z",
+                    "message_metadata": {},
+                }
+            },
+        )
+        yield make_event("complete", sequence=2, data={"message": {"id": "m-1"}})
+
+    payloads = await _collect_payloads(source)
+    user_payload = next(
+        payload
+        for payload in payloads
+        if payload != "[DONE]" and payload.get("type") == "data-user-message"
+    )
+    message = user_payload["data"]["message"]
+
+    assert message["id"] == "u-1"
+    assert message["role"] == "user"
+    assert message["content"] == "hi"
+    assert message["createdAt"] == "2026-07-02T01:00:00Z"
     assert "sender" not in message
     assert "conversation_id" not in message
     assert "updated_at" not in message

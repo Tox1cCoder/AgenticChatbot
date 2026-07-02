@@ -677,7 +677,7 @@ or external traffic needs review.
 
 The backend preserves rich tool render metadata in two places:
 
-- Persisted assistant message metadata: `messageMetadata.tool_artifacts[].render`
+- Persisted assistant message metadata: `metadata.tool_artifacts[].render`
 - AI SDK streams: `tool-output-available.render`
 
 The model-facing tool message remains compact text. Frontends should render from
@@ -1078,7 +1078,7 @@ Marker rules:
 - Must appear on its own line, optionally with up to three leading spaces and trailing whitespace.
 - `<id>` may contain ASCII letters, digits, `_`, `-`, `.`, and `:` and is at most 128 characters.
 - Markers inside fenced (` ``` ` or `~~~`) or indented (4-space) code blocks are treated as literal markdown.
-- Unknown ids produce a neutral unavailable-content block plus a validation warning in `messageMetadata.rich_reference_warnings`.
+- Unknown ids produce a neutral unavailable-content block plus a validation warning in `metadata.rich_reference_warnings`.
 
 ### Stable item IDs
 
@@ -1150,7 +1150,7 @@ Capable AI SDK streams emit additive `data-rich-items` parts as safe non-image r
 }
 ```
 
-Image candidates are **never** streamed transiently — they only surface in the final `data-assistant-message.data.message.messageMetadata.rich_items` after marker selection. Canvas source is excluded from transient upserts. Transient data parts ride in `useChat({ onData })`, not in `message.parts`. The AI SDK response retains the `x-vercel-ai-ui-message-stream: v1` header.
+Image candidates are **never** streamed transiently — they only surface in the final `data-assistant-message.data.message.metadata.rich_items` after marker selection. Canvas source is excluded from transient upserts. Transient data parts ride in `useChat({ onData })`, not in `message.parts`. The AI SDK response retains the `x-vercel-ai-ui-message-stream: v1` header.
 
 ### Client renderer algorithm
 
@@ -1159,7 +1159,7 @@ Image candidates are **never** streamed transiently — they only surface in the
 3. Accumulate `text-delta` content normally.
 4. Split the accumulated text only on standalone complete markers into blocks.
 5. Render a known typed item at that block position; while a streamed marker is waiting for its widget upsert, render a lightweight inline placeholder there.
-6. On final `data-assistant-message`, replace transient registry data with persisted `messageMetadata.rich_items` when present. Refetch `GET /ai/conversations/{conversation_id}/messages?inlineRichResponseV1=true` after `finish` for the authoritative final content layout when auto-placement may have inserted markers during persistence.
+6. On final `data-assistant-message`, replace transient registry data with persisted `metadata.rich_items` when present. Refetch `GET /ai/conversations/{conversation_id}/messages?inlineRichResponseV1=true` after `finish` for the authoritative final content layout when auto-placement may have inserted markers during persistence.
 7. Append only unreferenced items whose `display_policy == "inline_or_append"`. Never build an image gallery from unreferenced image candidates or legacy `images`.
 
 ### Migration rules

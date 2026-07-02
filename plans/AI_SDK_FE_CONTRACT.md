@@ -2,6 +2,27 @@
 
 This document describes the frontend-facing response shape for the AI SDK-compatible chat path.
 
+## BREAKING CHANGES — 2026-07-02 response-format cleanup
+
+> **Read this first if you built against an earlier revision of this document.**
+> The legacy compatibility fields were removed from every AI SDK-visible surface
+> (`plans/ai_sdk_response_cleanup.md` records the decision). Persisted data and
+> the internal `/messages/stream` path are unchanged.
+
+| # | Change | Migration |
+|---|---|---|
+| 1 | `messageMetadata` mirror **removed** from history messages and the `data-assistant-message` / `data-interrupt` message payloads. | Read `message.metadata` only. |
+| 2 | `data-interrupt.data.pendingToolCalls` **removed**. | Read `data.interrupt.action_requests[]`. |
+| 3 | `data.total` **removed** from the messages listing payload. | Read `data.meta.total`. |
+| 4 | Legacy renderer metadata **scrubbed** from all AI SDK responses: `images`, `has_images`, `images_count`, `agentic_images_count`, `live_widgets`, `canvas_artifact`, `pending_tool_calls`, and internal `_`-prefixed keys. | Images: render `parts[].type === "file"`. Widgets, canvas artifacts, tool renders: render `metadata.rich_items` — send `inlineRichResponseV1: true`. |
+| 5 | `data-user-message` / `data-error-message` payloads are now projected (`id`, `role`, `content`, `createdAt`, `metadata`, `parts`) — raw DB fields (`conversation_id`, `sender`, `updated_at`) no longer appear. | Use the projected fields. |
+| 6 | History messages always carry `parts` with a guaranteed leading `text` part. | Render from `parts` per the AI SDK v5+ `UIMessage` spec. |
+
+Because of change 4, **`inlineRichResponseV1: true` is effectively required** for
+clients that want widgets, canvas artifacts, or tool renders. The server-side
+`inline_rich_response_enabled` kill switch now disables rich UI entirely for AI
+SDK clients (they still get text and image `file` parts).
+
 ## Chat Path
 
 Use:
@@ -128,7 +149,6 @@ Assistant metadata:
       "role": "assistant",
       "createdAt": "ISO-8601 timestamp",
       "metadata": {},
-      "messageMetadata": {},
       "parts": []
     }
   }
@@ -138,7 +158,8 @@ Assistant metadata:
 Notes:
 
 - `data-assistant-message.data.message.content` is intentionally omitted on the stream because answer text already arrived as `text-delta`.
-- Stream metadata is projected to the AI SDK `metadata` field and mirrored to `messageMetadata` for existing client code. `message_metadata` is not emitted on AI SDK stream messages.
+- Stream metadata is projected to the AI SDK `metadata` field only. The `messageMetadata` mirror and the `message_metadata` wire alias are not emitted on AI SDK stream messages.
+- `metadata` is scrubbed of legacy renderer fields (see the breaking-changes table) before it reaches the wire.
 - `parts` may contain generated image/file parts. For v1 rich responses, only selected images appear as file parts.
 - Article-style auto-placement can add final `<!--rich:<id>-->` markers at persistence time after text deltas have already streamed. For the AI SDK stream, use the persisted message from history after `finish` when you need the exact final marker layout.
 
@@ -164,6 +185,11 @@ Other data events:
 { "type": "data-node-complete", "data": { "node": "chat_agent" }, "transient": true }
 { "type": "heartbeat" }
 ```
+
+`data-user-message.data.message` is a wire-safe projection of the persisted user
+message — `id`, `role`, `content`, `createdAt`, plus `metadata`/`parts` when
+present. Database-only fields (`conversation_id`, `sender`, `updated_at`) are
+never included.
 
 ## Subagent Progress
 
@@ -229,7 +255,7 @@ Detect HITL by checking for `data-interrupt`:
 ```ts
 const isHitl = event.type === "data-interrupt";
 const interrupt = event.data?.interrupt;
-const requests = interrupt?.action_requests ?? event.data?.pendingToolCalls ?? [];
+const requests = interrupt?.action_requests ?? [];
 ```
 
 When `isHitl` is true, render a human-in-the-loop UI from `requests`. The stream will finish immediately after the interrupt event.
@@ -242,7 +268,7 @@ today. Frontend should derive the interrupt kind from the event and metadata:
 
 | Derived kind | How to detect | FE behavior |
 |---|---|---|
-| `tool_approval` | `event.type === "data-interrupt"` and `data.interrupt.action_requests[]` or `data.pendingToolCalls[]` is present | Render approval UI and resume through `POST /ai/resume-interrupt`. This is the current HITL interrupt shape. |
+| `tool_approval` | `event.type === "data-interrupt"` and `data.interrupt.action_requests[]` is present | Render approval UI and resume through `POST /ai/resume-interrupt`. This is the current HITL interrupt shape. |
 | `planning_pause` | Final assistant metadata has `planning_budget_reached: true`, `execution_paused: true`, or `execution_pause_reason` | Do not render HITL decisions. Show the assistant content/message and let the user continue with a normal chat message. |
 | `subagent_requires_approval` | Live `data-subagent.data.subagent.status === "requires_approval"` or final `backendMeta.subagent_results[].status === "requires_approval"` | Show worker as blocked. The nested worker is not resumable through `/ai/resume-interrupt`; the user must approve or rerun the operation from the main conversation. |
 
@@ -268,14 +294,6 @@ Decision types are the user actions sent back on resume: `approve`, `edit`,
   "data": {
     "threadId": "conversation-thread-id",
     "next": ["approval-node"],
-    "pendingToolCalls": [
-      {
-        "id": "tool-call-id",
-        "name": "tool_name",
-        "args": {},
-        "tool_call_id": "tool-call-id"
-      }
-    ],
     "interrupt": {
       "interrupt_id": "interrupt-id",
       "thread_id": "conversation-thread-id",
@@ -316,8 +334,7 @@ Decision types are the user actions sent back on resume: `approve`, `edit`,
         "paused": true,
         "pause_reason": "tool_approval_required",
         "thread_id": "conversation-thread-id",
-        "next": ["approval-node"],
-        "pending_tool_calls": []
+        "next": ["approval-node"]
       }
     }
   }
@@ -331,7 +348,7 @@ Important HITL fields:
 | `data.threadId` | string | Required for resume as `threadId`. |
 | `data.interrupt.interrupt_id` | string | Required for resume as `interruptId`. |
 | `data.interrupt.conversation_id` | string | Required for resume as `conversationId`. |
-| `data.interrupt.action_requests[]` | array | Canonical list of tool calls awaiting human input. Prefer this over `pendingToolCalls` for UI. |
+| `data.interrupt.action_requests[]` | array | Canonical (and only) list of tool calls awaiting human input. |
 | `action_requests[].action` | string | Tool/action name. |
 | `action_requests[].args` | object | Original tool arguments. Use this to show what will run. |
 | `action_requests[].description` | string or null | Optional human-readable tool description. |
@@ -458,11 +475,9 @@ Query fields:
           { "type": "file", "url": "data:image/png;base64,...", "mediaType": "image/png" }
         ],
         "metadata": {},
-        "messageMetadata": {},
         "createdAt": "ISO-8601 timestamp"
       }
     ],
-    "total": 1,
     "meta": {
       "total": 1,
       "perPage": 20,
@@ -480,14 +495,13 @@ Message fields:
 | `id` | string | Message UUID. |
 | `role` | string | `user` or `assistant`. |
 | `content` | string | Markdown/plain text. For rich v1, may contain `<!--rich:<id>-->` markers only when the history request opts in with `inlineRichResponseV1=true` and the server rich-response setting is enabled. |
-| `parts` | array or null | AI SDK UI parts. Images are exposed as `file` parts. |
+| `parts` | array | AI SDK UI parts. Always present; a leading `text` part carrying the message content is guaranteed. Images are exposed as `file` parts. |
 | `parts[].type` | string | `text`, `file`, or `reasoning`. |
 | `parts[].text` | string | Text part content. |
 | `parts[].url` | string | File URL, data URL, remote URL, or blob URL. |
 | `parts[].mediaType` | string | MIME type for file part. |
 | `parts[].reasoning` | string | Reasoning content for reasoning parts, if present. |
-| `metadata` | object or null | Canonical AI SDK UI message metadata field. |
-| `messageMetadata` | object or null | Compatibility mirror of `metadata` for existing assistant-message consumers. |
+| `metadata` | object or null | Canonical AI SDK UI message metadata field, scrubbed of legacy renderer fields. |
 | `createdAt` | string or null | ISO-8601 timestamp. |
 
 ## Assistant Metadata Shape
@@ -495,8 +509,7 @@ Message fields:
 Use:
 
 ```ts
-const backendMeta =
-  message.metadata ?? message.messageMetadata ?? {};
+const backendMeta = message.metadata ?? {};
 ```
 
 Common `backendMeta` fields:
@@ -528,16 +541,10 @@ Common `backendMeta` fields:
   "subagent_dispatches": [],
   "subagent_results": [],
   "tool_artifacts": [],
-  "live_widgets": [],
-  "images": [],
-  "has_images": true,
-  "images_count": 1,
-  "agentic_images_count": 1,
   "documents_cited": [],
   "chunks_retrieved": 3,
   "documents_found": 1,
   "citations": [],
-  "canvas_artifact": {},
   "rich_items_version": 1,
   "rich_items": [],
   "rich_reference_warnings": [],
@@ -555,12 +562,12 @@ Common `backendMeta` fields:
 
 All fields are optional. Frontend should ignore unknown keys.
 
-Metadata compatibility rules:
+Metadata rules:
 
-- Prefer `message.metadata ?? message.messageMetadata ?? {}`.
-- `metadata` and `messageMetadata` are mirrors on history and final stream assistant-message side-channel payloads. The old `message_metadata` wire alias is not emitted by the AI SDK response path.
-- `rich_items`, when present, is a field inside backend metadata at the same level as `live_widgets`, `images`, `tool_artifacts`, and `canvas_artifact`. It is not a top-level message field and is not nested under those legacy renderer fields.
-- Internal keys beginning with `_`, such as `_rich_item_candidates` and `_inline_rich_response_v1`, should not be persisted or rendered. Ignore them if seen from a non-production path.
+- `message.metadata` is the only metadata field. The `messageMetadata` mirror and the `message_metadata` wire alias are not emitted by the AI SDK response path.
+- Legacy renderer fields (`images`, `has_images`, `images_count`, `agentic_images_count`, `live_widgets`, `canvas_artifact`, `pending_tool_calls`) are scrubbed from AI SDK responses even when present in persisted data. Images arrive as `file` parts; everything else arrives as `rich_items`.
+- `rich_items`, when present, is a field inside backend metadata at the same level as `tool_artifacts`. It is not a top-level message field.
+- Internal keys beginning with `_`, such as `_rich_item_candidates` and `_inline_rich_response_v1`, are scrubbed from AI SDK responses.
 
 Core runtime/model fields:
 
@@ -612,15 +619,15 @@ Renderer/media fields:
 | Field | Type | FE usage |
 |---|---|---|
 | `tool_artifacts` | array | Persisted compact tool execution records. Use for trace, audit, and tool-render fallback. |
-| `live_widgets` | array | Legacy widget mount metadata. Use only when rich `live_widget` items are absent. |
-| `images` | array | Legacy image metadata. Prefer AI SDK `parts[].type === "file"` or rich image items. |
-| `has_images` / `images_count` / `agentic_images_count` | boolean/number | Legacy image counters. |
-| `canvas_artifact` | object | Legacy canvas artifact. Prefer rich `canvas_artifact` items for placement when v1 rich items exist. |
 | `rich_items_version` | number | Current version is `1`. Present only for messages with rich-item activity. |
-| `rich_items` | array | Final authoritative rich-item registry for inline/append rendering. |
+| `rich_items` | array | Final authoritative rich-item registry for inline/append rendering. The only source for widgets, canvas artifacts, and tool renders. |
 | `rich_reference_warnings` | array | Validation warnings such as `unknown_rich_item` or `invalid_rich_item`. |
 | `documents_cited` / `citations` | array | RAG citation metadata. |
 | `chunks_retrieved` / `documents_found` | number | RAG retrieval counters. |
+
+Removed legacy renderer fields (`images`, image counters, `live_widgets`,
+`canvas_artifact`) are scrubbed from AI SDK responses — see the
+breaking-changes table.
 
 Planning/HITL/user-experience fields:
 
@@ -633,7 +640,6 @@ Planning/HITL/user-experience fields:
 | `pause_reason` | string | Pause reason; see HITL Interrupt Types. |
 | `thread_id` | string | Resume thread id for persisted interrupt messages. |
 | `next` | string[] | Next graph node(s) for resume/debug. |
-| `pending_tool_calls` | array | Legacy pending tool calls. Prefer `interrupt.action_requests`. |
 | `todos` | array | Current task-plan/todo state for planning UI. |
 | `planning_call_count` | number | Number of planning loop calls this turn. |
 | `all_tasks_completed` | boolean | Planning execution completed all tasks. |
@@ -684,50 +690,19 @@ Accepted attachment fields:
 | `url` | string | `data:`, `http://`, `https://`, or `blob:` URL. |
 | `path` / `image` / `source` | string or object | Fallback source fields. Local filesystem-like paths are ignored. |
 
-### Assistant Image Metadata
+### Assistant Images
 
-Legacy image metadata may appear in `backendMeta.images`:
-
-```json
-{
-  "images": [
-    {
-      "data": "base64_encoded_image_data",
-      "mime": "image/jpeg",
-      "name": "Image description or caption",
-      "page_number": 5,
-      "caption": "Original image caption",
-      "url": "https://optional.remote/image.png",
-      "source_url": "https://optional.source/page",
-      "description": "Optional description",
-      "rich_item_id": "image:document:image-id"
-    }
-  ],
-  "has_images": true,
-  "images_count": 1
-}
-```
-
-Image metadata fields:
-
-| Field | Type | Notes |
-|---|---|---|
-| `data` | string | Raw base64. AI SDK adapter emits a `file` part as `data:<mime>;base64,<data>`. |
-| `url` | string | Remote/data/blob URL. Used directly for `file.url`. |
-| `base64` / `image` / `source` | string | Fallback image source fields accepted by the adapter. |
-| `mime` / `mimeType` / `mediaType` / `contentType` | string | MIME type. Defaults to `image/png` for response projection. |
-| `name` | string | Optional display name. |
-| `caption` | string | Optional caption from document/image extraction. |
-| `page_number` | number | Optional document page number. |
-| `source_url` | string | Optional source page URL. |
-| `description` | string | Optional description. |
-| `rich_item_id` / `id` | string | Used to filter v1 rich images. |
+Assistant images are delivered exclusively as AI SDK `file` parts (streamed
+`file` chunks during generation, `parts[].type === "file"` on history and the
+final `data-assistant-message`). The legacy `backendMeta.images` array and its
+counters are scrubbed from AI SDK responses.
 
 Frontend rendering rule:
 
-- Prefer AI SDK `parts[].type === "file"` for images.
-- If `rich_items_version === 1`, render selected image rich items and file parts only. Do not build a separate gallery from `backendMeta.images`.
-- If there is no `rich_items_version`, legacy clients may render `backendMeta.images` as a gallery.
+- Render AI SDK `parts[].type === "file"` for images.
+- If `rich_items_version === 1`, image rich items carry placement (`inline_only`
+  markers); the emitted file parts contain only the selected images.
+- Do not build a separate image gallery from metadata.
 
 ## Rich Response v1
 
@@ -798,7 +773,7 @@ new rich item types. It changes when markers can appear:
 - The server-side `inline_rich_response_enabled` setting now defaults to enabled and remains a kill switch. If it is disabled, the backend strips/omits v1 marker behavior even when the client opts in.
 - When `rich_auto_place_enabled` is enabled, the backend may insert markers for relevant unreferenced image candidates and live widgets into the final persisted assistant markdown.
 - Auto-placement is deterministic and bounded by server settings. Current defaults: at most 3 auto-placed images per answer, one placed item per paragraph, and a minimum keyword-overlap score of 0.25. Widget placement is not capped by the image limit.
-- Images still use `display_policy: "inline_only"`. Unplaced image candidates are dropped/scrubbed from v1 legacy image fields; clients should not render a separate gallery from hidden candidates.
+- Images still use `display_policy: "inline_only"`. Unplaced image candidates are never exposed to AI SDK clients; do not render a separate gallery.
 - The final authoritative layout is the pair of persisted `message.content` plus `metadata.rich_items`.
 
 Streaming note:
@@ -999,33 +974,17 @@ widget renderers (`table`/`chart`/`dashboard`/`form`/`list`) — do **not** choo
 renderer by `widget_type`. Legacy persisted metadata may still carry a removed structured
 type; render those as an unsupported/legacy placeholder rather than a structured renderer.
 
-Live widgets can appear in two places:
+Live widgets reach AI SDK clients only through
+`backendMeta.rich_items[]` where `type === "live_widget"` (the legacy
+`backendMeta.live_widgets[]` array is scrubbed from AI SDK responses).
 
-1. Legacy metadata: `backendMeta.live_widgets[]`
-2. Rich response v1: `backendMeta.rich_items[]` where `type === "live_widget"`
-
-Legacy `live_widgets[]` shape:
-
-```json
-{
-  "widget_id": "widget-id",
-  "session_id": "conversation-id",
-  "widget_type": "html",
-  "title": "Widget title",
-  "status": "active",
-  "version": 1,
-  "connection_endpoint": "/widgets/widget-id/connection"
-}
-```
-
-Fields:
+Widget rich-item `payload` fields:
 
 | Field | Type | Notes |
 |---|---|---|
 | `widget_id` | string | Widget identifier. |
 | `session_id` | string | Conversation/session id. |
-| `widget_type` | string | Always `html` — the only supported live widget type. Legacy metadata may carry a removed structured type; render those as a legacy placeholder. |
-| `title` | string or null | Optional title. |
+| `widget_type` | string | Always `html` — the only supported live widget type. Older persisted items may carry a removed structured type; render those as a legacy placeholder. |
 | `status` | string | `active` or `closed`. |
 | `version` | number | Incrementing state version. |
 | `connection_endpoint` | string | POST this endpoint to mint a widget WebSocket token. |
@@ -1241,30 +1200,9 @@ Fields are optional and depend on the RAG tool path.
 
 ## Canvas Artifact
 
-Canvas responses can include legacy metadata:
-
-```json
-{
-  "canvas_artifact": {
-    "content": "<full self-contained HTML / SVG document>",
-    "language": "html",
-    "title": "Short title"
-  }
-}
-```
-
-Legacy canvas fields:
-
-| Field | Type | Notes |
-|---|---|---|
-| `content` | string | Full artifact source. Same safety boundary as rich canvas `payload.content`. |
-| `language` | string | Renderer/editor hint. `CanvasAgent` emits `html`, `svg`, or `react`; see Rich Canvas Artifact Item for normalization rules. |
-| `title` | string | Short display title. Derived from `<title>` when available. |
-
-Rich v1 may also expose this as a `canvas_artifact` rich item. If both legacy
-metadata and a rich item are present for the same assistant message, prefer
-`backendMeta.rich_items[]` for placement and keep `canvas_artifact` as the
-legacy append fallback.
+Canvas artifacts reach AI SDK clients only as `canvas_artifact` rich items
+(see Rich Canvas Artifact Item). The legacy `backendMeta.canvas_artifact`
+object is scrubbed from AI SDK responses.
 
 ## Context and Model Metadata
 
@@ -1351,7 +1289,7 @@ Recommended detection:
 
 ```ts
 function getBackendMeta(message: any) {
-  return message?.metadata ?? message?.messageMetadata ?? {};
+  return message?.metadata ?? {};
 }
 
 function isHitlEvent(event: any) {
@@ -1385,14 +1323,13 @@ function getInterruptKind(event: any, backendMeta: any = {}) {
 }
 
 function getHitlRequests(event: any) {
-  return event?.data?.interrupt?.action_requests ?? event?.data?.pendingToolCalls ?? [];
+  return event?.data?.interrupt?.action_requests ?? [];
 }
 
 function getLiveWidgets(meta: any) {
-  const richWidgets = Array.isArray(meta?.rich_items)
+  return Array.isArray(meta?.rich_items)
     ? meta.rich_items.filter((item: any) => item?.type === "live_widget")
     : [];
-  return richWidgets.length ? richWidgets : meta?.live_widgets ?? [];
 }
 
 function getImageParts(message: any) {
@@ -1407,12 +1344,8 @@ function normalizeCanvasLanguage(artifactOrPayload: any) {
 }
 
 function getCanvasItems(meta: any) {
-  const richCanvases = Array.isArray(meta?.rich_items)
+  return Array.isArray(meta?.rich_items)
     ? meta.rich_items.filter((item: any) => item?.type === "canvas_artifact")
-    : [];
-  if (richCanvases.length) return richCanvases;
-  return meta?.canvas_artifact
-    ? [{ type: "canvas_artifact", payload: meta.canvas_artifact }]
     : [];
 }
 ```

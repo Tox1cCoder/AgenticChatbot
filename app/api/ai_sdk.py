@@ -1,5 +1,4 @@
 import base64
-import json
 from collections.abc import AsyncGenerator, Callable
 from typing import Annotated, Any
 from uuid import UUID, uuid4
@@ -23,6 +22,13 @@ from app.schemas.message import InterruptResumeRequest, MessageCreate
 from app.schemas.pagination import ConversationPaginationParams, MessagePaginationParams
 from app.schemas.responses import ApiResponse
 from app.schemas.responses.paginated_response import PaginatedApiResponse
+from app.services.event_streaming.ai_sdk_projection import (
+    attach_image_parts_to_message,
+    ensure_leading_text_part,
+    is_v1_rich_items_message,
+    project_ai_sdk_message_for_capability,
+    scrub_legacy_metadata,
+)
 from app.services.event_streaming.ai_sdk_v6 import (
     AISDKV6StreamAdapter,
 )
@@ -31,8 +37,6 @@ from app.services.event_streaming.ai_sdk_v6 import (
 )
 
 router = APIRouter(tags=["ai-sdk"])
-
-_AI_SDK_HEARTBEAT_INTERVAL_SECONDS = 15.0
 
 
 class AISDKChatRequest(BaseModel):
@@ -60,27 +64,6 @@ class AISDKChatRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
 
-class AISDKMessagePart(BaseModel):
-    """
-    A part within a Vercel AI SDK UIMessage.
-
-    Matches the ``UIPart`` discriminated union used by ``useChat()``:
-    - ``type='text'``      → plain text delta
-    - ``type='file'``      → image / binary attachment (data URL or remote URL)
-    - ``type='reasoning'`` → chain-of-thought / thinking text
-    """
-
-    type: str = Field(..., description="Part type: 'text', 'file', or 'reasoning'")
-    text: str | None = Field(None, description="Text content (when type='text')")
-    url: str | None = Field(None, description="File or data URL (when type='file')")
-    media_type: str | None = Field(
-        None, alias="mediaType", description="MIME type (when type='file')"
-    )
-    reasoning: str | None = Field(None, description="Reasoning text (when type='reasoning')")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
 class AISDKUIMessage(BaseModel):
     """
     Vercel AI SDK ``UIMessage`` format.
@@ -95,19 +78,19 @@ class AISDKUIMessage(BaseModel):
     id: str = Field(..., description="Unique message ID (UUID string)")
     role: str = Field(..., description="'user' or 'assistant'")
     content: str = Field(..., description="Plain-text content of the message")
-    parts: list[dict[str, Any]] | None = Field(
-        None,
+    parts: list[dict[str, Any]] = Field(
+        default_factory=list,
         description=(
-            "Structured message parts (text / file / reasoning) for multimodal messages. "
-            "Mirrors the ``parts`` field of the AI SDK UIMessage spec."
+            "Structured message parts (text / file / reasoning). Always present; "
+            "a `text` part carrying the message content is guaranteed. Mirrors the "
+            "``parts`` field of the AI SDK UIMessage spec."
         ),
     )
-    metadata: dict[str, Any] | None = Field(None, description="AI SDK client-side metadata")
-    message_metadata: dict[str, Any] | None = Field(
+    metadata: dict[str, Any] | None = Field(
         None,
-        alias="messageMetadata",
         description=(
-            "Backend metadata: RAG citations, images, canvas artifacts, suggested questions, etc."
+            "Backend message metadata: provider/model info, RAG citations, rich items, "
+            "suggested questions, etc. Legacy renderer fields are scrubbed."
         ),
     )
     created_at: str | None = Field(
@@ -123,8 +106,7 @@ class AISDKMessagesData(BaseModel):
     messages: list[AISDKUIMessage] = Field(
         ..., description="Messages in Vercel AI SDK UIMessage format"
     )
-    total: int = Field(..., description="Total number of messages in the conversation")
-    meta: PaginationMeta = Field(..., description="Pagination metadata")
+    meta: PaginationMeta = Field(..., description="Pagination metadata (includes `total`)")
 
 
 def _extract_user_text(messages: list[dict[str, Any]]) -> str:
@@ -193,18 +175,7 @@ def _normalize_ai_sdk_chat_messages(payload: AISDKChatRequest) -> list[dict[str,
 def _extract_data_from_candidate(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
-
-    payload = value.strip()
-    if not payload:
-        return None
-
-    if payload.startswith("data:"):
-        return payload
-
-    if payload.startswith(("http://", "https://", "blob:")):
-        return payload
-
-    return payload
+    return value.strip() or None
 
 
 def _extract_user_attachments(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -303,417 +274,6 @@ def _extract_user_attachments(messages: list[dict[str, Any]]) -> list[dict[str, 
     return []
 
 
-def _extract_mime_from_data_url(value: str) -> str | None:
-    if not isinstance(value, str):
-        return None
-
-    payload = value.strip()
-    if not payload.startswith("data:"):
-        return None
-
-    header, _, _ = payload.partition(",")
-    mime = header[5:].split(";")[0].strip()
-    return mime if "/" in mime else None
-
-
-def _normalize_image_item_to_file_part(item: Any) -> dict[str, str] | None:
-    if not isinstance(item, dict):
-        return None
-
-    mime = (
-        item.get("mime")
-        or item.get("mimeType")
-        or item.get("mediaType")
-        or item.get("contentType")
-        or "image/png"
-    )
-    mime = str(mime).strip() if mime else "image/png"
-
-    candidate_values: list[Any] = [
-        item.get("url"),
-        item.get("data"),
-        item.get("base64"),
-        item.get("image"),
-        item.get("source"),
-    ]
-
-    for candidate in candidate_values:
-        if isinstance(candidate, dict):
-            candidate = candidate.get("url") or candidate.get("data") or candidate.get("base64")
-        if not isinstance(candidate, str):
-            continue
-
-        raw_value = candidate.strip()
-        if not raw_value:
-            continue
-
-        if raw_value.startswith("data:"):
-            detected_mime = _extract_mime_from_data_url(raw_value)
-            if detected_mime:
-                mime = detected_mime
-            return {"url": raw_value, "mediaType": mime}
-
-        if raw_value.startswith(("http://", "https://", "blob:")):
-            return {"url": raw_value, "mediaType": mime}
-
-        try:
-            base64.b64decode(raw_value, validate=False)
-        except Exception:
-            continue
-
-        return {
-            "url": f"data:{mime};base64,{raw_value}",
-            "mediaType": mime,
-        }
-
-    return None
-
-
-def _extract_image_file_parts_from_metadata(
-    metadata: dict[str, Any] | None,
-) -> list[dict[str, str]]:
-    if not isinstance(metadata, dict):
-        return []
-
-    images = metadata.get("images")
-    if not isinstance(images, list):
-        return []
-
-    file_parts: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-
-    for item in images:
-        file_part = _normalize_image_item_to_file_part(item)
-        if not file_part:
-            continue
-
-        key = (file_part["url"], file_part["mediaType"])
-        if key in seen:
-            continue
-        seen.add(key)
-        file_parts.append(file_part)
-
-    return file_parts
-
-
-def _is_v1_rich_items_message(metadata: dict[str, Any] | None) -> bool:
-    if not isinstance(metadata, dict):
-        return False
-    return metadata.get("rich_items_version") == 1
-
-
-def _scrub_v1_legacy_image_fields(payload: dict[str, Any]) -> None:
-    """Mutate ``payload`` to remove unselected legacy image data for v1 messages.
-
-    For v1 rich-items messages we never want hidden image candidates to surface
-    through the legacy ``metadata["images"]`` channel or via the AI SDK
-    ``parts`` array. The selected images are already exposed by
-    ``_selected_image_file_parts_from_rich_items()``.
-    """
-    for meta_key in ("message_metadata", "messageMetadata", "metadata"):
-        meta = payload.get(meta_key)
-        if isinstance(meta, dict) and "images" in meta:
-            scrubbed = dict(meta)
-            scrubbed.pop("images", None)
-            payload[meta_key] = scrubbed
-    parts = payload.get("parts")
-    if isinstance(parts, list):
-        rich_items = None
-        for meta_key in ("message_metadata", "messageMetadata", "metadata"):
-            meta = payload.get(meta_key)
-            if isinstance(meta, dict):
-                rich_items = meta.get("rich_items")
-                break
-        allowed_urls: set[str] = set()
-        if isinstance(rich_items, list):
-            for item in rich_items:
-                if not isinstance(item, dict) or item.get("type") != "image":
-                    continue
-                pl = item.get("payload") or {}
-                if pl.get("url"):
-                    allowed_urls.add(str(pl["url"]))
-                elif pl.get("data"):
-                    mime = pl.get("mime_type") or "image/png"
-                    allowed_urls.add(f"data:{mime};base64,{pl['data']}")
-        filtered_parts = []
-        for part in parts:
-            if not isinstance(part, dict):
-                filtered_parts.append(part)
-                continue
-            if part.get("type") == "file" and part.get("url") not in allowed_urls:
-                continue
-            filtered_parts.append(part)
-        payload["parts"] = filtered_parts
-
-
-def _selected_image_file_parts_from_rich_items(
-    metadata: dict[str, Any] | None,
-) -> list[dict[str, str]]:
-    if not isinstance(metadata, dict):
-        return []
-    rich_items = metadata.get("rich_items")
-    if not isinstance(rich_items, list):
-        return []
-    file_parts: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for item in rich_items:
-        if not isinstance(item, dict) or item.get("type") != "image":
-            continue
-        payload = item.get("payload") or {}
-        url = payload.get("url")
-        data = payload.get("data")
-        mime_type = payload.get("mime_type") or "image/png"
-        if url:
-            file_part = {"url": str(url), "mediaType": str(mime_type)}
-        elif data:
-            file_part = {"url": f"data:{mime_type};base64,{data}", "mediaType": str(mime_type)}
-        else:
-            continue
-        key = (file_part["url"], file_part["mediaType"])
-        if key in seen:
-            continue
-        seen.add(key)
-        file_parts.append(file_part)
-    return file_parts
-
-
-def project_ai_sdk_message_for_capability(
-    message: dict[str, Any],
-    *,
-    inline_rich_response_v1: bool,
-) -> dict[str, Any]:
-    """Project a persisted assistant message for an AI SDK consumer.
-
-    When ``inline_rich_response_v1`` is True, the message passes through
-    unchanged (markers preserved, `rich_items` available). When False, the
-    standalone HTML-comment marker lines are stripped from ``content`` so
-    non-capable clients do not render them verbatim, and `rich_items` /
-    `rich_items_version` keys are removed from any metadata field present.
-    """
-    if not isinstance(message, dict):
-        return message
-    if inline_rich_response_v1:
-        return message
-    projected = dict(message)
-    content = projected.get("content")
-    if isinstance(content, str) and "<!--rich:" in content:
-        from app.core.rich_response import strip_inline_rich_markers
-
-        projected["content"] = strip_inline_rich_markers(content)
-    for meta_key in ("message_metadata", "messageMetadata", "metadata"):
-        meta = projected.get(meta_key)
-        if isinstance(meta, dict):
-            scrubbed = {
-                k: v
-                for k, v in meta.items()
-                if k not in {"rich_items", "rich_items_version", "rich_reference_warnings"}
-            }
-            projected[meta_key] = scrubbed
-    return projected
-
-
-def _extract_image_file_parts_from_message(
-    message: dict[str, Any],
-) -> list[dict[str, str]]:
-    if not isinstance(message, dict):
-        return []
-
-    metadata = None
-    for key in ("message_metadata", "messageMetadata", "metadata"):
-        value = message.get(key)
-        if isinstance(value, dict):
-            metadata = value
-            break
-
-    return _extract_image_file_parts_from_metadata(metadata)
-
-
-def _attach_image_parts_to_message(message: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(message, dict):
-        return message
-
-    payload = dict(message)
-
-    # Mirror backend metadata key to a generic `metadata` field for UI compatibility.
-    if "metadata" not in payload:
-        if isinstance(payload.get("message_metadata"), dict):
-            payload["metadata"] = payload["message_metadata"]
-        elif isinstance(payload.get("messageMetadata"), dict):
-            payload["metadata"] = payload["messageMetadata"]
-
-    # For v1 rich-items messages, file parts come only from finalized rich_items
-    # (selected images). Skip the legacy metadata["images"] attachment entirely
-    # so hidden candidates cannot leak via `parts`.
-    metadata = None
-    for key in ("message_metadata", "messageMetadata", "metadata"):
-        value = payload.get(key)
-        if isinstance(value, dict):
-            metadata = value
-            break
-    if _is_v1_rich_items_message(metadata):
-        image_parts = _selected_image_file_parts_from_rich_items(metadata)
-    else:
-        image_parts = _extract_image_file_parts_from_message(payload)
-    if not image_parts:
-        return payload
-
-    existing_parts = payload.get("parts")
-    parts: list[dict[str, Any]] = (
-        [p for p in existing_parts if isinstance(p, dict)]
-        if isinstance(existing_parts, list)
-        else []
-    )
-
-    if not isinstance(existing_parts, list):
-        content = payload.get("content")
-        if isinstance(content, str) and content.strip():
-            parts.append({"type": "text", "text": content})
-
-    existing_urls = {
-        p.get("url") for p in parts if p.get("type") == "file" and isinstance(p.get("url"), str)
-    }
-
-    for file_part in image_parts:
-        url = file_part["url"]
-        if url in existing_urls:
-            continue
-        parts.append(
-            {
-                "type": "file",
-                "url": url,
-                "mediaType": file_part["mediaType"],
-            }
-        )
-        existing_urls.add(url)
-
-    payload["parts"] = parts
-    return payload
-
-
-def project_ai_sdk_assistant_message_event(
-    message: dict[str, Any],
-    *,
-    include_content: bool = False,
-) -> dict[str, Any]:
-    """Project a persisted assistant message into a stream metadata side-channel.
-
-    The AI SDK stream has already delivered body text through ``text-delta``.
-    This projection keeps durable metadata and file parts while avoiding leakage
-    of database-only fields such as ``sender`` and ``conversation_id``.
-    """
-    if not isinstance(message, dict):
-        return {}
-
-    projected: dict[str, Any] = {}
-    message_id = message.get("id")
-    if message_id not in (None, ""):
-        projected["id"] = str(message_id)
-
-    role = message.get("role")
-    if not isinstance(role, str) or not role:
-        sender = message.get("sender")
-        if sender == 1 or sender == "1":
-            role = "user"
-        elif sender == 2 or sender == "2":
-            role = "assistant"
-    if isinstance(role, str) and role:
-        projected["role"] = role
-
-    created_at = message.get("createdAt") or message.get("created_at")
-    if isinstance(created_at, str) and created_at:
-        projected["createdAt"] = created_at
-
-    if include_content:
-        content = message.get("content")
-        if isinstance(content, str):
-            projected["content"] = content
-
-    metadata = None
-    for key in ("messageMetadata", "message_metadata", "metadata"):
-        value = message.get(key)
-        if isinstance(value, dict):
-            metadata = value
-            break
-    if isinstance(metadata, dict):
-        projected["metadata"] = metadata
-        projected["messageMetadata"] = metadata
-
-    parts = message.get("parts")
-    if isinstance(parts, list):
-        projected["parts"] = [part for part in parts if isinstance(part, dict)]
-
-    return projected
-
-
-def _clean_tool_output(value: Any) -> Any:
-    """
-    Clean tool output by extracting actual data from LangChain Content objects.
-    """
-    if value is None:
-        return None
-
-    # Handle lists - recursively clean each item
-    if isinstance(value, list):
-        cleaned = []
-        for item in value:
-            if isinstance(item, dict):
-                # Extract text from LangChain Content objects
-                if "type" in item and item.get("type") == "text" and "text" in item:
-                    cleaned.append(item["text"])
-                else:
-                    # Recursively clean nested dicts
-                    cleaned.append(_clean_tool_output(item))
-            else:
-                cleaned.append(_clean_tool_output(item))
-
-        # Unwrap single-item lists
-        if len(cleaned) == 1:
-            return cleaned[0]
-        return cleaned
-
-    # Handle dicts - recursively clean nested structures
-    if isinstance(value, dict):
-        # If it's a LangChain Content object, extract the text
-        if "type" in value and value.get("type") == "text" and "text" in value:
-            return value["text"]
-        # Otherwise, clean nested values
-        return {k: _clean_tool_output(v) for k, v in value.items()}
-
-    return value
-
-
-def _coerce_json_object(value: Any) -> Any:
-    """
-    Vercel AI SDK UI message stream expects tool `input`/`output` to be JSON-serializable.
-    Returns the exact tool result without any wrapping.
-    """
-    if value is None:
-        return None
-
-    # Return dicts and lists as-is
-    if isinstance(value, (dict, list)):
-        return value
-
-    # Return primitives as-is (except strings that look like JSON)
-    if isinstance(value, (int, float, bool)):
-        return value
-
-    # Try to parse strings as JSON if they look like JSON
-    if isinstance(value, str):
-        s = value.strip()
-        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
-            try:
-                # Parse the JSON string to return the actual object
-                # This prevents double-encoding and escaped newlines
-                return json.loads(s)
-            except Exception:
-                pass
-        return value
-
-    # Fallback for other types - convert to string
-    return str(value)
-
-
 def _build_ui_message_stream_response(
     event_source_factory: Callable[[], AsyncGenerator[dict[str, Any], None]],
     state: StreamState,
@@ -721,7 +281,6 @@ def _build_ui_message_stream_response(
     adapter = AISDKV6StreamAdapter(
         event_source_factory,
         state,
-        heartbeat_interval_seconds=_AI_SDK_HEARTBEAT_INTERVAL_SECONDS,
     )
     return StreamingResponse(
         adapter.iter_sse(),
@@ -895,15 +454,24 @@ async def get_conversation_messages_ai_sdk(
         }
 
         if isinstance(msg.message_metadata, dict):
-            message_payload["messageMetadata"] = msg.message_metadata
             message_payload["metadata"] = msg.message_metadata
 
         if role == "assistant":
+            # v1-ness is decided on the persisted metadata so hidden image
+            # candidates cannot fall back onto legacy `images` after the
+            # capability projection strips the rich keys.
+            is_v1 = is_v1_rich_items_message(msg.message_metadata)
             message_payload = project_ai_sdk_message_for_capability(
                 message_payload,
                 inline_rich_response_v1=rich_response_capable,
             )
-            message_payload = _attach_image_parts_to_message(message_payload)
+            # Image file parts are extracted before the legacy scrub below.
+            message_payload = attach_image_parts_to_message(message_payload, is_v1=is_v1)
+
+        ensure_leading_text_part(message_payload)
+        metadata = message_payload.get("metadata")
+        if isinstance(metadata, dict):
+            message_payload["metadata"] = scrub_legacy_metadata(metadata)
 
         messages.append(AISDKUIMessage.model_validate(message_payload))
 
@@ -912,7 +480,6 @@ async def get_conversation_messages_ai_sdk(
         message="Messages retrieved successfully",
         data=AISDKMessagesData(
             messages=messages,
-            total=paginated_result.meta.total,
             meta=paginated_result.meta,
         ),
     )
