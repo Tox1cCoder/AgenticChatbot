@@ -1,87 +1,131 @@
 # AI SDK Frontend Contract
 
-This document describes the frontend-facing response shape for the AI SDK-compatible chat path.
+The wire contract for the AI SDK-compatible chat path. Every shape in this
+document is the exact serialized output of the current backend, verified
+against code and live responses on 2026-07-02. Fields not listed for a shape
+are not sent. Removed legacy fields are listed in [Not on the Wire](#not-on-the-wire).
 
-## BREAKING CHANGES — 2026-07-02 response-format cleanup
+## Endpoints
 
-> **Read this first if you built against an earlier revision of this document.**
-> The legacy compatibility fields were removed from every AI SDK-visible surface
-> (`plans/ai_sdk_response_cleanup.md` records the decision). Persisted data and
-> the internal `/messages/stream` path are unchanged.
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/chat/{conversationId}` | Chat stream (AI SDK UI Message Stream, SSE). |
+| `POST /ai/chat/{conversationId}` | Alias of the above. Use `/api/chat` for new integrations. |
+| `POST /ai/resume-interrupt` | Resume after a HITL interrupt. Same SSE stream format. |
+| `GET /ai/conversations/{conversationId}/messages` | Message history as AI SDK `UIMessage` objects. |
+| `POST /ai/conversations`, `GET /ai/conversations`, `GET/PATCH/DELETE /ai/conversations/{id}` | Conversation CRUD (standard `ApiResponse` envelope). |
+| `POST {connection_endpoint}` | Mint a widget WebSocket token (endpoint comes from the widget payload). |
+| `POST /widgets/{widgetId}/actions/{actionKey}` | Execute a widget action. |
+| `GET /tool-results/{blobId}` | Fetch an offloaded tool output. |
 
-| # | Change | Migration |
-|---|---|---|
-| 1 | `messageMetadata` mirror **removed** from history messages and the `data-assistant-message` / `data-interrupt` message payloads. | Read `message.metadata` only. |
-| 2 | `data-interrupt.data.pendingToolCalls` **removed**. | Read `data.interrupt.action_requests[]`. |
-| 3 | `data.total` **removed** from the messages listing payload. | Read `data.meta.total`. |
-| 4 | Legacy renderer metadata **scrubbed** from all AI SDK responses: `images`, `has_images`, `images_count`, `agentic_images_count`, `live_widgets`, `canvas_artifact`, `pending_tool_calls`, internal `_`-prefixed keys, and database-redundant debug keys (`conversation_id`, `has_tool_calls`, `context_messages`). | Images: render `parts[].type === "file"`. Widgets, canvas artifacts, tool renders: render `metadata.rich_items` — send `inlineRichResponseV1: true`. The conversation id comes from the route. |
-| 5 | `data-user-message` / `data-error-message` payloads are now projected (`id`, `role`, `content`, `createdAt`, `metadata`, `parts`) — raw DB fields (`conversation_id`, `sender`, `updated_at`) no longer appear. | Use the projected fields. |
-| 6 | History messages always carry `parts` with a guaranteed leading `text` part. | Render from `parts` per the AI SDK v5+ `UIMessage` spec. |
+All endpoints require the normal `Authorization: Bearer <jwt>` header.
 
-Because of change 4, **`inlineRichResponseV1: true` is effectively required** for
-clients that want widgets, canvas artifacts, or tool renders. The server-side
-`inline_rich_response_enabled` kill switch now disables rich UI entirely for AI
-SDK clients (they still get text and image `file` parts).
-
-## Chat Path
-
-Use:
+## Chat Request
 
 ```http
 POST /api/chat/{conversationId}
+Content-Type: application/json
 ```
-
-Alias:
-
-```http
-POST /ai/chat/{conversationId}
-```
-
-Request body:
 
 ```json
 {
   "messages": [
-    {
-      "role": "user",
-      "content": "Run the report"
-    }
+    { "role": "user", "content": "Run the report" }
   ],
-  "userId": "optional-user-id",
-  "inlineRichResponseV1": false
+  "inlineRichResponseV1": true
 }
 ```
 
-Request fields:
-
-| Field | Type | Notes |
+| Field | Type | Rules |
 |---|---|---|
-| `messages` | array | AI SDK UI message history. Backend reads the latest user message. |
-| `messages[].role` | string | Usually `user` or `assistant`. |
-| `messages[].content` | string or parts array | Plain text, or parts-style content. |
-| `messages[].parts` | array | Optional. Text parts use `{ "type": "text", "text": "..." }`; file/image parts are supported. |
-| `messages[].attachments` | array | Optional image attachments. Also accepts `experimental_attachments` or `files`. |
-| `userId` | string, optional | Reserved/client hint only on authenticated deployments. The backend uses the authenticated user identity, not this body field, for ownership and user-aware features. |
-| `inlineRichResponseV1` | boolean, optional | Opt in to marker-positioned rich UI items and article-style inline placement. Also accepted as `inline_rich_response_v1`. |
-| `deviceId` | string, optional | Usually injected by the sidecar/client backend for local runtime tools. |
+| `messages` | array | AI SDK UI message history. The backend reads the latest `user` message. |
+| `messages[].role` | string | `user` or `assistant`. |
+| `messages[].content` | string or array | Plain text, or a parts array. |
+| `messages[].parts` | array | Optional. Text parts are `{ "type": "text", "text": "..." }`; image/file parts are accepted (see Request Attachments). |
+| `messages[].attachments` | array | Optional image attachments. `experimental_attachments` and `files` are accepted equivalents. |
+| `message` | object or string | Optional latest UI message for custom transports. A dict is appended to `messages` when its `id` differs from the last entry. |
+| `content` | string | Fallback user text when `messages` is empty. |
+| `userId` | string | Client hint only. Ownership and user-aware features use the authenticated JWT identity, never this field. |
+| `inlineRichResponseV1` | boolean | Rich-response v1 capability flag. `inline_rich_response_v1` is an accepted equivalent. **Required for rich UI**: without it the response contains no `rich_items`, no markers, no widgets, no canvas. |
+| `deviceId` | string | Injected by the sidecar for local runtime tools. `device_id` is an accepted equivalent. |
 
-The response is `text/event-stream` and includes this header. Header names are case-insensitive; the backend currently emits it in lowercase.
+Unknown extra fields are accepted and ignored.
+
+Error responses (non-stream JSON):
+
+| Status | Body | Cause |
+|---|---|---|
+| 400 | `{"success": false, "message": "No user message found"}` | No user text and no attachments in the request. |
+| 405 | — | Wrong method. |
+
+### Request Attachments
+
+The latest user message may carry images in `parts`, `content` (as an array),
+`attachments`, `experimental_attachments`, or `files`. Accepted item fields:
+
+| Field | Rules |
+|---|---|
+| `type` | `image` or `file`. Other types are ignored. |
+| `name` / `filename` | Optional display name. Default `attachment`. |
+| `mime` / `mimeType` / `mediaType` / `contentType` | MIME type. Default `image/jpeg`. |
+| `data` / `base64` | Data URL or raw base64. |
+| `url` | `data:`, `http(s):`, or `blob:` URL. |
+| `path` / `image` / `source` | Fallback source fields. Local filesystem paths are ignored. |
+
+## Stream Protocol
+
+Response headers:
 
 ```http
+content-type: text/event-stream; charset=utf-8
 x-vercel-ai-ui-message-stream: v1
 ```
 
-Parse each `data:` line as JSON and switch on `type`. The stream ends with `data: [DONE]`.
+Framing: each event is one `data: <json>` line. The stream ends with
+`data: [DONE]`. A `{"type": "heartbeat"}` event is emitted after every 15
+seconds of source silence; ignore it.
 
-## Stream Event Shapes
-
-The stream always starts like this:
+Every stream begins:
 
 ```json
-{ "type": "start", "messageId": "assistant-message-id" }
+{ "type": "start", "messageId": "<assistant-message-uuid>" }
 { "type": "start-step" }
-{ "type": "text-start", "id": "text-part-id" }
+{ "type": "text-start", "id": "<text-part-uuid>" }
 ```
+
+`messageId` equals the persisted assistant message id — do not create a
+duplicate row after refetching history.
+
+Terminal sequences (exactly one occurs per stream):
+
+| Outcome | Sequence |
+|---|---|
+| Complete | optional `file` events → `data-assistant-message` → `text-end` → [`reasoning-end`] → `finish-step` → `finish` → `[DONE]` |
+| Interrupt | [`text-delta` with pause copy] → `text-end` → [`reasoning-end`] → `data-interrupt` → `finish-step` → `finish` → `[DONE]` |
+| Error | `error` → `text-end` → [`reasoning-end`] → [`data-error-message`] → `finish-step` → `finish` → `[DONE]` |
+
+Event catalog:
+
+| `type` | Transient | Purpose |
+|---|---|---|
+| `start`, `start-step`, `text-start`, `text-delta`, `text-end`, `finish-step`, `finish` | — | AI SDK lifecycle and answer text. |
+| `reasoning-start`, `reasoning-delta`, `reasoning-end` | — | Model reasoning text. Emitted only when reasoning exists. |
+| `tool-input-start`, `tool-input-available`, `tool-output-available` | — | Tool calls. |
+| `file` | — | Generated/selected image as a file part. |
+| `data-user-message` | yes | Persisted user message echo. |
+| `data-agent-selected` | yes | Routing decision. |
+| `data-continuation`, `data-node-complete` | yes | Planning-loop progress. |
+| `data-rich-items` | yes | Live rich-item upserts (capable requests only; see emission rules). |
+| `data-subagent` | yes | Live worker progress. |
+| `data-assistant-message` | no | Final assistant message side-channel (metadata + parts). |
+| `data-interrupt` | no | HITL pause. Terminal. |
+| `data-error-message` | yes | Persisted error message echo. |
+| `error` | — | Error text. Terminal. |
+| `heartbeat` | — | Keep-alive. |
+
+Unknown event types must be ignored.
+
+## Stream Events
 
 Text:
 
@@ -101,117 +145,100 @@ Reasoning:
 Tool call:
 
 ```json
-{
-  "type": "tool-input-start",
-  "toolCallId": "tool-call-id",
-  "toolName": "tool_name"
-}
+{ "type": "tool-input-start", "toolCallId": "tool-call-id", "toolName": "tool_name" }
+{ "type": "tool-input-available", "toolCallId": "tool-call-id", "toolName": "tool_name", "input": {} }
+{ "type": "tool-output-available", "toolCallId": "tool-call-id", "output": "any JSON value", "render": {} }
 ```
+
+`input` and `output` are any JSON value. JSON-shaped strings are parsed before
+emission (never double-encoded). `render` is present only when the tool
+produced a structured render payload (see Tool Artifacts).
+
+File (image) part:
 
 ```json
-{
-  "type": "tool-input-available",
-  "toolCallId": "tool-call-id",
-  "toolName": "tool_name",
-  "input": {}
-}
+{ "type": "file", "url": "data:image/png;base64,...", "mediaType": "image/png" }
 ```
+
+User message echo — a wire-safe projection. Database fields
+(`conversation_id`, `sender`, `updated_at`) are never included:
 
 ```json
-{
-  "type": "tool-output-available",
-  "toolCallId": "tool-call-id",
-  "output": "any JSON value",
-  "render": {}
-}
+{ "type": "data-user-message", "transient": true,
+  "data": { "message": {
+    "id": "user-message-id",
+    "role": "user",
+    "content": "user text",
+    "createdAt": "ISO-8601",
+    "metadata": {}
+  } } }
 ```
 
-`tool-input-available.input` and `tool-output-available.output` may be any JSON-serializable value: object, array, string, number, boolean, or null.
-
-File/image part:
-
-```json
-{
-  "type": "file",
-  "url": "data:image/png;base64,...",
-  "mediaType": "image/png"
-}
-```
-
-Assistant metadata:
-
-```json
-{
-  "type": "data-assistant-message",
-  "data": {
-    "message": {
-      "id": "assistant-message-id",
-      "role": "assistant",
-      "createdAt": "ISO-8601 timestamp",
-      "metadata": {},
-      "parts": []
-    }
-  }
-}
-```
-
-Notes:
-
-- `data-assistant-message.data.message.content` is intentionally omitted on the stream because answer text already arrived as `text-delta`.
-- Stream metadata is projected to the AI SDK `metadata` field only. The `messageMetadata` mirror and the `message_metadata` wire alias are not emitted on AI SDK stream messages.
-- `metadata` is scrubbed of legacy renderer fields (see the breaking-changes table) before it reaches the wire.
-- `parts` may contain generated image/file parts. For v1 rich responses, only selected images appear as file parts.
-- Article-style auto-placement can add final `<!--rich:<id>-->` markers at persistence time after text deltas have already streamed. For the AI SDK stream, use the persisted message from history after `finish` when you need the exact final marker layout.
-
-Rich item upsert:
-
-```json
-{
-  "type": "data-rich-items",
-  "data": {
-    "operation": "upsert",
-    "items": []
-  },
-  "transient": true
-}
-```
-
-Emission rules — `data-rich-items` is a **partial, live-progress channel**, not the
-full registry:
-
-| Item type | Streams as `data-rich-items`? | Arrives via |
-|---|---|---|
-| `live_widget`, `tool_render` | Yes, as each tool completes (only for capable requests). | Transient upsert **and** final `data-assistant-message.metadata.rich_items`. |
-| `image` | Never (selection happens at finalization; candidates must not leak). | Final `data-assistant-message` / history only. |
-| `canvas_artifact` | Never (the source is the asset; it is promoted at persistence). | Final `data-assistant-message` / history only. |
-| Any item whose payload carries inline binary `data` | Never. | Final `data-assistant-message` / history only. |
-
-Do not treat the absence of `data-rich-items` on a turn as an error: a
-canvas-only or image-only answer emits none. The authoritative registry is
-always `metadata.rich_items` on the final `data-assistant-message` (and
-history). A marker streamed in `text-delta` whose item has not been upserted
-yet should render as a pending placeholder until `finish`.
-
-Other data events:
+Routing and planning progress:
 
 ```json
 { "type": "data-agent-selected", "data": { "agent": "chat_agent" }, "transient": true }
-{ "type": "data-user-message", "data": { "message": {} }, "transient": true }
 { "type": "data-continuation", "data": { "round": 1, "max_rounds": 3, "reason": "tool_budget" }, "transient": true }
 { "type": "data-node-complete", "data": { "node": "chat_agent" }, "transient": true }
-{ "type": "heartbeat" }
 ```
 
-`data-user-message.data.message` is a wire-safe projection of the persisted user
-message — `id`, `role`, `content`, `createdAt`, plus `metadata`/`parts` when
-present. Database-only fields (`conversation_id`, `sender`, `updated_at`) are
-never included.
+Rich item upsert (only for requests that sent `inlineRichResponseV1: true`):
+
+```json
+{ "type": "data-rich-items",
+  "data": { "operation": "upsert", "items": [] },
+  "transient": true }
+```
+
+`data-rich-items` is a partial live-progress channel, not the full registry:
+
+| Item type | Streams transiently? | Delivered via |
+|---|---|---|
+| `live_widget`, `tool_render` | Yes, as each tool completes. | Upsert **and** final `data-assistant-message.metadata.rich_items`. |
+| `image` | Never. | Final `data-assistant-message` / history only. |
+| `canvas_artifact` | Never. | Final `data-assistant-message` / history only. |
+| Any item whose payload carries inline binary `data` | Never. | Final / history only. |
+
+A turn with zero `data-rich-items` events is normal (canvas-only,
+image-only, or no rich activity). The authoritative registry is always
+`metadata.rich_items` on the final `data-assistant-message` and on history.
+A marker streamed in `text-delta` whose item has not arrived yet renders as a
+pending placeholder until `finish`.
+
+Final assistant message side-channel:
+
+```json
+{ "type": "data-assistant-message",
+  "data": { "message": {
+    "id": "assistant-message-id",
+    "role": "assistant",
+    "createdAt": "ISO-8601",
+    "metadata": {},
+    "parts": []
+  } } }
+```
+
+- `content` is never included — the answer text already arrived as `text-delta`.
+- `metadata` is the scrubbed backend metadata (see Assistant Metadata). There
+  is no `messageMetadata` mirror.
+- `parts`, when present, contains the message's file parts. For v1 rich
+  messages the file parts are exactly the selected images.
+- The event is suppressed when the message carries nothing beyond its id.
+
+Error:
+
+```json
+{ "type": "error", "errorText": "error message" }
+{ "type": "data-error-message", "data": { "message": {} }, "transient": true }
+```
+
+`data-error-message.data.message` uses the same wire-safe projection as
+`data-user-message` (with `content` included).
 
 ## Subagent Progress
 
-> **Status: shipped** (2026-06-11, "Live Subagent Progress" — `event_streaming.md` Tasks 11–15). The backend emits these parts on all AI SDK chat endpoints; the wire shape below matches `ai_sdk_v6.py::_subagent`. Resume-path (`/ai/resume-interrupt`) dispatches do not stream live progress (documented out of scope); token-level worker deltas (`phase: "delta"`) are reserved but not emitted today.
-
-When the Planning Agent dispatches workers (`dispatch_subagents`), each worker streams live progress as transient `data-subagent` parts, interleaved with the rest of the stream:
+When the Planning Agent dispatches workers, each worker streams transient
+`data-subagent` events interleaved with the rest of the stream:
 
 ```json
 { "type": "data-subagent", "transient": true,
@@ -228,83 +255,63 @@ When the Planning Agent dispatches workers (`dispatch_subagents`), each worker s
             "output": "…", "summary": "Short worker summary", "elapsedMs": 1234 } }
 ```
 
-Fields:
-
-| Field | Type | Notes |
+| Field | Presence | Meaning |
 |---|---|---|
-| `data.phase` | string | `start`, `tool`, or `end`. The lifecycle of one worker. |
-| `data.subagent.id` | string | **Stable key.** Upsert/update the same UI row across `start` → `tool` → `end`. |
-| `data.subagent.name` | string | Worker agent name (e.g. `search_agent`). |
-| `data.subagent.path` | array | Hierarchy path, e.g. `["planning_agent", "worker-a"]`. |
-| `data.subagent.status` | string | `running`, `completed`, `failed`, `timeout`, or `requires_approval`. Reflects the worker's current state on each event. |
-| `data.task` | string | `start` only. The instruction given to the worker. |
-| `data.toolName` / `data.toolCallId` | string | `tool` only. A tool the worker invoked. |
-| `data.output` / `data.summary` | string | `tool`/`end`. Worker tool output / final summary. |
-| `data.status` | string | `tool` only. Per-tool status (`success`/`error`/…). |
-| `data.render` | object | `tool` only, optional. Structured render payload for the worker's tool result. |
-| `data.text` | string | Reserved for `phase: "delta"` worker token deltas (not emitted today). |
-| `data.elapsedMs` | number | `end` only. Worker wall-clock duration. |
-| `data.error` | string or null | `end` only, when the worker failed. |
+| `data.phase` | always | `start`, `tool`, or `end`. |
+| `data.subagent.id` | always | Stable key — upsert the same UI row across phases. |
+| `data.subagent.name` | always | Worker agent name. |
+| `data.subagent.path` | always | Hierarchy path. |
+| `data.subagent.status` | always | `running`, `completed`, `failed`, `timeout`, or `requires_approval`. |
+| `data.task` | `start` | The worker's instruction. |
+| `data.toolCallId` / `data.toolName` | `tool` | The tool the worker invoked. |
+| `data.status` | `tool` | Per-tool status (`success` / `error` / …). |
+| `data.render` | `tool`, optional | Structured render payload for the worker's tool result. |
+| `data.output` / `data.summary` | `tool` / `end` | Tool output / final worker summary. |
+| `data.elapsedMs` | `end` | Worker wall-clock duration in ms. |
+| `data.error` | `end`, on failure | Error text. |
+| `data.text` | reserved | For future `phase: "delta"` token streaming. Not emitted. |
 
 Rendering rules:
 
-- `data-subagent` is **transient** — it is not added to message state. Maintain your own map keyed by `data.subagent.id` for a live "subagents working" panel, then drop/collapse it when the run finishes.
-- The **durable** record of subagent results stays in `backendMeta.subagent_results` on the final `data-assistant-message` (see Agent metadata). Use that for the persisted/historical view; use `data-subagent` only for live progress.
-- Unknown future phases should be ignored gracefully.
+- `data-subagent` is transient — keep your own map keyed by `subagent.id` for
+  a live panel; drop it when the run finishes.
+- The durable record is `metadata.subagent_results` on the final
+  `data-assistant-message`.
+- Resume-path (`/ai/resume-interrupt`) dispatches do not stream live progress.
+- Ignore unknown phases.
 
-Finish:
+## Human-in-the-Loop
 
-```json
-{ "type": "finish-step" }
-{ "type": "finish" }
-```
-
-Error:
-
-```json
-{ "type": "error", "errorText": "error message" }
-{ "type": "data-error-message", "data": { "message": {} }, "transient": true }
-```
-
-## HITL Auto-Detection
-
-Detect HITL by checking for `data-interrupt`:
+### Detection
 
 ```ts
 const isHitl = event.type === "data-interrupt";
-const interrupt = event.data?.interrupt;
-const requests = interrupt?.action_requests ?? [];
+const requests = event.data?.interrupt?.action_requests ?? [];
 ```
 
-When `isHitl` is true, render a human-in-the-loop UI from `requests`. The stream will finish immediately after the interrupt event.
+The stream terminates immediately after `data-interrupt`.
 
-## HITL Interrupt Types
+Interrupt kinds:
 
-There is currently one AI SDK stream event for human-in-the-loop pauses:
-`data-interrupt`. The backend does not emit a separate `interrupt.type` field
-today. Frontend should derive the interrupt kind from the event and metadata:
-
-| Derived kind | How to detect | FE behavior |
+| Kind | Detection | FE behavior |
 |---|---|---|
-| `tool_approval` | `event.type === "data-interrupt"` and `data.interrupt.action_requests[]` is present | Render approval UI and resume through `POST /ai/resume-interrupt`. This is the current HITL interrupt shape. |
-| `planning_pause` | Final assistant metadata has `planning_budget_reached: true`, `execution_paused: true`, or `execution_pause_reason` | Do not render HITL decisions. Show the assistant content/message and let the user continue with a normal chat message. |
-| `subagent_requires_approval` | Live `data-subagent.data.subagent.status === "requires_approval"` or final `backendMeta.subagent_results[].status === "requires_approval"` | Show worker as blocked. The nested worker is not resumable through `/ai/resume-interrupt`; the user must approve or rerun the operation from the main conversation. |
+| `tool_approval` | `data-interrupt` with `data.interrupt.action_requests[]` | Render approval UI; resume via `POST /ai/resume-interrupt`. |
+| `planning_pause` | Final metadata has `planning_budget_reached: true`, `execution_paused: true`, or `execution_pause_reason` | No decision UI. Show the message; the user continues with a normal chat message. |
+| `subagent_requires_approval` | Live `data-subagent` `status === "requires_approval"`, or `metadata.subagent_results[].status === "requires_approval"` | Show the worker as blocked. Nested workers are not resumable via `/ai/resume-interrupt`. |
 
-Pause/reason fields are not the same as decision types:
+Pause reasons on persisted messages (`metadata.pause_reason` /
+`metadata.execution_pause_reason`) and their resume behavior:
 
-| Field/value | Meaning | Resume behavior |
+| Value | Meaning | Resume |
 |---|---|---|
-| `metadata.pause_reason = "tool_approval_required"` | Persisted assistant message is paused for HITL tool approval. | Use the persisted `interrupt` payload to rebuild approval UI. |
-| `pause_reason = "awaiting_approval"` | Workflow/subagent stopped because a tool needs approval. | Prefer the `interrupt` object if present. Without `interrupt`, show blocked state only. |
-| `pause_reason = "max_iterations_reached"` | Planning loop hit its iteration/budget limit. | No HITL decision. Let the user send another message to continue. |
-| `pause_reason = "consecutive_errors_limit"` | Planning loop stopped after repeated errors. | No HITL decision. Show retry/continue affordance. |
-| `execution_pause_reason = "max_tasks_reached"` | Persisted planning execution pause derived from `planning_budget_reached`. | No HITL decision. Use `execution_pause_message` for display. |
-| `recursion_limit` / `rate_limit` | Possible internal/planning pause reasons from execution guards. | No HITL decision unless a `data-interrupt` payload also exists. |
+| `tool_approval_required` | Paused for HITL tool approval. | Rebuild approval UI from `metadata.interrupt`. |
+| `awaiting_approval` | Workflow/subagent stopped for a tool approval. | Use `metadata.interrupt` if present; otherwise show blocked state. |
+| `max_iterations_reached` | Planning loop hit its budget. | No decision. User sends another message. |
+| `consecutive_errors_limit` | Planning loop stopped after repeated errors. | No decision. Show retry/continue affordance. |
+| `max_tasks_reached` (`execution_pause_reason`) | Planning execution pause. | No decision. Display `execution_pause_message`. |
+| `recursion_limit` / `rate_limit` | Execution guard pauses. | No decision unless a `data-interrupt` payload exists. |
 
-Decision types are the user actions sent back on resume: `approve`, `edit`,
-`reject`, and `respond`.
-
-## HITL Interrupt Shape
+### Interrupt Event
 
 ```json
 {
@@ -329,16 +336,16 @@ Decision types are the user actions sent back on resume: `approve`, `edit`,
       "metadata": {
         "message": "optional display message",
         "reason": "optional display reason",
-        "timeout_deadline": "ISO-8601 timestamp",
+        "timeout_deadline": "ISO-8601",
         "device_id": "optional-device-id",
         "tool_provenance": {
           "tool-call-id": {
             "device_id": "optional-device-id",
-            "tool_origin": "client_or_server_origin",
+            "tool_origin": "client_mcp | server_mcp | internal",
             "server_name": "optional-mcp-server",
-            "qualified_tool_id": "optional-qualified-tool-id",
-            "tool_instance_id": "optional-tool-instance-id",
-            "session_id": "optional-runtime-session",
+            "qualified_tool_id": "optional",
+            "tool_instance_id": "optional",
+            "session_id": "optional",
             "catalog_version": 1
           }
         }
@@ -346,7 +353,9 @@ Decision types are the user actions sent back on resume: `approve`, `edit`,
     },
     "message": {
       "id": "paused-assistant-message-id",
+      "role": "assistant",
       "content": "",
+      "createdAt": "ISO-8601",
       "metadata": {
         "interrupt": {},
         "paused": true,
@@ -359,48 +368,26 @@ Decision types are the user actions sent back on resume: `approve`, `edit`,
 }
 ```
 
-Important HITL fields:
+| Field | Rules |
+|---|---|
+| `data.threadId` | Send back as `threadId` on resume. |
+| `data.interrupt.interrupt_id` | Send back as `interruptId` on resume. |
+| `data.interrupt.conversation_id` | Send back as `conversationId` on resume. |
+| `data.interrupt.action_requests[]` | The list of tool calls awaiting decisions. This is the only such list. |
+| `action_requests[].action` | Tool/action name. |
+| `action_requests[].args` | The arguments that will run. Display these. |
+| `action_requests[].tool_call_id` | Primary decision target. When present, echo it as `toolCallId` on the matching decision. |
+| `action_requests[].task_id` | UI correlation id. It is the decision target only when `tool_call_id` is absent. |
+| `action_requests[].allowed_decisions` | When present, restrict the decision buttons to these values. |
+| `data.interrupt.metadata.timeout_deadline` | Approval window deadline; render countdown/expired state. |
+| `data.interrupt.metadata.tool_provenance` | Audit/debug map keyed by tool call id. Not primary UI copy. |
+| `data.message` | Wire-safe projection of the persisted paused assistant message. `metadata.interrupt` carries the same payload for rebuild-from-history. |
 
-| Field | Type | Notes |
-|---|---|---|
-| `data.threadId` | string | Required for resume as `threadId`. |
-| `data.interrupt.interrupt_id` | string | Required for resume as `interruptId`. |
-| `data.interrupt.conversation_id` | string | Required for resume as `conversationId`. |
-| `data.interrupt.action_requests[]` | array | Canonical (and only) list of tool calls awaiting human input. |
-| `action_requests[].action` | string | Tool/action name. |
-| `action_requests[].args` | object | Original tool arguments. Use this to show what will run. |
-| `action_requests[].description` | string or null | Optional human-readable tool description. |
-| `action_requests[].tool_call_id` | string or null | Primary decision target. If present, send it back as `toolCallId` on the matching decision. |
-| `action_requests[].task_id` | string or null | UI/request identifier. Send as `taskId` if useful, but do not use it instead of `toolCallId` when `tool_call_id` is present. It is only the decision target when `tool_call_id` is missing. |
-| `action_requests[].allowed_decisions` | array or null | If present, restrict UI buttons to these decisions. |
-| `data.interrupt.metadata` | object | Display/recovery metadata for the whole interrupt. See below. |
-
-Interrupt metadata fields:
-
-| Field | Type | Notes |
-|---|---|---|
-| `message` | string or null | Optional display copy for the approval UI. |
-| `reason` | string or null | Optional display reason when `message` is absent or too terse. |
-| `timeout_deadline` | string or null | ISO-8601 deadline for the approval window. FE may show countdown/expired state. |
-| `device_id` | string or null | Client device that owns a local-tool interrupt, when applicable. |
-| `tool_provenance` | object | Map keyed by tool call id or action name. Use for audit/debug and stale-runtime checks, not primary user copy. |
-| `tool_provenance.*.device_id` | string or null | Device associated with that tool call. |
-| `tool_provenance.*.tool_origin` | string or null | Tool origin such as `client_mcp`, `server_mcp`, or `internal`. |
-| `tool_provenance.*.server_name` | string or null | MCP server name, usually for client/server MCP tools. |
-| `tool_provenance.*.qualified_tool_id` | string or null | Stable qualified tool identifier when available. |
-| `tool_provenance.*.tool_instance_id` | string or null | Runtime tool instance id used for stale resume validation. |
-| `tool_provenance.*.session_id` | string or null | Runtime session id used for stale resume validation. |
-| `tool_provenance.*.catalog_version` | number or null | Tool catalog version used for stale resume validation. |
-
-## Resume HITL
-
-Call:
+### Resume
 
 ```http
 POST /ai/resume-interrupt
 ```
-
-Body:
 
 ```json
 {
@@ -408,75 +395,55 @@ Body:
   "conversationId": "conversation-id",
   "interruptId": "interrupt-id",
   "decisions": [
-    {
-      "type": "approve",
-      "toolCallId": "tool-call-id",
-      "action": "tool_name",
-      "args": {}
-    }
+    { "type": "approve", "toolCallId": "tool-call-id", "action": "tool_name", "args": {} }
   ],
-  "inlineRichResponseV1": false
+  "inlineRichResponseV1": true
 }
 ```
+
+`deviceId` is accepted for sidecar-scoped interrupts. Snake-case equivalents
+(`thread_id`, `tool_call_id`, `task_id`, `inline_rich_response_v1`) are
+accepted everywhere camelCase is shown.
 
 Decision fields:
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `type` | string | yes | `approve`, `edit`, `reject`, or `respond`. |
-| `toolCallId` | string | conditionally required | Required whenever the corresponding `action_requests[]` item has `tool_call_id`. Snake case `tool_call_id` is also accepted. |
-| `taskId` | string | optional | UI/request identifier. Snake case `task_id` is also accepted. Fallback target only when `toolCallId`/`tool_call_id` is unavailable. |
-| `action` | string | optional | Tool/action name. Useful for audit/debug display. |
-| `args` | object | optional | Meaning depends on decision type. |
+| Field | Required | Rules |
+|---|---|---|
+| `type` | yes | `approve`, `edit`, `reject`, or `respond`. |
+| `toolCallId` | when the matching request has `tool_call_id` | Must equal that value. |
+| `taskId` | no | UI correlation only. Not a substitute for `toolCallId`. |
+| `action` | no | Tool name, for audit display. |
+| `args` | per type | See below. |
 
-Resume coverage rules:
+Coverage rules:
 
-- Send exactly one decision for every item in `data.interrupt.action_requests[]`.
-- If an action request contains `tool_call_id`, the matching decision must include the same value as `toolCallId` (or `tool_call_id`).
-- `taskId` may be included for UI correlation/back-compat, but `taskId` alone is not sufficient when the pending request has a distinct `tool_call_id`.
-- The backend rejects incomplete coverage with `422 INTERRUPT_INCOMPLETE_DECISIONS`; retrying the same already-claimed interrupt can return `409 INTERRUPT_ALREADY_RESOLVED`, so build the complete decision set before the first resume request.
+- Send exactly one decision per `action_requests[]` entry.
+- Incomplete coverage → `422 INTERRUPT_INCOMPLETE_DECISIONS`.
+- Re-resuming a claimed interrupt → `409 INTERRUPT_ALREADY_RESOLVED`. Build
+  the complete decision set before the first request.
 
 Decision behavior:
 
-| Type | Meaning |
+| Type | Effect |
 |---|---|
 | `approve` | Run the original tool call. |
-| `edit` | Run the tool call with replacement `args`. |
-| `reject` | Do not run the tool. Put feedback in `args.message`, `args.reason`, or `args.feedback`. |
-| `respond` | Do not run the tool. Pass a human answer back with `args.response` or `args.message`. |
+| `edit` | Run with replacement `args`. |
+| `reject` | Do not run. Feedback in `args.message` / `args.reason` / `args.feedback`. |
+| `respond` | Do not run. Human answer in `args.response` / `args.message`. |
 
-Examples:
+The resume response is the same SSE stream format as chat.
 
-```json
-{
-  "type": "reject",
-  "toolCallId": "tool-call-id",
-  "action": "tool_name",
-  "args": { "reason": "Do not access this account." }
-}
+## Message History
+
+```http
+GET /ai/conversations/{conversationId}/messages
 ```
 
-```json
-{
-  "type": "respond",
-  "toolCallId": "tool-call-id",
-  "action": "ask_user",
-  "args": { "response": "Use the quarterly report." }
-}
-```
-
-The resume response uses the same AI SDK stream event format as chat.
-
-## Message History Shape
-
-`GET /ai/conversations/{conversationId}/messages` returns AI SDK `UIMessage` objects.
-
-Query fields:
-
-| Field | Type | Notes |
-|---|---|---|
-| `page` / `limit` / `orderBy` / `orderDirection` | query | Standard pagination and ordering. |
-| `inlineRichResponseV1` | boolean, optional | Opt in to marker-bearing persisted rich-response content. Snake case `inline_rich_response_v1` is also accepted. Without this flag, standalone rich markers are stripped and `rich_items`, `rich_items_version`, and `rich_reference_warnings` are removed from metadata. |
+Query: `page`, `limit`, `orderBy` (`createdAt` default, `updatedAt`),
+`orderDirection` (`asc`/`desc`), `inlineRichResponseV1` (also
+`inline_rich_response_v1`). Without the rich flag, markers are stripped from
+`content` and `rich_items` / `rich_items_version` / `rich_reference_warnings`
+are removed from metadata.
 
 ```json
 {
@@ -493,319 +460,190 @@ Query fields:
           { "type": "file", "url": "data:image/png;base64,...", "mediaType": "image/png" }
         ],
         "metadata": {},
-        "createdAt": "ISO-8601 timestamp"
+        "createdAt": "ISO-8601"
       }
     ],
-    "meta": {
-      "total": 1,
-      "perPage": 20,
-      "currentPage": 1,
-      "lastPage": 1
-    }
-  }
+    "meta": { "total": 1, "perPage": 20, "currentPage": 1, "lastPage": 1 }
+  },
+  "error": null
 }
 ```
 
-Message fields:
+| Field | Rules |
+|---|---|
+| `id` | Message UUID. |
+| `role` | `user` or `assistant`. |
+| `content` | Markdown/plain text. Contains `<!--rich:<id>-->` markers only when the request opted in with `inlineRichResponseV1=true`. |
+| `parts` | Always present. A leading `text` part carrying `content` is guaranteed; images appear as `file` parts. |
+| `metadata` | Backend metadata, scrubbed (see Assistant Metadata). Null for messages persisted without metadata. |
+| `createdAt` | ISO-8601 timestamp. |
 
-| Field | Type | Notes |
-|---|---|---|
-| `id` | string | Message UUID. |
-| `role` | string | `user` or `assistant`. |
-| `content` | string | Markdown/plain text. For rich v1, may contain `<!--rich:<id>-->` markers only when the history request opts in with `inlineRichResponseV1=true` and the server rich-response setting is enabled. |
-| `parts` | array | AI SDK UI parts. Always present; a leading `text` part carrying the message content is guaranteed. Images are exposed as `file` parts. |
-| `parts[].type` | string | `text`, `file`, or `reasoning`. |
-| `parts[].text` | string | Text part content. |
-| `parts[].url` | string | File URL, data URL, remote URL, or blob URL. |
-| `parts[].mediaType` | string | MIME type for file part. |
-| `parts[].reasoning` | string | Reasoning content for reasoning parts, if present. |
-| `metadata` | object or null | Canonical AI SDK UI message metadata field, scrubbed of legacy renderer fields. |
-| `createdAt` | string or null | ISO-8601 timestamp. |
+The total count is `data.meta.total`.
 
-## Assistant Metadata Shape
-
-Use:
+## Assistant Metadata
 
 ```ts
 const backendMeta = message.metadata ?? {};
 ```
 
-Common `backendMeta` fields:
-
-```json
-{
-  "persona_used": "optional persona prompt",
-  "provider": "openai",
-  "model": "gpt-4o",
-  "key_source": "env",
-  "config_source": "request",
-  "config_warnings": ["optional warning"],
-  "custom_model_override": true,
-  "provider_fallback": {
-    "from": "openai",
-    "to": "gemini",
-    "reason": "provider_error"
-  },
-  "reasoning_effort": "high",
-  "thinking": "provider thinking text if persisted",
-  "thinking_summary": "provider thinking summary if available",
-  "reasoning_summary": "provider reasoning summary if available",
-  "reasoning_tokens": 123,
-  "token_breakdown": {},
-  "context_window": {},
-  "agent": {},
-  "handoff": {},
-  "custom_agent_warnings": [],
-  "subagent_dispatches": [],
-  "subagent_results": [],
-  "tool_artifacts": [],
-  "documents_cited": [],
-  "chunks_retrieved": 3,
-  "documents_found": 1,
-  "citations": [],
-  "rich_items_version": 1,
-  "rich_items": [],
-  "rich_reference_warnings": [],
-  "suggested_questions": [],
-  "reply_to_user_message_id": "optional-user-message-id",
-  "todos_synced": true,
-  "interrupt": {},
-  "paused": true,
-  "pause_reason": "tool_approval_required",
-  "execution_paused": true,
-  "execution_pause_reason": "max_tasks_reached",
-  "execution_pause_message": "Completed a planning iteration. Send a message to continue."
-}
-```
-
-All fields are optional. Frontend should ignore unknown keys.
-
-Metadata rules:
-
-- `message.metadata` is the only metadata field. The `messageMetadata` mirror and the `message_metadata` wire alias are not emitted by the AI SDK response path.
-- Legacy renderer fields (`images`, `has_images`, `images_count`, `agentic_images_count`, `live_widgets`, `canvas_artifact`, `pending_tool_calls`) are scrubbed from AI SDK responses even when present in persisted data. Images arrive as `file` parts; everything else arrives as `rich_items`.
-- Database-redundant debug keys (`conversation_id`, `has_tool_calls`, `context_messages`) are also scrubbed — the conversation id is always known from the route.
-- `rich_items`, when present, is a field inside backend metadata at the same level as `tool_artifacts`. It is not a top-level message field.
-- Internal keys beginning with `_`, such as `_rich_item_candidates` and `_inline_rich_response_v1`, are scrubbed from AI SDK responses.
+`metadata` is the single metadata field on history messages and on every
+stream side-channel payload. All fields are optional; ignore unknown keys.
+The scrub applied to every AI SDK response removes the legacy renderer
+fields, database-redundant keys, and `_`-prefixed internal keys listed in
+[Not on the Wire](#not-on-the-wire).
 
 Core runtime/model fields:
 
-| Field | Type | FE usage |
+| Field | Type | Use |
 |---|---|---|
-| `persona_used` | string | Optional trace/debug display for the persona prompt applied to this turn. |
-| `provider` | string | Model provider id, e.g. `openai`, `gemini`, `anthropic`. |
-| `model` | string | Model id used for the final response. |
-| `key_source` | string | Credential source such as `env`, `db`, `settings`, or `none`. Usually debug/admin only. |
-| `config_source` | string | Runtime model config source, e.g. request, saved agent config, default, or fallback. |
-| `config_warnings` | string[] | Non-fatal model/config warnings. Show only in debug/admin surfaces unless product wants them user-visible. |
-| `custom_model_override` | boolean | `true` when the request used an ad hoc model override. Debug/admin only. |
-| `provider_fallback` | object | Present when backend fell back from one provider/model to another. |
-| `provider_fallback.from` / `to` | string | Provider/model fallback source and target. |
-| `provider_fallback.reason` | string | Why fallback happened. |
-| `reasoning_effort` | string | Requested effort level when supported by the provider. |
-| `thinking` | string | Persisted provider thinking text if exposed by the provider/config. Treat as sensitive/debug-only unless product policy says otherwise. |
-| `thinking_summary` / `reasoning_summary` | string | Short reasoning/thinking summary when available. |
-| `reasoning_tokens` | number | Provider-reported reasoning/thinking token count when available. |
+| `persona_used` | string | Persona prompt applied this turn. Debug display. |
+| `provider` / `model` | string | Provider and model of the final response. |
+| `key_source` | string | Credential source (`env`, `db`, `settings`, `none`). Debug/admin. |
+| `config_source` | string | Runtime model-config source. Debug/admin. |
+| `config_warnings` | string[] | Non-fatal model/config warnings. |
+| `custom_model_override` | boolean | Ad hoc model override was used. Debug/admin. |
+| `provider_fallback` | object | `{from, to, reason}` when the backend fell back between providers. |
+| `reasoning_effort` | string | Requested effort level. |
+| `thinking` | string | Persisted provider thinking text. Treat as debug-only. |
+| `thinking_summary` / `reasoning_summary` | string | Short reasoning summary. |
+| `reasoning_tokens` | number | Provider-reported reasoning token count. |
+| `context_overflow_retry` | boolean | The turn was retried after a context overflow. |
 
 Token/context fields:
 
-| Field | Type | FE usage |
+| Field | Type | Use |
 |---|---|---|
-| `token_breakdown.estimated` | object | Estimated prompt/tool/history token counts. Debug or context-meter UI. |
-| `token_breakdown.actual` | object | Provider-reported `input_tokens`, `output_tokens`, `total_tokens`, and `reasoning_tokens` when available. |
-| `token_breakdown.counts` | object | Counts for history messages, tool messages, and bound tools. |
-| `token_breakdown.bound_tool_names` | string[] | Tool names included in the model request. Debug/admin only. |
-| `context_window` | object | Context-window metadata and usage meter fields. See Context and Model Metadata. |
+| `token_breakdown.estimated` | object | Estimated prompt/tool/history token counts. |
+| `token_breakdown.actual` | object | Provider-reported `input_tokens`, `output_tokens`, `total_tokens`, `reasoning_tokens`. |
+| `token_breakdown.counts` | object | History/tool message and bound-tool counts. |
+| `token_breakdown.bound_tool_names` | string[] | Tools bound to the model request. Debug/admin. |
+| `context_window` | object | Context-window meter. Shape below. |
+
+```json
+{
+  "context_window": {
+    "provider": "openai",
+    "model": "gpt-4o",
+    "context_window_tokens": 128000,
+    "max_input_tokens": 128000,
+    "max_output_tokens": 16384,
+    "source": "registry",
+    "known": true,
+    "used_tokens": 12500,
+    "used_token_source": "actual_total",
+    "usage_ratio": 0.09765625,
+    "display_state": "ok"
+  }
+}
+```
+
+When `known` is `false`, the numeric fields are null.
 
 Agent/routing fields:
 
-| Field | Type | FE usage |
+| Field | Type | Use |
 |---|---|---|
-| `agent.id` | string | Runtime agent id, e.g. `chat_agent`, `canvas_agent`, or `custom_agent:<uuid>`. |
-| `agent.kind` | string | `base` or `custom`. |
-| `agent.name` | string | Display name for the responding/selected agent. |
-| `agent.custom_agent_id` | string or null | Stable custom-agent database id when applicable. |
-| `agent.source` | string | `response` when the final response identifies itself, otherwise `selected_agent`. |
-| `handoff.from_agent_id` / `to_agent_id` | string | Agent handoff source and target. |
-| `handoff.reason` | string | Short reason the model/tool supplied for the handoff. |
-| `handoff.tool_call_id` | string or null | Tool call id associated with the handoff. |
-| `custom_agent_warnings` | array | Warnings about custom-agent tool/skill availability. |
-| `subagent_dispatches` | array | Planning dispatch debug/activity records. Prefer `data-subagent` for live progress and `subagent_results` for durable summaries. |
-| `subagent_results` | array | Durable compact worker summaries. See Subagent Progress. |
+| `agent` | object | `{id, kind, name, custom_agent_id, source}` — the responding agent. `kind` is `base` or `custom`; `source` is `response` or `selected_agent`. |
+| `handoff` | object | `{from_agent_id, to_agent_id, reason, tool_call_id}`. |
+| `custom_agent_warnings` | array | Custom-agent tool/skill availability warnings. |
+| `subagent_dispatches` | array | Planning dispatch records. Debug; prefer `data-subagent` live and `subagent_results` durable. |
+| `subagent_results` | array | Durable worker summaries: `{id, agent, agent_name, agent_kind, custom_agent_id, status, summary}`. |
+| `subagent_worker_artifacts` | object | Per-worker debug artifacts. |
 
 Renderer/media fields:
 
-| Field | Type | FE usage |
+| Field | Type | Use |
 |---|---|---|
-| `tool_artifacts` | array | Persisted compact tool execution records. Use for trace, audit, and tool-render fallback. |
-| `rich_items_version` | number | Current version is `1`. Present only for messages with rich-item activity. |
-| `rich_items` | array | Final authoritative rich-item registry for inline/append rendering. The only source for widgets, canvas artifacts, and tool renders. |
-| `rich_reference_warnings` | array | Validation warnings such as `unknown_rich_item` or `invalid_rich_item`. |
-| `documents_cited` / `citations` | array | RAG citation metadata. |
+| `tool_artifacts` | array | Persisted tool execution records (see Tool Artifacts). |
+| `rich_items_version` | number | `1`. Present only on messages with rich-item activity. |
+| `rich_items` | array | The authoritative rich-item registry. The only source for widgets, canvas artifacts, and tool renders. |
+| `rich_reference_warnings` | array | `{code, id}` validation warnings: `unknown_rich_item`, `invalid_rich_item`. |
+| `documents_cited` / `citations` | array | RAG citation metadata (see RAG Citations). |
 | `chunks_retrieved` / `documents_found` | number | RAG retrieval counters. |
+| `canvas_artifact` (persisted only) | — | Never on the AI SDK wire. Canvas is delivered as a rich item. |
 
-Removed legacy renderer fields (`images`, image counters, `live_widgets`,
-`canvas_artifact`) are scrubbed from AI SDK responses — see the
-breaking-changes table.
+Planning/UX fields:
 
-Planning/HITL/user-experience fields:
-
-| Field | Type | FE usage |
+| Field | Type | Use |
 |---|---|---|
-| `suggested_questions` | string[] | Optional follow-up suggestions. |
-| `reply_to_user_message_id` | string | Assistant message was generated as a reply to a specific user message. |
-| `interrupt` | object | Persisted HITL interrupt payload. Rebuild approval UI from this when message is paused. |
-| `paused` | boolean | `true` for persisted paused assistant messages. |
-| `pause_reason` | string | Pause reason; see HITL Interrupt Types. |
-| `thread_id` | string | Resume thread id for persisted interrupt messages. |
-| `next` | string[] | Next graph node(s) for resume/debug. |
-| `todos` | array | Current task-plan/todo state for planning UI. |
-| `planning_call_count` | number | Number of planning loop calls this turn. |
-| `all_tasks_completed` | boolean | Planning execution completed all tasks. |
-| `planning_budget_reached` | boolean | Planning loop paused after reaching budget/iteration limit. |
-| `todos_synced` | boolean | Backend synced response metadata back into persisted task-plan state. |
-| `next_task` | object | Active/next task summary for planning UI. |
+| `suggested_questions` | string[] | Follow-up suggestions. |
+| `reply_to_user_message_id` | string | The user message this reply answers. |
+| `interrupt` | object | Persisted HITL payload for paused messages. |
+| `paused` / `pause_reason` | boolean/string | Paused-message markers (see HITL). |
+| `thread_id` / `next` | string / string[] | Resume identifiers for paused messages. |
+| `todos` | array | Task-plan state for planning UI. |
+| `planning_call_count` | number | Planning loop calls this turn. |
+| `all_tasks_completed` | boolean | Planning finished all tasks. |
+| `planning_budget_reached` | boolean | Planning paused at its budget. |
+| `todos_synced` | boolean | Task-plan state was synced at persistence. |
+| `next_task` | object | Active/next task summary. |
 | `planning_rubric` | object | Plan-quality grading metadata. |
-| `subagent_worker_artifacts` | object | Debug/detail artifacts keyed by worker when available. |
-| `execution_paused` | boolean | Persisted planning execution pause marker. Not a HITL approval interrupt. |
-| `execution_pause_reason` | string | Current persisted value is usually `max_tasks_reached`; see HITL Interrupt Types. |
-| `execution_pause_message` | string | User-facing copy for planning pauses. |
-
-## Images and Attachments
-
-### Request Attachments
-
-The latest user message may send images in `parts`, `content`, `attachments`, `experimental_attachments`, or `files`.
-
-Accepted input item variants:
-
-```json
-{
-  "type": "file",
-  "name": "chart.png",
-  "mediaType": "image/png",
-  "url": "data:image/png;base64,..."
-}
-```
-
-```json
-{
-  "type": "image",
-  "name": "chart.png",
-  "mime": "image/png",
-  "data": "raw-base64-without-data-url-prefix"
-}
-```
-
-Accepted attachment fields:
-
-| Field | Type | Notes |
-|---|---|---|
-| `type` | string | `image` or `file`. Other types are ignored. |
-| `name` / `filename` | string | Optional display filename. Defaults to `attachment`. |
-| `mime` / `mimeType` / `mediaType` / `contentType` | string | MIME type. Defaults to `image/jpeg` on request extraction. |
-| `data` | string | Data URL or raw base64. |
-| `base64` | string | Raw base64. |
-| `url` | string | `data:`, `http://`, `https://`, or `blob:` URL. |
-| `path` / `image` / `source` | string or object | Fallback source fields. Local filesystem-like paths are ignored. |
+| `execution_paused` / `execution_pause_reason` / `execution_pause_message` | boolean/string/string | Planning execution pause (not a HITL approval). |
+| `agentic_mode` / `disable_tools` | boolean | RAG agent execution flags. |
 
 ### Assistant Images
 
-Assistant images are delivered exclusively as AI SDK `file` parts (streamed
-`file` chunks during generation, `parts[].type === "file"` on history and the
-final `data-assistant-message`). The legacy `backendMeta.images` array and its
-counters are scrubbed from AI SDK responses.
-
-Frontend rendering rule:
-
-- Render AI SDK `parts[].type === "file"` for images.
-- If `rich_items_version === 1`, image rich items carry placement (`inline_only`
-  markers); the emitted file parts contain only the selected images.
-- Do not build a separate image gallery from metadata.
+Assistant images are delivered exclusively as `file` parts: streamed `file`
+events during generation, `parts[].type === "file"` on history and on the
+final `data-assistant-message`. For v1 rich messages the file parts are
+exactly the selected images; unselected candidates are never exposed. Do not
+build an image gallery from metadata.
 
 ## Rich Response v1
 
-When `inlineRichResponseV1` is true and server config enables it, assistant markdown may contain standalone markers:
+Activation: the request sends `inlineRichResponseV1: true` **and** the server
+setting `inline_rich_response_enabled` is on (default on; it is a kill
+switch). Non-capable responses contain no markers and no rich keys.
 
-```markdown
-Here is the chart:
+### Serialization
 
-<!--rich:widget:widget-id-->
-```
+Rich items are serialized with null-valued keys omitted. A key is present
+with a real value or absent — `"title": null` and `"data": null` never occur.
+Check for presence, not for null.
 
-Marker format:
+### Emitted Types
 
-```text
-<!--rich:<id>-->
-```
+| `type` | Emitted | `id` format | `display_policy` |
+|---|---|---|---|
+| `image` | yes | `image:tool:<tool-call-id>:<index>`, `image:document:<image-id>` | `inline_only` |
+| `live_widget` | yes | `widget:<widget-id>` | `inline_or_append` |
+| `tool_render` | yes | `tool:<tool-call-id>` | `inline_or_append` |
+| `canvas_artifact` | yes | `canvas:main` | `inline_or_append` |
+| `citation` | **no — reserved**, never constructed | — | — |
+| `resource_link` | **no — reserved**, never constructed | — | — |
 
-Rules:
+Common fields:
 
-| Rule | Value |
-|---|---|
-| Marker line | Must be on its own line. |
-| Allowed ID chars | ASCII letters, digits, `_`, `-`, `.`, `:`. |
-| Max ID length | 128 chars. |
-| Code blocks | Markers inside fenced or 4-space indented code blocks are literal markdown. |
-
-### What the backend actually emits
-
-Read this before the per-type sections — two rules remove most confusion:
-
-1. **Serialization omits empty values.** Rich items are serialized with
-   null-valued keys dropped. A key is either present with a real value or
-   absent — you will never receive `"title": null` or `"data": null`. Check
-   for presence, not for null.
-2. **Only four types are emitted today.** `citation` and `resource_link`
-   exist in the schema for forward compatibility but no backend code
-   constructs them; render unknown types as an ignorable placeholder.
-
-| `type` | Emitted? | `id` format | `display_policy` | Arrives via |
-|---|---|---|---|---|
-| `image` | Yes | `image:tool:<tool-call-id>:<index>` (web/tool images), `image:document:<image-id>` (RAG documents) | `inline_only` | Final `data-assistant-message` / history only. |
-| `live_widget` | Yes | `widget:<widget-id>` | `inline_or_append` | Transient `data-rich-items` **and** final/history. |
-| `tool_render` | Yes | `tool:<tool-call-id>` | `inline_or_append` | Transient `data-rich-items` **and** final/history. |
-| `canvas_artifact` | Yes | `canvas:main` | `inline_or_append` | Final `data-assistant-message` / history only. |
-| `citation` | No — reserved | — | — | Never emitted today. |
-| `resource_link` | No — reserved | — | — | Never emitted today. |
-
-Common fields (a field marked "optional" is absent when it has no value):
-
-| Field | Presence | Notes |
+| Field | Presence | Rules |
 |---|---|---|
 | `id` | always | Stable marker target. |
-| `type` | always | One of the emitted types above. |
-| `source` | optional | Origin: `web_search` / `tool_image` / `rag_document` (images), `widget_tool` (widgets), `tool` (tool renders). Absent on canvas items. |
+| `type` | always | One of the emitted types. Render unknown types as an ignorable placeholder. |
+| `source` | optional | `web_search` / `tool_image` / `rag_document` (images), `widget_tool` (widgets), `tool` (tool renders). Absent on canvas. |
 | `display_policy` | always | `inline_only` or `inline_or_append`. |
-| `title` | optional | Display title. Always present on canvas items; on others only when the source had one. |
-| `alt_text` | image only | Accessibility text; always present on image items, absent on all other types. |
-| `provenance` | always | Origin metadata; `{}` when there is none (canvas). See per-type sections. |
+| `title` | optional | Always present on canvas; on others only when the source had one. |
+| `alt_text` | image only | Always present on image items; absent on every other type. |
+| `provenance` | always | Origin metadata; `{}` when there is none. |
 | `payload` | always | Type-specific payload. |
 
 Display policies:
 
 | Policy | Behavior |
 |---|---|
-| `inline_only` | Render only at marker. Images use this. Do not append elsewhere. |
-| `inline_or_append` | Render at marker if present; otherwise append below the answer. |
+| `inline_only` | Render only at the marker. Never append. Images use this. |
+| `inline_or_append` | Render at the marker when referenced; otherwise append below the answer. |
 
-### Article-Style Auto-Placement
+### Markers
 
-The article rich-response implementation does not add new stream event types or
-new rich item types. It changes when markers can appear:
+```text
+<!--rich:<id>-->
+```
 
-- `inlineRichResponseV1: true` is still the client capability flag.
-- The server-side `inline_rich_response_enabled` setting now defaults to enabled and remains a kill switch. If it is disabled, the backend strips/omits v1 marker behavior even when the client opts in.
-- When `rich_auto_place_enabled` is enabled, the backend may insert markers for relevant unreferenced image candidates and live widgets into the final persisted assistant markdown.
-- Auto-placement is deterministic and bounded by server settings. Current defaults: at most 3 auto-placed images per answer, one placed item per paragraph, and a minimum keyword-overlap score of 0.25. Widget placement is not capped by the image limit.
-- Images still use `display_policy: "inline_only"`. Unplaced image candidates are never exposed to AI SDK clients; do not render a separate gallery.
-- The final authoritative layout is the pair of persisted `message.content` plus `metadata.rich_items`.
-
-Streaming note:
-
-- If the model wrote markers itself, those markers can appear in `text-delta`.
-- If the backend inserted markers during persistence, the earlier `text-delta` stream may not contain those markers.
-- The AI SDK `data-assistant-message` event intentionally omits `content`, so clients that need exact article placement during/after a live run should refetch `GET /ai/conversations/{conversationId}/messages?inlineRichResponseV1=true` after `finish`, or use an application-level finalized message source if one is available.
+| Rule | Value |
+|---|---|
+| Placement | The marker resolves when it is a standalone line (up to 3 leading spaces). |
+| ID charset | ASCII letters, digits, `_`, `-`, `.`, `:`. |
+| Max ID length | 128. |
+| Code blocks | Markers inside fenced or 4-space-indented code blocks are literal text. |
 
 ### Rich Image Item
 
@@ -822,29 +660,24 @@ Streaming note:
     "source_url": "https://example.com/source",
     "description": "Optional description"
   },
-  "provenance": {
-    "tool_call_id": "tool-call-id",
-    "tool": "tool_name",
-    "index": 0
-  }
+  "provenance": { "tool_call_id": "tool-call-id", "tool": "tool_name", "index": 0 }
 }
 ```
 
-Payload rules:
-
-- Exactly one of `payload.url` or `payload.data` (raw base64) is present —
-  never both, and the unused key is absent, not null.
-- `payload.mime_type` is always present. Allowed MIME types are `image/png`,
-  `image/jpeg`, `image/webp`, and `image/gif`.
-- `payload.source_url` and `payload.description` appear only when the source
-  provided them. Item-level `title` likewise.
-- `source` is `web_search` for Tavily results, `tool_image` for other tool
-  images, and `rag_document` for document images (ids of the form
-  `image:document:<image-id>`, provenance `{document_image_id, page_number}`,
-  `title` of the form `"Page 5"` when the page is known).
-- `provenance` on tool images may carry additional provider metadata
-  (`thumbnail_url`, `width`, `height`, `source_domain`, `provider`) —
-  audit/debug only, not for primary rendering.
+- Exactly one of `payload.url` or `payload.data` (raw base64) is present. The
+  unused key is absent.
+- `payload.mime_type` is always present. Allowed: `image/png`, `image/jpeg`,
+  `image/webp`, `image/gif`.
+- `payload.source_url`, `payload.description`, and item `title` appear only
+  when the source provided them.
+- `source` is `web_search` (Tavily), `tool_image` (other tools), or
+  `rag_document` (document images: id `image:document:<image-id>`,
+  provenance `{document_image_id, page_number}`, title `"Page <n>"` when
+  known).
+- Tool-image provenance may add `thumbnail_url`, `width`, `height`,
+  `source_domain`, `provider`. Audit/debug only.
+- Images are selection-only: an image item exists only when the final
+  markdown references it inline.
 
 ### Rich Live Widget Item
 
@@ -868,8 +701,8 @@ Payload rules:
 ```
 
 All payload keys are always present. The payload never contains widget
-`state` — state arrives over the widget WebSocket (see Live Widgets).
-`title` is absent when the widget was created without one.
+`state` — state arrives over the widget WebSocket. `title` is absent when the
+widget has none.
 
 ### Rich Tool Render Item
 
@@ -887,14 +720,13 @@ All payload keys are always present. The payload never contains widget
       "structured_content": {}
     }
   },
-  "provenance": {
-    "tool_call_id": "tool-call-id",
-    "tool": "tool_name"
-  }
+  "provenance": { "tool_call_id": "tool-call-id", "tool": "tool_name" }
 }
 ```
 
-`payload.render` is renderer-specific. Known examples include `mcp_app`, `image`, `json`, `text`, `error`, `live_widget`, and `subagent_dispatch`. Only meaningful non-widget app renders become `tool_render` rich items — widget renders use the dedicated `live_widget` type and error/text renders are not promoted. `title` is present only when the render carries one.
+`payload.render` is renderer-specific (`mcp_app` and other app renders).
+Widget renders use the `live_widget` type; error/text renders are not
+promoted. `title` is present only when the render carries one.
 
 ### Rich Canvas Artifact Item
 
@@ -913,120 +745,80 @@ All payload keys are always present. The payload never contains widget
 }
 ```
 
-Emission notes:
+- At most one per message; the id is always `canvas:main`.
+- Created only for capable requests (or messages that already have other
+  rich-item activity). Non-capable canvas messages expose no canvas on the AI
+  SDK wire.
+- Arrives only in the final `data-assistant-message` and history — never as a
+  transient upsert, never as a `file` part.
+- `payload.content` is executable, untrusted browser content. Render only in
+  a sandboxed iframe (`sandbox`, `referrerpolicy="no-referrer"`).
+- `payload.language` is `html`, `svg`, or `react`; normalize anything else to
+  `html`. CanvasAgent fence-hint normalization: `svg` → `svg`;
+  `react`/`jsx`/`js`/`javascript`/`tsx`/`ts` → `react`; everything else →
+  `html`.
+- `payload.title` falls back to `Canvas`.
+- `payload.preferred_height` is schema-accepted but never emitted. Use your
+  default frame height.
+- A truncated generation still produces an artifact; the assistant text then
+  contains a visible "output was cut off" note. There is no wire flag.
 
-- A message carries at most one canvas artifact, promoted from the CanvasAgent
-  output at persistence with the stable id `canvas:main`.
-- The canvas rich item is created for requests that sent
-  `inlineRichResponseV1: true` (or any message that already has other
-  rich-item activity). Canvas messages created by non-capable clients keep the
-  pre-v1 persisted shape and expose no canvas on the AI SDK wire.
-- `payload.preferred_height` is defined in the schema but currently never
-  emitted for promoted canvas items — rich items are serialized with
-  null-valued keys omitted, so treat it as an optional number and fall back to
-  your default frame height when absent.
+### Reserved Types
 
-Canvas artifacts are standalone browser-rendered artifacts. They may appear as
-legacy `backendMeta.canvas_artifact` and/or as a rich item with
-`type: "canvas_artifact"`.
+`citation` and `resource_link` exist in the schema and are never constructed.
+You will not receive them. RAG citations are delivered through
+`metadata.documents_cited` / `metadata.citations`.
 
-Canvas artifact kinds FE should expect:
+### Auto-Placement
 
-| Kind | Typical user request | `language` | Rendering expectation |
-|---|---|---|---|
-| Full HTML page/app | Website, landing page, calculator, dashboard, game, form, animation, chart, HTML canvas visualization | `html` | Render `content` in the existing sandboxed canvas/iframe path as a full self-contained document. |
-| SVG artifact | Icon, logo, static vector illustration, simple diagram | `svg` | Render `content` as standalone SVG in the same reviewed canvas boundary. |
-| React browser artifact | React component/app, JSX/TSX/JS interactive artifact | `react` | Render as a self-contained browser artifact. Current prompt expects React/ReactDOM UMD CDN usage and a root mount point when React is used. |
+- With `rich_auto_place_enabled`, the backend inserts markers for relevant
+  unreferenced image candidates and live widgets into the final persisted
+  markdown. Defaults: ≤ 3 auto-placed images per answer, one placed item per
+  paragraph, minimum keyword-overlap score 0.25. Widgets are not capped by
+  the image limit.
+- Auto-placed markers are inserted at persistence — after text deltas have
+  streamed. For the exact final layout, refetch history with
+  `inlineRichResponseV1=true` after `finish`.
+- The authoritative layout is persisted `message.content` +
+  `metadata.rich_items`.
 
-`payload.language` is a renderer/editor hint, not the human language of the
-answer and not a MIME type. `CanvasAgent` currently normalizes fenced-code
-language hints like this:
+### Renderer Algorithm
 
-| LLM code fence hint | Emitted `language` |
-|---|---|
-| `svg` | `svg` |
-| `react`, `jsx`, `js`, `javascript`, `tsx`, `ts` | `react` |
-| `html`, blank, unknown, or anything else | `html` |
-
-The rich-item schema accepts `language` as a string for forward compatibility,
-but FE should only special-case `html`, `svg`, and `react` today. Unknown future
-values should fall back to the safest existing canvas renderer or an
-unsupported-artifact placeholder.
-
-Canvas payload fields:
-
-| Field | Type | Notes |
-|---|---|---|
-| `payload.language` | string | Renderer/editor hint. Current emitted values are `html`, `svg`, and `react`. |
-| `payload.title` | string | Display title. Often derived from the HTML `<title>` tag; fallback is `Canvas`. |
-| `payload.content` | string | Full artifact source. Treat as executable/untrusted browser content and render only inside the approved sandbox boundary. |
-| `payload.preferred_height` | number | Optional height hint in pixels — accepted by the schema but never emitted today (absent, not null). Fall back to your default frame height. |
-
-### Reserved Types (not emitted)
-
-`citation` and `resource_link` are defined in the rich-item schema for
-forward compatibility, but **no backend path constructs them today** — you
-will not receive them on any stream or history response. Do not build
-renderers for them yet; if a future item type (these or any other) appears,
-render an ignorable placeholder. RAG citations are delivered through
-`backendMeta.documents_cited` / `backendMeta.citations` instead (see RAG
-Citations).
-
-Renderer algorithm:
-
-1. Opt in with `inlineRichResponseV1: true`.
-2. Store transient `data-rich-items.data.items` by `id`.
+1. Send `inlineRichResponseV1: true`.
+2. Maintain an `items_by_id` map; apply `data-rich-items` upserts into it.
 3. Accumulate `text-delta`.
-4. Split complete standalone `<!--rich:<id>-->` marker lines.
-5. Render known rich item at marker position.
-6. On final `data-assistant-message`, replace transient items with `backendMeta.rich_items` when present. If exact auto-placed marker layout is required, refetch history with `inlineRichResponseV1=true` after `finish`.
-7. Append only unreferenced `inline_or_append` items. Never append `inline_only` images.
+4. Split content on standalone `<!--rich:<id>-->` marker lines.
+5. Render known items at their markers; render a pending placeholder for
+   markers whose item has not arrived.
+6. On the final `data-assistant-message`, replace the map with
+   `metadata.rich_items`. Refetch history when the exact auto-placed layout
+   is required.
+7. Append unreferenced `inline_or_append` items below the answer. Never
+   append `inline_only` images.
 
 ## Live Widgets
 
-Live widgets have one supported type: `html`. A widget is a self-contained micro-app.
-The frontend renders the widget **state only as a sandboxed iframe** from `state.html` —
-never inject `state.html` into the main chat DOM. `state.html` is untrusted, executable
-content; treat it with the same safety boundary as a canvas artifact (`sandbox` iframe,
-`referrerpolicy="no-referrer"`).
+The only widget type is `html`: a self-contained micro-app. Widget state
+renders exclusively as a sandboxed iframe from `state.html` — never inject it
+into the chat DOM. There are no structured widget renderers; do not pick a
+renderer by `widget_type`. Legacy persisted items carrying a removed
+structured type render as a legacy placeholder.
 
-Expected widget state (delivered over the WebSocket, see below):
+Widget state (delivered over the WebSocket):
 
 ```json
-{
-  "html": "<!doctype html>...",
-  "height": 620,
-  "caption": "Optional short caption"
-}
+{ "html": "<!doctype html>...", "height": 620, "caption": "Optional short caption" }
 ```
 
-`height` is a number between 260 and 960; `caption` is optional. There are no structured
-widget renderers (`table`/`chart`/`dashboard`/`form`/`list`) — do **not** choose a React
-renderer by `widget_type`. Legacy persisted metadata may still carry a removed structured
-type; render those as an unsupported/legacy placeholder rather than a structured renderer.
-
-Live widgets reach AI SDK clients only through
-`backendMeta.rich_items[]` where `type === "live_widget"` (the legacy
-`backendMeta.live_widgets[]` array is scrubbed from AI SDK responses).
-
-Widget rich-item `payload` fields:
-
-| Field | Type | Notes |
-|---|---|---|
-| `widget_id` | string | Widget identifier. |
-| `session_id` | string | Conversation/session id. |
-| `widget_type` | string | Always `html` — the only supported live widget type. Older persisted items may carry a removed structured type; render those as a legacy placeholder. |
-| `status` | string | `active` or `closed`. |
-| `version` | number | Incrementing state version. |
-| `connection_endpoint` | string | POST this endpoint to mint a widget WebSocket token. |
+`height` is 260–960. `caption` is optional.
 
 Mount flow:
 
-1. Render placeholder from metadata.
-2. POST `connection_endpoint` with normal auth.
+1. Render a placeholder from the rich item payload.
+2. `POST {payload.connection_endpoint}` with normal auth.
 3. Open the returned `ws_url`.
-4. Render `widget_state_sync.state.html` inside a sandboxed iframe (`srcdoc`).
-5. Apply future `widget_update.state` by re-rendering the iframe.
+4. Render `widget_state_sync.state.html` in a sandboxed iframe (`srcdoc`).
+5. Re-render the iframe on each `widget_update.state`.
 
 Connection response:
 
@@ -1040,81 +832,34 @@ Connection response:
   "version": 1,
   "ws_url": "/widgets/widget-id/connect?session_id=conversation-id&token=jwt",
   "token": "jwt",
-  "expires_at": "ISO-8601 timestamp"
+  "expires_at": "ISO-8601"
 }
 ```
 
-Widget WebSocket server events:
+Server WebSocket events — `widget_state_sync` (initial), `widget_update`,
+`widget_close`, each carrying `{type, widget_id, widget_type, title, state,
+status, version}`; plus:
 
 ```json
-{
-  "type": "widget_state_sync",
-  "widget_id": "widget-id",
-  "widget_type": "html",
-  "title": "Widget title",
-  "state": {},
-  "status": "active",
-  "version": 1
-}
-```
-
-```json
-{
-  "type": "widget_update",
-  "widget_id": "widget-id",
-  "widget_type": "html",
-  "title": "Widget title",
-  "state": {},
-  "status": "active",
-  "version": 2
-}
-```
-
-```json
-{
-  "type": "widget_close",
-  "widget_id": "widget-id",
-  "widget_type": "html",
-  "title": "Widget title",
-  "state": {},
-  "status": "closed",
-  "version": 3
-}
-```
-
-```json
-{ "type": "ping", "timestamp": "ISO-8601 timestamp" }
+{ "type": "ping", "timestamp": "ISO-8601" }
 { "type": "error", "message": "Widget is no longer available." }
 ```
 
-Widget WebSocket client events:
+Client WebSocket events:
 
 ```json
 { "type": "pong" }
+{ "type": "user_state_patch", "patch": { "selection": "row-id" } }
 ```
 
-```json
-{
-  "type": "user_state_patch",
-  "patch": {
-    "selection": "row-id"
-  }
-}
-```
-
-Widget action endpoint:
+Widget actions:
 
 ```http
 POST /widgets/{widgetId}/actions/{actionKey}
 ```
 
-Request:
-
 ```json
-{
-  "input_values": { "note": "demo" },
-  "state_patch": { "selection": "row-id" }
-}
+{ "input_values": { "note": "demo" }, "state_patch": { "selection": "row-id" } }
 ```
 
 Response:
@@ -1128,11 +873,12 @@ Response:
 }
 ```
 
-The action endpoint does not call the assistant. Submit `content` through `/api/chat/{conversationId}`.
+The action endpoint does not call the assistant. Submit `content` through
+`POST /api/chat/{conversationId}`.
 
 ## Tool Artifacts
 
-Persisted tool artifacts live in `backendMeta.tool_artifacts[]`:
+`metadata.tool_artifacts[]` — persisted tool execution records:
 
 ```json
 {
@@ -1146,51 +892,23 @@ Persisted tool artifacts live in `backendMeta.tool_artifacts[]`:
 }
 ```
 
-Fields:
+| Field | Rules |
+|---|---|
+| `tool_call_id` | Tool call id, or null. |
+| `tool` | Tool name. |
+| `args` | Tool input. |
+| `output` | Output text, capped. Widget outputs are compacted and exclude `state`. |
+| `error` | Error text or null. |
+| `status` | `success`, `error`, `failed`, or `rejected`. |
+| `render` | Optional structured render payload (same shapes as `tool-output-available.render`). |
+| `blob_id` | Present when a large output was offloaded. Fetch the full text with `GET /tool-results/{blob_id}`. |
+| `blob_size_bytes` | Size of the offloaded output. |
+| `output_truncated` | `true` when `output` is a preview plus an offload notice. |
 
-| Field | Type | Notes |
-|---|---|---|
-| `tool_call_id` | string or null | Tool call ID. |
-| `tool` | string | Tool name. Legacy shape may use `tool_name`. |
-| `args` | any | Tool input args. |
-| `output` | string or null | Tool output, capped for metadata. Widget outputs are compacted and exclude large `state`. |
-| `error` | string or null | Error text, if failed. |
-| `status` | string | `success`, `error`, `failed`, or `rejected`. |
-| `render` | object, optional | Structured render payload for UI. |
-| `blob_id` | string, optional | Present when a large tool output was offloaded. Fetch full text with `GET /tool-results/{blob_id}` using normal auth. |
-| `blob_size_bytes` | number, optional | Size of the full offloaded output in bytes. |
-| `output_truncated` | boolean, optional | `true` when `output` is only a preview plus an offload notice. |
-
-Offloaded tool-result storage is backend-internal. New blobs are stored in the
-database, while legacy file-backed blobs remain readable through the same
-`GET /tool-results/{blob_id}` endpoint; frontend behavior does not change.
-
-Render payload is tool-specific. Examples:
-
-```json
-{
-  "version": 1,
-  "type": "mcp_app",
-  "template_uri": "ui://canva/presentation-viewer.html",
-  "structured_content": {
-    "presentation_id": "deck_123"
-  }
-}
-```
-
-```json
-{
-  "type": "image",
-  "content": [
-    { "type": "text", "text": "Here is the chart." },
-    { "type": "image", "mimeType": "image/png", "data": "base64" }
-  ]
-}
-```
+Tool artifacts are plain persisted dicts — unlike rich items, null values
+(e.g. `"error": null`) do appear.
 
 ## RAG Citations
-
-Document/RAG responses can include:
 
 ```json
 {
@@ -1200,13 +918,7 @@ Document/RAG responses can include:
       "source": "report.pdf",
       "document_number": 1,
       "chunks": [
-        {
-          "chunk_index": 0,
-          "score": 0.85,
-          "character_count": 1500,
-          "content": "Chunk text...",
-          "page_number": 5
-        }
+        { "chunk_index": 0, "score": 0.85, "character_count": 1500, "content": "Chunk text...", "page_number": 5 }
       ],
       "total_chunks": 1,
       "avg_score": 0.85
@@ -1215,108 +927,14 @@ Document/RAG responses can include:
   "chunks_retrieved": 3,
   "documents_found": 1,
   "citations": [
-    {
-      "document_id": "document-id",
-      "source": "report.pdf",
-      "chunk_index": 0,
-      "page_number": 5,
-      "score": 0.85,
-      "content": "Chunk text..."
-    }
+    { "document_id": "document-id", "source": "report.pdf", "chunk_index": 0, "page_number": 5, "score": 0.85, "content": "Chunk text..." }
   ]
 }
 ```
 
-Fields are optional and depend on the RAG tool path.
+Presence depends on the RAG tool path used.
 
-## Canvas Artifact
-
-Canvas artifacts reach AI SDK clients only as `canvas_artifact` rich items
-(see Rich Canvas Artifact Item). The legacy `backendMeta.canvas_artifact`
-object is scrubbed from AI SDK responses.
-
-## Context and Model Metadata
-
-Optional model/runtime fields:
-
-```json
-{
-  "provider": "openai",
-  "model": "gpt-4o",
-  "key_source": "env",
-  "config_source": "request",
-  "config_warnings": [],
-  "custom_model_override": true,
-  "provider_fallback": {
-    "from": "openai",
-    "to": "gemini",
-    "reason": "provider_error"
-  },
-  "reasoning_effort": "high",
-  "reasoning_tokens": 300,
-  "context_overflow_retry": true
-}
-```
-
-Context window:
-
-```json
-{
-  "context_window": {
-    "provider": "openai",
-    "model": "gpt-4o",
-    "context_window_tokens": 128000,
-    "max_input_tokens": 128000,
-    "max_output_tokens": 16384,
-    "source": "registry",
-    "known": true,
-    "used_tokens": 12500,
-    "used_token_source": "actual_total",
-    "usage_ratio": 0.09765625,
-    "display_state": "ok"
-  }
-}
-```
-
-If `known` is false, `context_window_tokens`, `max_input_tokens`, `max_output_tokens`, `used_tokens`, and `usage_ratio` may be null.
-
-Agent metadata:
-
-```json
-{
-  "agent": {
-    "id": "search_agent",
-    "kind": "base",
-    "name": "Search Agent",
-    "custom_agent_id": null,
-    "source": "selected_agent"
-  },
-  "handoff": {
-    "from_agent_id": "planning_agent",
-    "to_agent_id": "search_agent",
-    "reason": "Needs web search",
-    "tool_call_id": "tool-call-id"
-  },
-  "subagent_results": [
-    {
-      "id": "worker-id",
-      "agent": "search_agent",
-      "agent_name": "Search Agent",
-      "agent_kind": "base",
-      "custom_agent_id": null,
-      "status": "completed",
-      "summary": "Short worker summary"
-    }
-  ],
-  "custom_agent_warnings": []
-}
-```
-
-Planning metadata may include `todos`, `planning_call_count`, `all_tasks_completed`, `planning_budget_reached`, `pause_reason`, `execution_paused`, `execution_pause_reason`, `execution_pause_message`, `next_task`, `planning_rubric`, and `subagent_worker_artifacts`. These are optional and mostly useful for task-plan UI.
-
-## Frontend Detection Summary
-
-Recommended detection:
+## Detection Helpers
 
 ```ts
 function getBackendMeta(message: any) {
@@ -1327,56 +945,64 @@ function isHitlEvent(event: any) {
   return event?.type === "data-interrupt";
 }
 
+function getHitlRequests(event: any) {
+  return event?.data?.interrupt?.action_requests ?? [];
+}
+
 function getInterruptKind(event: any, backendMeta: any = {}) {
-  if (event?.type === "data-interrupt") {
-    return "tool_approval";
-  }
-  if (
-    event?.type === "data-subagent" &&
-    event?.data?.subagent?.status === "requires_approval"
-  ) {
+  if (event?.type === "data-interrupt") return "tool_approval";
+  if (event?.type === "data-subagent" && event?.data?.subagent?.status === "requires_approval") {
     return "subagent_requires_approval";
   }
-  if (
-    backendMeta?.planning_budget_reached ||
-    backendMeta?.execution_paused ||
-    backendMeta?.execution_pause_reason
-  ) {
+  if (backendMeta?.planning_budget_reached || backendMeta?.execution_paused || backendMeta?.execution_pause_reason) {
     return "planning_pause";
   }
-  if (
-    Array.isArray(backendMeta?.subagent_results) &&
-    backendMeta.subagent_results.some((item: any) => item?.status === "requires_approval")
-  ) {
+  if (Array.isArray(backendMeta?.subagent_results) &&
+      backendMeta.subagent_results.some((r: any) => r?.status === "requires_approval")) {
     return "subagent_requires_approval";
   }
   return null;
 }
 
-function getHitlRequests(event: any) {
-  return event?.data?.interrupt?.action_requests ?? [];
-}
-
-function getLiveWidgets(meta: any) {
+function getRichItems(meta: any, type: string) {
   return Array.isArray(meta?.rich_items)
-    ? meta.rich_items.filter((item: any) => item?.type === "live_widget")
+    ? meta.rich_items.filter((i: any) => i?.type === type)
     : [];
 }
+
+const getLiveWidgets = (meta: any) => getRichItems(meta, "live_widget");
+const getCanvasItems = (meta: any) => getRichItems(meta, "canvas_artifact");
 
 function getImageParts(message: any) {
   return Array.isArray(message?.parts)
-    ? message.parts.filter((part: any) => part?.type === "file" && part?.mediaType?.startsWith("image/"))
+    ? message.parts.filter((p: any) => p?.type === "file" && p?.mediaType?.startsWith("image/"))
     : [];
 }
 
-function normalizeCanvasLanguage(artifactOrPayload: any) {
-  const value = String(artifactOrPayload?.language ?? "").toLowerCase();
+function normalizeCanvasLanguage(payload: any) {
+  const value = String(payload?.language ?? "").toLowerCase();
   return value === "svg" || value === "react" ? value : "html";
 }
-
-function getCanvasItems(meta: any) {
-  return Array.isArray(meta?.rich_items)
-    ? meta.rich_items.filter((item: any) => item?.type === "canvas_artifact")
-    : [];
-}
 ```
+
+## Not on the Wire
+
+Definitive list of things AI SDK responses never contain (removed 2026-07-02
+or never implemented). If you find any of these, it is a bug — report it.
+
+| Absent | Use instead |
+|---|---|
+| `messageMetadata` mirror, `message_metadata` alias | `message.metadata`. |
+| `data-interrupt.data.pendingToolCalls` | `data.interrupt.action_requests[]`. |
+| `data.total` on the messages listing | `data.meta.total`. |
+| `metadata.images`, `has_images`, `images_count`, `agentic_images_count` | `file` parts / image rich items. |
+| `metadata.live_widgets` | `live_widget` rich items. |
+| `metadata.canvas_artifact` | The `canvas:main` rich item. |
+| `metadata.pending_tool_calls` | `metadata.interrupt.action_requests`. |
+| `metadata.conversation_id`, `has_tool_calls`, `context_messages` | The route's conversation id; nothing (write-only debug counters). |
+| `_`-prefixed metadata keys (`_rich_item_candidates`, `_inline_rich_response_v1`, …) | Internal only. |
+| `citation` / `resource_link` rich items | `metadata.documents_cited` / `metadata.citations`. |
+| `content` on `data-assistant-message` | Accumulated `text-delta`, or history. |
+| Widget `state` in rich item payloads | The widget WebSocket. |
+| `payload.preferred_height` on canvas items | Your default frame height. |
+| Null-valued keys on rich items | Absent keys. |
