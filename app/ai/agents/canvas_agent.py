@@ -100,7 +100,14 @@ _CODE_FENCE = "```"
 _REACT_LANGUAGE_HINTS = {"jsx", "js", "tsx", "ts", "react", "javascript"}
 
 
-def _find_first_code_block(text: str) -> tuple[str, str, int, int] | None:
+def _find_first_code_block(text: str) -> tuple[str, str, int, int, bool] | None:
+    """Return ``(language_hint, code, start, end, closed)`` for the first fence.
+
+    ``closed`` is False when the output was cut off before the closing fence
+    (length cap, provider stop). The code then runs to end-of-text so a
+    partial artifact can still be extracted instead of persisting the raw
+    code dump as chat content.
+    """
     start = text.find(_CODE_FENCE)
     if start < 0:
         return None
@@ -110,13 +117,15 @@ def _find_first_code_block(text: str) -> tuple[str, str, int, int] | None:
     if newline_index < 0:
         return None
 
+    language_hint = text[info_start:newline_index].strip().lower()
+
     end = text.find(_CODE_FENCE, newline_index + 1)
     if end < 0:
-        return None
+        code = text[newline_index + 1 :].strip()
+        return language_hint, code, start, len(text), False
 
-    language_hint = text[info_start:newline_index].strip().lower()
     code = text[newline_index + 1 : end].strip()
-    return language_hint, code, start, end + len(_CODE_FENCE)
+    return language_hint, code, start, end + len(_CODE_FENCE), True
 
 
 def _extract_title(code: str) -> str:
@@ -146,7 +155,7 @@ def _extract_artifact(text: str) -> dict[str, Any] | None:
     if block is None:
         return None
 
-    lang_hint, code, _, _ = block
+    lang_hint, code, _, _, closed = block
 
     if not code:
         return None
@@ -162,11 +171,14 @@ def _extract_artifact(text: str) -> dict[str, Any] | None:
     # Try to derive a title from <title> tag; fall back to generic label
     title = _extract_title(code)
 
-    return {
+    artifact: dict[str, Any] = {
         "content": code,
         "language": language,
         "title": title,
     }
+    if not closed:
+        artifact["truncated"] = True
+    return artifact
 
 
 def _strip_code_block(text: str) -> str:
@@ -175,7 +187,7 @@ def _strip_code_block(text: str) -> str:
     if block is None:
         return text.strip()
 
-    _, _, start, end = block
+    _, _, start, end, _ = block
     return f"{text[:start]}{text[end:]}".strip()
 
 
@@ -268,11 +280,18 @@ class CanvasAgent(BaseAgent):
             response.metadata["canvas_artifact"] = artifact
             # Replace the raw LLM output (which contains the full code block) with
             # a clean conversational description for the chat thread.
-            response.message.content = description or (
+            content = description or (
                 f"Here's your **{artifact['title']}**! "
                 "You can view and interact with it in the canvas panel. "
                 "Let me know if you'd like any changes."
             )
+            if artifact.get("truncated"):
+                content += (
+                    "\n\n> The artifact output was cut off before completion, so the "
+                    "canvas may be incomplete. Ask me to regenerate it if something "
+                    "looks broken."
+                )
+            response.message.content = content
         else:
             # The LLM didn't produce a fenced code block — return as-is so the user
             # sees the response and can ask again.

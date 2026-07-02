@@ -176,6 +176,22 @@ Rich item upsert:
 }
 ```
 
+Emission rules — `data-rich-items` is a **partial, live-progress channel**, not the
+full registry:
+
+| Item type | Streams as `data-rich-items`? | Arrives via |
+|---|---|---|
+| `live_widget`, `tool_render` | Yes, as each tool completes (only for capable requests). | Transient upsert **and** final `data-assistant-message.metadata.rich_items`. |
+| `image` | Never (selection happens at finalization; candidates must not leak). | Final `data-assistant-message` / history only. |
+| `canvas_artifact` | Never (the source is the asset; it is promoted at persistence). | Final `data-assistant-message` / history only. |
+| Any item whose payload carries inline binary `data` | Never. | Final `data-assistant-message` / history only. |
+
+Do not treat the absence of `data-rich-items` on a turn as an error: a
+canvas-only or image-only answer emits none. The authoritative registry is
+always `metadata.rich_items` on the final `data-assistant-message` (and
+history). A marker streamed in `text-delta` whose item has not been upserted
+yet should render as a pending placeholder until `finish`.
+
 Other data events:
 
 ```json
@@ -225,6 +241,8 @@ Fields:
 | `data.toolName` / `data.toolCallId` | string | `tool` only. A tool the worker invoked. |
 | `data.output` / `data.summary` | string | `tool`/`end`. Worker tool output / final summary. |
 | `data.status` | string | `tool` only. Per-tool status (`success`/`error`/…). |
+| `data.render` | object | `tool` only, optional. Structured render payload for the worker's tool result. |
+| `data.text` | string | Reserved for `phase: "delta"` worker token deltas (not emitted today). |
 | `data.elapsedMs` | number | `end` only. Worker wall-clock duration. |
 | `data.error` | string or null | `end` only, when the worker failed. |
 
