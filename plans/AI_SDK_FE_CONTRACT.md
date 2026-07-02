@@ -14,7 +14,7 @@ This document describes the frontend-facing response shape for the AI SDK-compat
 | 1 | `messageMetadata` mirror **removed** from history messages and the `data-assistant-message` / `data-interrupt` message payloads. | Read `message.metadata` only. |
 | 2 | `data-interrupt.data.pendingToolCalls` **removed**. | Read `data.interrupt.action_requests[]`. |
 | 3 | `data.total` **removed** from the messages listing payload. | Read `data.meta.total`. |
-| 4 | Legacy renderer metadata **scrubbed** from all AI SDK responses: `images`, `has_images`, `images_count`, `agentic_images_count`, `live_widgets`, `canvas_artifact`, `pending_tool_calls`, and internal `_`-prefixed keys. | Images: render `parts[].type === "file"`. Widgets, canvas artifacts, tool renders: render `metadata.rich_items` — send `inlineRichResponseV1: true`. |
+| 4 | Legacy renderer metadata **scrubbed** from all AI SDK responses: `images`, `has_images`, `images_count`, `agentic_images_count`, `live_widgets`, `canvas_artifact`, `pending_tool_calls`, internal `_`-prefixed keys, and database-redundant debug keys (`conversation_id`, `has_tool_calls`, `context_messages`). | Images: render `parts[].type === "file"`. Widgets, canvas artifacts, tool renders: render `metadata.rich_items` — send `inlineRichResponseV1: true`. The conversation id comes from the route. |
 | 5 | `data-user-message` / `data-error-message` payloads are now projected (`id`, `role`, `content`, `createdAt`, `metadata`, `parts`) — raw DB fields (`conversation_id`, `sender`, `updated_at`) no longer appear. | Use the projected fields. |
 | 6 | History messages always carry `parts` with a guaranteed leading `text` part. | Render from `parts` per the AI SDK v5+ `UIMessage` spec. |
 
@@ -566,6 +566,7 @@ Metadata rules:
 
 - `message.metadata` is the only metadata field. The `messageMetadata` mirror and the `message_metadata` wire alias are not emitted by the AI SDK response path.
 - Legacy renderer fields (`images`, `has_images`, `images_count`, `agentic_images_count`, `live_widgets`, `canvas_artifact`, `pending_tool_calls`) are scrubbed from AI SDK responses even when present in persisted data. Images arrive as `file` parts; everything else arrives as `rich_items`.
+- Database-redundant debug keys (`conversation_id`, `has_tool_calls`, `context_messages`) are also scrubbed — the conversation id is always known from the route.
 - `rich_items`, when present, is a field inside backend metadata at the same level as `tool_artifacts`. It is not a top-level message field.
 - Internal keys beginning with `_`, such as `_rich_item_candidates` and `_inline_rich_response_v1`, are scrubbed from AI SDK responses.
 

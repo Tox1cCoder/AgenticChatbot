@@ -43,6 +43,21 @@ projection code into a production-ready layering. Persisted metadata (DB) and th
 9. Dead code removed: `AISDKMessagePart` (never referenced), no-op branches in
    `_extract_data_from_candidate`.
 
+## Follow-up fixes (same day)
+
+- Fixed a pre-existing leak found during live verification: for v1 messages served to
+  non-capable clients, the capability projection stripped `rich_items_version` before image
+  parts were sourced, so leftover legacy `images` candidates leaked as `file` parts. v1-ness
+  is now decided on the original metadata (`visible_image_file_parts(..., is_v1=...)`).
+- Extended the wire scrub with database-redundant debug keys: `conversation_id`,
+  `has_tool_calls`, `context_messages`. Removed the write-only `has_tool_calls` /
+  `context_messages` writes at their agent sources (zero readers); `conversation_id` writes
+  remain persisted (many call sites) but never reach the AI SDK wire.
+- Added a fail-fast startup guard (`app/main.py::_ensure_selector_event_loop`): on Windows
+  with checkpoints enabled, a ProactorEventLoop server now refuses to start instead of
+  silently failing every checkpointer pool connection (uvicorn 0.46 hard-codes Proactor for
+  non-subprocess launches).
+
 ## Out of scope
 
 - `build_bot_metadata()` persistence (Streamlit still reads legacy fields from the DB).

@@ -1125,7 +1125,6 @@ class BaseAgent(ABC):
             token_breakdown_dict = token_breakdown.to_dict()
             metadata = {
                 "conversation_id": conversation_id,
-                "has_tool_calls": tool_calls is not None,
                 "token_breakdown": token_breakdown_dict,
             }
             if context_overflow_retried:

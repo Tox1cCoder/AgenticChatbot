@@ -35,6 +35,19 @@ LEGACY_METADATA_KEYS = frozenset(
     }
 )
 
+# Database-redundant / write-only debug fields some agents persist into
+# message metadata. Clients already know the conversation from the route, and
+# nothing reads the counters — they are wire noise.
+DB_REDUNDANT_METADATA_KEYS = frozenset(
+    {
+        "conversation_id",
+        "has_tool_calls",
+        "context_messages",
+    }
+)
+
+_SCRUBBED_METADATA_KEYS = LEGACY_METADATA_KEYS | DB_REDUNDANT_METADATA_KEYS
+
 _METADATA_KEYS = ("message_metadata", "messageMetadata", "metadata")
 
 
@@ -52,16 +65,17 @@ def find_message_metadata(message: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def scrub_legacy_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
-    """Drop legacy renderer fields and internal keys from an AI SDK projection.
+    """Drop legacy renderer, database-redundant, and internal keys from an
+    AI SDK projection.
 
-    Persistence is untouched — the Streamlit path still reads these fields
-    from the database. Callers that need image ``file`` parts must extract
-    them before scrubbing.
+    Persistence is untouched — the Streamlit path still reads the legacy
+    fields from the database. Callers that need image ``file`` parts must
+    extract them before scrubbing.
     """
     return {
         key: value
         for key, value in metadata.items()
-        if key not in LEGACY_METADATA_KEYS and not key.startswith("_")
+        if key not in _SCRUBBED_METADATA_KEYS and not key.startswith("_")
     }
 
 

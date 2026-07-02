@@ -123,11 +123,37 @@ def _ensure_qdrant_collection():
         )
 
 
+def _ensure_selector_event_loop():
+    """Fail fast when the server loop cannot run psycopg async pools.
+
+    uvicorn (0.46+) hard-codes ``ProactorEventLoop`` for non-subprocess
+    launches on Windows, ignoring the policy set at the top of this module.
+    On that loop the LangGraph checkpointer's psycopg pool fails on every
+    connection, so HITL/planning silently breaks while the server appears
+    healthy. ``reload``/``workers`` launches are unaffected (subprocess
+    launches use ``SelectorEventLoop``).
+    """
+    if sys.platform != "win32" or not settings.enable_langgraph_checkpoints:
+        return
+    loop = asyncio.get_running_loop()
+    if isinstance(loop, asyncio.ProactorEventLoop):
+        raise RuntimeError(
+            "This server is running on a ProactorEventLoop, which psycopg async "
+            "pools cannot use. Launch with reload/workers (subprocess mode), or "
+            "start via the uvicorn Server API after setting "
+            "asyncio.WindowsSelectorEventLoopPolicy(), e.g.:\n"
+            "  asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())\n"
+            "  asyncio.run(uvicorn.Server(uvicorn.Config('app.main:app')).serve())\n"
+            "Alternatively disable LangGraph checkpoints (ENABLE_LANGGRAPH_CHECKPOINTS=false)."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
     global _client_runtime_cleanup_task
     # Startup
+    _ensure_selector_event_loop()
     await init_database_migrations()
     await init_checkpoint_tables()
     await init_agents()

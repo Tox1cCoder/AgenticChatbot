@@ -72,7 +72,6 @@ class ChatAgent(BaseAgent):
                     metadata={
                         **runtime_metadata,
                         "conversation_id": conversation_id,
-                        "context_messages": len(conversation_history),
                         "persona_used": persona,
                         "has_images": True,
                     },
@@ -118,7 +117,6 @@ class ChatAgent(BaseAgent):
         )
 
         response.metadata["conversation_id"] = conversation_id
-        response.metadata["context_messages"] = len(conversation_history)
         response.metadata["persona_used"] = persona
         return response
 

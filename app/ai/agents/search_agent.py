@@ -69,7 +69,6 @@ class SearchAgent(BaseAgent):
             history_summary=history_summary,
         )
         response.metadata["conversation_id"] = conversation_id
-        response.metadata["context_messages"] = len(conversation_history)
         response.metadata["agent_type"] = "tool_calling"
         response.metadata["persona_used"] = persona
         return response

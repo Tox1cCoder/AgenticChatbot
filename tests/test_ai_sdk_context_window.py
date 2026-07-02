@@ -265,6 +265,9 @@ def test_ai_sdk_messages_scrub_legacy_renderer_fields():
             "canvas_artifact": {"content": "<html></html>", "language": "html"},
             "pending_tool_calls": [],
             "_rich_item_candidates": [],
+            "conversation_id": "conversation-1",
+            "has_tool_calls": True,
+            "context_messages": 5,
         },
     )
     user_msg = SimpleNamespace(

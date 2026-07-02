@@ -258,6 +258,9 @@ async def test_terminal_assistant_message_scrubs_legacy_renderer_fields():
                         "canvas_artifact": {"content": "<html></html>"},
                         "pending_tool_calls": [],
                         "_rich_item_candidates": [],
+                        "conversation_id": "conversation-1",
+                        "has_tool_calls": False,
+                        "context_messages": 3,
                     },
                 }
             },

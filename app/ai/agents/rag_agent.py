@@ -849,7 +849,6 @@ class RAGAgent(BaseAgent):
         metadata: dict[str, Any] = {
             "conversation_id": conversation_id,
             "agentic_mode": True,
-            "has_tool_calls": bool(tool_calls),
             "token_breakdown": token_breakdown.to_dict(),
         }
         if isinstance(actual_usage.get("reasoning_tokens"), int):
