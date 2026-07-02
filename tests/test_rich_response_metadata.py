@@ -189,6 +189,85 @@ def test_referenced_widget_marker_is_not_duplicated_in_append():
     assert widget_items[0]["id"] == "widget:w-2"
 
 
+def test_capable_canvas_response_promotes_canvas_rich_item():
+    """CanvasAgent output must reach AI SDK clients through ``rich_items`` —
+    the wire projection scrubs the legacy ``canvas_artifact`` field, so
+    without this promotion the artifact would be invisible to them."""
+
+    response = WorkflowResponse(
+        message=WorkflowResponseMessage(content="Here is your page."),
+        metadata={
+            "_inline_rich_response_v1": True,
+            "canvas_artifact": {
+                "content": "<!doctype html><title>Hello</title><h1>Hello</h1>",
+                "language": "html",
+                "title": "Hello",
+            },
+        },
+    )
+
+    metadata = build_bot_metadata(response)
+
+    canvas = next(item for item in metadata["rich_items"] if item["type"] == "canvas_artifact")
+    assert canvas["id"] == "canvas:main"
+    assert canvas["display_policy"] == "inline_or_append"
+    assert canvas["payload"]["content"].startswith("<!doctype html>")
+    assert canvas["payload"]["language"] == "html"
+    assert canvas["payload"]["title"] == "Hello"
+    assert metadata["rich_items_version"] == 1
+    # Legacy canvas_artifact stays persisted for the Streamlit path.
+    assert metadata["canvas_artifact"]["title"] == "Hello"
+
+
+def test_capable_canvas_response_defaults_missing_title_and_language():
+    response = WorkflowResponse(
+        message=WorkflowResponseMessage(content="Here is your page."),
+        metadata={
+            "_inline_rich_response_v1": True,
+            "canvas_artifact": {"content": "<svg></svg>"},
+        },
+    )
+
+    metadata = build_bot_metadata(response)
+
+    canvas = next(item for item in metadata["rich_items"] if item["type"] == "canvas_artifact")
+    assert canvas["payload"]["title"] == "Canvas"
+    assert canvas["payload"]["language"] == "html"
+
+
+def test_non_capable_canvas_response_keeps_legacy_metadata_only():
+    response = WorkflowResponse(
+        message=WorkflowResponseMessage(content="Here is your page."),
+        metadata={
+            "canvas_artifact": {
+                "content": "<!doctype html><title>Hello</title>",
+                "language": "html",
+                "title": "Hello",
+            }
+        },
+    )
+
+    metadata = build_bot_metadata(response)
+
+    assert metadata["canvas_artifact"]["title"] == "Hello"
+    assert "rich_items_version" not in metadata
+
+
+def test_canvas_artifact_without_content_is_not_promoted():
+    response = WorkflowResponse(
+        message=WorkflowResponseMessage(content="Nothing to render."),
+        metadata={
+            "_inline_rich_response_v1": True,
+            "canvas_artifact": {"language": "html", "title": "Empty"},
+        },
+    )
+
+    metadata = build_bot_metadata(response)
+
+    assert "rich_items_version" not in metadata
+    assert "rich_items" not in metadata
+
+
 def test_unknown_marker_produces_warning():
     response = WorkflowResponse(
         message=WorkflowResponseMessage(content="<!--rich:image:does-not-exist-->"),

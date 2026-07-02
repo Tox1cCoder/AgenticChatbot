@@ -860,7 +860,7 @@ Exactly one of `payload.url` or `payload.data` is present. Allowed MIME types ar
 
 ```json
 {
-  "id": "canvas:assistant-message-id",
+  "id": "canvas:main",
   "type": "canvas_artifact",
   "display_policy": "inline_or_append",
   "title": "Canvas title",
@@ -868,10 +868,21 @@ Exactly one of `payload.url` or `payload.data` is present. Allowed MIME types ar
     "language": "html",
     "title": "Canvas title",
     "content": "<!doctype html>...",
-    "preferred_height": 640
+    "preferred_height": null
   }
 }
 ```
+
+Emission notes:
+
+- A message carries at most one canvas artifact, promoted from the CanvasAgent
+  output at persistence with the stable id `canvas:main`.
+- The canvas rich item is created for requests that sent
+  `inlineRichResponseV1: true` (or any message that already has other
+  rich-item activity). Canvas messages created by non-capable clients keep the
+  pre-v1 persisted shape and expose no canvas on the AI SDK wire.
+- `payload.preferred_height` is currently always `null` for promoted canvas
+  items.
 
 Canvas artifacts are standalone browser-rendered artifacts. They may appear as
 legacy `backendMeta.canvas_artifact` and/or as a rich item with

@@ -202,11 +202,41 @@ def _normalize_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _canvas_rich_item_from_artifact(artifact: Any) -> dict[str, Any] | None:
+    """Build a public ``canvas_artifact`` rich item from legacy canvas metadata.
+
+    The legacy ``metadata["canvas_artifact"]`` field stays persisted for the
+    Streamlit path; this promotion is what makes CanvasAgent output visible to
+    AI SDK clients, whose wire projection scrubs the legacy field.
+    """
+    if not isinstance(artifact, dict):
+        return None
+    content = artifact.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    title = artifact.get("title")
+    title = title if isinstance(title, str) and title.strip() else "Canvas"
+    language = artifact.get("language")
+    language = language if isinstance(language, str) and language.strip() else "html"
+    return {
+        "id": "canvas:main",
+        "type": RichItemType.canvas_artifact.value,
+        "display_policy": RichDisplayPolicy.inline_or_append.value,
+        "title": title,
+        "payload": {
+            "language": language,
+            "title": title,
+            "content": content,
+        },
+    }
+
+
 def _finalize_rich_items(
     *,
     content: str,
     candidates: list[dict[str, Any]],
     widget_items: list[dict[str, Any]],
+    canvas_item: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Resolve the final ``rich_items`` registry and validation warnings.
 
@@ -216,6 +246,8 @@ def _finalize_rich_items(
             during execution (already type-tagged dicts).
         widget_items: Public ``live_widget`` rich items derived from existing
             tool artifacts.
+        canvas_item: Public ``canvas_artifact`` rich item derived from the
+            legacy canvas metadata, when the response produced one.
 
     Returns:
         A tuple ``(rich_items, warnings)`` where ``rich_items`` is the
@@ -240,16 +272,19 @@ def _finalize_rich_items(
             return None
         return validated.model_dump(mode="json", exclude_none=True)
 
-    # Widgets always persist (they are inline_or_append). Tag inline ones.
-    for widget in widget_items:
-        widget_id = widget.get("id")
-        if not widget_id or widget_id in seen_ids:
+    # Widgets and canvas artifacts always persist (they are inline_or_append).
+    always_persisted = list(widget_items)
+    if canvas_item is not None:
+        always_persisted.append(canvas_item)
+    for item in always_persisted:
+        item_id = item.get("id")
+        if not item_id or item_id in seen_ids:
             continue
-        public_widget = validated_public_item(widget)
-        if public_widget is None:
+        public_item = validated_public_item(item)
+        if public_item is None:
             continue
-        rich_items.append(public_widget)
-        seen_ids.add(widget_id)
+        rich_items.append(public_item)
+        seen_ids.add(item_id)
 
     # Candidates: images persist only when referenced; non-images persist if
     # their policy allows append or they are referenced.
@@ -395,6 +430,7 @@ def build_bot_metadata(
         candidates = [c for c in raw_candidates if isinstance(c, dict)]
 
     widget_items = [_widget_rich_item_from_live_widget(widget) for widget in (live_widgets or [])]
+    canvas_item = _canvas_rich_item_from_artifact(metadata.get("canvas_artifact"))
 
     # Only opt the message into the v1 contract when there is actual rich-item
     # activity. Legacy messages with neither markers nor candidates retain the
@@ -405,7 +441,11 @@ def build_bot_metadata(
     if isinstance(message_content, str):
         content = message_content
     has_markers = bool(parse_inline_rich_references(content))
-    has_v1_signal = bool(candidates) or has_markers or (capable_response and bool(widget_items))
+    has_v1_signal = (
+        bool(candidates)
+        or has_markers
+        or (capable_response and bool(widget_items or canvas_item))
+    )
 
     if not has_v1_signal:
         return metadata
@@ -414,6 +454,7 @@ def build_bot_metadata(
         content=content,
         candidates=candidates,
         widget_items=widget_items,
+        canvas_item=canvas_item,
     )
 
     metadata["rich_items_version"] = RICH_ITEMS_VERSION
