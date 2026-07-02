@@ -882,11 +882,11 @@ Exactly one of `payload.url` or `payload.data` is present. Allowed MIME types ar
   "type": "canvas_artifact",
   "display_policy": "inline_or_append",
   "title": "Canvas title",
+  "provenance": {},
   "payload": {
     "language": "html",
     "title": "Canvas title",
-    "content": "<!doctype html>...",
-    "preferred_height": null
+    "content": "<!doctype html>..."
   }
 }
 ```
@@ -899,8 +899,10 @@ Emission notes:
   `inlineRichResponseV1: true` (or any message that already has other
   rich-item activity). Canvas messages created by non-capable clients keep the
   pre-v1 persisted shape and expose no canvas on the AI SDK wire.
-- `payload.preferred_height` is currently always `null` for promoted canvas
-  items.
+- `payload.preferred_height` is defined in the schema but currently never
+  emitted for promoted canvas items — rich items are serialized with
+  null-valued keys omitted, so treat it as an optional number and fall back to
+  your default frame height when absent.
 
 Canvas artifacts are standalone browser-rendered artifacts. They may appear as
 legacy `backendMeta.canvas_artifact` and/or as a rich item with
