@@ -776,6 +776,19 @@ APP_STYLE = """
         line-height: 1.45;
     }
 
+    .subagent-worker-thinking {
+        margin: 0.3rem 0;
+        padding: 0.35rem 0.6rem;
+        border-left: 3px solid #c7d2fe;
+        background: #f8fafc;
+        color: #64748b;
+        font-size: 0.78rem;
+        line-height: 1.4;
+        font-style: italic;
+        max-height: 9rem;
+        overflow-y: auto;
+    }
+
     .subagent-worker-model {
         display: inline-flex;
         align-items: center;
@@ -5211,24 +5224,28 @@ def _render_subagent_activity_view(view: dict[str, Any] | None, *, live: bool = 
             summary = str(item.get("summary") or "").strip()
             model_badge_html = _format_subagent_model_badge(item) or ""
 
+            summary_html = sanitize_message_content(summary) if summary else "No summary returned."
+            thinking = str(item.get("thinking") or "").strip()
+            thinking_html = (
+                f'<div class="subagent-worker-thinking">{sanitize_message_content(thinking)}</div>'
+                if thinking
+                else ""
+            )
+            # Built without newlines/indentation: st.markdown treats indented
+            # lines after a blank line (e.g. an empty model badge) as a
+            # CommonMark code block and shows the raw HTML.
             st.markdown(
-                f"""
-                <div class="subagent-worker-row">
-                    <div class="subagent-worker-top">
-                        <div class="subagent-worker-name">
-                            {worker_id} &middot; {agent_name}{duration_text}
-                        </div>
-                        <span class="trace-status-pill trace-status-{worker_class}">
-                            <span class="material-symbols-outlined" aria-hidden="true">{worker_icon}</span>
-                            {html.escape(worker_badge)}
-                        </span>
-                    </div>
-                    {model_badge_html}
-                    <div class="subagent-worker-summary">
-                        {sanitize_message_content(summary) if summary else "No summary returned."}
-                    </div>
-                </div>
-                """,
+                '<div class="subagent-worker-row">'
+                '<div class="subagent-worker-top">'
+                '<div class="subagent-worker-name">'
+                f"{worker_id} &middot; {agent_name}{duration_text}</div>"
+                f'<span class="trace-status-pill trace-status-{worker_class}">'
+                f'<span class="material-symbols-outlined" aria-hidden="true">{worker_icon}</span>'
+                f"{html.escape(worker_badge)}</span></div>"
+                f"{model_badge_html}"
+                f"{thinking_html}"
+                f'<div class="subagent-worker-summary">{summary_html}</div>'
+                "</div>",
                 unsafe_allow_html=True,
             )
 

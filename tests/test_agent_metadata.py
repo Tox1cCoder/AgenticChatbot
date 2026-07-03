@@ -95,6 +95,41 @@ def test_normalize_subagent_metadata_adds_display_names():
     ]
 
 
+def test_normalize_subagent_metadata_keeps_durable_activity_fields():
+    raw = [
+        {
+            "id": "w1",
+            "agent": "search_agent",
+            "status": "completed",
+            "summary": "found it",
+            "thinking": "checked two sources",
+            "error": None,
+            "elapsed_ms": 4213,
+            "related_todo_ids": ["t1"],
+            "requested_model": {"provider": "openai", "model": "gpt-5.4"},
+            "resolved_model": {"provider": "openai", "model": "gpt-5.4"},
+        }
+    ]
+
+    normalized = normalize_subagent_metadata(raw, None)
+
+    assert normalized == [
+        {
+            "id": "w1",
+            "agent": "search_agent",
+            "agent_name": "Search Agent",
+            "agent_kind": "base",
+            "status": "completed",
+            "summary": "found it",
+            "thinking": "checked two sources",
+            "elapsed_ms": 4213,
+            "related_todo_ids": ["t1"],
+            "requested_model": {"provider": "openai", "model": "gpt-5.4"},
+            "resolved_model": {"provider": "openai", "model": "gpt-5.4"},
+        }
+    ]
+
+
 def test_build_bot_metadata_keeps_agent_and_removes_redundant_custom_fields():
     response = WorkflowResponse(
         message=WorkflowResponseMessage(content="answer"),

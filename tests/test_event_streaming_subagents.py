@@ -64,7 +64,10 @@ async def test_dispatcher_emits_subagent_start_and_end_events():
     assert events[0].subagent.name == "search_agent"
     assert events[0].subagent.path == ["planning_agent", "worker-a"]
     assert events[-1].subagent.status == "completed"
-    assert events[-1].data["output"] == "worker answer"
+    # The end event carries the full answer as `summary`; `output` is
+    # reserved for worker tool events.
+    assert events[-1].data["summary"] == "worker answer"
+    assert "output" not in events[-1].data
 
 
 def test_sink_token_keeps_graph_state_checkpoint_serializable():

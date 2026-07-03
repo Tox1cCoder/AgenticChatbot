@@ -138,10 +138,28 @@ def test_subagent_end_projects_status_and_summary():
         subagent=SubagentRef(
             id="w1", name="search_agent", path=["planning_agent", "w1"], status="completed"
         ),
-        data={"summary": "done", "elapsed_ms": 12},
+        data={"summary": "done", "elapsed_ms": 12, "thinking": "checked both options"},
     )
     payload = legacy_event_from_v3(event)
     assert payload["phase"] == "end"
     assert payload["subagent"]["status"] == "completed"
     assert payload["summary"] == "done"
     assert payload["elapsed_ms"] == 12
+    assert payload["thinking"] == "checked both options"
+
+
+def test_subagent_message_delta_projects_to_delta_phase_with_channel():
+    event = make_event(
+        "subagent_message_delta",
+        sequence=3,
+        subagent=SubagentRef(
+            id="w1", name="search_agent", path=["planning_agent", "w1"], status="running"
+        ),
+        data={"text": "considering sources", "channel": "reasoning"},
+    )
+    payload = legacy_event_from_v3(event)
+    assert payload["type"] == "subagent"
+    assert payload["phase"] == "delta"
+    assert payload["subagent"]["id"] == "w1"
+    assert payload["text"] == "considering sources"
+    assert payload["channel"] == "reasoning"

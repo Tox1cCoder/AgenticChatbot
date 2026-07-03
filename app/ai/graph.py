@@ -2958,6 +2958,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         parent_state: GraphState,
         related_todo_ids: list[str] | None = None,
         model_override: "SubagentModelOverride | None" = None,
+        task_id: str | None = None,
     ) -> AgentResponse:
         """Run a single graph-agent against an isolated child state.
 
@@ -3000,6 +3001,9 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             override=model_override,
         )
         worker_history_summary: str | None = None
+        # ``purpose`` + ``subagent_task_id`` let the v3 stream translator
+        # attribute this worker's model deltas to its subagent row instead of
+        # leaking them into the main answer/thinking stream.
         run_config = RunnableConfig(
             tags=["internal", "planning_subagent", f"subagent:{agent_name}"],
             metadata={
@@ -3007,6 +3011,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                 "purpose": "planning_subagent",
                 "subagent": True,
                 "subagent_agent": agent_name,
+                "subagent_task_id": task_id or agent_name,
             },
         )
 
@@ -3352,14 +3357,14 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     ) -> list[Any]:
         """Return Planning-supervisor-only internal tools for this turn.
 
-        ``dispatch_subagents`` is bound whenever the feature flag is on and
-        Planning mode is active. ``planning_phase`` and plan presence are NOT
-        binding gates — they are prompt-level guidance. Hiding the tool prevents
-        the user from testing subagents on a fresh planning conversation.
+        ``dispatch_subagents`` is bound whenever the feature flag is on. The
+        planning node only runs when a turn is routed (or handed off) to
+        planning_agent, so an explicit "use subagents" request works without
+        pre-enabling Planning mode — the mode flag flips on automatically when
+        the resulting todos sync. ``planning_phase``, Planning mode, and plan
+        presence are prompt-level guidance, not binding gates.
         """
         if not getattr(settings, "planning_subagents_enabled", False):
-            return []
-        if not state.get("planning_mode_enabled"):
             return []
 
         from .planning_subagents import (

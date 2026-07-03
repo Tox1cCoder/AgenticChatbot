@@ -249,6 +249,152 @@ def test_build_live_subagent_activity_view_keeps_previous_when_start_args_are_in
     assert view is previous
 
 
+def test_build_live_subagent_activity_view_accumulates_reasoning_deltas():
+    start = build_live_subagent_activity_view(
+        {
+            "type": "subagent",
+            "phase": "start",
+            "subagent": {"id": "w1", "name": "search_agent", "status": "running"},
+            "task": "Find sources",
+        }
+    )
+    first = build_live_subagent_activity_view(
+        {
+            "type": "subagent",
+            "phase": "delta",
+            "subagent": {"id": "w1", "name": "search_agent", "status": "running"},
+            "text": "Checking ",
+            "channel": "reasoning",
+        },
+        previous=start,
+    )
+    second = build_live_subagent_activity_view(
+        {
+            "type": "subagent",
+            "phase": "delta",
+            "subagent": {"id": "w1", "name": "search_agent", "status": "running"},
+            "text": "official sources.",
+            "channel": "reasoning",
+        },
+        previous=first,
+    )
+
+    assert second is not None
+    worker = second["results"][0]
+    assert worker["thinking"] == "Checking official sources."
+    # Answer-text deltas must not pollute the thinking accumulator.
+    third = build_live_subagent_activity_view(
+        {
+            "type": "subagent",
+            "phase": "delta",
+            "subagent": {"id": "w1", "name": "search_agent", "status": "running"},
+            "text": "Gold is at...",
+            "channel": "text",
+        },
+        previous=second,
+    )
+    assert third["results"][0]["thinking"] == "Checking official sources."
+
+
+def test_build_live_subagent_activity_view_end_carries_final_thinking():
+    start = build_live_subagent_activity_view(
+        {
+            "type": "subagent",
+            "phase": "start",
+            "subagent": {"id": "w1", "name": "search_agent", "status": "running"},
+            "task": "Find sources",
+        }
+    )
+    ended = build_live_subagent_activity_view(
+        {
+            "type": "subagent",
+            "phase": "end",
+            "subagent": {"id": "w1", "name": "search_agent", "status": "completed"},
+            "summary": "done",
+            "thinking": "final reasoning summary",
+            "elapsed_ms": 900,
+        },
+        previous=start,
+    )
+
+    assert ended is not None
+    worker = ended["results"][0]
+    assert worker["status"] == "completed"
+    assert worker["thinking"] == "final reasoning summary"
+
+
+def test_dispatch_end_render_preserves_live_thinking_and_finalizes_status():
+    started = build_live_subagent_activity_view(
+        {
+            "type": "subagent",
+            "phase": "start",
+            "subagent": {"id": "worker-a", "name": "search_agent", "status": "running"},
+            "task": "Check the current docs.",
+        }
+    )
+    with_thinking = build_live_subagent_activity_view(
+        {
+            "type": "subagent",
+            "phase": "delta",
+            "subagent": {"id": "worker-a", "name": "search_agent", "status": "running"},
+            "text": "Comparing sources.",
+            "channel": "reasoning",
+        },
+        previous=started,
+    )
+    ended = build_live_subagent_activity_view(
+        {
+            "type": "tool",
+            "name": "dispatch_subagents",
+            "phase": "end",
+            "render": {
+                "type": "subagent_dispatch",
+                "structured_content": {
+                    "status": "completed",
+                    "results": [
+                        {
+                            "id": "worker-a",
+                            "agent": "search_agent",
+                            "status": "completed",
+                            "elapsed_ms": 1200,
+                            "answer": "Docs checked in full.",
+                        }
+                    ],
+                },
+            },
+        },
+        previous=with_thinking,
+    )
+
+    assert ended is not None
+    assert ended["status"] == "completed"
+    worker = ended["results"][0]
+    assert worker["status"] == "completed"
+    # Model-facing payloads carry `answer`; the view maps it to summary.
+    assert worker["summary"] == "Docs checked in full."
+    # Live-accumulated thinking survives the tool-result overlay.
+    assert worker["thinking"] == "Comparing sources."
+
+
+def test_build_subagent_activity_view_surfaces_worker_thinking():
+    metadata = {
+        "subagent_results": [
+            {
+                "id": "w1",
+                "agent": "search_agent",
+                "status": "completed",
+                "summary": "Found current docs.",
+                "thinking": "compared both sources",
+            }
+        ]
+    }
+
+    view = build_subagent_activity_view(metadata)
+
+    assert view is not None
+    assert view["results"][0]["thinking"] == "compared both sources"
+
+
 # ---------------------------------------------------------------------------
 # Phase 10 follow-up: subagent activity surfaces requested/resolved model
 # ---------------------------------------------------------------------------

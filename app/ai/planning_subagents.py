@@ -191,7 +191,9 @@ class PlanningSubagentTask(BaseModel):
         try:
             json.dumps(value)
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"PlanningSubagentTask.context must be JSON-serializable: {exc}")
+            raise ValueError(
+                f"PlanningSubagentTask.context must be JSON-serializable: {exc}"
+            ) from exc
         return value
 
 
@@ -229,12 +231,24 @@ class PlanningSubagentResult(BaseModel):
     custom_agent_id: str | None = None
     status: Literal["completed", "failed", "timeout", "requires_approval"]
     elapsed_ms: int
-    summary: str
+    summary: str = Field(
+        description=(
+            "Full worker answer for activity display/persistence. Identical "
+            "text to ``answer``; only one of the two appears per payload."
+        ),
+    )
     answer: str = Field(
         default="",
         description=(
             "Full worker answer handed back to the Planning supervisor. This "
             "is not substring-truncated by the subagent dispatcher."
+        ),
+    )
+    thinking: str | None = Field(
+        default=None,
+        description=(
+            "Worker reasoning text for activity display. Never sent back to "
+            "the Planning supervisor model."
         ),
     )
     related_todo_ids: list[str] = Field(default_factory=list)
@@ -291,6 +305,7 @@ class _IsolatedAgentRunner(Protocol):
         parent_state: dict[str, Any],
         related_todo_ids: list[str] | None = None,
         model_override: SubagentModelOverride | None = None,
+        task_id: str | None = None,
     ) -> AgentResponse: ...
 
 
@@ -355,9 +370,6 @@ def build_worker_model_request(
 # ---------------------------------------------------------------------------
 
 
-_TRUNCATION_NOTICE = "\n…[truncated]"
-_ACTIVITY_SUMMARY_MAX_CHARS = 1200
-
 _SUBAGENT_RESPONSE_CONTRACT = """
 
 Response contract:
@@ -371,25 +383,17 @@ Response contract:
 """.strip()
 
 
-def _truncate_summary(text: str, max_chars: int) -> str:
-    if max_chars <= 0:
-        return text
-    if len(text) <= max_chars:
-        return text
-    keep = max(0, max_chars - len(_TRUNCATION_NOTICE))
-    return text[:keep] + _TRUNCATION_NOTICE
-
-
-def _activity_summary_from_answer(answer: str) -> str:
-    return _truncate_summary(answer.strip(), _ACTIVITY_SUMMARY_MAX_CHARS)
-
-
 def _result_payload(
     result: PlanningSubagentResult,
     *,
     include_answer: bool,
 ) -> dict[str, Any]:
     """Return a result payload without nested worker artifacts.
+
+    ``include_answer=True`` is the model-facing payload: the full ``answer``
+    only — ``summary`` duplicates it and ``thinking`` is UI/debug material,
+    so neither reaches the supervisor. ``include_answer=False`` is the
+    activity/UI payload: full ``summary`` + ``thinking``, no ``answer``.
 
     ``requested_model``/``resolved_model`` are kept so the supervisor (and the
     UI) can see exactly which model answered each worker, but the underlying
@@ -398,8 +402,7 @@ def _result_payload(
     """
 
     excluded = {"artifacts", "images"}
-    if not include_answer:
-        excluded.add("answer")
+    excluded.update({"thinking", "summary"} if include_answer else {"answer"})
 
     return result.model_dump(
         mode="json",
@@ -447,6 +450,16 @@ def _summarize_requested_model(
     if override is None:
         return None
     return override.model_dump(exclude_none=True)
+
+
+def _worker_thinking(response: AgentResponse) -> str | None:
+    """Reasoning text from the worker's final model call."""
+    metadata = response.metadata or {}
+    for key in ("thinking", "reasoning_summary"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 # Worker response metadata keys carried back as ``resolved_model`` for the
@@ -522,6 +535,7 @@ class PlanningSubagentDispatcher:
             artifacts: list[dict[str, Any]] | None = None,
             resolved_model: dict[str, Any] | None = None,
             identity: dict[str, Any] | None = None,
+            thinking: str | None = None,
         ) -> PlanningSubagentResult:
             resolved_identity = identity or default_identity or {}
             return PlanningSubagentResult(
@@ -532,8 +546,9 @@ class PlanningSubagentDispatcher:
                 custom_agent_id=resolved_identity.get("custom_agent_id"),
                 status=status,
                 elapsed_ms=int((time.perf_counter() - wall_start) * 1000),
-                summary=_activity_summary_from_answer(answer),
+                summary=answer.strip(),
                 answer=answer,
+                thinking=thinking,
                 related_todo_ids=list(task.related_todo_ids),
                 error=error,
                 artifacts=list(artifacts or []),
@@ -549,8 +564,8 @@ class PlanningSubagentDispatcher:
                     agent_name=result.agent,
                     status=result.status,
                     data={
-                        "output": result.answer,
                         "summary": result.summary,
+                        "thinking": result.thinking,
                         "elapsed_ms": result.elapsed_ms,
                         "error": result.error,
                         "requested_model": result.requested_model,
@@ -580,6 +595,7 @@ class PlanningSubagentDispatcher:
                 parent_state=parent_state,
                 related_todo_ids=list(task.related_todo_ids),
                 model_override=task.model_override,
+                task_id=task.id,
             )
         except asyncio.TimeoutError:
             return await _emit_end(
@@ -601,6 +617,7 @@ class PlanningSubagentDispatcher:
 
         worker_artifacts = list(response.tool_artifacts or [])
         resolved_model = _summarize_resolved_model(response)
+        worker_thinking = _worker_thinking(response)
 
         if self._event_sink is not None:
             for artifact in worker_artifacts:
@@ -646,6 +663,7 @@ class PlanningSubagentDispatcher:
                     artifacts=worker_artifacts,
                     resolved_model=resolved_model,
                     identity=response_identity,
+                    thinking=worker_thinking,
                 )
             )
 
@@ -659,6 +677,7 @@ class PlanningSubagentDispatcher:
                     artifacts=worker_artifacts,
                     resolved_model=resolved_model,
                     identity=response_identity,
+                    thinking=worker_thinking,
                 )
             )
 
@@ -669,6 +688,7 @@ class PlanningSubagentDispatcher:
                 artifacts=worker_artifacts,
                 resolved_model=resolved_model,
                 identity=response_identity,
+                thinking=worker_thinking,
             )
         )
 
@@ -682,8 +702,7 @@ _DISPATCH_TOOL_DESCRIPTION = (
     "Dispatch independent worker tasks to other graph agents during PLANNING "
     "execution. Workers run in parallel and the call blocks until every "
     "worker completes, fails, times out, or signals it needs human approval. "
-    "Each result returns a full worker `answer` for supervisor reconciliation "
-    "plus a compact `summary` for activity display. "
+    "Each result returns the full worker `answer` for supervisor reconciliation. "
     "Workers receive their own isolated context — they do NOT see the "
     "Planning Agent's chat history and they CANNOT update todos directly. "
     "After this tool returns, the Planning Agent must read each result and "
@@ -796,4 +815,8 @@ def create_dispatch_subagents_tool(
         name="dispatch_subagents",
         description=_DISPATCH_TOOL_DESCRIPTION,
         args_schema=DispatchSubagentsInput,
+        # The dispatch blocks for the whole worker fan-out (multiple model +
+        # tool rounds), so the generic per-tool timeout must not apply here;
+        # workers remain bounded by their own tool/provider timeouts.
+        metadata={"execution_timeout_seconds": None},
     )

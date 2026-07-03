@@ -244,35 +244,49 @@ When the Planning Agent dispatches workers, each worker streams transient
             "subagent": { "id": "worker-a", "name": "search_agent", "path": ["planning_agent", "worker-a"], "status": "running" },
             "task": "Find source material." } }
 { "type": "data-subagent", "transient": true,
+  "data": { "phase": "delta",
+            "subagent": { "id": "worker-a", "name": "search_agent", "path": ["planning_agent", "worker-a"], "status": "running" },
+            "text": "Weighing which sources are authoritative…", "channel": "reasoning" } }
+{ "type": "data-subagent", "transient": true,
   "data": { "phase": "tool",
             "subagent": { "id": "worker-a", "name": "search_agent", "path": ["planning_agent", "worker-a"], "status": "running" },
             "toolCallId": "sub-call-1", "toolName": "search_documents", "status": "success" } }
 { "type": "data-subagent", "transient": true,
   "data": { "phase": "end",
             "subagent": { "id": "worker-a", "name": "search_agent", "path": ["planning_agent", "worker-a"], "status": "completed" },
-            "output": "…", "summary": "Short worker summary", "elapsedMs": 1234 } }
+            "summary": "Full worker answer…", "thinking": "Final reasoning…", "elapsedMs": 1234 } }
 ```
 
 | Field | Presence | Meaning |
 |---|---|---|
-| `data.phase` | always | `start`, `tool`, or `end`. |
+| `data.phase` | always | `start`, `delta`, `tool`, or `end`. |
 | `data.subagent.id` | always | Stable key — upsert the same UI row across phases. |
 | `data.subagent.name` | always | Worker agent name. |
 | `data.subagent.path` | always | Hierarchy path. |
 | `data.subagent.status` | always | `running`, `completed`, `failed`, `timeout`, or `requires_approval`. |
 | `data.task` | `start` | The worker's instruction. |
+| `data.text` | `delta` | Live worker model token(s). |
+| `data.channel` | `delta` | `reasoning` (worker thinking) or `text` (worker answer). |
 | `data.toolCallId` / `data.toolName` | `tool` | The tool the worker invoked. |
 | `data.status` | `tool` | Per-tool status (`success` / `error` / …). |
 | `data.render` | `tool`, optional | Structured render payload for the worker's tool result. |
-| `data.output` / `data.summary` | `tool` / `end` | Tool output / final worker summary. |
+| `data.output` | `tool` | The worker tool's output. |
+| `data.summary` | `end` | The worker's full, untruncated answer. |
+| `data.thinking` | `end`, optional | Reasoning from the worker's final model call. Untruncated. |
 | `data.elapsedMs` | `end` | Worker wall-clock duration in ms. |
 | `data.error` | `end`, on failure | Error text. |
-| `data.text` | reserved | For future `phase: "delta"` token streaming. Not emitted. |
+| `data.requestedModel` / `data.resolvedModel` | `end`, optional | Task-local model override and the model that actually answered. |
 
 Rendering rules:
 
 - `data-subagent` is transient — keep your own map keyed by `subagent.id` for
   a live panel; drop it when the run finishes.
+- Accumulate `delta` events per worker per `channel`. `reasoning` deltas are
+  the worker's live thinking; `text` deltas are its answer-in-progress. The
+  `end` event's `thinking` is the final model call's reasoning, not the
+  concatenation of the deltas.
+- Worker model output never appears in the top-level `text-delta` /
+  `reasoning-delta` stream — those channels carry only the responding agent.
 - The durable record is `metadata.subagent_results` on the final
   `data-assistant-message`.
 - Resume-path (`/ai/resume-interrupt`) dispatches do not stream live progress.
@@ -545,7 +559,7 @@ Agent/routing fields:
 | `handoff` | object | `{from_agent_id, to_agent_id, reason, tool_call_id}`. |
 | `custom_agent_warnings` | array | Custom-agent tool/skill availability warnings. |
 | `subagent_dispatches` | array | Planning dispatch records. Debug; prefer `data-subagent` live and `subagent_results` durable. |
-| `subagent_results` | array | Durable worker summaries: `{id, agent, agent_name, agent_kind, custom_agent_id, status, summary}`. |
+| `subagent_results` | array | Durable worker records: `{id, agent, agent_name, agent_kind, status, summary}` plus, when present, `custom_agent_id`, `thinking`, `error`, `elapsed_ms`, `related_todo_ids`, `requested_model`, `resolved_model`. `summary` and `thinking` are untruncated. Absent keys are omitted, never null. |
 | `subagent_worker_artifacts` | object | Per-worker debug artifacts. |
 
 Renderer/media fields:

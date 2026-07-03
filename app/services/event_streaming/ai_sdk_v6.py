@@ -327,11 +327,15 @@ class AISDKV6StreamAdapter:
             ("task", "task"),
             ("output", "output"),
             ("summary", "summary"),
+            ("thinking", "thinking"),
             ("status", "status"),
             ("error", "error"),
             ("render", "render"),
             ("text", "text"),
+            ("channel", "channel"),
             ("elapsed_ms", "elapsedMs"),
+            ("requested_model", "requestedModel"),
+            ("resolved_model", "resolvedModel"),
         ):
             value = data.get(src_key)
             if value is not None:

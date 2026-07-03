@@ -209,6 +209,51 @@ async def test_execute_tool_calls_times_out_slow_tool(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_tool_calls_metadata_none_disables_timeout(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_timeout", 0.01)
+    monkeypatch.setattr(settings, "tool_execution_max_retries", 0)
+
+    class _LongRunningTool:
+        name = "dispatch_like_tool"
+        metadata = {"execution_timeout_seconds": None}
+
+        async def ainvoke(self, args):
+            await asyncio.sleep(0.05)
+            return "done"
+
+    outputs, artifacts, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "dispatch_like_tool", "args": {}}],
+        tool_map={"dispatch_like_tool": _LongRunningTool()},
+    )
+
+    assert outputs[0]["content"] == "done"
+    assert artifacts[0].get("status") != "error"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_calls_metadata_overrides_timeout(monkeypatch):
+    monkeypatch.setattr(settings, "tool_execution_timeout", 10)
+    monkeypatch.setattr(settings, "tool_execution_max_retries", 0)
+
+    class _SlowOverrideTool:
+        name = "slow_override_tool"
+        metadata = {"execution_timeout_seconds": 0.01}
+
+        async def ainvoke(self, args):
+            await asyncio.sleep(1)
+            return "too late"
+
+    outputs, _, _ = await execute_tool_calls(
+        tool_calls=[{"id": "call-1", "name": "slow_override_tool", "args": {}}],
+        tool_map={"slow_override_tool": _SlowOverrideTool()},
+    )
+
+    payload = json.loads(outputs[0]["content"])
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "timeout"
+
+
+@pytest.mark.asyncio
 async def test_execute_tool_calls_retries_retry_safe_transient_failure(monkeypatch):
     monkeypatch.setattr(settings, "tool_execution_timeout", 1)
     monkeypatch.setattr(settings, "tool_execution_max_retries", 1)

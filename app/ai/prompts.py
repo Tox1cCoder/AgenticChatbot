@@ -347,8 +347,10 @@ Routing priorities:
    subagent", "dispatch", "delegate", "fan out", "run in parallel", "execute the
    plan", or any reference to subagents MUST route to planning_agent in this state,
    regardless of other heuristics.
-3. Prefer planning_agent when the user is managing a task plan or working through
-   an existing plan, even if no plan exists yet.
+3. Prefer planning_agent when the user is managing a task plan, working through
+   an existing plan, or explicitly asks to delegate, dispatch subagents, fan out,
+   or run tasks with parallel workers — even if no plan exists yet and Planning
+   mode is not active.
 4. Prefer canvas_agent when the user wants a standalone authored browser artifact
    or a larger interactive experience in the canvas preview.
 5. Prefer chat_agent, rag_agent, or search_agent with widget tools for bounded

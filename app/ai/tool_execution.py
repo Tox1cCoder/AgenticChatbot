@@ -976,6 +976,26 @@ def _tool_execution_timeout_seconds() -> float:
     return max(0.001, parsed)
 
 
+def _resolve_tool_timeout_seconds(tool: Any) -> float | None:
+    """Per-tool timeout from ``tool.metadata["execution_timeout_seconds"]``.
+
+    ``None`` disables the outer timeout — for long-running orchestration tools
+    (e.g. ``dispatch_subagents``) whose inner operations already run under
+    their own tool/provider timeouts. Absent or invalid values fall back to
+    the global ``tool_execution_timeout``.
+    """
+    metadata = getattr(tool, "metadata", None)
+    if isinstance(metadata, dict) and "execution_timeout_seconds" in metadata:
+        value = metadata["execution_timeout_seconds"]
+        if value is None:
+            return None
+        try:
+            return max(0.001, float(value))
+        except (TypeError, ValueError):
+            pass
+    return _tool_execution_timeout_seconds()
+
+
 def _tool_execution_max_retries() -> int:
     value = getattr(settings, "tool_execution_max_retries", 0) or 0
     try:
@@ -1000,7 +1020,7 @@ async def invoke_tool_with_policy(
     Session errors (``ClosedResourceError`` / ``BrokenResourceError``) are
     re-raised so the caller's MCP reconnect path can run.
     """
-    timeout_seconds = _tool_execution_timeout_seconds()
+    timeout_seconds = _resolve_tool_timeout_seconds(tool)
     max_retries = _tool_execution_max_retries()
     attempts = 0
     last_exc: BaseException | None = None
@@ -1008,10 +1028,13 @@ async def invoke_tool_with_policy(
     while attempts <= max_retries:
         attempts += 1
         try:
-            result = await asyncio.wait_for(
-                invoke_tool(tool, tool_args),
-                timeout=timeout_seconds,
-            )
+            if timeout_seconds is None:
+                result = await invoke_tool(tool, tool_args)
+            else:
+                result = await asyncio.wait_for(
+                    invoke_tool(tool, tool_args),
+                    timeout=timeout_seconds,
+                )
             return result, None, None
         except asyncio.TimeoutError:
             last_exc = TimeoutError(f"Tool timed out after {timeout_seconds}s")

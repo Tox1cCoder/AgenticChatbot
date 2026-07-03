@@ -50,17 +50,23 @@ def classify_tool_error(
     exc: BaseException,
     *,
     tool_name: str,
-    timeout_seconds: int | float,
+    timeout_seconds: int | float | None,
     attempts: int,
 ) -> ToolErrorSummary:
     raw = str(exc).lower()
-    timeout_value = int(timeout_seconds) if float(timeout_seconds).is_integer() else timeout_seconds
 
     if isinstance(exc, TimeoutError):
+        if timeout_seconds is None:
+            timeout_message = "Tool timed out in an underlying operation."
+        else:
+            timeout_value = (
+                int(timeout_seconds) if float(timeout_seconds).is_integer() else timeout_seconds
+            )
+            timeout_message = f"Tool timed out after {timeout_value}s."
         return ToolErrorSummary(
             error_type=ToolErrorKind.TIMEOUT.value,
             retryable=True,
-            message=f"Tool timed out after {timeout_value}s.",
+            message=timeout_message,
             hint=(
                 "Retry only if the operation is likely safe; otherwise adjust inputs, "
                 "use another available tool, discover a better tool, or ask the user."

@@ -149,10 +149,12 @@ class PlanningAgent(BaseAgent):
             phase_prompt = dedent(
                 """
                 # CURRENT PHASE: PLANNING
-                - Create or modify the task plan using: set_todos, add_todo, update_todo, remove_todo
+                - Create or modify the task plan using: set_todos, add_todo,
+                  update_todo, remove_todo
                 - Do NOT execute tasks: no start_todo or complete_todo
                 - Ask for confirmation before starting execution
-                - When modifying an existing plan, preserve task IDs and statuses for unchanged tasks
+                - When modifying an existing plan, preserve task IDs and
+                  statuses for unchanged tasks
 
                 When the user explicitly asks to start/execute/implement:
                 - Begin execution by calling start_todo for the next task
@@ -203,11 +205,11 @@ class PlanningAgent(BaseAgent):
                 - Keep dispatch calls focused: include only the independent
                   worker tasks needed for the current step.
                 - Workers CANNOT mutate todos. After the call returns, read
-                  each `answer` (the full worker answer; `summary` is only
-                  the compact activity preview) and call `write_todos`
-                  (complete or update) for related todos. If a result is
-                  `failed`, `timeout`, or `requires_approval`, leave the todo
-                  pending and explain the blocker in your reply.
+                  each `answer` (the full worker answer) and call
+                  `write_todos` (complete or update) for related todos. If a
+                  result is `failed`, `timeout`, or `requires_approval`,
+                  leave the todo pending and explain the blocker in your
+                  reply.
                 - You are the only actor allowed to call `write_todos`.
 
                 ### Task fields — required shapes

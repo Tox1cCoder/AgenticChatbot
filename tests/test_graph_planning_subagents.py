@@ -117,10 +117,14 @@ async def test_planning_node_binds_dispatch_in_planning_and_executing_when_plan_
 
 
 @pytest.mark.asyncio
-async def test_planning_node_does_not_bind_dispatch_when_planning_mode_disabled_in_planning_phase(
+async def test_planning_node_binds_dispatch_when_planning_mode_disabled(
     monkeypatch,
 ):
-    """The only binding gates are planning_subagents_enabled + planning_mode_enabled."""
+    """planning_subagents_enabled is the only binding gate.
+
+    An explicit "use subagents" request routes to planning_agent without
+    Planning mode being pre-enabled, so the dispatch tool must still bind.
+    """
     monkeypatch.setattr(settings, "planning_subagents_enabled", True)
 
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
@@ -159,7 +163,7 @@ async def test_planning_node_does_not_bind_dispatch_when_planning_mode_disabled_
 
     call_kwargs = workflow.planning_agent.invoke_model_with_history.call_args.kwargs
     tool_names = [tool.name for tool in call_kwargs.get("internal_tools") or []]
-    assert "dispatch_subagents" not in tool_names
+    assert "dispatch_subagents" in tool_names
 
 
 @pytest.mark.asyncio
@@ -258,7 +262,9 @@ async def test_planning_node_binds_dispatch_schema_without_constructing_dispatch
 
 
 @pytest.mark.asyncio
-async def test_planning_node_does_not_bind_dispatch_when_planning_mode_disabled(monkeypatch):
+async def test_planning_node_binds_dispatch_when_planning_mode_disabled_in_executing_phase(
+    monkeypatch,
+):
     monkeypatch.setattr(settings, "planning_subagents_enabled", True)
 
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
@@ -298,7 +304,7 @@ async def test_planning_node_does_not_bind_dispatch_when_planning_mode_disabled(
     call_kwargs = workflow.planning_agent.invoke_model_with_history.call_args.kwargs
     internal_tools = call_kwargs.get("internal_tools") or []
     tool_names = [t.name for t in internal_tools]
-    assert "dispatch_subagents" not in tool_names
+    assert "dispatch_subagents" in tool_names
 
 
 @pytest.mark.asyncio
@@ -558,6 +564,40 @@ async def test_run_agent_in_isolated_context_does_not_pollute_parent_messages(mo
     assert response.message.content == "worker done"
     # Parent state messages must not have been mutated by the worker.
     assert parent_state["messages"] == parent_messages
+
+
+@pytest.mark.asyncio
+async def test_run_agent_in_isolated_context_stamps_subagent_task_id_in_run_config():
+    """Worker model runs must carry subagent_task_id so the v3 stream
+    translator can attribute their deltas to the right worker row."""
+    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
+    workflow._get_conversation_history = AsyncMock(return_value=[])
+
+    captured_kwargs: dict[str, Any] = {}
+
+    async def fake_invoke(messages, conversation_history, persona, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _ok("done")
+
+    agent = SimpleNamespace(
+        invoke_model_with_history=fake_invoke,
+        agent_config_key="chat",
+        agent_id="chat_agent",
+    )
+    workflow.chat_agent = agent
+    workflow.agents = {"chat_agent": agent}
+
+    await workflow._run_agent_in_isolated_context(
+        agent_name="chat_agent",
+        task_prompt="worker task",
+        parent_state={"messages": [], "context": {}},
+        task_id="w7",
+    )
+
+    run_config = captured_kwargs["run_config"]
+    assert run_config["metadata"]["purpose"] == "planning_subagent"
+    assert run_config["metadata"]["subagent_task_id"] == "w7"
+    assert run_config["metadata"]["subagent_agent"] == "chat_agent"
 
 
 @pytest.mark.asyncio
@@ -1643,7 +1683,13 @@ async def test_dispatcher_isolates_sibling_worker_overrides(monkeypatch):
     seen_per_agent: dict[str, list[dict[str, Any]]] = {}
 
     async def fake_runner(
-        *, agent_name, task_prompt, parent_state, related_todo_ids=None, model_override=None
+        *,
+        agent_name,
+        task_prompt,
+        parent_state,
+        related_todo_ids=None,
+        model_override=None,
+        task_id=None,
     ):
         from app.ai.planning_subagents import build_worker_model_request
 
@@ -1722,7 +1768,13 @@ async def test_dispatch_result_includes_requested_and_resolved_model(monkeypatch
     workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
 
     async def fake_runner(
-        *, agent_name, task_prompt, parent_state, related_todo_ids=None, model_override=None
+        *,
+        agent_name,
+        task_prompt,
+        parent_state,
+        related_todo_ids=None,
+        model_override=None,
+        task_id=None,
     ):
         return AgentResponse(
             agent_type=AgentType.SEARCH,

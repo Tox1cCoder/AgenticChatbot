@@ -110,7 +110,20 @@ def legacy_event_from_v3(event: V3StreamEvent) -> dict[str, Any] | None:
             payload["tool_call_id"] = event.tool_call_id
         if event.tool_name:
             payload["tool_name"] = event.tool_name
-        for key in ("task", "output", "summary", "status", "error", "render", "text", "elapsed_ms"):
+        for key in (
+            "task",
+            "output",
+            "summary",
+            "thinking",
+            "status",
+            "error",
+            "render",
+            "text",
+            "channel",
+            "elapsed_ms",
+            "requested_model",
+            "resolved_model",
+        ):
             value = event.data.get(key)
             if value is not None:
                 payload[key] = value

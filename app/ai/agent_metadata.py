@@ -168,5 +168,19 @@ def normalize_subagent_metadata(
             "status": str(entry.get("status") or "unknown"),
             "summary": str(entry.get("summary") or ""),
         }
+        # Durable per-worker record: keep the dispatcher's activity fields so
+        # persisted messages render the same detail as the live panel.
+        if isinstance(entry.get("thinking"), str):
+            item["thinking"] = entry["thinking"]
+        if isinstance(entry.get("error"), str):
+            item["error"] = entry["error"]
+        if isinstance(entry.get("elapsed_ms"), (int, float)):
+            item["elapsed_ms"] = int(entry["elapsed_ms"])
+        related = entry.get("related_todo_ids")
+        if isinstance(related, list) and related:
+            item["related_todo_ids"] = [str(v) for v in related]
+        for model_key in ("requested_model", "resolved_model"):
+            if isinstance(entry.get(model_key), dict):
+                item[model_key] = entry[model_key]
         normalized.append({k: v for k, v in item.items() if v not in (None, "")})
     return normalized

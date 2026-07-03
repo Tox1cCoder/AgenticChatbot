@@ -199,6 +199,37 @@ async def test_subagent_events_map_to_data_subagent_chunks():
 
 
 @pytest.mark.asyncio
+async def test_subagent_message_delta_maps_to_delta_phase_with_thinking_channel():
+    async def source():
+        yield make_event(
+            "subagent_message_delta",
+            sequence=1,
+            subagent=SubagentRef(
+                id="w1", name="search_agent", path=["planning_agent", "w1"], status="running"
+            ),
+            data={"text": "weighing sources", "channel": "reasoning"},
+        )
+        yield make_event(
+            "subagent_end",
+            sequence=2,
+            subagent=SubagentRef(
+                id="w1", name="search_agent", path=["planning_agent", "w1"], status="completed"
+            ),
+            data={"summary": "done", "thinking": "weighed sources", "elapsed_ms": 5},
+        )
+        yield make_event("complete", sequence=3, data={"message": {"id": "m-1"}})
+
+    payloads = await _collect_payloads(source)
+    subagent = [p for p in payloads if p != "[DONE]" and p.get("type") == "data-subagent"]
+
+    assert subagent[0]["data"]["phase"] == "delta"
+    assert subagent[0]["data"]["text"] == "weighing sources"
+    assert subagent[0]["data"]["channel"] == "reasoning"
+    assert subagent[1]["data"]["phase"] == "end"
+    assert subagent[1]["data"]["thinking"] == "weighed sources"
+
+
+@pytest.mark.asyncio
 async def test_terminal_assistant_message_projects_to_ui_message_metadata_shape():
     async def source():
         yield make_event(

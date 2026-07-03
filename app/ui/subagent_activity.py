@@ -69,7 +69,9 @@ def _normalize_result(entry: Any) -> dict[str, Any] | None:
         or "unknown_agent"
     )
     status = str(entry.get("status") or "unknown").strip().lower() or "unknown"
-    summary = str(entry.get("summary") or "").strip()
+    # Model-facing dispatch JSON carries the full text as `answer` only;
+    # activity metadata carries it as `summary`. Accept either.
+    summary = str(entry.get("summary") or entry.get("answer") or "").strip()
 
     normalized: dict[str, Any] = {
         "id": worker_id or f"{agent}:{status}",
@@ -83,7 +85,7 @@ def _normalize_result(entry: Any) -> dict[str, Any] | None:
         ],
     }
 
-    for key in ("agent_name", "agent_kind", "custom_agent_id"):
+    for key in ("agent_name", "agent_kind", "custom_agent_id", "thinking"):
         value = entry.get(key)
         if isinstance(value, str) and value.strip():
             normalized[key] = value.strip()
@@ -333,6 +335,10 @@ def _merge_live_subagent_event(
         task_text = event.get("task")
         if isinstance(task_text, str) and task_text.strip() and not entry.get("summary"):
             entry["summary"] = task_text.strip()
+    elif phase == "delta":
+        text = event.get("text")
+        if isinstance(text, str) and text and event.get("channel") == "reasoning":
+            entry["thinking"] = str(entry.get("thinking") or "") + text
     elif phase == "tool":
         artifacts = _as_list(entry.get("artifacts"))
         artifacts.append(
@@ -345,7 +351,15 @@ def _merge_live_subagent_event(
         )
         entry["artifacts"] = artifacts
     elif phase == "end":
-        for key in ("summary", "elapsed_ms", "requested_model", "resolved_model", "error"):
+        end_keys = (
+            "summary",
+            "thinking",
+            "elapsed_ms",
+            "requested_model",
+            "resolved_model",
+            "error",
+        )
+        for key in end_keys:
             value = event.get(key)
             if value is not None:
                 entry[key] = value
@@ -427,6 +441,34 @@ def build_live_subagent_activity_view(
                 ]
             }
         )
-        return view or previous
+        if view is None:
+            return previous
+
+        prev_rows = {
+            str(row.get("id") or ""): row
+            for row in _as_list((previous or {}).get("results"))
+            if isinstance(row, dict)
+        }
+        if not prev_rows:
+            return view
+
+        # Overlay the tool result's final fields onto the live rows so
+        # event-only detail (accumulated thinking, model info) survives.
+        merged_results = []
+        for row in view.get("results") or []:
+            prev_row = prev_rows.get(str(row.get("id") or ""), {})
+            fresh = {key: value for key, value in row.items() if value not in (None, "", [])}
+            merged_results.append({**prev_row, **fresh})
+
+        rationales = list(view.get("rationales") or [])
+        for rationale in _as_list((previous or {}).get("rationales")):
+            _append_unique_text(rationales, rationale)
+
+        status = str(view.get("status") or "")
+        return _build_activity_view(
+            results=merged_results,
+            rationales=rationales,
+            dispatch_statuses=[status] if status in _AGGREGATE_STATUSES else [],
+        )
 
     return previous

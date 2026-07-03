@@ -29,6 +29,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
 
+from ...core.config import settings
 from .events import SubagentRef, V3StreamEvent, make_event
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,33 @@ def _node_from_metadata(metadata: dict[str, Any] | None) -> str | None:
         return None
     value = metadata.get("langgraph_node") or metadata.get("node")
     return str(value) if value else None
+
+
+def _subagent_ref_from_metadata(metadata: dict[str, Any]) -> SubagentRef | None:
+    """Identify a planning-subagent worker model run from its merged metadata.
+
+    ``_run_agent_in_isolated_context`` stamps every worker model call with
+    ``purpose=planning_subagent`` + ``subagent_task_id``/``subagent_agent``,
+    which LangGraph merges into the messages-channel metadata.
+    """
+    if metadata.get("purpose") != "planning_subagent":
+        return None
+    task_id = str(metadata.get("subagent_task_id") or "").strip()
+    if not task_id:
+        return None
+    return SubagentRef(
+        id=task_id,
+        name=str(metadata.get("subagent_agent") or "unknown_agent"),
+        path=["planning_agent", task_id],
+        status="running",
+    )
+
+
+def _is_internal_run(metadata: dict[str, Any]) -> bool:
+    if metadata.get("internal") is True:
+        return True
+    tags = metadata.get("tags")
+    return isinstance(tags, (list, tuple)) and "internal" in tags
 
 
 def _text_from_block(block: dict[str, Any]) -> str:
@@ -224,6 +252,20 @@ class V3ProtocolTranslator:
         run_id = metadata.get("run_id") if isinstance(metadata, dict) else None
         event_name = message_event.get("event")
 
+        if isinstance(metadata, dict):
+            # Planning-subagent worker model runs surface on this channel too
+            # (nested calls inherit the graph's streaming callbacks). Re-route
+            # their deltas to attributed subagent events instead of letting
+            # them interleave into the main answer/thinking stream.
+            subagent = _subagent_ref_from_metadata(metadata)
+            if subagent is not None:
+                yield from self._translate_subagent_delta(
+                    message_event, subagent, namespace=namespace, run_id=run_id
+                )
+                return
+            if settings.suppress_internal_stream_chunks and _is_internal_run(metadata):
+                return
+
         if event_name == "content-block-delta":
             delta = message_event.get("delta") or {}
             dtype = delta.get("type")
@@ -302,6 +344,40 @@ class V3ProtocolTranslator:
                 namespace=namespace,
                 run_id=run_id,
                 data={"usage": message_event.get("usage")},
+            )
+
+    def _translate_subagent_delta(
+        self,
+        message_event: dict[str, Any],
+        subagent: SubagentRef,
+        *,
+        namespace: list[str],
+        run_id: Any,
+    ) -> Iterable[V3StreamEvent]:
+        """Project a worker model-run envelope to ``subagent_message_delta``.
+
+        Only text/reasoning deltas surface (``channel`` distinguishes them);
+        worker message lifecycle and tool-call chunks stay private — worker
+        tool activity is reported by the dispatcher's event sink.
+        """
+        if message_event.get("event") != "content-block-delta":
+            return
+        delta = message_event.get("delta") or {}
+        dtype = delta.get("type")
+        if dtype == "text-delta":
+            text, channel = delta.get("text", ""), "text"
+        elif dtype == "reasoning-delta":
+            text, channel = delta.get("reasoning", ""), "reasoning"
+        else:
+            return
+        if text:
+            yield make_event(
+                "subagent_message_delta",
+                sequence=self._next(),
+                namespace=namespace,
+                run_id=run_id if isinstance(run_id, str) else None,
+                subagent=subagent,
+                data={"text": text, "channel": channel},
             )
 
     def _translate_values(

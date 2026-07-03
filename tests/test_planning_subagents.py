@@ -339,6 +339,7 @@ class _StubWorkflow:
         parent_state: dict[str, Any],
         related_todo_ids: list[str] | None = None,
         model_override: Any = None,
+        task_id: str | None = None,
     ) -> AgentResponse:
         return await self._runner(
             agent_name=agent_name,
@@ -346,6 +347,7 @@ class _StubWorkflow:
             parent_state=parent_state,
             related_todo_ids=related_todo_ids,
             model_override=model_override,
+            task_id=task_id,
         )
 
 
@@ -539,12 +541,12 @@ async def test_dispatcher_returns_full_answer_despite_tool_result_budget(monkeyp
 
     result = await dispatcher.dispatch(request, parent_state={})
     assert result.results[0].answer == long_answer
-    assert result.results[0].summary
-    assert len(result.results[0].summary) < len(long_answer)
+    # No subagent-specific truncation: the activity summary is the full answer.
+    assert result.results[0].summary == long_answer
 
 
 @pytest.mark.asyncio
-async def test_dispatch_tool_returns_full_answer_but_stashes_compact_activity(monkeypatch):
+async def test_dispatch_tool_returns_full_answer_and_stashes_full_activity(monkeypatch):
     monkeypatch.setattr(settings, "tool_result_max_chars", 100)
 
     long_answer = "full worker answer " + ("detail " * 2000)
@@ -563,13 +565,84 @@ async def test_dispatch_tool_returns_full_answer_but_stashes_compact_activity(mo
     result_json = await tool.ainvoke({"tasks": [_valid_task("w1", "chat_agent")]})
     parsed = json.loads(result_json)
 
+    # Model payload carries the answer once — no duplicate summary field.
     assert parsed["results"][0]["answer"] == long_answer
-    assert parsed["results"][0]["summary"]
-    assert len(parsed["results"][0]["summary"]) < len(long_answer)
+    assert "summary" not in parsed["results"][0]
 
+    # Activity payload carries the same full text as summary, no answer.
     activity_result = parent_state["context"]["subagent_results"][0]
     assert "answer" not in activity_result
-    assert activity_result["summary"] == parsed["results"][0]["summary"]
+    assert activity_result["summary"] == long_answer.strip()
+
+
+def test_dispatch_tool_opts_out_of_generic_execution_timeout():
+    tool = create_dispatch_subagents_tool(dispatcher=None, parent_state_provider=None)
+    assert tool.metadata == {"execution_timeout_seconds": None}
+
+
+@pytest.mark.asyncio
+async def test_worker_thinking_is_kept_for_activity_but_not_for_supervisor():
+    """Worker reasoning goes to activity metadata/UI, never back to the model."""
+
+    async def runner(**kwargs):
+        return AgentResponse(
+            agent_type=AgentType.CHAT,
+            agent_id="chat_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="worker answer"),
+            metadata={"thinking": "I should check the sources first."},
+        )
+
+    workflow = _StubWorkflow(runner)
+    dispatcher = PlanningSubagentDispatcher(workflow=workflow, settings=settings)
+    parent_state: dict[str, Any] = {}
+    tool = create_dispatch_subagents_tool(
+        dispatcher=dispatcher,
+        parent_state_provider=lambda: parent_state,
+    )
+
+    result_json = await tool.ainvoke({"tasks": [_valid_task("w1", "chat_agent")]})
+    parsed = json.loads(result_json)
+
+    # Model-facing payload: full answer, no worker reasoning.
+    assert parsed["results"][0]["answer"] == "worker answer"
+    assert "thinking" not in parsed["results"][0]
+
+    # Activity payload: reasoning kept, answer dropped.
+    activity_result = parent_state["context"]["subagent_results"][0]
+    assert activity_result["thinking"] == "I should check the sources first."
+    assert "answer" not in activity_result
+
+
+@pytest.mark.asyncio
+async def test_worker_thinking_falls_back_to_reasoning_summary_and_reaches_end_event():
+    async def runner(**kwargs):
+        return AgentResponse(
+            agent_type=AgentType.CHAT,
+            agent_id="chat_agent",
+            message=AgentMessage(role=MessageRole.ASSISTANT, content="ok"),
+            metadata={"reasoning_summary": "Compared both options."},
+        )
+
+    class _SinkSpy:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict[str, Any]]] = []
+
+        async def emit(self, event_type, **kwargs):
+            self.events.append((event_type, kwargs))
+
+    sink = _SinkSpy()
+    dispatcher = PlanningSubagentDispatcher(
+        workflow=_StubWorkflow(runner), settings=settings, event_sink=sink
+    )
+
+    result = await dispatcher.run_one(
+        PlanningSubagentTask(id="w1", agent=PlanningSubagentName.CHAT_AGENT, task="do the thing"),
+        parent_state={},
+    )
+
+    assert result.thinking == "Compared both options."
+    end_events = [kwargs for etype, kwargs in sink.events if etype == "subagent_end"]
+    assert end_events and end_events[0]["data"]["thinking"] == "Compared both options."
 
 
 @pytest.mark.asyncio
@@ -649,7 +722,6 @@ async def test_dispatcher_keeps_worker_artifacts_for_ui_but_not_in_model_json(mo
 
     # Model context: full answer is handed off, no artifacts/images leaked.
     assert parsed["results"][0]["answer"] == "worker summary"
-    assert parsed["results"][0]["summary"] == "worker summary"
     assert "artifacts" not in parsed["results"][0]
     assert "images" not in parsed["results"][0]
 
@@ -702,9 +774,10 @@ async def test_dispatch_subagents_tool_returns_valid_json_string(monkeypatch):
     for entry in parsed["results"]:
         assert entry["status"] in ("completed", "failed", "timeout", "requires_approval")
         assert "elapsed_ms" in entry
-        assert "summary" in entry
         assert "answer" in entry
         assert "agent" in entry
+        # summary duplicates answer and is activity-only — not model-facing.
+        assert "summary" not in entry
 
 
 @pytest.mark.asyncio
@@ -743,7 +816,6 @@ async def test_dispatch_subagents_tool_stashes_compact_results_without_artifacts
 
     parsed = json.loads(result_json)
     assert parsed["results"][0]["answer"] == "done"
-    assert parsed["results"][0]["summary"] == "done"
     assert "artifacts" not in parsed["results"][0]
     assert "images" not in parsed["results"][0]
 

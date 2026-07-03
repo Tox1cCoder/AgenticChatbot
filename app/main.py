@@ -235,6 +235,7 @@ def create_app() -> FastAPI:
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            allow_private_network=True,
             expose_headers=["x-vercel-ai-ui-message-stream"],
         )
     else:
@@ -243,6 +244,7 @@ def create_app() -> FastAPI:
             allow_origins=["*"],
             allow_methods=["*"],
             allow_headers=["*"],
+            allow_private_network=True,
             expose_headers=["x-vercel-ai-ui-message-stream"],
         )
 

@@ -198,6 +198,99 @@ def test_translator_block_delta_tool_call_chunk_becomes_tool_call_delta():
     assert events[0].data["args_delta"] == '{"query"'
 
 
+def _worker_messages_event(message_event, *, seq=1, task_id="w1", agent="search_agent"):
+    return _v3(
+        "messages",
+        (
+            message_event,
+            {
+                "langgraph_node": "planning_agent",
+                "run_id": "r1",
+                "internal": True,
+                "purpose": "planning_subagent",
+                "subagent": True,
+                "subagent_agent": agent,
+                "subagent_task_id": task_id,
+                "tags": ["internal", "planning_subagent"],
+            },
+        ),
+        seq=seq,
+    )
+
+
+def test_translator_routes_worker_reasoning_delta_to_subagent_message_delta():
+    t = V3ProtocolTranslator()
+    events = list(
+        t.translate(
+            _worker_messages_event(
+                {
+                    "event": "content-block-delta",
+                    "index": 0,
+                    "delta": {"type": "reasoning-delta", "reasoning": "worker plan"},
+                }
+            )
+        )
+    )
+    assert [e.type for e in events] == ["subagent_message_delta"]
+    assert events[0].data == {"text": "worker plan", "channel": "reasoning"}
+    assert events[0].subagent is not None
+    assert events[0].subagent.id == "w1"
+    assert events[0].subagent.name == "search_agent"
+    assert events[0].subagent.path == ["planning_agent", "w1"]
+    assert events[0].subagent.status == "running"
+
+
+def test_translator_routes_worker_text_delta_to_subagent_message_delta():
+    t = V3ProtocolTranslator()
+    events = list(
+        t.translate(
+            _worker_messages_event(
+                {
+                    "event": "content-block-delta",
+                    "index": 0,
+                    "delta": {"type": "text-delta", "text": "worker answer"},
+                }
+            )
+        )
+    )
+    assert [e.type for e in events] == ["subagent_message_delta"]
+    assert events[0].data == {"text": "worker answer", "channel": "text"}
+
+
+def test_translator_suppresses_worker_message_lifecycle_and_tool_chunks():
+    t = V3ProtocolTranslator()
+    for message_event in (
+        {"event": "message-start", "id": "m1", "role": "assistant"},
+        {"event": "message-finish", "usage": {}},
+        {
+            "event": "content-block-delta",
+            "index": 0,
+            "delta": {
+                "type": "block-delta",
+                "fields": {"type": "tool_call_chunk", "id": "c1", "name": "t", "args": "{"},
+            },
+        },
+    ):
+        assert list(t.translate(_worker_messages_event(message_event))) == []
+
+
+def test_translator_drops_internal_non_subagent_run_deltas():
+    t = V3ProtocolTranslator()
+    event = _v3(
+        "messages",
+        (
+            {
+                "event": "content-block-delta",
+                "index": 0,
+                "delta": {"type": "text-delta", "text": "summary text"},
+            },
+            {"langgraph_node": "chat_agent", "internal": True, "tags": ["internal"]},
+        ),
+        seq=1,
+    )
+    assert list(t.translate(event)) == []
+
+
 def test_translator_content_block_finish_tool_call_becomes_tool_call_available():
     t = V3ProtocolTranslator()
     events = list(

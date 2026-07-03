@@ -86,6 +86,7 @@ def create_app() -> FastAPI:
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
+        allow_private_network=True,
     )
 
     compatibility_routers = [
