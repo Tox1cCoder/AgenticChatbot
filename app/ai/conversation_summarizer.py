@@ -99,7 +99,8 @@ class ConversationSummarizer:
             )
         except (TimeoutError, asyncio.TimeoutError):
             logger.warning(
-                "Conversation summarization timed out after %.1fs (user=%s) — keeping previous summary",
+                "Conversation summarization timed out after %.1fs (user=%s) — "
+                "keeping previous summary",
                 float(timeout),
                 user_id,
             )
@@ -143,7 +144,8 @@ class ConversationSummarizer:
                     api_key = raw_key.strip()
             except Exception as exc:
                 logger.warning(
-                    "Gemini credential lookup for summarization failed (user=%s): %s — falling back to global key",
+                    "Gemini credential lookup for summarization failed (user=%s): %s — "
+                    "falling back to global key",
                     user_id,
                     exc,
                 )
@@ -168,7 +170,8 @@ class ConversationSummarizer:
             )
         except Exception as exc:
             logger.warning(
-                "Runtime model resolution for summarization failed (user=%s): %s — falling back to global key",
+                "Runtime model resolution for summarization failed (user=%s): %s — "
+                "falling back to global key",
                 raw_user_id,
                 exc,
             )

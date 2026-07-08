@@ -204,7 +204,7 @@ class ChatAgent(BaseAgent):
                         image_url = normalized["url"]
                         if not image_url.startswith("data:"):
                             continue
-                        _header, _separator, raw_data = image_url.partition(",")
+                        raw_data = image_url.partition(",")[2]
                         if not raw_data:
                             continue
 

@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 # Using conservative estimate - actual varies between 3-4 for English text
 CHARS_PER_TOKEN_ESTIMATE = 4
 
+# Per-image prompt cost used when trimming history to a token budget. Vision
+# providers price an image far above the few tokens of its text reference
+# (Anthropic ~= (w*h)/750 up to ~1600; OpenAI high-detail ~= 765+). A single
+# conservative constant keeps image-bearing turns from silently evading the
+# trim guardrail without needing image dimensions here. This is a trimming
+# estimate only -- not an app-level cap and not the provider's real bill.
+IMAGE_ATTACHMENT_TOKEN_ESTIMATE = 1_200
+
 
 @dataclass
 class TokenBudgetBreakdown:
@@ -130,7 +138,7 @@ def estimate_agent_message_tokens(message: Any) -> int:
     tokens = estimate_tokens(content) + 4  # content + role overhead
     attachments = getattr(message, "attachments", None)
     if isinstance(attachments, list):
-        tokens += 32 * len(attachments)
+        tokens += IMAGE_ATTACHMENT_TOKEN_ESTIMATE * len(attachments)
     return tokens
 
 
