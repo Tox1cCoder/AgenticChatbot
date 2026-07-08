@@ -8,6 +8,7 @@ from client_backend.api.common import make_api_response
 from client_backend.core.auth import require_local_session
 from client_backend.core.security import LocalSessionPayload
 from client_backend.services.local_skills_registry import get_skills_registry
+from client_backend.services.runtime_bridge import get_runtime_bridge
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
@@ -25,6 +26,13 @@ def _skill_detail(skill) -> dict:
     payload = _skill_summary(skill)
     payload["content"] = skill.content
     return payload
+
+
+async def _refresh_runtime_bridge_catalogs_if_connected() -> None:
+    bridge = get_runtime_bridge()
+    if not bridge.is_connected() or not bridge.get_registered_device_id():
+        return
+    await bridge.refresh_catalogs()
 
 
 @router.get("")
@@ -78,6 +86,8 @@ async def toggle_skill(
     if not updated:
         raise HTTPException(status_code=404, detail="Skill not found")
 
+    await _refresh_runtime_bridge_catalogs_if_connected()
+
     state = "enabled" if enabled else "disabled"
     message = f"Skill '{name}' {state}"
     return make_api_response(
@@ -94,6 +104,7 @@ async def reload_skills(
     """Rescan configured local skill roots."""
     registry = get_skills_registry()
     await registry.refresh()
+    await _refresh_runtime_bridge_catalogs_if_connected()
     message = "Skills reloaded"
     return make_api_response(
         success=True,

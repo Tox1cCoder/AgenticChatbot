@@ -44,6 +44,22 @@ class _RegistryStub:
         return 0
 
 
+class _BridgeStub:
+    def __init__(self, *, connected: bool = True, device_id: str | None = "device-123"):
+        self.connected = connected
+        self.device_id = device_id
+        self.refresh_calls = 0
+
+    def is_connected(self) -> bool:
+        return self.connected
+
+    def get_registered_device_id(self) -> str | None:
+        return self.device_id
+
+    async def refresh_catalogs(self) -> None:
+        self.refresh_calls += 1
+
+
 def _build_app() -> FastAPI:
     app = FastAPI()
     app.include_router(skills_api.router)
@@ -75,3 +91,31 @@ def test_skills_routes_return_server_style_payloads(monkeypatch):
     assert registry.initialize_calls == 4
     assert registry.refresh_calls == 1
     assert registry.toggle_calls == [("demo", False)]
+
+
+def test_reload_skills_refreshes_runtime_catalogs_when_bridge_active(monkeypatch):
+    registry = _RegistryStub()
+    bridge = _BridgeStub()
+    monkeypatch.setattr(skills_api, "get_skills_registry", lambda: registry)
+    monkeypatch.setattr(skills_api, "get_runtime_bridge", lambda: bridge, raising=False)
+
+    with TestClient(_build_app()) as client:
+        response = client.post("/skills/reload")
+
+    assert response.status_code == 200
+    assert registry.refresh_calls == 1
+    assert bridge.refresh_calls == 1
+
+
+def test_toggle_skill_refreshes_runtime_catalogs_when_bridge_active(monkeypatch):
+    registry = _RegistryStub()
+    bridge = _BridgeStub()
+    monkeypatch.setattr(skills_api, "get_skills_registry", lambda: registry)
+    monkeypatch.setattr(skills_api, "get_runtime_bridge", lambda: bridge, raising=False)
+
+    with TestClient(_build_app()) as client:
+        response = client.patch("/skills/demo/toggle?enabled=false")
+
+    assert response.status_code == 200
+    assert registry.toggle_calls == [("demo", False)]
+    assert bridge.refresh_calls == 1
