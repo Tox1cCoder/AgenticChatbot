@@ -1,0 +1,105 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <script>
+      function sendStreamlitMessage(type, data) {
+        window.parent.postMessage(
+          {
+            isStreamlitMessage: true,
+            type: type,
+            ...data,
+          },
+          "*"
+        );
+      }
+
+      function setComponentValue(value) {
+        sendStreamlitMessage("streamlit:setComponentValue", { value: value });
+      }
+
+      function setFrameHeight(height) {
+        sendStreamlitMessage("streamlit:setFrameHeight", { height: height });
+      }
+
+      function componentReady() {
+        sendStreamlitMessage("streamlit:componentReady", { apiVersion: 1 });
+        setFrameHeight(0);
+      }
+
+      function activeChatTextarea(doc) {
+        const active = doc.activeElement;
+        if (!active || active.tagName !== "TEXTAREA") return null;
+        const placeholder = active.getAttribute("placeholder") || "";
+        const label = active.getAttribute("aria-label") || "";
+        if (placeholder === "Type your message..." || label === "Message") {
+          return active;
+        }
+        return null;
+      }
+
+      async function fileToPayload(file, index) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            resolve({
+              name: file.name || `clipboard-image-${Date.now()}-${index}.png`,
+              mime: file.type || "image/png",
+              data: String(reader.result || ""),
+            });
+          };
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(file);
+        });
+      }
+
+      function install() {
+        let topDoc;
+        try {
+          topDoc = window.parent.document;
+        } catch (_) {
+          return;
+        }
+        if (!topDoc) return;
+        topDoc.__chatImagePasteSetComponentValue = setComponentValue;
+        if (topDoc.__chatImagePasteInstalled) return;
+        topDoc.__chatImagePasteInstalled = true;
+
+        topDoc.addEventListener(
+          "paste",
+          async function (event) {
+            if (!activeChatTextarea(topDoc)) return;
+            const clipboard = event.clipboardData;
+            if (!clipboard || !clipboard.items) return;
+
+            const files = [];
+            for (const item of clipboard.items) {
+              if (item.kind === "file" && item.type && item.type.startsWith("image/")) {
+                const file = item.getAsFile();
+                if (file) files.push(file);
+              }
+            }
+
+            if (!files.length) return;
+            event.preventDefault();
+
+            const payload = [];
+            for (let index = 0; index < files.length; index += 1) {
+              payload.push(await fileToPayload(files[index], index + 1));
+            }
+            const eventId = `paste-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            topDoc.__chatImagePasteSetComponentValue({
+              eventId: eventId,
+              images: payload,
+            });
+          },
+          true
+        );
+      }
+
+      componentReady();
+      install();
+    </script>
+  </head>
+  <body></body>
+</html>

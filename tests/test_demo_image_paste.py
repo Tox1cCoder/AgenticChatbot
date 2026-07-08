@@ -77,3 +77,41 @@ def test_pending_image_preview_uses_compact_grid_helper():
     assert "def _render_pending_image_attachments(" in source
     assert "_render_pending_image_attachments()" in source
     assert "st.columns(min(len(st.session_state.pending_image_attachments), 4))" not in source
+
+
+def test_demo_mounts_clipboard_capture_near_chat_input():
+    source = (Path(__file__).resolve().parents[1] / "demo.py").read_text(encoding="utf-8")
+
+    assert "capture_pasted_images(" in source
+    assert "_handle_pasted_image_payload(" in source
+
+
+def test_paste_mount_does_not_block_message_form_rendering():
+    source = (Path(__file__).resolve().parents[1] / "demo.py").read_text(encoding="utf-8")
+
+    paste_pos = source.index("pasted_payload = capture_pasted_images")
+    form_pos = source.index('with st.form("message_form"')
+    paste_block = source[paste_pos:form_pos]
+
+    assert paste_pos < form_pos
+    assert "if _handle_pasted_image_payload(pasted_payload):" in paste_block
+    assert "st.rerun()" in paste_block
+    assert "return" not in paste_block
+
+
+def test_clipboard_component_filters_to_focused_message_textarea():
+    html = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "ui"
+        / "clipboard_image_capture"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert 'placeholder === "Type your message..."' in html
+    assert "clipboardData" in html
+    assert "eventId" in html
+    assert "images" in html
+    assert "__chatImagePasteSetComponentValue" in html
+    assert "setFrameHeight(0)" in html
+    assert "streamlit:setComponentValue" in html

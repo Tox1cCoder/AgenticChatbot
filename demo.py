@@ -21,6 +21,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from app.services.event_streaming.compat import infer_tool_state, normalize_tool_phase
+from app.ui.clipboard_image_capture import capture_pasted_images
 from app.ui.hitl_decisions import (
     approval_tool_label,
     attach_stream_context,
@@ -7957,6 +7958,15 @@ def render_chat_view():
         _form_send = False
         _form_attach = False
         _form_message = ""
+
+        # Mount the clipboard capture component near the chat input. It is
+        # non-blocking: when no new paste is consumed, execution falls through
+        # to the message form so the text box and Send/Attach controls stay
+        # visible. A consumed paste triggers a single rerun, after which the
+        # event id is remembered and the stale component value is ignored.
+        pasted_payload = capture_pasted_images(key=f"chat_image_paste_{conversation_id}")
+        if _handle_pasted_image_payload(pasted_payload):
+            st.rerun()
 
         with st.form("message_form", clear_on_submit=True):
             col1, col2, col3 = st.columns([6, 1, 1])
