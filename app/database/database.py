@@ -1,37 +1,30 @@
-"""Database module for dependency-injector integration."""
+"""Database provider for dependency-injector integration.
+
+This is a thin adapter over the single application engine/session factory
+defined in :mod:`app.database.session`. It exists only to expose a
+context-manager ``session`` for the container's ``db.provided.session``
+wiring; it does not own its own engine and never mutates schema (migrations
+are the only schema mutation path).
+"""
 
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, orm
 from sqlalchemy.orm import Session
 
-from app.database.base import Base
+from app.database.session import SessionLocal
 
 logger = logging.getLogger(__name__)
 
 
 class Database:
-    """Database utility class."""
+    """Adapter exposing a context-manager session over the shared factory."""
 
-    def __init__(self, db_url: str) -> None:
-        self._engine = create_engine(
-            db_url,
-            echo=False,
-            pool_pre_ping=True,
-            pool_recycle=300,
-        )
-        self._session_factory = orm.scoped_session(
-            orm.sessionmaker(
-                autoflush=False,
-                bind=self._engine,
-            ),
-        )
-
-    def create_database(self) -> None:
-        """Create all database tables."""
-        Base.metadata.create_all(self._engine)
+    def __init__(self, db_url: str | None = None) -> None:
+        # db_url is accepted for backward-compatible construction but ignored:
+        # the single engine/session factory lives in app.database.session.
+        self._session_factory = SessionLocal
 
     @contextmanager
     def session(self) -> Iterator[Session]:

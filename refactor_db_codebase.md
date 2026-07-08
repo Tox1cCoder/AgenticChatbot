@@ -492,7 +492,7 @@ Expected after this task: `alembic check` PASS and schema contract tests PASS. I
 - Modify: tests that instantiate `Database(settings.database_url)`
 - Create: `tests/test_database_session_provider.py`
 
-- [ ] **Step 1: Add explicit session context helpers**
+- [x] **Step 1: Add explicit session context helpers**
 
 Update `app/database/session.py` to expose one engine and one session factory:
 
@@ -546,7 +546,7 @@ def get_session_factory():
 
 Do not use `session_scope()` inside repositories that already commit internally. Use `SessionLocal` as the repository factory there.
 
-- [ ] **Step 2: Retire `Database.create_database()`**
+- [x] **Step 2: Retire `Database.create_database()`**
 
 Modify `app/database/database.py` so it no longer creates a second engine and no longer exposes `create_database()`. Keep a small compatibility wrapper only if tests or dependency-injector wiring still need `.session()`:
 
@@ -577,11 +577,11 @@ class Database:
 
 Then plan a later deletion of `Database` after container/tests no longer require it.
 
-- [ ] **Step 3: Update dependency injection**
+- [x] **Step 3: Update dependency injection**
 
 In `app/core/container.py`, prefer `SessionLocal` or `get_session_factory()` for repositories. Keep `Database` only if a test fixture still uses `db.provided.session`.
 
-- [ ] **Step 4: Add tests**
+- [x] **Step 4: Add tests**
 
 ```python
 from app.database.session import SessionLocal, get_engine, get_session_factory
@@ -595,7 +595,7 @@ def test_database_engine_is_bound_to_session_factory():
     assert SessionLocal.kw["bind"] is get_engine()
 ```
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run:
 
@@ -1062,10 +1062,15 @@ _Records deviations, judgment calls, and clarifications made during implementati
   - `conversation_memory_summaries`: added `__table_args__` with explicit `ux_conversation_memory_summaries_conversation_id` (unique) and `ix_conversation_memory_summaries_last_message`, matching live names; kept `user_id` `index=True` (matches live `ix_conversation_memory_summaries_user_id`).
   - `ClientDevice.status`: added `length=32` to the existing non-native `SQLEnum` (smallest change, per plan).
   - **INCIDENT + lesson:** verifying downgrade reversibility, I ran an alembic round-trip in the background concurrently with a foreground check. Two alembic processes deadlocked on DDL locks against the running uvicorn dev server, leaving orphaned migration backends and the DB downgraded. Reversibility itself was confirmed (downgrade `v1w2x3y4z5a6`→`g0h1i2j3k4l5` ran clean). Recovery required terminating 4 stuck DB sessions (user-authorized after classifier denials). **Lesson: never run DB-mutating alembic in the background or concurrently — always sequential/foreground.** Re-applied migration cleanly with `lock_timeout=8s`.
+- **Task 4:**
+  - Step 3 (DI) kept intentionally minimal: rather than rewrite ~25 `session_factory=db.provided.session` sites in `container.py`, `Database` was made a thin adapter over the shared `SessionLocal`/engine from `app.database.session`. This achieves the single-engine goal (the actual bug: `Database` previously built a *second* engine) without a risky 25-site DI churn, and keeps `db.provided.session` and the 4 test files that do `Database(settings.database_url)` working unchanged. Verified: `Container().db().session()` binds to the single shared engine.
+  - `SessionLocal` gained `expire_on_commit=False` (per plan target) so ORM objects stay usable after commit/session-close (avoids DetachedInstanceError); 46 repo/service/API regression tests pass with it.
+  - `create_database()` (the only `Base.metadata.create_all` caller) removed — migrations are now the sole schema-mutation path. `database.py` no longer imports `Base`.
 
 ### Progress
 
 - **Task 1 — DONE** (commit 899bff9). `tests/test_database_schema_contract.py` created. RED confirmed: 3 failed (unmodeled `conversation_device_bindings`, table present, 14 redundant PK indexes), 2 passed (checkpoint ownership disjoint, 0 unexpired pending HITL). Matches plan's expected pre-implementation state.
 - **Task 2 — DONE** (commit e328e9e). `autogenerate_filters.py` + `test_alembic_autogenerate_filters.py` created; `env.py` wired. Filter tests 2/2 pass; `alembic check` output no longer references any checkpoint table (still fails overall on remaining app-table drift, as expected).
-- **Task 3 — DONE** (commit pending). 17 model files edited + `v1w2x3y4z5a6_schema_contract_cleanup.py` migration created. Live DB migrated to `v1w2x3y4z5a6`. Verified: `alembic check` = "No new upgrade operations detected"; schema contract test 5/5 green; regression (memory-summary repo 7/7, document chunk/model/parse-artifact 25/25) green. Downgrade reversibility confirmed. `conversation_device_bindings` dropped.
+- **Task 3 — DONE** (commit 4916e88). 18 model files edited + `v1w2x3y4z5a6_schema_contract_cleanup.py` migration created. Live DB migrated to `v1w2x3y4z5a6`. Verified: `alembic check` = "No new upgrade operations detected"; schema contract test 5/5 green; regression (memory-summary repo 7/7, document chunk/model/parse-artifact 25/25) green. Downgrade reversibility confirmed. `conversation_device_bindings` dropped.
+- **Task 4 — DONE** (commit pending). `session.py` (one engine + `SessionLocal` w/ `expire_on_commit=False` + `session_scope()`), `database.py` (thin adapter over shared `SessionLocal`, no 2nd engine, `create_database` removed), `test_database_session_provider.py` created. Verified: provider tests + custom-agents service/message/api + hitl_api = 46/46 pass; container session bound to single shared engine.
 
