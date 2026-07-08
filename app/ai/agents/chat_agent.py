@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from ...interfaces.runtime_model_resolver_interface import IRuntimeModelResolver
 from ..agent_config import build_gemini_generate_config
+from ..image_context import build_multimodal_content, normalize_image_attachment
 from ..prompts import CHAT_SYSTEM_PROMPT, build_chat_prompt
 from ..schemas import AgentMessage, AgentResponse, AgentType, MessageRole
 from ..utils import coerce_response_text
@@ -176,16 +177,7 @@ class ChatAgent(BaseAgent):
                         enable_reasoning_summary=False,
                     )
 
-                    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-                    for attachment in attachments:
-                        raw_data = str(attachment.get("data") or "").strip()
-                        mime_type = str(attachment.get("mime") or "image/jpeg").strip()
-                        if raw_data.startswith("data:"):
-                            image_url = raw_data
-                        else:
-                            image_url = f"data:{mime_type};base64,{raw_data}"
-                        if raw_data:
-                            content.append({"type": "image_url", "image_url": {"url": image_url}})
+                    content = build_multimodal_content(prompt, attachments)
 
                     response = await self._ainvoke_with_retries(
                         llm,
@@ -206,18 +198,23 @@ class ChatAgent(BaseAgent):
                 parts = [types.Part(text=prompt)]
                 for attachment in attachments:
                     try:
-                        raw_data = attachment.get("data", "")
-                        if isinstance(raw_data, str) and raw_data.startswith("data:"):
-                            header, _, payload = raw_data.partition(",")
-                            raw_data = payload or ""
-                            if not attachment.get("mime") and ";" in header:
-                                inferred_mime = header[5:].split(";", 1)[0].strip()
-                                if inferred_mime:
-                                    attachment["mime"] = inferred_mime
+                        normalized = normalize_image_attachment(attachment)
+                        if normalized is None:
+                            continue
+                        image_url = normalized["url"]
+                        if not image_url.startswith("data:"):
+                            continue
+                        _header, _separator, raw_data = image_url.partition(",")
+                        if not raw_data:
+                            continue
 
                         image_data = base64.b64decode(raw_data)
-                        mime_type = attachment.get("mime", "image/jpeg")
-                        parts.append(types.Part.from_bytes(data=image_data, mime_type=mime_type))
+                        parts.append(
+                            types.Part.from_bytes(
+                                data=image_data,
+                                mime_type=normalized["mime"],
+                            )
+                        )
                     except Exception as img_err:
                         logger.error("Failed to process image attachment: %s", img_err)
 
