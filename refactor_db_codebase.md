@@ -241,7 +241,7 @@ Expected before implementation: FAIL on `conversation_device_bindings` and redun
 - Create: `tests/test_alembic_autogenerate_filters.py`
 - Modify: `app/alembic/env.py`
 
-- [ ] **Step 1: Add the filter module**
+- [x] **Step 1: Add the filter module**
 
 ```python
 """Alembic autogenerate filters.
@@ -274,7 +274,7 @@ def include_name(
     return True
 ```
 
-- [ ] **Step 2: Wire the filter into Alembic**
+- [x] **Step 2: Wire the filter into Alembic**
 
 In `app/alembic/env.py`, import `include_name` and pass it to both `context.configure(...)` calls:
 
@@ -300,7 +300,7 @@ context.configure(
 )
 ```
 
-- [ ] **Step 3: Add unit coverage**
+- [x] **Step 3: Add unit coverage**
 
 ```python
 from app.alembic.autogenerate_filters import EXTERNAL_TABLE_NAMES, include_name
@@ -316,7 +316,7 @@ def test_application_tables_are_included_in_autogenerate():
     assert include_name("document_chunks", "table", {}) is True
 ```
 
-- [ ] **Step 4: Verify checkpoint drop operations disappear from Alembic check output**
+- [x] **Step 4: Verify checkpoint drop operations disappear from Alembic check output**
 
 Run:
 
@@ -1054,7 +1054,10 @@ _Records deviations, judgment calls, and clarifications made during implementati
 
 - **Task 1:** Test file written verbatim from plan. Confirmed the 14 redundant PK indexes in the live DB match the Task 3 migration's drop list exactly (2 explicit `ix_agent_model_configs_id`/`ix_model_providers_id` + 12 in the loop), so Task 3's PK-index migration is pre-verified against ground truth.
 
+- **Task 2:** `env.py` imports `Base` from `app.database.base` (not `app.models.base` as the schema-contract test uses); both aggregate the same model metadata (verified: alembic detected all app tables; the contract test found all 14 offenders). `include_name` wired into both offline and online `context.configure` calls.
+
 ### Progress
 
-- **Task 1 — DONE** (commit pending). `tests/test_database_schema_contract.py` created. RED confirmed: 3 failed (unmodeled `conversation_device_bindings`, table present, 14 redundant PK indexes), 2 passed (checkpoint ownership disjoint, 0 unexpired pending HITL). Matches plan's expected pre-implementation state.
+- **Task 1 — DONE** (commit 899bff9). `tests/test_database_schema_contract.py` created. RED confirmed: 3 failed (unmodeled `conversation_device_bindings`, table present, 14 redundant PK indexes), 2 passed (checkpoint ownership disjoint, 0 unexpired pending HITL). Matches plan's expected pre-implementation state.
+- **Task 2 — DONE** (commit pending). `autogenerate_filters.py` + `test_alembic_autogenerate_filters.py` created; `env.py` wired. Filter tests 2/2 pass; `alembic check` output no longer references any checkpoint table (still fails overall on remaining app-table drift, as expected).
 

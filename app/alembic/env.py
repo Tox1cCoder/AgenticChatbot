@@ -8,6 +8,7 @@ from sqlalchemy import engine_from_config, pool
 # Add the project root directory to sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from app.alembic.autogenerate_filters import include_name
 from app.core.config import settings
 from app.database.base import Base
 
@@ -53,6 +54,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_name=include_name,
     )
 
     with context.begin_transaction():
@@ -75,7 +77,11 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            include_name=include_name,
+        )
 
         with context.begin_transaction():
             context.run_migrations()
