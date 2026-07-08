@@ -75,6 +75,9 @@ def _import_demo_with_ui_stubs(monkeypatch: pytest.MonkeyPatch):
     components_module = types.ModuleType("streamlit.components")
     components_v1_module = types.ModuleType("streamlit.components.v1")
     components_v1_module.html = lambda *args, **kwargs: None
+    components_v1_module.declare_component = (
+        lambda *args, **kwargs: (lambda **_component_kwargs: _component_kwargs.get("default"))
+    )
     components_module.v1 = components_v1_module
     streamlit_stub.components = components_module
     markdown_stub = types.ModuleType("markdown")
