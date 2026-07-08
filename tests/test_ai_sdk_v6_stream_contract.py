@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from app.api.ai_sdk import _extract_user_attachments
 from app.services.event_streaming.ai_sdk_v6 import AISDKV6StreamAdapter, AISDKV6StreamState
 from app.services.event_streaming.events import SubagentRef, make_event
 
@@ -348,3 +349,24 @@ async def test_user_message_event_projects_wire_safe_payload():
     assert "sender" not in message
     assert "conversation_id" not in message
     assert "updated_at" not in message
+
+
+def test_ai_sdk_extracts_file_part_data_url_attachment():
+    payload = [
+        {
+            "role": "user",
+            "parts": [
+                {"type": "text", "text": "inspect"},
+                {
+                    "type": "file",
+                    "name": "screen.png",
+                    "mediaType": "image/png",
+                    "url": "data:image/png;base64,abc",
+                },
+            ],
+        }
+    ]
+
+    assert _extract_user_attachments(payload) == [
+        {"name": "screen.png", "mime": "image/png", "data": "data:image/png;base64,abc"}
+    ]
