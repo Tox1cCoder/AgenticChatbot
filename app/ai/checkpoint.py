@@ -189,10 +189,15 @@ class CheckpointManager:
         if self._pool is None:
             return False
 
+        # Fixed, code-controlled table list only — never accept table names
+        # from caller input. Delete children before parents (writes/blobs
+        # reference checkpoints) to stay dependency-safe under FK constraints.
+        tables = ("checkpoint_writes", "checkpoint_blobs", "checkpoints")
+        schema = getattr(self.settings, "checkpoint_schema", "public") or "public"
         async with self._pool.connection() as conn:
-            for table_name in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
+            for table_name in tables:
                 await conn.execute(
-                    f"DELETE FROM {table_name} WHERE thread_id = %s",
+                    f'DELETE FROM "{schema}"."{table_name}" WHERE thread_id = %s',
                     (normalized_thread_id,),
                 )
         return True

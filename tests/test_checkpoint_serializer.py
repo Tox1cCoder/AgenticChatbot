@@ -129,7 +129,7 @@ async def test_checkpoint_manager_delete_thread_falls_back_to_pool_sql():
 
     assert deleted is True
     assert executed == [
-        ("DELETE FROM checkpoints WHERE thread_id = %s", ("thread-1",)),
-        ("DELETE FROM checkpoint_blobs WHERE thread_id = %s", ("thread-1",)),
-        ("DELETE FROM checkpoint_writes WHERE thread_id = %s", ("thread-1",)),
+        ('DELETE FROM "public"."checkpoint_writes" WHERE thread_id = %s', ("thread-1",)),
+        ('DELETE FROM "public"."checkpoint_blobs" WHERE thread_id = %s', ("thread-1",)),
+        ('DELETE FROM "public"."checkpoints" WHERE thread_id = %s', ("thread-1",)),
     ]

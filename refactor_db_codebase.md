@@ -616,7 +616,7 @@ Expected: PASS.
 - Create: `tests/test_checkpoint_retention_service.py`
 - Modify: `tests/test_checkpoint_serializer.py`
 
-- [ ] **Step 1: Make checkpoint deletion schema-aware**
+- [x] **Step 1: Make checkpoint deletion schema-aware**
 
 Update `CheckpointManager.delete_thread()` so the SQL fallback uses the configured `checkpoint_schema` and deletes in dependency-safe order:
 
@@ -632,7 +632,7 @@ for table_name in tables:
 
 Keep table names from a fixed tuple only. Do not accept table names from user input.
 
-- [ ] **Step 2: Add retention service**
+- [x] **Step 2: Add retention service**
 
 `app/services/checkpoint_retention_service.py` should:
 
@@ -653,11 +653,11 @@ class CheckpointRetentionService:
         ...
 ```
 
-- [ ] **Step 3: Move Celery cleanup through the service**
+- [x] **Step 3: Move Celery cleanup through the service**
 
 Update `app/workers/cleanup_tasks.py` so `cleanup_abandoned_interrupts()` calls `CheckpointRetentionService` instead of duplicating DB/Redis/checkpoint cleanup logic.
 
-- [ ] **Step 4: Add focused tests**
+- [x] **Step 4: Add focused tests**
 
 Test cases:
 
@@ -667,7 +667,7 @@ Test cases:
 - cleanup swallows per-thread checkpoint deletion errors and continues;
 - schema-qualified fallback SQL is used when `adelete_thread` is unavailable.
 
-- [ ] **Step 5: Run cleanup once in development before deleting graph compatibility**
+- [x] **Step 5: Run cleanup once in development before deleting graph compatibility**
 
 Run:
 
@@ -1066,11 +1066,20 @@ _Records deviations, judgment calls, and clarifications made during implementati
   - Step 3 (DI) kept intentionally minimal: rather than rewrite ~25 `session_factory=db.provided.session` sites in `container.py`, `Database` was made a thin adapter over the shared `SessionLocal`/engine from `app.database.session`. This achieves the single-engine goal (the actual bug: `Database` previously built a *second* engine) without a risky 25-site DI churn, and keeps `db.provided.session` and the 4 test files that do `Database(settings.database_url)` working unchanged. Verified: `Container().db().session()` binds to the single shared engine.
   - `SessionLocal` gained `expire_on_commit=False` (per plan target) so ORM objects stay usable after commit/session-close (avoids DetachedInstanceError); 46 repo/service/API regression tests pass with it.
   - `create_database()` (the only `Base.metadata.create_all` caller) removed — migrations are now the sole schema-mutation path. `database.py` no longer imports `Base`.
+- **Task 5** (subagent-implemented, controller-verified live):
+  - New `CheckpointRetentionService.cleanup_expired_and_deleted_threads(*, now)` returns counts: `pending_interrupts_inspected`, `hitl_interrupts_expired`, `hitl_checkpoint_threads_deleted`, `soft_deleted_conversations_inspected`, `conversation_checkpoint_threads_deleted`. Order: expire HITL first (DB authoritative) → delete their threads → sweep soft-deleted conversations. Per-thread errors swallowed+logged; never issues DDL.
+  - `CheckpointManager.delete_thread()` SQL fallback now schema-qualified (`"<schema>"."<table>"`) and dependency-safe order (`checkpoint_writes`→`checkpoint_blobs`→`checkpoints`); fixed tuple only.
+  - `cleanup_abandoned_interrupts()` delegates to the service; Redis scan preserved+guarded; return shape preserved (one additive key `soft_deleted_conversations_inspected`).
+  - New repo method `ConversationRepository.get_soft_deleted()` (genuinely missing — the rest of the repo filters `deleted_at IS NULL` everywhere). Verified thread_id==`str(conversation.id)` matches `ConversationService.delete_conversation`'s convention.
+  - **Controller bug fix during live verify:** the task's `asyncio.new_event_loop()` produced a Windows ProactorEventLoop → psycopg async pool `PoolTimeout` in `CheckpointManager.setup()`; retention silently returned zeros. Fixed by creating a SelectorEventLoop on `win32` via `WindowsSelectorEventLoopPolicy().new_event_loop()` (mirrors the existing `app/main.py:7-9` convention). This was a latent pre-existing incompatibility (original per-invocation manager had the same pattern), surfaced only by actually running the task.
+  - **Live Step 5 result:** 64 pending-expired HITL → expired; 837 checkpoint threads cleaned; 797 soft-deleted conversations swept; after-state = 0 pending HITL. This satisfies Task 6's precondition (no active interrupts needing the old node). Unit tests 12/12, ruff clean.
+  - Non-blocking follow-up (subagent concern #2): `get_soft_deleted()` is unbounded with no "cleaned" marker, so each 10-min beat re-sweeps all soft-deleted rows (idempotent no-ops). Candidate for a future pagination/marker task; out of Task 5 scope.
 
 ### Progress
 
 - **Task 1 — DONE** (commit 899bff9). `tests/test_database_schema_contract.py` created. RED confirmed: 3 failed (unmodeled `conversation_device_bindings`, table present, 14 redundant PK indexes), 2 passed (checkpoint ownership disjoint, 0 unexpired pending HITL). Matches plan's expected pre-implementation state.
 - **Task 2 — DONE** (commit e328e9e). `autogenerate_filters.py` + `test_alembic_autogenerate_filters.py` created; `env.py` wired. Filter tests 2/2 pass; `alembic check` output no longer references any checkpoint table (still fails overall on remaining app-table drift, as expected).
 - **Task 3 — DONE** (commit 4916e88). 18 model files edited + `v1w2x3y4z5a6_schema_contract_cleanup.py` migration created. Live DB migrated to `v1w2x3y4z5a6`. Verified: `alembic check` = "No new upgrade operations detected"; schema contract test 5/5 green; regression (memory-summary repo 7/7, document chunk/model/parse-artifact 25/25) green. Downgrade reversibility confirmed. `conversation_device_bindings` dropped.
-- **Task 4 — DONE** (commit pending). `session.py` (one engine + `SessionLocal` w/ `expire_on_commit=False` + `session_scope()`), `database.py` (thin adapter over shared `SessionLocal`, no 2nd engine, `create_database` removed), `test_database_session_provider.py` created. Verified: provider tests + custom-agents service/message/api + hitl_api = 46/46 pass; container session bound to single shared engine.
+- **Task 4 — DONE** (commit 020ec02). `session.py` (one engine + `SessionLocal` w/ `expire_on_commit=False` + `session_scope()`), `database.py` (thin adapter over shared `SessionLocal`, no 2nd engine, `create_database` removed), `test_database_session_provider.py` created. Verified: provider tests + custom-agents service/message/api + hitl_api = 46/46 pass; container session bound to single shared engine.
+- **Task 5 — DONE** (commit pending). Subagent-implemented, controller-verified. `checkpoint_retention_service.py` + `test_checkpoint_retention_service.py` created; `checkpoint.py` (schema-aware fallback), `cleanup_tasks.py` (delegates + Windows selector-loop fix), `conversation.py` (`get_soft_deleted`), `test_checkpoint_serializer.py` updated. Unit 12/12; live cleanup expired 64 HITL + cleaned 837 threads; after-state 0 pending HITL; ruff clean.
 

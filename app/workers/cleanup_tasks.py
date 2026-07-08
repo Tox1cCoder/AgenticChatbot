@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 from datetime import datetime, timezone
 
 import redis
@@ -8,6 +9,7 @@ from celery.schedules import crontab
 from app.ai.agents.rag_agent import RAGAgent
 from app.core.config import settings
 from app.core.container import get_container
+from app.services.checkpoint_retention_service import CheckpointRetentionService
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -98,104 +100,88 @@ def cleanup_abandoned_interrupts():
     Background task to clean up abandoned HITL interrupts.
 
     This task:
-    1. Queries the DB for PENDING interrupts whose expiry time has passed and
-       marks them EXPIRED (authoritative source of truth).
-    2. Scans Redis for expired interrupt keys and deletes them (supplementary).
-    3. Cleans up LangGraph checkpoint state for expired threads.
+    1. Delegates DB-backed expiry (authoritative) and checkpoint-thread
+       cleanup for expired interrupts + soft-deleted conversations to
+       CheckpointRetentionService.
+    2. Scans Redis for expired interrupt keys and deletes them (supplementary),
+       then cleans up their checkpoint threads too.
     """
     try:
         now = datetime.now(timezone.utc)
-        expired_threads: list[str] = []
 
-        # ── DB-backed expiry (authoritative) ────────────────────────────────────
-        db_expired_count = 0
+        # ── Redis cleanup (supplementary) ────────────────────────────────────────
+        redis_expired_threads, redis_expired_count, active_count = (
+            _scan_and_expire_redis_interrupts(now)
+        )
+
+        # ── DB-backed expiry + checkpoint cleanup (authoritative) ──────────────
+        retention_counts = {
+            "pending_interrupts_inspected": 0,
+            "hitl_interrupts_expired": 0,
+            "hitl_checkpoint_threads_deleted": 0,
+            "soft_deleted_conversations_inspected": 0,
+            "conversation_checkpoint_threads_deleted": 0,
+        }
+        redis_checkpoints_cleaned = 0
         try:
             container = get_container()
             hitl_repo = container.hitl_interrupt_repository()
-            expired_records = hitl_repo.get_expired_pending(now)
-            expired_threads.extend(
-                record.thread_id for record in expired_records if getattr(record, "thread_id", None)
-            )
-            for record in expired_records:
-                try:
-                    hitl_repo.mark_expired(record.id)
-                    db_expired_count += 1
-                except Exception:
-                    pass
-        except Exception as db_exc:
-            logger.warning("DB interrupt expiry check failed: %s", db_exc, exc_info=True)
+            conversation_repo = container.conversation_repository()
 
-        # ── Redis cleanup (supplementary) ────────────────────────────────────────
-        redis_url = getattr(settings, "redis_url", "") or ""
-        expired_count = 0
-        checkpoint_cleaned_count = 0
-        active_count = 0
-
-        if redis_url.strip():
-            redis_client = redis.from_url(redis_url)
-            interrupt_pattern = "interrupt:*"
-
-            for key in redis_client.scan_iter(match=interrupt_pattern):
-                try:
-                    stored_timestamp = redis_client.get(key)
-                    if not stored_timestamp:
-                        continue
-
-                    stored_time = datetime.fromisoformat(stored_timestamp.decode("utf-8"))
-                    # Ensure comparison is between two tz-aware datetimes
-                    if stored_time.tzinfo is None:
-                        stored_time = stored_time.replace(tzinfo=timezone.utc)
-
-                    elapsed_minutes = (now - stored_time).total_seconds() / 60
-
-                    if elapsed_minutes > settings.hitl_approval_timeout_minutes:
-                        expired_count += 1
-
-                        # Key format: "interrupt:{conversation_id}:{interrupt_id}"
-                        key_parts = key.decode("utf-8").split(":")
-                        conversation_id = key_parts[1] if len(key_parts) > 1 else None
-
-                        if conversation_id:
-                            expired_threads.append(conversation_id)
-
-                        redis_client.delete(key)
-                    else:
-                        active_count += 1
-
-                except Exception:
-                    continue
-
-        # ── Checkpoint cleanup ───────────────────────────────────────────────────
-        if expired_threads:
-            expired_threads = list(dict.fromkeys(expired_threads))
-            loop = asyncio.new_event_loop()
+            # psycopg3 async requires a SelectorEventLoop; the default loop on
+            # Windows is a ProactorEventLoop the checkpoint pool cannot use
+            # (mirrors app.main's policy). Elsewhere the default loop is fine.
+            if sys.platform == "win32":
+                loop = asyncio.WindowsSelectorEventLoopPolicy().new_event_loop()
+            else:
+                loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                checkpoint_cleaned_count = loop.run_until_complete(
-                    _cleanup_checkpoint_states(expired_threads)
+                retention_counts, redis_checkpoints_cleaned = loop.run_until_complete(
+                    _run_checkpoint_retention_cleanup(
+                        now=now,
+                        hitl_repo=hitl_repo,
+                        conversation_repo=conversation_repo,
+                        redis_expired_thread_ids=redis_expired_threads,
+                    )
                 )
             finally:
                 loop.close()
+        except Exception as retention_exc:
+            logger.warning(
+                "Checkpoint retention cleanup failed: %s", retention_exc, exc_info=True
+            )
 
-        total_expired = db_expired_count + expired_count
+        db_expired_count = retention_counts["hitl_interrupts_expired"]
+        checkpoint_cleaned_count = (
+            retention_counts["hitl_checkpoint_threads_deleted"]
+            + retention_counts["conversation_checkpoint_threads_deleted"]
+            + redis_checkpoints_cleaned
+        )
+
+        total_expired = db_expired_count + redis_expired_count
         if total_expired > 0:
             logger.info(
                 "HITL cleanup: %d DB records expired, %d Redis keys expired, "
-                "%d checkpoint states cleaned",
+                "%d checkpoint states cleaned, %d soft-deleted conversations swept",
                 db_expired_count,
-                expired_count,
+                redis_expired_count,
                 checkpoint_cleaned_count,
+                retention_counts["soft_deleted_conversations_inspected"],
             )
 
         return {
             "success": True,
             "timestamp": now.isoformat(),
             "db_expired_interrupts": db_expired_count,
-            "redis_expired_interrupts": expired_count,
+            "redis_expired_interrupts": redis_expired_count,
             "checkpoints_cleaned": checkpoint_cleaned_count,
             "active_interrupts": active_count,
+            "soft_deleted_conversations_inspected": (
+                retention_counts["soft_deleted_conversations_inspected"]
+            ),
             "message": (
-                f"Cleanup completed: {db_expired_count} DB + {expired_count} Redis "
+                f"Cleanup completed: {db_expired_count} DB + {redis_expired_count} Redis "
                 f"expired, {checkpoint_cleaned_count} checkpoints cleaned, "
                 f"{active_count} active"
             ),
@@ -210,37 +196,110 @@ def cleanup_abandoned_interrupts():
         }
 
 
-async def _cleanup_checkpoint_states(thread_ids: list) -> int:
+def _scan_and_expire_redis_interrupts(now: datetime) -> tuple[list[str], int, int]:
     """
-    Clean up LangGraph checkpoint states for the given thread IDs.
+    Scan Redis for interrupt keys past the approval timeout and delete them.
 
-    Args:
-        thread_ids: List of thread IDs (conversation IDs) to clean up
+    Redis timestamps are supplementary bookkeeping only — the DB HITLInterrupt
+    table remains the source of truth for interrupt lifecycle state, so a
+    failure here must not block the DB-backed retention pass.
 
     Returns:
-        Number of successfully cleaned checkpoint states
+        (expired_thread_ids, expired_count, active_count)
     """
-    cleaned_count = 0
+    redis_url = getattr(settings, "redis_url", "") or ""
+    if not redis_url.strip():
+        return [], 0, 0
+
+    expired_thread_ids: list[str] = []
+    expired_count = 0
+    active_count = 0
 
     try:
-        from app.ai.checkpoint import CheckpointManager
+        redis_client = redis.from_url(redis_url)
+        interrupt_pattern = "interrupt:*"
 
-        checkpoint_manager = CheckpointManager(
-            db_url=settings.database_url,
-            settings=settings,
-        )
-        await checkpoint_manager.setup()
-
-        for thread_id in thread_ids:
+        for key in redis_client.scan_iter(match=interrupt_pattern):
             try:
-                if await checkpoint_manager.delete_thread(thread_id):
-                    cleaned_count += 1
+                stored_timestamp = redis_client.get(key)
+                if not stored_timestamp:
+                    continue
+
+                stored_time = datetime.fromisoformat(stored_timestamp.decode("utf-8"))
+                # Ensure comparison is between two tz-aware datetimes
+                if stored_time.tzinfo is None:
+                    stored_time = stored_time.replace(tzinfo=timezone.utc)
+
+                elapsed_minutes = (now - stored_time).total_seconds() / 60
+
+                if elapsed_minutes > settings.hitl_approval_timeout_minutes:
+                    expired_count += 1
+
+                    # Key format: "interrupt:{conversation_id}:{interrupt_id}"
+                    key_parts = key.decode("utf-8").split(":")
+                    conversation_id = key_parts[1] if len(key_parts) > 1 else None
+
+                    if conversation_id:
+                        expired_thread_ids.append(conversation_id)
+
+                    redis_client.delete(key)
+                else:
+                    active_count += 1
+
             except Exception:
                 continue
+    except Exception as redis_exc:
+        logger.warning("Redis interrupt expiry scan failed: %s", redis_exc, exc_info=True)
+        return [], 0, 0
 
+    return expired_thread_ids, expired_count, active_count
+
+
+async def _run_checkpoint_retention_cleanup(
+    now: datetime,
+    hitl_repo,
+    conversation_repo,
+    redis_expired_thread_ids: list[str],
+) -> tuple[dict[str, int], int]:
+    """
+    Run CheckpointRetentionService plus ad-hoc cleanup for Redis-sourced threads.
+
+    A dedicated CheckpointManager is created per invocation (rather than reusing
+    the container's singleton) because this coroutine runs inside a fresh event
+    loop each time the Celery task fires, and the underlying psycopg connection
+    pool is bound to the loop that opened it.
+
+    Returns:
+        (retention_counts, redis_checkpoints_cleaned)
+    """
+    # Imported lazily to avoid loading langgraph/psycopg_pool at worker startup
+    # for a task that may never run in a given process.
+    from app.ai.checkpoint import CheckpointManager
+
+    checkpoint_manager = CheckpointManager(db_url=settings.database_url, settings=settings)
+    await checkpoint_manager.setup()
+
+    try:
+        retention_service = CheckpointRetentionService(
+            checkpoint_manager=checkpoint_manager,
+            hitl_interrupt_repository=hitl_repo,
+            conversation_repository=conversation_repo,
+        )
+        retention_counts = await retention_service.cleanup_expired_and_deleted_threads(now=now)
+
+        redis_checkpoints_cleaned = 0
+        for thread_id in dict.fromkeys(redis_expired_thread_ids):
+            try:
+                if await checkpoint_manager.delete_thread(thread_id):
+                    redis_checkpoints_cleaned += 1
+            except Exception:
+                logger.warning(
+                    "Failed to delete checkpoint thread %s (Redis-sourced expiry)",
+                    thread_id,
+                    exc_info=True,
+                )
+                continue
+
+        return retention_counts, redis_checkpoints_cleaned
+    finally:
         await checkpoint_manager.cleanup()
-
-    except Exception:
-        pass
-
-    return cleaned_count

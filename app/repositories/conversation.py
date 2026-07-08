@@ -148,6 +148,11 @@ class ConversationCRUDStrategy(
         )
         return db.execute(statement).scalar() is not None
 
+    def get_soft_deleted(self, db: Session) -> list[Conversation]:
+        """Return conversations that have been soft-deleted (deleted_at is set)."""
+        statement = select(Conversation).where(Conversation.deleted_at.is_not(None))
+        return list(db.execute(statement).scalars().all())
+
 
 class ConversationRepository:
     """Repository for Conversation model using session factory pattern"""
@@ -250,3 +255,8 @@ class ConversationRepository:
         """Check if conversation exists"""
         with self.session_factory() as session:
             return self._crud_strategy.exists(session, id)
+
+    def get_soft_deleted(self) -> list[Conversation]:
+        """Get all soft-deleted conversations (used by checkpoint retention cleanup)."""
+        with self.session_factory() as session:
+            return self._crud_strategy.get_soft_deleted(session)
