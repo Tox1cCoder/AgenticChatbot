@@ -1,18 +1,16 @@
 """Memory refactor Task 6 guards: long-term summarization is off the hot path.
 
-The graph no longer routes through ``summarize`` before ``route``. The
-``_summarization_node`` is kept as a no-op so legacy checkpoints don't
-crash. Durable summaries refresh after assistant persistence (in
-``MessageService``) — verified separately in
-``test_message_history_pipeline.py``.
+The graph no longer contains the legacy ``summarize`` node at all — it was a
+no-op orphan (no incoming/outgoing edges) kept only for old checkpoints, and
+was verified to be scheduled by zero live checkpoints before removal. Durable
+summaries refresh after assistant persistence (in ``MessageService``) —
+verified separately in ``test_message_history_pipeline.py``.
 """
 
 from __future__ import annotations
 
 import sys
 from unittest.mock import MagicMock
-
-import pytest
 
 sys.modules.setdefault("qdrant_client", MagicMock())
 sys.modules.setdefault("qdrant_client.models", MagicMock())
@@ -21,38 +19,18 @@ sys.modules.setdefault("langchain_openai", MagicMock())
 sys.modules.setdefault("langchain", MagicMock())
 sys.modules.setdefault("langchain.agents", MagicMock())
 
-from app.ai.graph import MultiAgentWorkflow
-from app.ai.schemas import GraphState
+from app.ai.graph import MultiAgentWorkflow  # noqa: E402 (heavy deps stubbed above first)
 
 
-@pytest.mark.asyncio
-async def test_summarization_node_is_a_noop_passthrough():
-    """The kept-for-compat node returns state unchanged and never invokes
-    the model."""
-    workflow = MultiAgentWorkflow.__new__(MultiAgentWorkflow)
-    state: GraphState = {  # type: ignore[assignment]
-        "conversation_id": "conv-1",
-        "context": {},
-    }
-
-    result = await workflow._summarization_node(state)
-
-    assert result is state
-    assert "history_summary" not in result
-
-
-def test_graph_starts_at_route_not_summarize():
-    """``START`` must connect directly to ``route`` so streaming never waits
-    on the summary model before the first user-visible token."""
+def test_workflow_has_no_summarize_node_or_method():
+    """The legacy compatibility node and its method must be fully removed, and
+    ``START`` must connect directly to ``route`` so streaming never waits on a
+    summary node before the first user-visible token."""
     import inspect
 
+    assert not hasattr(MultiAgentWorkflow, "_summarization_node")
     source = inspect.getsource(MultiAgentWorkflow._build_graph)
-
-    # The legacy edge "START -> summarize -> route" must be gone.
-    assert 'add_edge(START, "summarize")' not in source
-    assert 'add_edge("summarize", "route")' not in source
-
-    # Route is the new entrypoint.
+    assert '"summarize"' not in source
     assert 'add_edge(START, "route")' in source
 
 

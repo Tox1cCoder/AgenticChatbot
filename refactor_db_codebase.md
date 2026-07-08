@@ -691,7 +691,7 @@ Expected: expired pending HITL interrupts become expired, and checkpoint threads
 - Modify: `tests/test_graph_streaming_summarization.py`
 - Create or modify: `tests/test_graph_refactor_contract.py`
 
-- [ ] **Step 1: Add a guard test that no active checkpoint needs `summarize`**
+- [x] **Step 1: Add a guard test that no active checkpoint needs `summarize`**
 
 ```python
 from sqlalchemy import create_engine, text
@@ -711,7 +711,7 @@ def test_no_pending_checkpoint_requires_summarize_node():
 
 Run it after Task 5 cleanup. It should pass before deleting the node.
 
-- [ ] **Step 2: Remove the compatibility node**
+- [x] **Step 2: Remove the compatibility node**
 
 Delete:
 
@@ -722,7 +722,7 @@ Delete:
 
 Keep durable summary refresh in `MessageService.refresh_summary_after_turn()`.
 
-- [ ] **Step 3: Update tests**
+- [x] **Step 3: Update tests**
 
 Replace `test_summarization_node_is_a_noop_passthrough` with:
 
@@ -738,7 +738,7 @@ def test_workflow_has_no_summarize_node_or_method():
     assert 'add_edge(START, "route")' in source
 ```
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run:
 
@@ -1074,6 +1074,12 @@ _Records deviations, judgment calls, and clarifications made during implementati
   - **Controller bug fix during live verify:** the task's `asyncio.new_event_loop()` produced a Windows ProactorEventLoop → psycopg async pool `PoolTimeout` in `CheckpointManager.setup()`; retention silently returned zeros. Fixed by creating a SelectorEventLoop on `win32` via `WindowsSelectorEventLoopPolicy().new_event_loop()` (mirrors the existing `app/main.py:7-9` convention). This was a latent pre-existing incompatibility (original per-invocation manager had the same pattern), surfaced only by actually running the task.
   - **Live Step 5 result:** 64 pending-expired HITL → expired; 837 checkpoint threads cleaned; 797 soft-deleted conversations swept; after-state = 0 pending HITL. This satisfies Task 6's precondition (no active interrupts needing the old node). Unit tests 12/12, ruff clean.
   - Non-blocking follow-up (subagent concern #2): `get_soft_deleted()` is unbounded with no "cleaned" marker, so each 10-min beat re-sweeps all soft-deleted rows (idempotent no-ops). Candidate for a future pagination/marker task; out of Task 5 scope.
+- **Task 6** (controller-implemented) — **user-approved deletion after redundancy proof:**
+  - The `summarize` node was already a disconnected **island** in the graph (only `add_node`, no `add_edge` in or out) that returned state unchanged; summarization moved to `MessageService.refresh_summary_after_turn`.
+  - Plan's guard `checkpoints ILIKE '%summarize%' == 0` was **5,589** after Task 5 cleanup — but that substring matches historical `versions_seen`/`channel_versions` bookkeeping and user message text, not live scheduling. It can never be 0 on a real DB.
+  - **Empirical safety proof (the real gate):** loaded all 247 threads whose latest checkpoint carries `branch:to:summarize` through the real compiled graph via `aget_state`; **0** had `summarize` in `.next` (only 30 had any pending task; 0 errors). Also 0 `checkpoint_writes` with `channel='summarize'`. → Removal is safe with **no checkpoint pruning** (destructive option proved unnecessary, so no user data deleted).
+  - Removed `_summarization_node`, its `add_node`, and the `langgraph_node == "summarize"` fallback in `_is_internal_stream_chunk` (also collapsed the trailing `if/return True; return False` per linter). Replaced the noop test with `test_workflow_has_no_summarize_node_or_method`; added `tests/test_graph_refactor_contract.py` with a *correct* cheap guard (`checkpoint_writes.channel='summarize' == 0`) and documented why the ILIKE proxy was replaced.
+  - Graph now compiles with 14 nodes (was 15). Verified: 11 (summarization+contract+history) + 32 (streaming/handoff/custom-agent graph) tests pass; ruff clean (also reduced pre-existing E402 in the touched test file from 2→1, silenced the last with a justified noqa).
 
 ### Progress
 
@@ -1081,5 +1087,6 @@ _Records deviations, judgment calls, and clarifications made during implementati
 - **Task 2 — DONE** (commit e328e9e). `autogenerate_filters.py` + `test_alembic_autogenerate_filters.py` created; `env.py` wired. Filter tests 2/2 pass; `alembic check` output no longer references any checkpoint table (still fails overall on remaining app-table drift, as expected).
 - **Task 3 — DONE** (commit 4916e88). 18 model files edited + `v1w2x3y4z5a6_schema_contract_cleanup.py` migration created. Live DB migrated to `v1w2x3y4z5a6`. Verified: `alembic check` = "No new upgrade operations detected"; schema contract test 5/5 green; regression (memory-summary repo 7/7, document chunk/model/parse-artifact 25/25) green. Downgrade reversibility confirmed. `conversation_device_bindings` dropped.
 - **Task 4 — DONE** (commit 020ec02). `session.py` (one engine + `SessionLocal` w/ `expire_on_commit=False` + `session_scope()`), `database.py` (thin adapter over shared `SessionLocal`, no 2nd engine, `create_database` removed), `test_database_session_provider.py` created. Verified: provider tests + custom-agents service/message/api + hitl_api = 46/46 pass; container session bound to single shared engine.
-- **Task 5 — DONE** (commit pending). Subagent-implemented, controller-verified. `checkpoint_retention_service.py` + `test_checkpoint_retention_service.py` created; `checkpoint.py` (schema-aware fallback), `cleanup_tasks.py` (delegates + Windows selector-loop fix), `conversation.py` (`get_soft_deleted`), `test_checkpoint_serializer.py` updated. Unit 12/12; live cleanup expired 64 HITL + cleaned 837 threads; after-state 0 pending HITL; ruff clean.
+- **Task 5 — DONE** (commit c93eed7). Subagent-implemented, controller-verified. `checkpoint_retention_service.py` + `test_checkpoint_retention_service.py` created; `checkpoint.py` (schema-aware fallback), `cleanup_tasks.py` (delegates + Windows selector-loop fix), `conversation.py` (`get_soft_deleted`), `test_checkpoint_serializer.py` updated. Unit 12/12; live cleanup expired 64 HITL + cleaned 837 threads; after-state 0 pending HITL; ruff clean.
+- **Task 6 — DONE** (commit pending). Legacy `summarize` node/method/stream-fallback removed after proving redundancy + resume-safety empirically (0/247 threads schedule it; no data pruned). `test_graph_streaming_summarization.py` updated, `test_graph_refactor_contract.py` guard added. Graph 15→14 nodes; 43 tests pass; ruff clean.
 

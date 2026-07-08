@@ -233,7 +233,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         Checks, in priority order:
         1. The `tags` list for the 'internal' tag (set via RunnableConfig in generate_summary).
         2. The nested `metadata` dict's `internal` key (also set via RunnableConfig).
-        3. The `langgraph_node` key as a hard-coded fallback for the summarize node.
         """
         if not isinstance(metadata, dict):
             return False
@@ -243,11 +242,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             return True
 
         nested_metadata = metadata.get("metadata") or {}
-        if isinstance(nested_metadata, dict) and nested_metadata.get("internal") is True:
-            return True
-
-        # Hard-coded fallback: always suppress the summarize node regardless of tags.
-        return metadata.get("langgraph_node") == "summarize"
+        return isinstance(nested_metadata, dict) and nested_metadata.get("internal") is True
 
     @staticmethod
     def _consume_stream_text_chunk(
@@ -680,11 +675,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     def _build_graph(self) -> StateGraph:
         workflow = StateGraph(GraphState)
 
-        # Memory refactor 2026-04-29: durable summary refresh now happens
-        # after assistant persistence, not on the request hot path.
-        # ``_summarization_node`` is kept as a no-op fallback so any in-flight
-        # checkpoints that previously routed through "summarize" still resolve.
-        workflow.add_node("summarize", self._summarization_node)
+        # Long-term summary refresh happens after assistant persistence, not on
+        # the request hot path (see MessageService.refresh_summary_after_turn).
         workflow.add_node("route", self._route_node)
         workflow.add_node("chat_agent", self._chat_node)
         workflow.add_node("rag_agent", self._rag_node)
@@ -1397,16 +1389,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         )
         self._attach_final_agent_metadata(values, response)
         return response
-
-    async def _summarization_node(self, state: GraphState) -> GraphState:
-        """No-op compatibility node.
-
-        Long-term summary refresh now happens after assistant persistence,
-        not on the streaming hot path. This node only exists so that any
-        legacy checkpoint that previously routed through ``summarize`` does
-        not error out — it just passes the state through unchanged.
-        """
-        return state
 
     async def _route_node(self, state: GraphState) -> GraphState:
         # Reset delegation counter and the per-turn invocation trail at the
