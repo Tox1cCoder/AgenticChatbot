@@ -127,7 +127,11 @@ def estimate_agent_message_tokens(message: Any) -> int:
     elif isinstance(message, dict):
         content = message.get("content", "")
 
-    return estimate_tokens(content) + 4  # content + role overhead
+    tokens = estimate_tokens(content) + 4  # content + role overhead
+    attachments = getattr(message, "attachments", None)
+    if isinstance(attachments, list):
+        tokens += 32 * len(attachments)
+    return tokens
 
 
 def estimate_tool_schema_tokens(tools: list[Any]) -> int:

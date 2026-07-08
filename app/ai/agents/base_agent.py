@@ -32,6 +32,7 @@ from ..deferred_tool_binding import (
     should_use_deferred_loading,
 )
 from ..hand_off_tool import hand_off as _hand_off_tool
+from ..image_context import build_multimodal_content, has_image_parts
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_context import build_context_window_usage, resolve_model_context_window
 from ..prompts import DELEGATION_SUFFIX, TOOL_CONTEXT_SUFFIX, TOOL_EXPLORATION_SUFFIX
@@ -859,7 +860,12 @@ class BaseAgent(ABC):
                 content = msg.content or ""
 
                 if role == "user":
-                    langchain_history.append(HumanMessage(content=content))
+                    attachments = getattr(msg, "attachments", None)
+                    multimodal_content = build_multimodal_content(content, attachments)
+                    if has_image_parts(multimodal_content):
+                        langchain_history.append(HumanMessage(content=multimodal_content))
+                    else:
+                        langchain_history.append(HumanMessage(content=content))
                 elif role == "assistant":
                     langchain_history.append(AIMessage(content=content))
                 # Skip system messages as we add our own system prompt
