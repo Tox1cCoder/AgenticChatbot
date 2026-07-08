@@ -71,12 +71,17 @@ def db_message_to_agent_message(message: Message) -> AgentMessage | None:
         "created_at": message.created_at.isoformat() if message.created_at else None,
     }
 
+    raw_metadata = message.message_metadata if isinstance(message.message_metadata, dict) else {}
+    raw_attachments = raw_metadata.get("attachments")
+    attachments = raw_attachments if isinstance(raw_attachments, list) else None
+
     sender = message.sender
     if sender == DBMessageRole.user.value:
         return AgentMessage(
             role=MessageRole.USER,
             content=message.content or "",
             metadata=metadata,
+            attachments=attachments,
         )
     if sender == DBMessageRole.assistant.value:
         if not (message.content or "").strip():

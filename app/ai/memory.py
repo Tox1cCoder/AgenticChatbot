@@ -136,6 +136,13 @@ class ConversationMemory:
             sender_to_role = {1: MessageRole.USER, 2: MessageRole.ASSISTANT}
             role = sender_to_role.get(db_message.sender, MessageRole.ASSISTANT)
 
+            metadata_json = (
+                db_message.message_metadata if isinstance(db_message.message_metadata, dict) else {}
+            )
+            attachments = None
+            if role == MessageRole.USER and isinstance(metadata_json.get("attachments"), list):
+                attachments = metadata_json["attachments"]
+
             return AgentMessage(
                 role=role,
                 content=db_message.content,
@@ -145,6 +152,7 @@ class ConversationMemory:
                         db_message.created_at.isoformat() if db_message.created_at else None
                     ),
                 },
+                attachments=attachments,
             )
         except Exception as e:
             logger.error(f"Failed to convert database message: {e}")
