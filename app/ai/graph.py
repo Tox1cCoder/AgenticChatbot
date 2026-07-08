@@ -54,6 +54,7 @@ from .hitl_config import (
     build_interrupt_response,
     policy_from_context,
 )
+from .image_context import build_multimodal_content, has_image_parts
 from .mcp_registry import get_global_mcp_manager
 from .memory import get_memory_manager
 from .rag_tool_actions import canonicalize_rag_tool_call, execute_search_documents_action
@@ -600,58 +601,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
     def _get_state_attachments(state: GraphState) -> list[Any]:
         return GraphStateView(state).attachments()
 
-    @staticmethod
-    def _normalize_attachment_image_url(attachment: Any) -> str | None:
-        if not isinstance(attachment, dict):
-            return None
-
-        mime = (
-            attachment.get("mime")
-            or attachment.get("mimeType")
-            or attachment.get("mediaType")
-            or attachment.get("contentType")
-            or "image/jpeg"
-        )
-        mime = str(mime).strip() if mime else "image/jpeg"
-
-        candidate_values = [
-            attachment.get("data"),
-            attachment.get("url"),
-            attachment.get("path"),
-            attachment.get("image"),
-            attachment.get("source"),
-        ]
-
-        for candidate in candidate_values:
-            if isinstance(candidate, dict):
-                candidate = (
-                    candidate.get("url")
-                    or candidate.get("data")
-                    or candidate.get("base64")
-                    or candidate.get("path")
-                )
-            if not isinstance(candidate, str):
-                continue
-
-            raw_value = candidate.strip()
-            if not raw_value:
-                continue
-
-            if raw_value.startswith("data:"):
-                return raw_value
-
-            if raw_value.startswith(("http://", "https://", "blob:")):
-                return raw_value
-
-            # Guard against accidentally treating local file-system paths as base64.
-            if ":\\" in raw_value or raw_value.startswith(("/", "./", "../")):
-                continue
-
-            return f"data:{mime};base64,{raw_value}"
-
-        return None
-
-    def _build_chat_turn_messages_with_attachments(
+    def _build_turn_messages_with_attachments(
         self,
         current_turn_messages: list[Any],
         attachments: list[Any],
@@ -665,29 +615,37 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             last_human_idx = len(messages_copy)
             messages_copy.append(HumanMessage(content=""))
 
-        original_content = messages_copy[last_human_idx].content
+        original_message = messages_copy[last_human_idx]
+        original_content = original_message.content
         user_text = coerce_response_text(original_content)
+        multimodal_content = build_multimodal_content(user_text, attachments)
 
-        multimodal_parts: list[dict[str, Any]] = []
-        if user_text:
-            multimodal_parts.append({"type": "text", "text": user_text})
+        if not has_image_parts(multimodal_content):
+            return messages_copy, False
 
-        for attachment in attachments:
-            image_url = self._normalize_attachment_image_url(attachment)
-            if not image_url:
-                continue
-            multimodal_parts.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": image_url},
-                }
-            )
+        kwargs: dict[str, Any] = {"content": multimodal_content}
+        message_id = getattr(original_message, "id", None)
+        if message_id:
+            kwargs["id"] = message_id
+        messages_copy[last_human_idx] = HumanMessage(**kwargs)
+        return messages_copy, True
 
-        has_images = any(part.get("type") == "image_url" for part in multimodal_parts)
-        if has_images:
-            messages_copy[last_human_idx] = HumanMessage(content=multimodal_parts)
+    @staticmethod
+    def _mark_response_has_images(response: AgentResponse, has_images: bool) -> None:
+        if not has_images:
+            return
+        response.metadata = dict(response.metadata or {})
+        response.metadata["has_images"] = True
 
-        return messages_copy, has_images
+    def _apply_current_turn_attachments(
+        self,
+        state: GraphState,
+        current_turn_messages: list[Any],
+    ) -> tuple[list[Any], bool]:
+        attachments = self._get_state_attachments(state)
+        if not attachments:
+            return current_turn_messages, False
+        return self._build_turn_messages_with_attachments(current_turn_messages, attachments)
 
     @staticmethod
     def _get_planning_flags(state: GraphState) -> tuple[bool, bool]:
@@ -2192,19 +2150,16 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             conversation_id, user_id, agent_key="chat", state=state
         )
 
-        attachments = self._get_state_attachments(state)
         device_id = state.get("device_id")
         current_turn_messages = self._messages_for_selected_agent(
             state,
             state.get("selected_agent") or "chat_agent",
             messages,
         )
-        has_images = False
-        if attachments:
-            current_turn_messages, has_images = self._build_chat_turn_messages_with_attachments(
-                current_turn_messages,
-                attachments,
-            )
+        current_turn_messages, has_images = self._apply_current_turn_attachments(
+            state,
+            current_turn_messages,
+        )
 
         response = await self.chat_agent.invoke_model_with_history(
             current_turn_messages,
@@ -2219,10 +2174,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             **self._multi_agent_kwargs(state, "chat_agent"),
         )
 
-        if has_images:
-            if response.metadata is None:
-                response.metadata = {}
-            response.metadata["has_images"] = True
+        self._mark_response_has_images(response, has_images)
 
         response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response)
@@ -2459,6 +2411,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             conversation_id, user_id, agent_key="chat", state=state
         )
         current_turn_messages = self._messages_for_selected_agent(state, selected_agent, messages)
+        current_turn_messages, has_images = self._apply_current_turn_attachments(
+            state,
+            current_turn_messages,
+        )
 
         response = await agent.invoke_model_with_history(
             current_turn_messages,
@@ -2472,6 +2428,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             **self._final_response_kwargs(state),
             **self._multi_agent_kwargs(state, selected_agent),
         )
+
+        self._mark_response_has_images(response, has_images)
 
         response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response)
@@ -2862,6 +2820,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             state.get("selected_agent") or "search_agent",
             messages,
         )
+        current_turn_messages, has_images = self._apply_current_turn_attachments(
+            state,
+            current_turn_messages,
+        )
 
         response = await self.search_agent.invoke_model_with_history(
             current_turn_messages,
@@ -2875,6 +2837,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             **self._final_response_kwargs(state),
             **self._multi_agent_kwargs(state, "search_agent"),
         )
+
+        self._mark_response_has_images(response, has_images)
 
         response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response)
@@ -2897,6 +2861,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             state.get("selected_agent") or "image_generator_agent",
             messages,
         )
+        current_turn_messages, has_images = self._apply_current_turn_attachments(
+            state,
+            current_turn_messages,
+        )
 
         response = await self.image_generator_agent.invoke_model_with_history(
             current_turn_messages,
@@ -2910,6 +2878,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             **self._final_response_kwargs(state),
             **self._multi_agent_kwargs(state, "image_generator_agent"),
         )
+
+        self._mark_response_has_images(response, has_images)
 
         response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response, append_images=True)
@@ -2932,6 +2902,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             state.get("selected_agent") or "canvas_agent",
             messages,
         )
+        current_turn_messages, has_images = self._apply_current_turn_attachments(
+            state,
+            current_turn_messages,
+        )
 
         response = await self.canvas_agent.invoke_model_with_history(
             current_turn_messages,
@@ -2945,6 +2919,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
             **self._final_response_kwargs(state),
             **self._multi_agent_kwargs(state, "canvas_agent"),
         )
+
+        self._mark_response_has_images(response, has_images)
 
         response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response)
@@ -3016,6 +2992,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         )
 
         worker_message = HumanMessage(content=task_prompt)
+        worker_turn = self._apply_current_turn_attachments(parent_state, [worker_message])
+        worker_messages, worker_has_images = worker_turn
 
         # RAG worker: drive the same search_documents loop used by the graph,
         # but keep all intermediate context local to this worker.
@@ -3064,6 +3042,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                         "history_summary": worker_history_summary,
                         "run_config": run_config,
                     },
+                    attachments=self._get_state_attachments(parent_state),
                 )
                 response = await agent.process_message(agent_msg, conversation_id)
 
@@ -3206,7 +3185,6 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         # Generic agent worker: tool-loop until final response, approval, or error.
 
-        worker_messages: list[Any] = [worker_message]
         tool_map: dict[str, Any] | None = None
         accumulated_worker_artifacts: list[dict[str, Any]] = []
         worker_iterations = 0
@@ -3258,6 +3236,7 @@ class MultiAgentWorkflow(IWorkflowRuntime):
                     existing = list(response.tool_artifacts or [])
                     existing.extend(accumulated_worker_artifacts)
                     response.tool_artifacts = existing
+                self._mark_response_has_images(response, worker_has_images)
                 return response
 
             normalized_worker_calls = [normalize_tool_call(tc) for tc in tool_calls]
@@ -3437,6 +3416,10 @@ class MultiAgentWorkflow(IWorkflowRuntime):
 
         # Get only current turn messages for the model
         current_turn_messages = self._get_current_turn_messages(messages)
+        current_turn_messages, has_images = self._apply_current_turn_attachments(
+            state,
+            current_turn_messages,
+        )
 
         # Build the Planning-mode subagent dispatch tool (only when allowed).
         internal_tools = self._build_planning_internal_tools(state)
@@ -3481,6 +3464,8 @@ class MultiAgentWorkflow(IWorkflowRuntime):
         if context.get("generate_final_summary") and not response.message.tool_calls:
             context["final_summary_generated"] = True
             state["context"] = context
+
+        self._mark_response_has_images(response, has_images)
 
         response = self._finalize_forced_final_response(state, response)
         self._merge_tool_artifacts(state, response)
