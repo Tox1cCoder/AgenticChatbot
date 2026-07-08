@@ -51,7 +51,8 @@ REQUEST_TIMEOUT = (5, 30)
 STREAM_REQUEST_TIMEOUT = (10, 900)
 
 _MAX_PERSONA_LENGTH = 8000
-_MAX_IMAGE_ATTACHMENTS = 4
+_PENDING_IMAGE_PREVIEW_COLUMNS = 8
+_PENDING_IMAGE_PREVIEW_WIDTH = 72
 TRACE_PREVIEW_CHAR_LIMIT = 500
 _PLACEHOLDER_CONVERSATION_TITLES = {
     "",
@@ -3319,16 +3320,122 @@ def _handle_new_image_attachments(uploaded_files: list) -> None:
     if not new_items:
         return
 
-    remaining = _MAX_IMAGE_ATTACHMENTS - len(pending)
-    if remaining <= 0:
-        st.toast(f"{_MAX_IMAGE_ATTACHMENTS} images", icon=":material/warning:")
+    pending.extend(new_items)
+    st.session_state.pending_image_attachments = pending
+
+
+def _attachment_from_pasted_payload(item: dict[str, Any]) -> dict[str, str] | None:
+    if not isinstance(item, dict):
+        return None
+
+    raw_data = str(item.get("data") or "").strip()
+    if not raw_data:
+        return None
+
+    mime = str(item.get("mime") or item.get("type") or "image/png").strip() or "image/png"
+    if raw_data.startswith("data:"):
+        header, _, payload = raw_data.partition(",")
+        raw_data = payload or ""
+        if ";" in header:
+            inferred = header[5:].split(";", 1)[0].strip()
+            if inferred:
+                mime = inferred
+
+    if not raw_data:
+        return None
+
+    return {
+        "token": str(uuid.uuid4()),
+        "name": str(item.get("name") or "clipboard-image.png"),
+        "mime": mime,
+        "data": raw_data,
+    }
+
+
+def _paste_event_id(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    event_id = str(payload.get("eventId") or payload.get("event_id") or "").strip()
+    return event_id or None
+
+
+def _paste_payload_images(payload: Any) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict) and isinstance(payload.get("images"), list):
+        return payload["images"]
+    return []
+
+
+def _handle_pasted_image_payload(payload: Any) -> bool:
+    images = _paste_payload_images(payload)
+    if not images:
+        return False
+
+    event_id = _paste_event_id(payload)
+    consumed_events = st.session_state.setdefault("consumed_image_paste_events", set())
+    if event_id and event_id in consumed_events:
+        return False
+
+    pending = st.session_state.get("pending_image_attachments", [])
+    existing_data = {item["data"] for item in pending if isinstance(item, dict) and "data" in item}
+    new_items: list[dict[str, str]] = []
+
+    for raw_item in images:
+        attachment = _attachment_from_pasted_payload(raw_item)
+        if not attachment:
+            continue
+        if attachment["data"] in existing_data:
+            continue
+        new_items.append(attachment)
+        existing_data.add(attachment["data"])
+
+    if event_id:
+        consumed_events.add(event_id)
+        st.session_state.consumed_image_paste_events = consumed_events
+
+    if new_items:
+        pending.extend(new_items)
+        st.session_state.pending_image_attachments = pending
+        return True
+
+    return False
+
+
+def _render_pending_image_attachments() -> None:
+    pending = st.session_state.get("pending_image_attachments", [])
+    if not pending:
         return
 
-    if len(new_items) > remaining:
-        st.toast("Some images ignored", icon=":material/warning:")
-
-    pending.extend(new_items[:remaining])
-    st.session_state.pending_image_attachments = pending
+    st.caption(f"{len(pending)} attachment(s) ready")
+    for row_start in range(0, len(pending), _PENDING_IMAGE_PREVIEW_COLUMNS):
+        row = pending[row_start : row_start + _PENDING_IMAGE_PREVIEW_COLUMNS]
+        cols = st.columns(_PENDING_IMAGE_PREVIEW_COLUMNS)
+        for idx, att in enumerate(row):
+            if not isinstance(att, dict):
+                continue
+            with cols[idx]:
+                try:
+                    image_bytes = base64.b64decode(att["data"])
+                except Exception:
+                    continue
+                st.image(
+                    image_bytes,
+                    caption=att.get("name") or "image",
+                    width=_PENDING_IMAGE_PREVIEW_WIDTH,
+                )
+                if st.button(
+                    "",
+                    icon=":material/close:",
+                    key=f"remove_{att.get('token')}",
+                    help="Remove attachment",
+                ):
+                    st.session_state.pending_image_attachments = [
+                        item
+                        for item in pending
+                        if isinstance(item, dict) and item.get("token") != att.get("token")
+                    ]
+                    st.rerun()
 
 
 def _format_image_only_message(attachments: list[dict[str, str]]) -> str:
@@ -7818,25 +7925,7 @@ def render_chat_view():
     # Input area
     if conversation_id:
         # Show pending attachments
-        if st.session_state.pending_image_attachments:
-            st.caption(f"{len(st.session_state.pending_image_attachments)} attachment(s) ready")
-            cols = st.columns(min(len(st.session_state.pending_image_attachments), 4))
-            for idx, att in enumerate(st.session_state.pending_image_attachments):
-                with cols[idx % len(cols)]:
-                    image_bytes = base64.b64decode(att["data"])
-                    st.image(image_bytes, caption=att["name"], width=80)
-                    if st.button(
-                        "Remove",
-                        icon=":material/close:",
-                        key=f"remove_{att['token']}",
-                        help="Remove attachment",
-                    ):
-                        st.session_state.pending_image_attachments = [
-                            item
-                            for item in st.session_state.pending_image_attachments
-                            if item["token"] != att["token"]
-                        ]
-                        st.rerun()
+        _render_pending_image_attachments()
 
         # File uploader
         file_uploader_key = f"chat_image_uploader_{conversation_id}" if conversation_id else None
@@ -7847,7 +7936,7 @@ def render_chat_view():
                 type=["png", "jpg", "jpeg", "gif", "webp"],
                 accept_multiple_files=True,
                 key=file_uploader_key,
-                help=f"Up to {_MAX_IMAGE_ATTACHMENTS} images",
+                help="Attach images",
             )
             if uploaded_files:
                 _handle_new_image_attachments(uploaded_files)
