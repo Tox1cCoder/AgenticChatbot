@@ -7,7 +7,10 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from app.ai.conversation_summarizer import ConversationSummarizer
+from app.ai.conversation_summarizer import (
+    ConversationSummarizer,
+    _agent_message_to_langchain,
+)
 from app.ai.schemas import AgentMessage, MessageRole
 
 
@@ -68,3 +71,17 @@ async def test_summarizer_caches_user_gemini_key(monkeypatch):
 
     assert provider_service.calls == [(user_id, "gemini")]
     assert api_keys == ["user-gemini-key", "user-gemini-key"]
+
+
+def test_summarizer_mentions_user_image_attachments_without_raw_base64():
+    msg = AgentMessage(
+        role=MessageRole.USER,
+        content="remember this screenshot",
+        attachments=[{"name": "screen.png", "mime": "image/png", "data": "abc123"}],
+    )
+
+    converted = _agent_message_to_langchain(msg)
+
+    assert "remember this screenshot" in converted.content
+    assert "[Attached image: screen.png, image/png]" in converted.content
+    assert "abc123" not in converted.content

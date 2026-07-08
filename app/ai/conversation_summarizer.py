@@ -21,6 +21,7 @@ from uuid import UUID
 from cachetools import TTLCache
 from langchain_core.messages import AIMessage, HumanMessage
 
+from app.ai.image_context import attachment_memory_lines
 from app.ai.schemas import AgentMessage, MessageRole
 from app.ai.summarization_middleware import (
     SummarizationConfig,
@@ -33,9 +34,13 @@ logger = logging.getLogger(__name__)
 
 
 def _agent_message_to_langchain(message: AgentMessage):
-    if message.role == MessageRole.ASSISTANT:
-        return AIMessage(content=message.content or "")
-    return HumanMessage(content=message.content or "")
+    content = message.content or ""
+    if message.role == MessageRole.USER:
+        image_lines = attachment_memory_lines(message.attachments)
+        if image_lines:
+            content = "\n".join([content, *image_lines]).strip()
+        return HumanMessage(content=content)
+    return AIMessage(content=content)
 
 
 class ConversationSummarizer:
