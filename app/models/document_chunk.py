@@ -34,6 +34,7 @@ class DocumentChunk(Base):
             "chunk_index",
             name="uq_document_chunk_document_index",
         ),
+        Index("idx_document_chunks_document_id", "document_id"),
         Index("idx_document_chunks_parse_artifact_id", "parse_artifact_id"),
         Index("idx_document_chunks_content_sha256", "content_sha256"),
         Index("idx_document_chunks_index_status", "index_status"),
@@ -44,14 +45,13 @@ class DocumentChunk(Base):
         UUID(as_uuid=True),
         ForeignKey("documents.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
     )
     parse_artifact_id = Column(
         UUID(as_uuid=True),
         ForeignKey("document_parse_artifacts.id", ondelete="SET NULL"),
         nullable=True,
     )
-    qdrant_point_id = Column(String(100), nullable=True, unique=True, index=True)
+    qdrant_point_id = Column(String(100), nullable=True, unique=True)
 
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)

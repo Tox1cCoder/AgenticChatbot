@@ -22,14 +22,14 @@ class ModelProvider(Base):
 
     __tablename__ = "model_providers"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
     )
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     provider_type = Column(Text, nullable=False)  # 'gemini', 'openai', 'anthropic'
     api_key_encrypted = Column(Text, nullable=False)
     is_default = Column(Boolean, default=False, nullable=False)

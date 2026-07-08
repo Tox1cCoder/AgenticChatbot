@@ -44,7 +44,7 @@ class CustomAgent(Base):
         Index("ix_custom_agents_owner_deleted", "owner_id", "deleted_at"),
     )
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
@@ -91,7 +91,7 @@ class ConversationCustomAgent(Base):
         Index("ix_conversation_custom_agents_custom_agent_id", "custom_agent_id"),
     )
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
 
     owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)

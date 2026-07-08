@@ -23,7 +23,7 @@ class ToolResultBlob(Base):
 
     __tablename__ = "tool_result_blobs"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id = Column(
         UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False, index=True
     )

@@ -12,12 +12,11 @@ class DocumentImage(Base):
     __tablename__ = "document_images"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False, index=True)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id"), nullable=False)
     chunk_id = Column(
         UUID(as_uuid=True),
         ForeignKey("document_chunks.id", ondelete="SET NULL"),
         nullable=True,
-        index=True,
     )
     image_path = Column(String(500), nullable=False)
     image_caption = Column(Text, nullable=True)

@@ -335,11 +335,11 @@ Expected after this task: pytest PASS. `alembic check` may still fail, but its o
 - Create: `app/alembic/versions/v1w2x3y4z5a6_schema_contract_cleanup.py`
 - Modify: `tests/test_database_schema_contract.py` if the final index contract is more specific than Task 1
 
-- [ ] **Step 1: Remove redundant primary-key indexes from models**
+- [x] **Step 1: Remove redundant primary-key indexes from models**
 
 Remove `index=True` from primary-key `id` columns. PostgreSQL primary keys already create indexes. Apply this to models such as `User`, `Conversation`, `Message`, `Feedback`, `TaskPlan`, `ToolApproval`, `ClientDevice`, `CustomAgent`, `SkillSetting`, `AgentModelConfig`, `ModelProvider`, `ToolApprovalSetting`, `ToolResultBlob`, and `UserMemory`.
 
-- [ ] **Step 2: Replace implicit duplicate indexes with explicit named indexes**
+- [x] **Step 2: Replace implicit duplicate indexes with explicit named indexes**
 
 Use explicit `Index(...)` or `UniqueConstraint(...)` in `__table_args__` when the index name is part of the schema contract.
 
@@ -353,11 +353,11 @@ Specific decisions:
 - Keep `uq_document_chunk_document_index`.
 - Match existing `conversation_memory_summaries` names: `ux_conversation_memory_summaries_conversation_id` and `ix_conversation_memory_summaries_last_message`, or explicitly migrate the live DB to the model names in the same revision. Prefer matching the current DB names to avoid unnecessary rename churn.
 
-- [ ] **Step 3: Align `ClientDevice.status` metadata**
+- [x] **Step 3: Align `ClientDevice.status` metadata**
 
 Keep the DB column as `VARCHAR(32)` and make SQLAlchemy metadata match it. Use either `SQLEnum(..., native_enum=False, length=32, values_callable=...)` or replace the column with `String(32)` plus Python-level validation in the service/schema layer. Prefer the smaller change: add `length=32` to the current non-native enum metadata.
 
-- [ ] **Step 4: Drop obsolete `conversation_device_bindings`**
+- [x] **Step 4: Drop obsolete `conversation_device_bindings`**
 
 Create `app/alembic/versions/v1w2x3y4z5a6_schema_contract_cleanup.py` with:
 
@@ -470,7 +470,7 @@ def downgrade() -> None:
         op.create_index(index_name, table_name, ["id"])
 ```
 
-- [ ] **Step 5: Verify Alembic and schema tests**
+- [x] **Step 5: Verify Alembic and schema tests**
 
 Run:
 
@@ -1055,9 +1055,17 @@ _Records deviations, judgment calls, and clarifications made during implementati
 - **Task 1:** Test file written verbatim from plan. Confirmed the 14 redundant PK indexes in the live DB match the Task 3 migration's drop list exactly (2 explicit `ix_agent_model_configs_id`/`ix_model_providers_id` + 12 in the loop), so Task 3's PK-index migration is pre-verified against ground truth.
 
 - **Task 2:** `env.py` imports `Base` from `app.database.base` (not `app.models.base` as the schema-contract test uses); both aggregate the same model metadata (verified: alembic detected all app tables; the contract test found all 14 offenders). `include_name` wired into both offline and online `context.configure` calls.
+- **Task 3:**
+  - Step 1 bulk removal (16 identical PK-`id` `index=True` lines across 15 files) done via a verified full-line Python string replacement rather than 16 read+edit round-trips. Two of those (`tool_result_blobs`, `user_memories`) had no live index yet — removal just prevents autogenerate from adding one.
+  - `document_chunks.document_id` (gap in plan Step 2): model produced `ix_document_chunks_document_id` via `index=True` while live had `idx_document_chunks_document_id`. Resolved per the plan's "match live names to avoid rename churn" rule — removed `index=True`, added explicit `Index("idx_document_chunks_document_id", "document_id")`. Migration leaves it untouched (already matches).
+  - `document_chunks.qdrant_point_id`: changed `unique=True, index=True` → `unique=True` only, so metadata declares a unique *constraint* (Postgres-named `document_chunks_qdrant_point_id_key`, matching live) instead of a unique index; migration drops the redundant plain `idx_document_chunks_qdrant_point_id`.
+  - `conversation_memory_summaries`: added `__table_args__` with explicit `ux_conversation_memory_summaries_conversation_id` (unique) and `ix_conversation_memory_summaries_last_message`, matching live names; kept `user_id` `index=True` (matches live `ix_conversation_memory_summaries_user_id`).
+  - `ClientDevice.status`: added `length=32` to the existing non-native `SQLEnum` (smallest change, per plan).
+  - **INCIDENT + lesson:** verifying downgrade reversibility, I ran an alembic round-trip in the background concurrently with a foreground check. Two alembic processes deadlocked on DDL locks against the running uvicorn dev server, leaving orphaned migration backends and the DB downgraded. Reversibility itself was confirmed (downgrade `v1w2x3y4z5a6`→`g0h1i2j3k4l5` ran clean). Recovery required terminating 4 stuck DB sessions (user-authorized after classifier denials). **Lesson: never run DB-mutating alembic in the background or concurrently — always sequential/foreground.** Re-applied migration cleanly with `lock_timeout=8s`.
 
 ### Progress
 
 - **Task 1 — DONE** (commit 899bff9). `tests/test_database_schema_contract.py` created. RED confirmed: 3 failed (unmodeled `conversation_device_bindings`, table present, 14 redundant PK indexes), 2 passed (checkpoint ownership disjoint, 0 unexpired pending HITL). Matches plan's expected pre-implementation state.
-- **Task 2 — DONE** (commit pending). `autogenerate_filters.py` + `test_alembic_autogenerate_filters.py` created; `env.py` wired. Filter tests 2/2 pass; `alembic check` output no longer references any checkpoint table (still fails overall on remaining app-table drift, as expected).
+- **Task 2 — DONE** (commit e328e9e). `autogenerate_filters.py` + `test_alembic_autogenerate_filters.py` created; `env.py` wired. Filter tests 2/2 pass; `alembic check` output no longer references any checkpoint table (still fails overall on remaining app-table drift, as expected).
+- **Task 3 — DONE** (commit pending). 17 model files edited + `v1w2x3y4z5a6_schema_contract_cleanup.py` migration created. Live DB migrated to `v1w2x3y4z5a6`. Verified: `alembic check` = "No new upgrade operations detected"; schema contract test 5/5 green; regression (memory-summary repo 7/7, document chunk/model/parse-artifact 25/25) green. Downgrade reversibility confirmed. `conversation_device_bindings` dropped.
 

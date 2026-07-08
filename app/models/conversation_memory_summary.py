@@ -8,7 +8,7 @@ the previous LangGraph-message-ID approach.
 
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, Text, func
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -19,14 +19,23 @@ class ConversationMemorySummary(Base):
     """Per-conversation rolling summary with a DB-message cursor."""
 
     __tablename__ = "conversation_memory_summaries"
+    __table_args__ = (
+        Index(
+            "ux_conversation_memory_summaries_conversation_id",
+            "conversation_id",
+            unique=True,
+        ),
+        Index(
+            "ix_conversation_memory_summaries_last_message",
+            "last_summarized_message_id",
+        ),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     conversation_id = Column(
         UUID(as_uuid=True),
         ForeignKey("conversations.id"),
         nullable=False,
-        unique=True,
-        index=True,
     )
     user_id = Column(
         UUID(as_uuid=True),
@@ -41,7 +50,6 @@ class ConversationMemorySummary(Base):
         UUID(as_uuid=True),
         ForeignKey("messages.id"),
         nullable=True,
-        index=True,
     )
     source_message_count = Column(Integer, nullable=False, default=0)
     estimated_tokens = Column(Integer, nullable=False, default=0)

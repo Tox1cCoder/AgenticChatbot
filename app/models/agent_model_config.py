@@ -22,13 +22,13 @@ class AgentModelConfig(Base):
 
     __tablename__ = "agent_model_configs"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True), default=func.now(), onupdate=func.now(), nullable=False
     )
 
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     agent_key = Column(Text, nullable=False)  # 'chat'|'rag'|'search'|'planning'
     provider_type = Column(Text, nullable=False)  # 'gemini'|'openai' (for now)
     model = Column(Text, nullable=False)
