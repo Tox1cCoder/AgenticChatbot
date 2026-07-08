@@ -27,6 +27,7 @@ from ...models.document_chunk import DocumentChunk
 from ...repositories.document_chunk import DocumentChunkRepository
 from ...repositories.document_image import DocumentImageRepository
 from ..context_overflow import compact_tool_messages_for_retry, is_context_overflow_error
+from ..image_context import build_multimodal_content, has_image_parts, image_url_part
 from ..mcp_registry import get_global_mcp_manager, get_mcp_tools_generation
 from ..model_factory import ModelFactory
 from ..prompts import (
@@ -889,6 +890,7 @@ class RAGAgent(BaseAgent):
         tool_context = message.metadata.get("tool_context", [])
         conversation_history = message.metadata.get("history", [])
         agentic_images = message.metadata.get("agentic_images", [])
+        user_attachments = message.attachments or []
         model_request = message.metadata.get("model_request")
         request_user_id = message.metadata.get("user_id")
         request_device_id = message.metadata.get("device_id")
@@ -976,39 +978,35 @@ class RAGAgent(BaseAgent):
                 "to answer the question."
             )
 
-        # Build multimodal content if images are available
-        if agentic_images:
-            # Build content list with text and images
-            human_content = [{"type": "text", "text": "\n".join(context_parts)}]
+        # Build multimodal content: current-turn user attachments + document images.
+        human_content = build_multimodal_content("\n".join(context_parts), user_attachments)
 
-            for img in agentic_images:
-                img_data = img.get("data")
-                mime_type = img.get("mime_type", "image/jpeg")
-                caption = img.get("caption", "")
-                page = img.get("page_number", "?")
+        for img in agentic_images:
+            img_data = img.get("data")
+            mime_type = img.get("mime_type", "image/jpeg")
+            caption = img.get("caption", "")
+            page = img.get("page_number", "?")
 
-                if img_data:
+            if img_data:
+                human_content.append(
+                    image_url_part(f"data:{mime_type};base64,{img_data}")
+                )
+                if caption:
                     human_content.append(
                         {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime_type};base64,{img_data}"},
+                            "type": "text",
+                            "text": f"[Image from page {page}: {caption}]",
                         }
                     )
-                    # Add caption as context
-                    if caption:
-                        human_content.append(
-                            {
-                                "type": "text",
-                                "text": f"[Image from page {page}: {caption}]",
-                            }
-                        )
 
+        has_prompt_images = has_image_parts(human_content)
+        if has_prompt_images:
             messages.append(HumanMessage(content=human_content))
         else:
             messages.append(HumanMessage(content="\n".join(context_parts)))
 
         runtime_config = self._resolve_runtime_model_config(request_user_id, model_request)
-        if agentic_images and not runtime_config.capabilities.get("supports_vision", False):
+        if has_prompt_images and not runtime_config.capabilities.get("supports_vision", False):
             fallback_runtime = self._create_fallback_runtime_config(
                 runtime_config.fallback_config,
                 reason="vision_not_supported",
@@ -1026,7 +1024,7 @@ class RAGAgent(BaseAgent):
                 disable_tools=rag_force_final_response,
                 user_id=request_user_id,
                 runtime_config=runtime_config,
-                has_images=bool(agentic_images),
+                has_images=has_prompt_images,
                 agentic_images_count=len(agentic_images) if agentic_images else 0,
                 run_config=run_config,
             )
