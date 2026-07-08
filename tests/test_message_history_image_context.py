@@ -5,7 +5,6 @@ from app.ai.memory import ConversationMemory
 from app.ai.schemas import MessageRole
 from app.models.enums import MessageRole as DBMessageRole
 
-
 ATTACHMENTS = [{"name": "screen.png", "mime": "image/png", "data": "abc123"}]
 
 

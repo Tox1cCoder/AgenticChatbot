@@ -5,7 +5,6 @@ from typing import Any
 
 import streamlit.components.v1 as components
 
-
 _COMPONENT_DIR = Path(__file__).with_name("clipboard_image_capture")
 _capture_component = components.declare_component(
     "clipboard_image_capture",

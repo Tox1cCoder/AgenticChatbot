@@ -4,7 +4,6 @@ import mimetypes
 import re
 from typing import Any
 
-
 _LOCAL_PATH_PREFIXES = ("/", "./", "../")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 

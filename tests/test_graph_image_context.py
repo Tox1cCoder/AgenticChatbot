@@ -4,7 +4,6 @@ from langchain_core.messages import HumanMessage
 
 from app.ai.graph import MultiAgentWorkflow
 
-
 ATTACHMENTS = [{"name": "screen.png", "mime": "image/png", "data": "abc"}]
 
 

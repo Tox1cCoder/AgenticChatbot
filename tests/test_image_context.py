@@ -8,7 +8,6 @@ from app.ai.image_context import (
     normalize_image_attachment,
 )
 
-
 PNG_B64 = base64.b64encode(b"fake-png").decode("ascii")
 
 
