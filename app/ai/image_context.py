@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+import mimetypes
+import re
+from typing import Any
+
+
+_LOCAL_PATH_PREFIXES = ("/", "./", "../")
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _clean_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _mime_from_data_url(data_url: str) -> str | None:
+    if not data_url.startswith("data:"):
+        return None
+    header = data_url.split(",", 1)[0]
+    media_type = header[5:].split(";", 1)[0].strip()
+    return media_type or None
+
+
+def _looks_like_local_path(value: str) -> bool:
+    return bool(_WINDOWS_DRIVE_RE.match(value)) or value.startswith(_LOCAL_PATH_PREFIXES)
+
+
+def _candidate_payloads(attachment: dict[str, Any]) -> list[Any]:
+    return [
+        attachment.get("data"),
+        attachment.get("url"),
+        attachment.get("base64"),
+        attachment.get("path"),
+        attachment.get("image"),
+        attachment.get("source"),
+    ]
+
+
+def normalize_image_attachment(attachment: Any) -> dict[str, str] | None:
+    if not isinstance(attachment, dict):
+        return None
+
+    name = _clean_str(attachment.get("name") or attachment.get("filename")) or "image"
+    mime = _clean_str(
+        attachment.get("mime")
+        or attachment.get("mimeType")
+        or attachment.get("mediaType")
+        or attachment.get("contentType")
+    )
+    if not mime:
+        mime = mimetypes.guess_type(name)[0] or "image/jpeg"
+
+    raw_value: str | None = None
+    for candidate in _candidate_payloads(attachment):
+        if isinstance(candidate, dict):
+            candidate = (
+                candidate.get("url")
+                or candidate.get("data")
+                or candidate.get("base64")
+                or candidate.get("path")
+            )
+        raw_value = _clean_str(candidate)
+        if raw_value:
+            break
+
+    if not raw_value or _looks_like_local_path(raw_value):
+        return None
+
+    if raw_value.startswith("data:"):
+        inferred = _mime_from_data_url(raw_value)
+        mime = inferred or mime
+        if not mime.startswith("image/"):
+            return None
+        return {"name": name, "mime": mime, "url": raw_value}
+
+    if not mime.startswith("image/"):
+        return None
+
+    if raw_value.startswith("blob:"):
+        # Browser blob URLs are scoped to the page process and are not fetchable
+        # by the backend or model provider. The UI must send data URLs instead.
+        return None
+
+    if raw_value.startswith(("http://", "https://")):
+        return {"name": name, "mime": mime, "url": raw_value}
+
+    return {"name": name, "mime": mime, "url": f"data:{mime};base64,{raw_value}"}
+
+
+def image_url_part(url: str) -> dict[str, Any]:
+    return {"type": "image_url", "image_url": {"url": url}}
+
+
+def build_multimodal_content(text: Any, attachments: list[Any] | None) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] = []
+    text_value = str(text or "").strip()
+    if text_value:
+        parts.append({"type": "text", "text": text_value})
+
+    for attachment in attachments or []:
+        normalized = normalize_image_attachment(attachment)
+        if normalized is None:
+            continue
+        parts.append(image_url_part(normalized["url"]))
+
+    return parts
+
+
+def has_image_parts(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(part, dict) and part.get("type") == "image_url" for part in content)
+
+
+def attachment_memory_lines(attachments: list[Any] | None) -> list[str]:
+    lines: list[str] = []
+    for attachment in attachments or []:
+        normalized = normalize_image_attachment(attachment)
+        if normalized is None:
+            continue
+        lines.append(f"[Attached image: {normalized['name']}, {normalized['mime']}]")
+    return lines
