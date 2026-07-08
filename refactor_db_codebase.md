@@ -762,7 +762,7 @@ Expected: PASS.
   - `tests/test_internal_sse_stream_contract.py`
   - `tests/test_ai_sdk_v6_stream_contract.py`
 
-- [ ] **Step 1: Extract `_StreamMapCtx` and stream mapping helpers**
+- [x] **Step 1: Extract `_StreamMapCtx` and stream mapping helpers**
 
 Move these from `MultiAgentWorkflow` into `graph_public_projection.py`:
 
@@ -787,11 +787,11 @@ class GraphPublicStreamProjector:
 
 Keep behavior identical: graph stream dicts still include `token`, `thinking`, `tool_start`, `tool_end`, `node_complete`, `continuation_start`, `agent_selected`, `interrupt`, `complete`, and `error` until `AIService` maps them to canonical `V3StreamEvent`.
 
-- [ ] **Step 2: Make `MultiAgentWorkflow` delegate projection**
+- [x] **Step 2: Make `MultiAgentWorkflow` delegate projection**
 
 In `execute_request_stream()` and `resume_with_decisions_stream()`, instantiate the projector and call `projector.map_event(event, ctx)`.
 
-- [ ] **Step 3: Add projector unit tests**
+- [x] **Step 3: Add projector unit tests**
 
 Cover:
 
@@ -802,7 +802,7 @@ Cover:
 - planning node snapshot to `node_complete`;
 - subagent events pass through unchanged.
 
-- [ ] **Step 4: Verify no wire contract change**
+- [x] **Step 4: Verify no wire contract change**
 
 Run:
 
@@ -1080,6 +1080,11 @@ _Records deviations, judgment calls, and clarifications made during implementati
   - **Empirical safety proof (the real gate):** loaded all 247 threads whose latest checkpoint carries `branch:to:summarize` through the real compiled graph via `aget_state`; **0** had `summarize` in `.next` (only 30 had any pending task; 0 errors). Also 0 `checkpoint_writes` with `channel='summarize'`. → Removal is safe with **no checkpoint pruning** (destructive option proved unnecessary, so no user data deleted).
   - Removed `_summarization_node`, its `add_node`, and the `langgraph_node == "summarize"` fallback in `_is_internal_stream_chunk` (also collapsed the trailing `if/return True; return False` per linter). Replaced the noop test with `test_workflow_has_no_summarize_node_or_method`; added `tests/test_graph_refactor_contract.py` with a *correct* cheap guard (`checkpoint_writes.channel='summarize' == 0`) and documented why the ILIKE proxy was replaced.
   - Graph now compiles with 14 nodes (was 15). Verified: 11 (summarization+contract+history) + 32 (streaming/handoff/custom-agent graph) tests pass; ruff clean (also reduced pre-existing E402 in the touched test file from 2→1, silenced the last with a justified noqa).
+- **Task 7** (subagent-implemented [sonnet], controller-verified):
+  - Extracted the full canonical→legacy public stream projection into new `app/services/event_streaming/graph_public_projection.py` (`StreamProjectionContext` [renamed `_StreamMapCtx`] + `GraphPublicStreamProjector`). Moved `_consume_stream_text_chunk`, `_map_v3_stream_event`(→`map_event`), `_emit_tool_start_from_canonical`, `_map_legacy_message_chunk`, `_map_legacy_update_node`, `_map_v3_values_snapshot`, and `_is_internal_stream_chunk` (only used by projection code — grep-verified).
+  - Projector interface per plan: `__init__(*, tool_end_events_from_node_state, suppress_internal_stream_chunks: bool)`. Dependency audit confirmed the moved code reaches back into the workflow for **nothing** except those two injected values; `_tool_end_events_from_node_state` stays on the workflow (tool-loop helper, moves in Task 8) and is injected as a callable.
+  - Both `execute_request_stream()` and `resume_with_decisions_stream()` instantiate the projector once and call `projector.map_event(event, ctx)`. `graph.py`: **5184→4781 lines (-403)**. `settings.suppress_internal_stream_chunks` read at the entrypoint and injected (projector no longer reads `settings`).
+  - Byte-identical wire format: the 26 existing stream/handoff/SSE/AI-SDK contract tests pass **unchanged** (no test edits) — strongest equivalence evidence. New `tests/test_graph_stream_projection.py` (8 tests). Controller independently re-ran: required suite 34/34; broad `stream/graph/sse/ai_sdk` sweep 242/242; ruff clean; graph compiles (14 nodes). `ai_service.py` untouched (no internal event-name change). `AI_SDK_FE_CONTRACT.md` NOT updated (public contract unchanged, per plan).
 
 ### Progress
 
@@ -1088,5 +1093,6 @@ _Records deviations, judgment calls, and clarifications made during implementati
 - **Task 3 — DONE** (commit 4916e88). 18 model files edited + `v1w2x3y4z5a6_schema_contract_cleanup.py` migration created. Live DB migrated to `v1w2x3y4z5a6`. Verified: `alembic check` = "No new upgrade operations detected"; schema contract test 5/5 green; regression (memory-summary repo 7/7, document chunk/model/parse-artifact 25/25) green. Downgrade reversibility confirmed. `conversation_device_bindings` dropped.
 - **Task 4 — DONE** (commit 020ec02). `session.py` (one engine + `SessionLocal` w/ `expire_on_commit=False` + `session_scope()`), `database.py` (thin adapter over shared `SessionLocal`, no 2nd engine, `create_database` removed), `test_database_session_provider.py` created. Verified: provider tests + custom-agents service/message/api + hitl_api = 46/46 pass; container session bound to single shared engine.
 - **Task 5 — DONE** (commit c93eed7). Subagent-implemented, controller-verified. `checkpoint_retention_service.py` + `test_checkpoint_retention_service.py` created; `checkpoint.py` (schema-aware fallback), `cleanup_tasks.py` (delegates + Windows selector-loop fix), `conversation.py` (`get_soft_deleted`), `test_checkpoint_serializer.py` updated. Unit 12/12; live cleanup expired 64 HITL + cleaned 837 threads; after-state 0 pending HITL; ruff clean.
-- **Task 6 — DONE** (commit pending). Legacy `summarize` node/method/stream-fallback removed after proving redundancy + resume-safety empirically (0/247 threads schedule it; no data pruned). `test_graph_streaming_summarization.py` updated, `test_graph_refactor_contract.py` guard added. Graph 15→14 nodes; 43 tests pass; ruff clean.
+- **Task 6 — DONE** (commit 1b4d19e). Legacy `summarize` node/method/stream-fallback removed after proving redundancy + resume-safety empirically (0/247 threads schedule it; no data pruned). `test_graph_streaming_summarization.py` updated, `test_graph_refactor_contract.py` guard added. Graph 15→14 nodes; 43 tests pass; ruff clean.
+- **Task 7 — DONE** (commit pending). Stream projection extracted to `graph_public_projection.py` (`GraphPublicStreamProjector`); graph.py 5184→4781 (-403). Byte-identical wire format (26 contract tests unchanged); new 8-test projection suite. Controller re-verified: 34/34 required + 242/242 broad sweep; ruff clean. Subagent-implemented [sonnet].
 

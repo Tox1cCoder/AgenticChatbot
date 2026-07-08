@@ -1,7 +1,8 @@
 """Legacy-dict → canonical V3 coercion for the graph boundary.
 
-The graph mapper (``app/ai/graph.py::_map_v3_stream_event``) still emits legacy
-public dicts (``token``/``thinking``/``tool_start``/``complete``/...). The
+The graph projector (``graph_public_projection.py::GraphPublicStreamProjector
+.map_event``) still emits legacy public dicts (``token``/``thinking``/
+``tool_start``/``complete``/...). The
 service layer and public adapters consume canonical :class:`V3StreamEvent`, so
 this bridge converts dicts on the way in at the AI-service boundary. Delete
 once the graph emits ``V3StreamEvent`` directly.
