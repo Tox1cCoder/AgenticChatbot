@@ -1103,6 +1103,31 @@ _Records deviations, judgment calls, and clarifications made during implementati
   - Step 2: `plans/AI_SDK_FE_CONTRACT.md` intentionally NOT updated — no endpoint/event-name/terminal-order/metadata/resume/rich-item change (per the plan's conditional).
   - Step 3: README `## Database Migrations` section updated with schema-ownership + cleanup notes (Alembic owns app tables; LangGraph owns checkpoint tables; migrations are the only schema-mutation path / no `create_all` at startup; `conversation_device_bindings` dropped for user-based ownership; retention via `CheckpointRetentionService` + Celery beat). Also replaced the stale "28 revisions tracked" count (actual revision files = 37) with a non-brittle "single head, currently v1w2x3y4z5a6".
 
+### Final Verification Results (2026-07-08)
+
+Run against the live local Postgres, controller-executed:
+
+| Check | Result |
+|---|---|
+| `alembic heads` | single head `v1w2x3y4z5a6` ✅ |
+| `alembic current` | at head `v1w2x3y4z5a6` ✅ |
+| `alembic check` | "No new upgrade operations detected" ✅ |
+| Focused contract suite (6 files) | 30/30 ✅ |
+| Broad graph/custom-agents/AI-SDK/SSE/message suite | 137/137 ✅ |
+| **Full test suite** (excl. live-server integration) | **1419 passed, 1 env-only fail** ✅ |
+| Ruff on all refactor-touched files | clean ✅ (repo-wide baseline 138 < prior ~161, not increased) |
+| No app model owns checkpoint tables | ✅ |
+| `conversation_device_bindings` dropped | ✅ |
+| No `summarize` node / `_summarization_node` | ✅ |
+| AI SDK + SSE stream contract unchanged | ✅ (no `AI_SDK_FE_CONTRACT.md` change) |
+| `graph.py` under 1,800 lines | ❌ **2,871** (deviation — see Task 8; stream entrypoints + isolated-context runner unscoped by plan) |
+
+**Two known-environmental failures (pre-existing, NOT caused by this refactor):**
+1. `tests/client_backend/test_live_server_integration.py::test_live_conversation_task_plan_and_alias_routes` — `ConnectionRefusedError` (needs a running server on :8000).
+2. `tests/test_brave_image_search_config.py::test_brave_image_search_defaults` — asserts `brave_search_api_key == ""` but the local `.env` supplies a real key (config-from-env; nothing in this refactor touches Brave/search config).
+
+**Net line change on `graph.py`: 5,202 → 2,871 (−2,331, −45%).** New modules: `app/ai/workflow/{graph_builder,tool_loop,custom_agents,rag_loop,planning_loop}.py`, `app/services/event_streaming/graph_public_projection.py`, `app/services/checkpoint_retention_service.py`.
+
 ### Progress
 
 - **Task 1 — DONE** (commit 899bff9). `tests/test_database_schema_contract.py` created. RED confirmed: 3 failed (unmodeled `conversation_device_bindings`, table present, 14 redundant PK indexes), 2 passed (checkpoint ownership disjoint, 0 unexpired pending HITL). Matches plan's expected pre-implementation state.
