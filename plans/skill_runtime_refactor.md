@@ -492,17 +492,17 @@ Modify:
 - Create: `client_backend/services/skill_runtime/errors.py` or `shared/skills/errors.py`
 - Test: `tests/client_backend/test_skill_execution_engine.py`
 
-- [ ] Implement `SkillExecutionEngine.execute(qualified_tool_id, arguments, context)`.
-- [ ] Validate capability exists and current readiness is `ready`.
-- [ ] Validate arguments against capability `input_schema`.
-- [ ] Call the permission evaluator before resolving secrets, rendering arguments, or spawning a process.
-- [ ] Render argument placeholders only into argv lists, never into a shell string.
-- [ ] Implement `python_module`, `python_script`, and `binary` runtimes first.
-- [ ] Apply timeout and output size limits.
-- [ ] Parse JSON stdout when the capability declares JSON output.
-- [ ] Return normalized success and error envelopes.
-- [ ] Add tests for success, invalid arguments, command not found, timeout, output too large, and non-JSON output.
-- [ ] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_execution_engine.py -q`
+- [x] Implement `SkillExecutionEngine.execute(qualified_tool_id, arguments, context)`.
+- [x] Validate capability exists and current readiness is `ready`.
+- [x] Validate arguments against capability `input_schema` (jsonschema).
+- [x] Call the permission evaluator before resolving secrets, rendering arguments, or spawning a process.
+- [x] Render argument placeholders only into argv lists, never into a shell string.
+- [x] Implement `python_module`, `python_script`, and `binary` runtimes first.
+- [x] Apply timeout (clamped) and output size limits.
+- [x] Parse JSON stdout when the capability declares JSON output.
+- [x] Return normalized success and error envelopes.
+- [x] Add tests for success, invalid arguments, command not found, timeout, output too large, and non-JSON output (+ permission block, missing secret, redaction, scoped env, path escape).
+- [x] Run: `.venv\Scripts\python.exe -m pytest tests/client_backend/test_skill_execution_engine.py -q` → 16 passed.
 
 ### Task 8: Route Skill Tool Dispatch
 
@@ -651,7 +651,8 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 | 3. Readiness checks | ✅ done | `7f5289b` (base `166fa4b`) | New skill_runtime/ package (manager + minimal secret store); 16 tests. Review found 1 Important (dep-name parser skipped whitespace-padded reqs, masking missing deps); fixed by switching to packaging.Requirement. |
 | 4. Bundle installation | ✅ done | `af416e1` (base `23b4c00`) | install.py + shared/skills/errors.py + /skills install/uninstall/installed API; 13 tests (+1 platform-skip). Implementer hit a transient 529 mid-task (resumed). Review Needs-fixes→fixed: 3 Important (symlink rejection [plan-required], disabled-reinstall replace semantics, UNSAFE_BUNDLE_PATH test) + DRY helper. NOTE: user committed `beb1fdb`/`23b4c00` to this branch concurrently — no file overlap. |
 | 5. Capability tools | ✅ done | `4e28e75` (base `af416e1`) | Ready skills' capabilities sync as client tools (manager.capability_catalog_entries + runtime_bridge merge + client_runtime_tools/client_tool_catalog origin widening); 8 catalog tests + coexistence search test. Review Approved (3 Minors; applied logger.exception). runtime_bridge has 8 pre-existing baseline ruff errors (deferred to final lint cleanup). |
-| 6. Permission evaluator | ✅ done | `b06d312` (base `4e28e75`) | Pure pre-exec permission evaluation (permissions.py); 27 tests. Review found 2 CRITICAL over-grants (empty/root fs path-prefix opened whole FS; mutation gate bypassable via granted token/`*`) — both fixed + regression-tested; re-review confirmed Resolved. |
+| 6. Permission evaluator | ✅ done | `812decb` (base `4e28e75`) | Pure pre-exec permission evaluation (permissions.py); 27 tests. Review found 2 CRITICAL over-grants (empty/root fs path-prefix opened whole FS; mutation gate bypassable via granted token/`*`) — both fixed + regression-tested; re-review confirmed Resolved. |
+| 7. Execution engine | ✅ done | `498b165` (base `975bbe2`) | SkillExecutionEngine (execution.py) — subprocess.run via to_thread (Selector-loop-safe), no shell, permission-before-secrets/spawn, scoped env, secret redaction, timeout+output caps; 16 tests. Review found 2 CRITICAL secret leaks (full os.environ inheritance; `_redact` substring collision) + 2 Important (manager/store divergence, unbounded timeout) — all fixed + regression-tested; re-review Approved (fixed NaN-clamp Minor too). User committed 4 image-attachment commits concurrently (no overlap). |
 
 ## Design Decisions Log
 
@@ -701,3 +702,12 @@ Executed via subagent-driven development (controller = Opus, implementers/review
 - **Two Critical over-grants caught in review + fixed:** (1) an empty or root-only fs path grant (`filesystem:read:` / `filesystem:read:/`) used to match the entire filesystem — now skipped (`if not prefix: continue`); use `filesystem:read:*` to grant everything. (2) mutation was satisfiable via the resource-grant set (a literal `"mutation"` token OR blanket `"*"`) — now gated SOLELY on `allow_mutation`. Both regression-tested; re-review confirmed Resolved.
 - **Redaction:** `redact_arguments` keeps keys, replaces every value with `"<redacted>"`; `PermissionDecision.to_error_payload` routes args through it so no argument value (possible secret) ever reaches an error/prompt/log.
 - Not yet wired into execution — Task 7 must call the evaluator before invoking any runtime and refuse on any non-allowed decision.
+
+### Task 7 — Execution engine
+- **Selector-loop-safe subprocess:** the sidecar runs a Selector event loop on Windows (for psycopg), where `asyncio.create_subprocess_exec` raises NotImplementedError. So execution uses `subprocess.run(argv_list, ...)` wrapped in `asyncio.to_thread` — never `shell=True`, never a joined shell string. Argv placeholders render each into a discrete list element.
+- **Ordered flow:** parse → lookup → readiness gate → jsonschema validation (+ schema defaults) → **permission check** → resolve secrets → render argv → build cmd by runtime → run → parse. Permission is strictly before secrets/render/spawn.
+- **Runtimes:** `binary` (shutil.which), `python_script` (path confined to skill dir via is_under_root), `python_module` (`python -m module`, PYTHONPATH prepends skill dir).
+- **Security fixes from review (2 CRITICAL + 2 Important):** (1) child env is built from an ALLOW-LIST (`_ENV_PASSTHROUGH_NAMES`) + this capability's injected secrets — NOT full `os.environ` (which would leak every other skill's env-backed secret); (2) `_redact` replaces secret values LONGEST-FIRST (a shorter secret that is a substring of a longer one previously leaked a fragment, non-deterministically via hash seed); (3) the readiness manager defaults to the engine's own secret store (no divergence); (4) `_clamp_timeout` bounds a caller timeout to (0, 300s], rejecting NaN/inf/non-numeric.
+- **Secret redaction** applied to stdout, stderr, and any error derived from them (RUNTIME_ERROR/NON_JSON_OUTPUT). INVALID_ARGUMENTS messages use only the schema path/keyword, never the offending value.
+- **First-slice policy default** = `SkillPermissionPolicy(granted={"*"}, allow_mutation=False)` (trust declared resource grants for user-installed skills; block mutations → PERMISSION_REQUIRED → Task 9 HITL; block shell). Revisit strictness later (final-triage item).
+- **audit_id stays None** — Task 11 wires the audit writer.
