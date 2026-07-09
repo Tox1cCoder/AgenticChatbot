@@ -939,11 +939,11 @@ Expected: PASS. If monkeypatch paths such as `app.ai.graph.execute_tool_calls` f
   - `app/repositories/tool_approval.py`
 - Add focused tests only where behavior changes.
 
-- [ ] **Step 1: Make generic strategies safe for models without `deleted_at`**
+- [x] **Step 1: Make generic strategies safe for models without `deleted_at`**
 
 Either delete the generic strategies and inline repository methods, or update them to check `hasattr(self.model, "deleted_at")` before filtering. Prefer deletion only when the repository method is already custom enough that the strategy adds no value.
 
-- [ ] **Step 2: Replace inefficient counts**
+- [x] **Step 2: Replace inefficient counts**
 
 Change `DefaultQueryStrategy.count_all()` from materializing rows to SQL `COUNT`.
 
@@ -959,14 +959,14 @@ def count_all(self, db: Session) -> int:
     return int(db.execute(statement).scalar() or 0)
 ```
 
-- [ ] **Step 3: Audit soft-delete expectations**
+- [x] **Step 3: Audit soft-delete expectations**
 
 Rules:
 
 - Tables with `deleted_at`: `users`, `conversations`, `messages`, `feedbacks`, `custom_agents`, `model_providers`, `tool_approvals`, `tool_result_blobs`, `user_memories`.
 - Tables without `deleted_at`: do not route through a strategy that assumes soft delete.
 
-- [ ] **Step 4: Verify repository tests**
+- [x] **Step 4: Verify repository tests**
 
 Run:
 
@@ -1092,6 +1092,12 @@ _Records deviations, judgment calls, and clarifications made during implementati
   - Topology contract tests added to `tests/test_graph_refactor_contract.py`; `test_graph_streaming_summarization.py` now introspects `build_workflow_graph` for the START→route/no-summarize guard.
   - **Deviation from plan's `<1,800` target:** `graph.py` = **2,871** lines (down from 5,202 original / 4,781 pre-task). All planned extractions (Steps 1,3-6) were completed; the remaining bulk is `__init__`, the two stream entrypoints (`execute_request_stream`/`resume_with_decisions_stream`), `_run_agent_in_isolated_context`, and orchestration — none of which the plan scoped for extraction. Reaching <1,800 would require extracting those, which is out of the plan's stated Task 8 scope. Recorded as a follow-up candidate.
   - Controller verification (independent): app imports OK; `create_workflow` compiles (14 nodes); all key methods resolve via MRO; full Task-8 suite 128/128; broad graph/agent/tool/rag/planning/hitl/stream sweep **762/762**; ruff clean on `graph.py` + all workflow modules.
+- **Task 9** (controller-implemented):
+  - Audit: models WITH `deleted_at` = user, conversation, message, feedback, custom_agent, model_provider, tool_approval, tool_result_blob, user_memory (9). Repos on the generic strategies = user, conversation, message, feedback, tool_approval (all have `deleted_at`) + **task_plan (no `deleted_at`)**. `TaskPlanCRUDStrategy` already overrode `get_by_id`/`delete`/`exists`, and `TaskPlanRepository` never calls the inherited `get_all`/`count_all`, so the latent AttributeError was contained but real.
+  - Step 1: made both generic strategies `deleted_at`-agnostic. `DefaultQueryStrategy._exclude_soft_deleted()` adds the `deleted_at IS NULL` filter only when the model has the column; all read methods route through it. `DefaultCommandStrategy.delete()` soft-deletes when supported, else hard-deletes (`db.delete`). Also fixed a latent `hasattr(model, None)` crash in `get_all_with_ordering` (guarded `order_by and ...`).
+  - Step 2: `count_all()` now uses SQL `select(func.count(model.id))` instead of materializing all rows.
+  - Step 3 (soft-delete audit) recorded above; no repo routes a no-`deleted_at` model through a soft-delete-assuming path anymore.
+  - Verified: ruff clean; plan's repo suite 46/46; broad repository/service sweep 172 passed. The 1 failure (`test_live_server_integration.py::test_live_conversation_task_plan_and_alias_routes`) is a pre-existing **environmental** live-server test (`ConnectionRefusedError` to :8000, no server running) — not a Task 9 regression (pure Python strategy changes cannot raise a network error).
 
 ### Progress
 
@@ -1102,5 +1108,6 @@ _Records deviations, judgment calls, and clarifications made during implementati
 - **Task 5 — DONE** (commit c93eed7). Subagent-implemented, controller-verified. `checkpoint_retention_service.py` + `test_checkpoint_retention_service.py` created; `checkpoint.py` (schema-aware fallback), `cleanup_tasks.py` (delegates + Windows selector-loop fix), `conversation.py` (`get_soft_deleted`), `test_checkpoint_serializer.py` updated. Unit 12/12; live cleanup expired 64 HITL + cleaned 837 threads; after-state 0 pending HITL; ruff clean.
 - **Task 6 — DONE** (commit 1b4d19e). Legacy `summarize` node/method/stream-fallback removed after proving redundancy + resume-safety empirically (0/247 threads schedule it; no data pruned). `test_graph_streaming_summarization.py` updated, `test_graph_refactor_contract.py` guard added. Graph 15→14 nodes; 43 tests pass; ruff clean.
 - **Task 7 — DONE** (commit 7ca0381). Stream projection extracted to `graph_public_projection.py` (`GraphPublicStreamProjector`); graph.py 5184→4781 (-403). Byte-identical wire format (26 contract tests unchanged); new 8-test projection suite. Controller re-verified: 34/34 required + 242/242 broad sweep; ruff clean. Subagent-implemented [sonnet].
-- **Task 8 — DONE** (commit pending). Node domains extracted to `app/ai/workflow/{graph_builder,tool_loop,custom_agents,rag_loop,planning_loop}.py` via mixins; graph.py 4781→2871 (5202→2871 overall). 6 test files got monkeypatch-path-only updates (verified no weakening) + topology contract tests. Controller-verified: 128/128 Task-8 suite, 762/762 broad sweep, app imports OK, ruff clean. Deviation: 2871 > plan's <1800 target (remaining bulk = stream entrypoints + isolated-context runner, unscoped by plan). Subagent [opus] hit org spend limit post-verification; controller verified tree directly.
+- **Task 8 — DONE** (commit da7e8eb). Node domains extracted to `app/ai/workflow/{graph_builder,tool_loop,custom_agents,rag_loop,planning_loop}.py` via mixins; graph.py 4781→2871 (5202→2871 overall). 6 test files got monkeypatch-path-only updates (verified no weakening) + topology contract tests. Controller-verified: 128/128 Task-8 suite, 762/762 broad sweep, app imports OK, ruff clean. Deviation: 2871 > plan's <1800 target (remaining bulk = stream entrypoints + isolated-context runner, unscoped by plan). Subagent [opus] hit org spend limit post-verification; controller verified tree directly.
+- **Task 9 — DONE** (commit pending). Generic repo strategies (`query_strategy.py`, `command_strategy.py`) made `deleted_at`-agnostic via `hasattr` guard (`_exclude_soft_deleted`; delete soft-or-hard); `count_all` now SQL `COUNT`; fixed latent `hasattr(model,None)` bug. Controller-implemented. Verified: ruff clean, repo suite 46/46, broad sweep 172 pass (1 env-only live-server failure). No test-weakening.
 

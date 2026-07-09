@@ -78,12 +78,24 @@ class DefaultCommandStrategy(CommandStrategy[ModelType, CreateSchemaType, Update
         return db_obj
 
     def delete(self, db: Session, id: int | UUID) -> bool:
-        """Soft delete a record by ID"""
-        statement = select(self.model).where(self.model.id == id, self.model.deleted_at.is_(None))
+        """Delete a record by ID.
+
+        Soft-deletes (sets ``deleted_at``) for models that support it; hard-
+        deletes models without a ``deleted_at`` column so the generic strategy
+        is safe for both.
+        """
+        soft_delete = hasattr(self.model, "deleted_at")
+        statement = select(self.model).where(self.model.id == id)
+        if soft_delete:
+            statement = statement.where(self.model.deleted_at.is_(None))
         db_obj = db.execute(statement).scalar_one_or_none()
 
-        if db_obj:
+        if not db_obj:
+            return False
+
+        if soft_delete:
             db_obj.deleted_at = datetime.now(timezone.utc)
-            db.commit()
-            return True
-        return False
+        else:
+            db.delete(db_obj)
+        db.commit()
+        return True
